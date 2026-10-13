@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -244,7 +245,7 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 			DefenseClawAdminTargetRef:             facts.targetRef(),
 			UserID:                                proxyV8OptionalID(facts.Caller.ID),
 			DefenseClawUserIDKind:                 v8UserIDKind(facts.Caller.IDKind),
-			DefenseClawUserName:                   proxyV8OptionalID(facts.Caller.Name),
+			DefenseClawUserName:                   v8UserName(facts.Caller.Name, proxyV8OptionalID),
 			ConditionAdminPrincipalKnown:          principal.IsPresent(),
 			MandatoryProtectedBoundaryAuthFailure: true,
 		})
@@ -363,6 +364,7 @@ func apiAuthenticationFailureLogReason(reason string) string {
 		managedHookReasonRootDenied,
 		managedHookReasonLedgerUnavailable,
 		managedHookReasonConnectorUnknown,
+		hookexec.ManagedUserNamespaceReason,
 		userScopedIdentityMismatchReason,
 		userScopedListenerProofRefusedReason,
 		"invalid_scoped_header_token",
@@ -370,7 +372,9 @@ func apiAuthenticationFailureLogReason(reason string) string {
 		"invalid_scoped_path_token",
 		"invalid_acp_signed_request",
 		"missing_acp_authenticated_transport",
-		"invalid_acp_scoped_token":
+		"invalid_acp_scoped_token",
+		acpCallerAccountMismatchReason,
+		acpCallerAccountUnverifiedReason:
 		return reason
 	}
 	return ""

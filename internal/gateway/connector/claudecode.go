@@ -20,11 +20,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -73,6 +73,12 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 	}
 	opts.OTLPPathToken = otlpToken
+	if !opts.ManagedEnterprise {
+		// Managed installs, Secure Client included, keep their setup path.
+		if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
+			return setupRefusedUnchanged{err: err}
+		}
+	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
@@ -113,6 +119,40 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// claudeCodeSettingsParseable refuses a settings file that is not a JSON
+// object before Setup changes anything. A hand-edit slip in settings.json
+// failed the hooks patch after the hook scripts were rewritten, the rollback
+// could not restore the file either, and the whole gateway stopped for every
+// connector with an error that did not name the file (GAP-0368). Refusing
+// unchanged keeps the earlier hooks and lets the other connectors start.
+func claudeCodeSettingsParseable(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return nil // a missing or unreadable file is reported by the patch
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fmt.Errorf("Claude Code settings file %s is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
+	}
+	if settings == nil {
+		return fmt.Errorf("Claude Code settings file %s must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path)
+	}
+	return nil
+}
+
+// jsonErrorPosition renders a JSON decode error with the 1-based line and
+// column of the offending byte when the decoder reports one.
+func jsonErrorPosition(data []byte, err error) string {
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) || syntax.Offset < 1 || syntax.Offset > int64(len(data)) {
+		return err.Error()
+	}
+	before := data[:syntax.Offset-1]
+	line := bytes.Count(before, []byte("\n")) + 1
+	column := len(before) - bytes.LastIndexByte(before, '\n')
+	return fmt.Sprintf("line %d, column %d: %v", line, column, err)
 }
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
@@ -1079,6 +1119,9 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return false
 	}
 	if runtime.GOOS == "windows" {
+		if view, ok := claudeCodeExecView(handler).(map[string]interface{}); ok {
+			handler = view
+		}
 		command, _ := handler["command"].(string)
 		expectedCommand := strings.TrimSpace(opts.HookExecutable)
 		if expectedCommand == "" {
@@ -1095,11 +1138,11 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
-	expected := hookInvocationCommand(
+	expected := posixHookCommandWord(hookInvocationCommand(
 		"claudecode",
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
-	)
-	return command == expected
+	))
+	return claudeCodeUnguardedHookCommand(command) == expected
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
@@ -1113,9 +1156,75 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		if executable == "" {
 			executable = defenseclawHookBinary()
 		}
-		return executable, []string{"hook", "--connector", "claudecode"}
+		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
-	return hookCommand, nil
+	command := posixHookCommandWord(hookCommand)
+	if shellHookSecureClientProfile(opts) {
+		return command, nil
+	}
+	if opts.ManagedEnterprise {
+		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
+	}
+	return claudeCodeMissingHookGuard(command), nil
+}
+
+// claudeCodeMissingHookGuardSeparator starts the clause that
+// claudeCodeMissingHookGuard appends to a Unix hook command.
+const claudeCodeMissingHookGuardSeparator = " || { rc=$?; "
+
+// claudeCodeMissingHookGuardMessage is what Claude Code shows when its
+// hook script cannot start. It must not name the script file:
+// doctor finds the registered script by that name in the command. Claude
+// Code prints the whole command line in front of any exit-2 message, so the
+// sentence must hold whatever the reason: a missing script (the data folder
+// was deleted, the home moved) and an unreadable one alike, and the repair
+// it names must work after ~/.defenseclaw is gone, which the installer
+// alone does not do (GAP-1074, GAP-1079).
+const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook script is missing " +
+	"or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, " +
+	"or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeManagedMissingHookGuardMessage is the managed-install sentence:
+// there the administrator's installer repairs the hooks, and quickstart does
+// not apply. Earlier per-user 1.0 builds wrote it too, so it is also
+// recognized as a generated guard until Setup rewrites the command.
+const claudeCodeManagedMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
+	"(the script is missing; was this account renamed or its home moved?). " +
+	"Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeMissingHookGuard makes a Unix hook command fail closed
+// when the shell cannot start its script. Claude Code treats any exit other
+// than 2 as a non-blocking error, so after an account rename or a home move
+// the shell's 127 for the old path let every tool call run unguarded
+// (GAP-0542). The script's own exits pass through unchanged; only 126 and
+// 127, "cannot run" and "not found", become a block with one plain sentence.
+// The script path stays the first shell word, so ownership checks and doctor
+// still find it.
+func claudeCodeMissingHookGuard(command string) string {
+	return claudeCodeMissingHookGuardWith(command, claudeCodeMissingHookGuardMessage)
+}
+
+func claudeCodeMissingHookGuardWith(command, message string) string {
+	return command + claudeCodeMissingHookGuardSeparator +
+		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
+		"echo '" + message + "' >&2; exit 2; }"
+}
+
+// claudeCodeUnguardedHookCommand removes only the exact generated guard,
+// so an old data directory is recognized without accepting a modified clause
+// that changes a blocking hook exit into success.
+func claudeCodeUnguardedHookCommand(command string) string {
+	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
+	if index <= 0 {
+		return command
+	}
+	if command == claudeCodeMissingHookGuard(command[:index]) {
+		return command[:index]
+	}
+	if command == claudeCodeMissingHookGuardWith(command[:index], claudeCodeManagedMissingHookGuardMessage) {
+		return command[:index]
+	}
+	return command
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
@@ -1267,6 +1376,13 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
+	if !opts.ManagedEnterprise {
+		// Refuse a link the gateway cannot inspect before any hook is
+		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
+		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+		}
+	}
 
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
@@ -1292,13 +1408,26 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {
 				if err := json.Unmarshal(data, &settings); err != nil {
 					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
 				}
+			}
+			if settings == nil {
+				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
 			}
 
 			backup := baseBackup
@@ -1386,7 +1515,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			// the exact Claude Code argv below, so another use of that executable is
 			// never removed by command alone. Recording the path lets a later Setup
 			// or Teardown recognize the prior launcher after an upgrade moves it.
-			backup.ManagedHookCommands = []string{hookCommand}
+			backup.ManagedHookCommands = []string{claudeCodeRecordedHookCommand(hookCommand, hookArgs)}
 			backupToSave = backup
 			transformed = append([]byte(nil), out...)
 			if exactBackupSafe {
@@ -1528,7 +1657,10 @@ type ClaudeCodeNativeOTLPProbe struct {
 // prevents a synthetic token-file request from masking a broken managed
 // settings credential.
 func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
-	settingsPath := claudeCodeSettingsPath()
+	settingsPath, err := claudeCodeUserSettingsReadPath(claudeCodeSettingsPath())
+	if err != nil {
+		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
+	}
 	data, exists, err := readStableClaudeCodeSettingsFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
@@ -1652,13 +1784,26 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {
 				if err := json.Unmarshal(data, &settings); err != nil {
 					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
 				}
+			}
+			if settings == nil {
+				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
 			}
 
 			existing := map[string]interface{}{}
@@ -2333,7 +2478,7 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 }
 
 func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
-	hook, ok := rawHook.(map[string]interface{})
+	hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 	if !ok {
 		return false
 	}
@@ -2341,6 +2486,7 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
+	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
@@ -2617,7 +2763,7 @@ func scriptHasMarker(path string) bool {
 // matcher groups and returns the compacted slice.
 func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{} {
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
-		return isOwnedHookHandler(rawHook, hooksDir)
+		return isOwnedCodexHookHandler(rawHook, hooksDir)
 	})
 }
 
@@ -2633,36 +2779,36 @@ func removeOwnedClaudeCodeHooks(
 		return nil, err
 	}
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
-		return isOwnedHookHandler(rawHook, hooksDir) ||
-			hookUsesTrackedClaudeCodeCommand(rawHook, managedCommands) ||
-			hookUsesLegacyClaudeCodeNativeCommand(rawHook) ||
-			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
+		hook := claudeCodeExecView(rawHook)
+		return isOwnedHookHandler(hook, hooksDir) ||
+			hookUsesTrackedClaudeCodeCommand(hook, managedCommands) ||
+			hookUsesLegacyClaudeCodeNativeCommand(hook) ||
+			hookUsesForeignDefenseClawClaudeCodeScript(hook)
 	}), nil
 }
 
 // hookUsesForeignDefenseClawClaudeCodeScript recognizes a handler that runs
-// the generated Claude Code hook of another DefenseClaw data dir:
-// <home>/.defenseclaw/hooks/claude-code-hook.sh. A settings.json copied from
-// another account (or from dotfiles) carries those entries, and that script
-// is often unreadable, so the marker check cannot claim it. Setup then kept
-// the dead entries next to its own, doctor kept warning "stale generated
-// script", and uninstall left them in place (GAP-2031). Only Setup's and
-// Teardown's removal pass uses this; the exact path shape is the claim.
+// a DefenseClaw Claude Code hook Setup did not write at this path: the
+// generated hook of another DefenseClaw data dir (a settings.json copied from
+// another account or from dotfiles, whose script is often unreadable, so the
+// marker check cannot claim it; GAP-2031), or this install's handler after
+// its script path was edited by hand. A handler that still carries the exact
+// generated missing-script guard is DefenseClaw's whatever its path.
+// Setup then kept the dead entries next to its own and the edited one kept
+// failing every call (GAP-0907). Only Setup's and Teardown's removal pass
+// uses this.
 func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
 	hook, ok := rawHook.(map[string]interface{})
 	if !ok {
 		return false
 	}
 	command, _ := hook["command"].(string)
-	if command == "" || strings.ContainsAny(command, " \t\"'") {
-		return false
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	if unguarded != command {
+		return true
 	}
-	command = filepath.ToSlash(command)
-	hooksDir := path.Dir(command)
-	return path.IsAbs(command) && path.Clean(command) == command &&
-		path.Base(command) == "claude-code-hook.sh" &&
-		path.Base(hooksDir) == "hooks" &&
-		path.Base(path.Dir(hooksDir)) == ".defenseclaw"
+	rest, edited := editedDefenseClawHookScript(unguarded, "claude-code-hook.sh")
+	return edited && rest == ""
 }
 
 func validateClaudeCodeHookEventShape(hookEventValue interface{}) error {

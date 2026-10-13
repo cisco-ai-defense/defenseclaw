@@ -410,8 +410,11 @@ func planGitProtection(plan *MountPlan, state *mountState) error {
 		plan.Protected = append(plan.Protected, ".git")
 	}
 	if g.HooksPath != "" {
+		// Why it is read-only, which an install script that writes git
+		// hooks there (husky's prepare) meets as EROFS (GAP-0215).
 		rel, _ := relSlash(plan.Project, g.HooksPath)
-		plan.Protected = append(plan.Protected, rel)
+		plan.Protected = append(plan.Protected, rel+" (the repository's core.hooksPath: an install script that writes git hooks there fails; "+
+			"npm install --ignore-scripts skips it)")
 	}
 	for _, inc := range g.IncludeFiles {
 		rel, _ := relSlash(plan.Project, inc)

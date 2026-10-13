@@ -25,6 +25,7 @@ import os
 from contextlib import redirect_stdout
 from unittest import mock
 
+import pytest
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import _DoctorResult
 from defenseclaw.config_inspect import ConfigInspectError
@@ -91,6 +92,13 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
     # Setup readiness still reads it as pending reload.
     assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
     assert "without --passive" in row["remediation"]
+    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
+    # reports an idle Hermes as the plain doctor does.
+    with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
+            mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
+        dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
+        cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
+    assert dry_run.checks[-1]["status"] == "pass"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
@@ -314,6 +322,65 @@ def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
     assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX folder modes")
+def test_a_writable_audit_folder_names_the_folder_not_a_restore(tmp_path) -> None:
+    # GAP-0300: a chmod 777 DEFENSECLAW_HOME read "restore the audit database
+    # from a trusted backup"; the folder was the fault and the database untouched.
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(audit_db=str(home / "audit.db"), data_dir=str(home))
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert f"{home} can be written by other accounts" in row["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX folder modes")
+def test_a_writable_folder_names_the_folder_for_the_device_key_too(tmp_path) -> None:
+    # GAP-0344: with the audit row fixed (GAP-0300), the Device identity row
+    # still sent the same chmod 777 home to a restore of the key from backup.
+    from defenseclaw.doctor_recovery import DeviceKeyHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=DeviceKeyHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(data_dir=str(home))
+    cfg.gateway.device_key_file = str(home / "device.key")
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_device_key", return_value=health):
+        cmd_doctor._check_device_identity(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert row["detail"] == (
+        f"{home} can be written by other accounts, so the device key in it is not trusted; "
+        "the key itself is untouched (directory-chain-is-writable-by-others)"
+    )
+
+
+def test_full_disk_audit_db_names_space_cause(tmp_path) -> None:
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="audit-db-integrity-unavailable")
+    cfg = mock.MagicMock(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch("defenseclaw.commands.cmd_doctor.shutil.disk_usage", return_value=mock.MagicMock(free=0)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    assert "disk holding" in r.checks[-1]["detail"]
+    assert "free space" in r.checks[-1]["remediation"]
+
+
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
     from defenseclaw.config import (
         BedrockKeyConfig,
@@ -354,12 +421,12 @@ def test_bedrock_instance_role_judge_needs_no_api_key(tmp_path, monkeypatch) -> 
     assert "auth_mode=instance_role" in r.checks[-1]["detail"]
 
 
-def test_bedrock_api_key_judge_without_key_fails_with_next_step(tmp_path, monkeypatch) -> None:
+def test_bedrock_judge_without_bearer_key_uses_aws_credentials(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
     r = _DoctorResult()
     cmd_doctor._check_llm_api_key(_bedrock_judge_cfg(tmp_path, "api_key"), r)
-    assert r.checks[-1]["status"] == "fail"
-    assert "defenseclaw setup llm" in r.checks[-1]["remediation"]
+    assert r.checks[-1]["status"] == "skip"
+    assert "AWS credential chain" in r.checks[-1]["detail"]
 
 
 def test_setup_llm_summary_says_why_no_key_is_needed() -> None:
@@ -502,6 +569,11 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     }
     assert "disk holding the audit database is full" in cmd_doctor._telemetry_error_reason(details)
     assert cmd_doctor._telemetry_error_reason({"event_history_failure": ""}) == ""
+    # GAP-1129: a loss journal the gateway cannot write is named too.
+    journal = {"local_write_loss_journal": "failing", "local_write_loss_journal_failed_writes": 2}
+    assert "audit loss journal" in cmd_doctor._telemetry_error_reason({**details, **journal})
+    reason, next_step, _ = cmd_doctor._audit_write_failure({"telemetry": {"state": "error", "details": journal}})
+    assert "audit loss journal" in reason and "data directory" in next_step
 
     from types import SimpleNamespace
 
@@ -652,6 +724,36 @@ def test_unverified_version_hint_names_action_mode() -> None:
     assert "'defenseclaw setup hermes --mode action'" in row["remediation"]
 
 
+def test_agent_installed_after_discovery_names_the_refresh() -> None:
+    # GAP-0052: Claude Code installed after init read as missing until a
+    # refresh, and the next step said to install it.
+    from types import SimpleNamespace
+
+    from defenseclaw import doctor_health
+
+    finding = doctor_health.ConnectorHealthFinding(
+        connector="claudecode",
+        status=doctor_health.HealthStatus.UNAVAILABLE,
+        reason_code="connector-agent-unavailable",
+        summary="claudecode is active but its agent installation is unavailable",
+        remediations=doctor_health._unavailable_connector_remediations("claudecode"),
+    )
+    report = SimpleNamespace(components=(), connectors=(finding,))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=None),
+        mock.patch("defenseclaw.doctor_health.build_health_report", return_value=report),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch("defenseclaw.inventory.agent_discovery.shutil.which", return_value="/opt/bin/claude"),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["claudecode"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: claudecode")
+    assert row["status"] == "warn"
+    assert "is installed now, after the last agent discovery" in row["detail"]
+    assert row["remediation"].startswith("defenseclaw agent discover --refresh")
+
+
 def test_init_next_steps_drop_a_plain_setup_covered_by_mode_action() -> None:
     # GAP-1372: init printed "setup hermes --mode action" and then a plain "setup hermes".
     from types import SimpleNamespace
@@ -760,11 +862,14 @@ def test_stopped_gateway_row_carries_its_next_step(tmp_path) -> None:
 def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
     # GAP-1526: the Connector OTLP drift WARN row had an empty remediation.
     report = _custody_report(managed_config_state="drifted", drop_only_batches=0, drop_only_signals=())
+    # GAP-0076: the text row printed no Next step line (the remedy sat in the detail).
     r = _DoctorResult()
-    cmd_doctor._check_connector_export_custody(report, r)
+    text = _render(lambda: cmd_doctor._check_connector_export_custody(report, r))
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"
+    assert "Next step: run 'defenseclaw setup claude-code' to re-apply" in text
+    assert text.count("defenseclaw setup claude-code") == 1
 
 
 def test_rows_that_name_a_command_in_their_detail_carry_it_as_remediation() -> None:
@@ -867,8 +972,43 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     recent = row("2026-10-03T06:10:00Z")
     assert "last 12 min ago" in recent["detail"]
     assert "defenseclaw setup <connector>" in recent["remediation"]
+    # GAP-0313: setup cannot change a running agent, such as Codex's
+    # background app-server that still sends the token it started with.
+    assert "keeps sending the old token until it restarts" in recent["remediation"]
+    assert "codex app-server daemon restart" in recent["remediation"]
 
     # GAP-2335: a few seconds old reads naturally, not "last 0 min ago".
     fresh = row("2026-10-03T06:21:55Z")
     assert "last under a minute ago" in fresh["detail"]
     assert "0 min" not in fresh["detail"]
+
+
+def test_hermes_bootstrap_process_is_a_running_host() -> None:
+    assert cmd_doctor._hermes_argv_verdict(
+        ["python3", "/home/user/.hermes/tools/hermes_bootstrap.py"]
+    ) is True
+
+
+def test_network_scanner_and_settings_errors_name_the_cause(tmp_path) -> None:
+    import socket
+    import urllib.error
+    from types import SimpleNamespace
+
+    from defenseclaw.webhooks import network_error_text
+
+    dns = urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+    assert network_error_text(dns, "https://hooks.invalid.example/private-token") == (
+        "could not resolve host hooks.invalid.example"
+    )
+
+    launcher = tmp_path / "skill-scanner"
+    launcher.write_text("#!/missing/python\n")
+    assert cmd_doctor._missing_launcher_interpreter(str(launcher)) == "/missing/python"
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}\n{ broken")
+    result = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._check_claudecode_hooks(SimpleNamespace(), result, platform_name="posix", config_path=str(settings))
+    row = next(row for row in result.checks if row.get("label") == "Claude Code hooks")
+    assert "not valid JSON at line 2" in row["detail"]
+    assert "restore the settings.json backup" in row["remediation"]

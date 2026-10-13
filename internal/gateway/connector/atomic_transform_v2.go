@@ -835,29 +835,6 @@ func atomicTransformV2RandomBoundName(dir *atomicTransformBoundDirectory, label 
 	return "", fmt.Errorf("could not reserve unique bound compare-and-swap %s name", label)
 }
 
-func createAtomicTransformV2Marker(
-	dir *atomicTransformBoundDirectory, txnID, label string,
-) (atomicTransformV2Artifact, error) {
-	content := atomicTransformV2MarkerBytes(txnID, label)
-	name, err := atomicTransformV2RandomBoundName(dir, "marker-"+label)
-	if err != nil {
-		return atomicTransformV2Artifact{}, err
-	}
-	state, err := atomicTransformBoundCreate(dir, name, content, 0o600)
-	if err != nil {
-		return atomicTransformV2Artifact{}, fmt.Errorf("create durable harmless %s marker: %w", label, err)
-	}
-	privateState, err := atomicTransformBoundInspectFilePrivate(dir, name, atomicTransformMaxIntentBytes)
-	if err != nil || !atomicTransformArtifactStatesEqualExact(privateState, state) {
-		if err == nil {
-			err = fmt.Errorf("created harmless %s marker changed before privacy validation", label)
-		}
-		_ = atomicTransformBoundDeleteExact(dir, name, state)
-		return atomicTransformV2Artifact{}, err
-	}
-	return atomicTransformV2ArtifactFromState(name, state), nil
-}
-
 func atomicTransformV2MarkerBytes(txnID, label string) []byte {
 	return []byte(fmt.Sprintf("%s\n%s\n%s\n", atomicTransformV2MarkerVersion, txnID, label))
 }
@@ -1390,11 +1367,6 @@ func parseAtomicTransformV2Candidate(name string) (atomicTransformV2CandidateNam
 		}
 	}
 	return result, true, nil
-}
-
-func atomicTransformV2Candidate(name string) (base, phase string, ok bool) {
-	candidate, reserved, err := parseAtomicTransformV2Candidate(name)
-	return candidate.base, candidate.phase, reserved && err == nil && !candidate.gc
 }
 
 type atomicTransformV2CandidateGroup struct {

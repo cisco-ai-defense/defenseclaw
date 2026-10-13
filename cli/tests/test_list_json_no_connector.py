@@ -24,7 +24,7 @@ from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.tui.app import _no_connector_hint
+from defenseclaw.tui.app import _inventory_scan_args, _no_connector_hint
 from defenseclaw.tui.services.inventory_state import InventorySnapshot
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
@@ -54,3 +54,34 @@ def test_tui_reads_empty_inventory_and_the_no_connector_hint() -> None:
     hint = _no_connector_hint("no connector configured — run 'defenseclaw setup <connector>'\n".encode())
     assert hint.startswith("No connector configured")
     assert _no_connector_hint(b"") == ""
+
+
+def test_ide_only_scan_without_connector_returns_rows_or_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.commands import cmd_aibom
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        monkeypatch.setattr(cmd_aibom, "_fetch_ide_plugins", lambda _app: (
+            {"enabled": True, "scope": "all", "plugins": [
+                {"plugin_id": "github.copilot", "ide_product": "vscode", "is_ai": True},
+            ]}, "",
+        ))
+        result = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins", "--json"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["ide_plugins"][0]["plugin_id"] == "github.copilot"
+        assert json.loads(result.stdout)["summary"]["total_items"] == 1
+        monkeypatch.setattr(cmd_aibom, "_fetch_ide_plugins", lambda _app: (None, "gateway unavailable"))
+        error = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins"], obj=app)
+        assert error.exit_code != 0 and "gateway unavailable" in error.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_tui_uses_full_scan_for_one_connector() -> None:
+    full = ("aibom", "scan", "--json")
+    class Config:
+        def active_connectors(self) -> list[str]:
+            return ["codex"]
+    assert _inventory_scan_args(full, Config()) == full
+    assert _inventory_scan_args(full, None) == (*full, "--only", "ide_plugins")

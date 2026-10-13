@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -55,11 +57,11 @@ func TestHookModelLogsV8RouteRichUnredactedRequestAndResponseWithoutGatewayJSONL
 			ConfigDigest: "0000000000000000000000000000000000000000000000000000000000000000",
 		},
 	}
-	if _, err := buildHookModelRequestLogRecord(builder, envelope, llmEventMeta{}, prompt); err != nil {
+	if _, err := buildHookModelRequestLogRecord(t.Context(), builder, envelope, llmEventMeta{}, prompt); err != nil {
 		t.Fatalf("build model request: %v", err)
 	}
 	envelope.Action = "model.response"
-	if _, err := buildHookModelResponseLogRecord(builder, envelope, llmEventMeta{}, response, []string{"stop"}); err != nil {
+	if _, err := buildHookModelResponseLogRecord(t.Context(), builder, envelope, llmEventMeta{}, response, []string{"stop"}); err != nil {
 		t.Fatalf("build model response: %v", err)
 	}
 	api.emitLLMPromptEventV8(t.Context(), meta, prompt, nil)
@@ -101,6 +103,70 @@ func TestHookModelLogsV8RouteRichUnredactedRequestAndResponseWithoutGatewayJSONL
 	}
 }
 
+// GAP-0070: a sandboxed session's model and agent lifecycle logs carry the
+// sandbox binding and the agent identity, so they join its hook decisions;
+// so do its tool_start and tool_end lifecycle logs (GAP-0202).
+func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33", SandboxName: "dc-codex-app-0a1b",
+	})
+	meta := richHookModelV8Meta()
+	meta.AgentIdentityID = "agt-0123456789abcdef"
+	api.emitLLMPromptEventV8(ctx, meta, "sandboxed prompt", nil)
+	if got := api.emitHookLifecycleEvent(ctx, meta); got != hookLifecycleV8Persisted {
+		t.Fatalf("lifecycle emission = %d, want persisted", got)
+	}
+	toolStart := meta
+	toolStart.LifecycleEvent, toolStart.LifecycleState, toolStart.ToolName, toolStart.ToolID =
+		observability.TelemetryEventToolStart, "running", "Bash", "call-1"
+	if got := api.emitHookLifecycleEvent(ctx, toolStart); got != hookLifecycleV8Persisted {
+		t.Fatalf("tool_start emission = %d, want persisted", got)
+	}
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 3 })
+	seen := map[string]bool{}
+	for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
+		var wire struct {
+			Body map[string]any `json:"body"`
+		}
+		name := logStringAttribute(record.GetAttributes(), "defenseclaw.event.name")
+		if err := json.Unmarshal([]byte(record.GetBody().GetStringValue()), &wire); err != nil {
+			t.Fatalf("%s body: %v", name, err)
+		}
+		if wire.Body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" ||
+			wire.Body["defenseclaw.sandbox.name"] != "dc-codex-app-0a1b" ||
+			wire.Body["defenseclaw.agent.identity.id"] != "agt-0123456789abcdef" {
+			t.Errorf("%s body = %v, want the sandbox id, name and agent identity", name, wire.Body)
+		}
+		seen[name] = true
+	}
+	if !seen[observability.TelemetryEventModelRequest] || !seen[observability.TelemetryEventTurnEnd] ||
+		!seen[observability.TelemetryEventToolStart] {
+		t.Fatalf("captured log events = %v, want model.request, turn_end and tool_start", seen)
+	}
+}
+
+// GAP-0158: the runtime the gateway runs reads the signed lifecycle history,
+// so a hook after a restart restores its session's lineage instead of
+// skipping the restore.
+func TestHookLifecycleHistoryReadsThroughTheGatewayRuntime(t *testing.T) {
+	api, _ := bindHookModelV8Runtime(t, []string{"logs"})
+	meta := richHookModelV8Meta()
+	if got := api.emitHookLifecycleEvent(t.Context(), meta); got != hookLifecycleV8Persisted {
+		t.Fatalf("lifecycle emission = %d, want persisted", got)
+	}
+	history, ok := api.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
+	if !ok {
+		t.Fatalf("gateway runtime %T reads no lifecycle history", api.observabilityV8RuntimeEmitter())
+	}
+	projection, found, err := history.LatestLifecycleProjection(t.Context(), audit.LifecycleProjectionQuery{
+		Connector: meta.Source, SessionID: meta.SessionID, AgentID: meta.AgentID,
+	})
+	if err != nil || !found || projection.ParentAgentID != meta.ParentAgentID || projection.Depth != meta.AgentDepth {
+		t.Fatalf("lifecycle history = %+v found=%t err=%v, want the parent link", projection, found, err)
+	}
+}
+
 func TestCodexNotifyEmitsCanonicalV8ModelLogsWithSourceFacts(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	const body = `{
@@ -139,6 +205,52 @@ func TestCodexNotifyEmitsCanonicalV8ModelLogsWithSourceFacts(t *testing.T) {
 	} {
 		if !bytes.Contains(wire, []byte(fact)) {
 			t.Fatalf("notify canonical logs missing source fact %q", fact)
+		}
+	}
+}
+
+// GAP-0203: the notify webhook is no hook, so its model logs join the agent
+// identity, instance and lineage the session was seen under on the hook
+// path, in a sandbox too, whose sessions the hook path keys apart.
+func TestCodexNotifyModelLogsJoinTheHookSessionIdentity(t *testing.T) {
+	const identityID = "agt-0123456789abcdef"
+	sharedRegMu.Lock()
+	previous := sharedReg
+	sharedReg = NewAgentRegistry("", "")
+	registry := sharedReg
+	sharedRegMu.Unlock()
+	t.Cleanup(func() {
+		sharedRegMu.Lock()
+		sharedReg = previous
+		sharedRegMu.Unlock()
+	})
+	sandboxCtx := sandboxauth.WithRequest(t.Context(), sandboxauth.Binding{ID: "sbx-join", SandboxName: "join", Connector: "codex"}, nil)
+	hook, _ := registry.ResolveForAgentIdentity(sandboxCtx, identityID, "thread-join", "")
+	if hook.AgentInstanceID == "" {
+		t.Fatal("the hook path minted no agent instance")
+	}
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	api.rememberHookSessionState(sandboxCtx, llmEventMeta{
+		Source: "codex", SessionID: "thread-join", AgentID: agentNodeID(identityID, "codex", "thread-join", "root"),
+		RootSessionID: "thread-root-join", AgentIdentityID: identityID,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"thread-join","turn-id":"turn-join","model":"gpt-5","input-messages":["hello"],"last-assistant-message":"hi"}`))
+	request = request.WithContext(sandboxCtx)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.handleCodexNotify(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("notify status=%d", response.Code)
+	}
+	eventuallyTrue(t, func() bool {
+		_, names := capturedModelLogWire(t, capture)
+		return names[observability.TelemetryEventModelRequest] && names[observability.TelemetryEventModelResponse]
+	})
+	wire, _ := capturedModelLogWire(t, capture)
+	for _, want := range []string{identityID, hook.AgentInstanceID, "thread-root-join"} {
+		if !bytes.Contains(wire, []byte(want)) {
+			t.Fatalf("notify model logs do not carry %q", want)
 		}
 	}
 }

@@ -28,7 +28,6 @@ EDITS = [
     ["edit", "guardrail", "--block-threshold", "3", "--alert-threshold", "1"],
     ["edit", "actions", "--severity", "medium", "--runtime", "disable"],
     ["edit", "scanner", "--type", "mcp", "--severity", "high", "--runtime", "disable"],
-    ["edit", "firewall", "--add-domain", "example.com"],
 ]
 
 
@@ -62,24 +61,18 @@ def _invoke(app, args):
 
 
 @pytest.mark.parametrize("args", EDITS, ids=lambda a: a[1])
-def test_editing_the_active_policy_reloads_the_gateway(app, reloads, args) -> None:
+def test_a_live_edit_reloads_the_gateway(app, reloads, args) -> None:
     result = _invoke(app, args)
     assert result.exit_code == 0, result.output
     assert len(reloads) == 1
     assert "Gateway reloaded the policy" in result.output
 
 
-def test_thresholds_reach_data_json_before_the_reload(app, reloads) -> None:
+def test_a_live_edit_writes_config(app, reloads) -> None:
     assert _invoke(app, EDITS[0]).exit_code == 0
-    with open(os.path.join(app.cfg.policy_dir, "rego", "data.json"), encoding="utf-8") as fh:
-        guardrail = json.load(fh)["guardrail"]
-    assert (guardrail["block_threshold"], guardrail["alert_threshold"]) == (3, 1)
-
-
-def test_an_active_action_edit_also_updates_the_config_actions(app, reloads) -> None:
-    # CLI skill-action paths fall back to config.yaml's skill_actions.
+    assert (app.cfg.guardrail.block_at, app.cfg.guardrail.alert_at) == ("HIGH", "LOW")
     assert _invoke(app, EDITS[1]).exit_code == 0
-    assert app.cfg.skill_actions.medium.runtime == "disable"
+    assert app.cfg.admission.defaults.actions["medium"]["runtime"] == "disable"
 
 
 @pytest.mark.parametrize("args", EDITS, ids=lambda a: a[1])
@@ -91,7 +84,7 @@ def test_no_reload_and_drafts_leave_the_gateway_alone(app, monkeypatch, args) ->
     assert _invoke(app, [*args, "--no-reload"]).exit_code == 0
     draft = _invoke(app, [*args, "--policy-name", "strict"])
     assert draft.exit_code == 0, draft.output
-    assert "Saved draft" in draft.output
+    assert "Apply it with" in draft.output
 
 
 def test_stopped_gateway_is_fine(app) -> None:
@@ -114,27 +107,44 @@ def test_rejected_reload_exits_1(app, monkeypatch) -> None:
     assert "defenseclaw policy validate" in result.output and "compilation failed" in result.output
 
 
-def test_skill_action_change_restarts_a_running_gateway(app, monkeypatch) -> None:
-    # GAP-1236: the gateway's config watcher refuses a skill_actions change
-    # ("requires gateway restart"), so a hot policy reload alone would claim
-    # an enforcement it does not have.
+def test_edit_scanner_preserves_allow_verdict(app) -> None:
+    from defenseclaw.enforce.admission import compile_admission
+
+    app.cfg.admission.plugin.actions["high"] = "allow"
+    result = _invoke(app, [
+        "edit", "scanner", "--type", "plugin", "--severity", "high",
+        "--runtime", "enable", "--no-reload",
+    ])
+    assert result.exit_code == 0, result.output
+    assert compile_admission(app.cfg, "plugin").actions["HIGH"][1] is True
+
+
+def test_a_watch_change_restarts_only_a_secure_client_gateway(app, monkeypatch) -> None:
+    # The gateway reloads watch hot (GAP-0056); a Secure Client gateway reads
+    # it at start, so there activate keeps the restart of main (GAP-1236).
     from defenseclaw.commands import cmd_policy, cmd_setup
 
     restarts: list[str] = []
-
-    def _no_reload(self):
-        raise AssertionError("a restart replaces the hot reload")
-
-    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _no_reload)
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", lambda self: {"status": "reloaded"})
     monkeypatch.setattr(cmd_policy, "_gateway_pid_alive", lambda _app: True)
     monkeypatch.setattr(
         cmd_setup, "_restart_defense_gateway", lambda data_dir, **_kw: restarts.append(data_dir) or True
     )
+    app.cfg.watch.rescan_interval_min = 7
+    result = _invoke(app, ["activate", "strict"])
+    assert result.exit_code == 0, result.output
+    assert restarts == [] and "Gateway reloaded the policy" in result.output
+
+    rego_dir = os.path.join(app.cfg.policy_dir, "rego")
+    os.makedirs(rego_dir, exist_ok=True)
+    with open(os.path.join(rego_dir, "data.json"), "w") as f:
+        json.dump({"config": {}, "actions": {}, "severity_ranking": {}}, f)
+    monkeypatch.setattr(cmd_policy.asset_lists, "is_secure_client", lambda _cfg: True)
+    app.cfg.watch.rescan_interval_min = 7
     result = _invoke(app, ["activate", "strict"])
     assert result.exit_code == 0, result.output
     assert restarts == [app.cfg.data_dir]
     assert "Restarted the gateway; it is enforcing the policy now." in result.output
-    assert "Gateway reloaded the policy" not in result.output
 
 
 def test_no_change_does_not_reload(app, monkeypatch) -> None:
@@ -146,21 +156,10 @@ def test_no_change_does_not_reload(app, monkeypatch) -> None:
     assert result.exit_code == 0 and "No changes specified" in result.output
 
 
-def test_threshold_edit_points_hook_tool_calls_at_block_at(app, reloads) -> None:
-    result = _invoke(app, EDITS[0])
-    assert result.exit_code == 0, result.output
-    assert "guardrail proxy" in result.output
-    assert "defenseclaw guardrail block-at" in result.output
-    patterns = _invoke(app, ["edit", "guardrail", "--add-pattern", "injection", "dc-marker"])
-    assert "guardrail block-at" not in patterns.output
-
-
-def test_an_edit_names_the_policy_it_changed(app, reloads) -> None:
+def test_an_edit_names_what_it_changed(app, reloads) -> None:
     # GAP-1667: the result line said only 'Guardrail updated: block_threshold=3'.
     result = _invoke(app, EDITS[0])
     assert result.exit_code == 0, result.output
-    assert "Guardrail of policy 'default' (active) updated: block_threshold=HIGH (3), alert_threshold=LOW (1)" in (
-        result.output
-    )
+    assert "Guardrail updated: block_at=HIGH, alert_at=LOW" in result.output
     draft = _invoke(app, ["edit", "firewall", "--add-domain", "example.org", "-p", "strict"])
-    assert "Firewall of policy 'strict' (draft) updated: +domain example.org" in draft.output
+    assert "Firewall of policy 'strict' updated: +domain example.org" in draft.output

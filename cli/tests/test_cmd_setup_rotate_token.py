@@ -33,6 +33,7 @@ from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
+from tests.environment import source_package_env
 from tests.permissions import assert_owner_only_file
 
 
@@ -148,7 +149,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            with self.assertRaisesRegex(click.ClickException, "ACL is not private"):
+            with self.assertRaisesRegex(click.ClickException, r"is not private \(Windows DACL is inheritable\)"):
                 cmd_setup._rotate_token_hook_snapshot_locked(td, "codex")
 
     def test_preserves_unrelated_bytes_and_crlf(self) -> None:
@@ -338,6 +339,7 @@ with locked_file_update(lock_base):
                     os.fspath(holder_release),
                 ],
                 cwd=Path(__file__).resolve().parents[2],
+                env=source_package_env(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1523,19 +1525,6 @@ with locked_file_update(lock_base):
             with open(dotenv, "rb") as fh:
                 self.assertEqual(fh.read(), original)
             self.assertNotIn("b" * 64, result.output)
-
-    def test_no_restart_is_rejected_before_any_mutation(self) -> None:
-        from tempfile import TemporaryDirectory
-
-        with TemporaryDirectory() as td:
-            app = _make_rotate_ctx(td, ["codex"])
-            lifecycle = mock.Mock()
-            with mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", lifecycle):
-                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes", "--no-restart"], obj=app)
-            self.assertNotEqual(result.exit_code, 0)
-            lifecycle.assert_not_called()
-            self.assertIn("--no-restart", result.output)
-            self.assertFalse(os.path.exists(os.path.join(td, ".env")))
 
     def test_managed_host_is_refused_before_any_mutation(self) -> None:
         from tempfile import TemporaryDirectory

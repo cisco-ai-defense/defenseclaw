@@ -15,15 +15,15 @@ def _values(wizard: SetupWizard, cfg: object) -> dict[str, str]:
 
 
 def test_scanner_forms_prefill_the_effective_config() -> None:
-    # An unset config is permissive / lenient / auto, as `config get` reports.
+    # An unset config is quiet / lenient / auto, as `config get` reports.
     unset = {"scanners": {"skill_scanner": {}, "mcp_scanner": {}}}
     skill = _values(SetupWizard.SKILL_SCANNER, unset)
-    assert (skill["Scan Policy"], skill["Lenient Mode"]) == ("permissive", "yes")
+    assert (skill["Scan Policy"], skill["Lenient Mode"]) == ("quiet", "yes")
     assert _values(SetupWizard.MCP_SCANNER, unset)["Analyzers"] == "auto"
 
     cfg = {"scanners": {"skill_scanner": {"policy": "", "lenient": False}, "mcp_scanner": {"analyzers": "yara"}}}
     skill = _values(SetupWizard.SKILL_SCANNER, cfg)
-    assert (skill["Scan Policy"], skill["Lenient Mode"]) == ("none", "no")
+    assert (skill["Scan Policy"], skill["Lenient Mode"]) == ("quiet", "no")
     assert _values(SetupWizard.MCP_SCANNER, cfg)["Analyzers"] == "yara"
 
 

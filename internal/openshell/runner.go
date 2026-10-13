@@ -18,10 +18,14 @@ package openshell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +72,7 @@ type ExecRunner struct {
 const defaultCommandTimeout = 2 * time.Minute
 
 func (c Command) environ() []string {
-	env := Environ(os.Environ())
+	env := withRuntimeDir(Environ(os.Environ()), userRuntimeDir)
 	if len(c.Unset) > 0 {
 		kept := env[:0]
 		for _, kv := range env {
@@ -89,6 +93,35 @@ func (c Command) environ() []string {
 	return append(env, c.Env...)
 }
 
+// withRuntimeDir sets XDG_RUNTIME_DIR to runtimeDir() where env has none:
+// a login shell from `su -l` or `sudo -iu` leaves it unset although the
+// user manager runs (linger, or another session), and `systemctl --user`
+// then fails with "Failed to connect to bus: No medium found".
+func withRuntimeDir(env []string, runtimeDir func() string) []string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "XDG_RUNTIME_DIR="); ok && v != "" {
+			return env
+		}
+	}
+	if dir := runtimeDir(); dir != "" {
+		return append(env, "XDG_RUNTIME_DIR="+dir)
+	}
+	return env
+}
+
+// userRuntimeDir is the caller's systemd runtime directory, /run/user/UID,
+// when it exists and is the caller's ("" off Linux).
+func userRuntimeDir() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	dir := "/run/user/" + strconv.Itoa(os.Geteuid())
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || !ownedByCaller(info) {
+		return ""
+	}
+	return dir
+}
+
 // Output implements Runner.
 func (r ExecRunner) Output(ctx context.Context, c Command) ([]byte, error) {
 	timeout := c.Timeout
@@ -107,7 +140,15 @@ func (r ExecRunner) Output(ctx context.Context, c Command) ([]byte, error) {
 	return out, nil
 }
 
-// Run implements Runner.
+// ErrInterrupted means the user pressed Ctrl-C while a command attached to
+// the terminal ran (Runner.Run): it went to that command, which ended.
+var ErrInterrupted = errors.New("interrupted")
+
+// Run implements Runner. The command owns the terminal while it runs: a
+// Ctrl-C reaches it (the terminal signals its whole process group) but
+// does not end this process, which waits for it and returns
+// ErrInterrupted, so the caller's cleanup runs and it can say what was
+// left undone. A second Ctrl-C ends a command that ignored the first.
 func (r ExecRunner) Run(ctx context.Context, c Command) error {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Env = c.environ()
@@ -121,8 +162,30 @@ func (r ExecRunner) Run(ctx context.Context, c Command) error {
 	if cmd.Stderr == nil {
 		cmd.Stderr = os.Stderr
 	}
-	if err := cmd.Run(); err != nil {
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%s: %w", c.Name, err)
 	}
-	return nil
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	interrupted := false
+	for {
+		select {
+		case err := <-done:
+			if interrupted {
+				return fmt.Errorf("%s: %w", c.Name, ErrInterrupted)
+			}
+			if err != nil {
+				return fmt.Errorf("%s: %w", c.Name, err)
+			}
+			return nil
+		case <-sig:
+			if interrupted {
+				_ = cmd.Process.Kill()
+			}
+			interrupted = true
+		}
+	}
 }

@@ -8,6 +8,22 @@ from pathlib import Path
 
 import pytest
 
+CLI_ROOT = Path(__file__).resolve().parents[1]
+
+
+def source_package_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return *env* (default: os.environ) with this checkout's cli/ first on PYTHONPATH.
+
+    A child interpreter imports defenseclaw from PYTHONPATH or site-packages.
+    CI installs the package; a fresh checkout does not, so children failed
+    with ModuleNotFoundError (or ran another installed copy).
+    """
+    result = dict(os.environ if env is None else env)
+    result["PYTHONPATH"] = os.pathsep.join(
+        entry for entry in (os.fspath(CLI_ROOT), result.get("PYTHONPATH", "")) if entry
+    )
+    return result
+
 
 def isolated_home_env(home: str | os.PathLike[str]) -> dict[str, str]:
     """Return a complete disposable user identity rooted at *home*."""

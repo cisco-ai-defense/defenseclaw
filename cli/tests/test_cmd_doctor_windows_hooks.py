@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import defenseclaw.doctor_hooks as doctor_hooks
 import yaml
+from defenseclaw.hook_integrity import _read_agent_config
 
 try:
     import tomllib
@@ -37,6 +38,7 @@ from defenseclaw.commands.cmd_doctor import (
 )
 from defenseclaw.doctor_hooks import (
     _CLAUDE_REQUIRED_HOOKS,
+    WindowsHookCheck,
     _codex_command_hook_hash,
     _codex_hook_state_key_source,
     _codex_policy_executable,
@@ -55,6 +57,13 @@ from defenseclaw.doctor_hooks import (
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
+    def test_codex_bom_config_is_read_by_hook_inspectors(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "config.toml")
+            path.write_bytes(b"\xef\xbb\xbf# user comment\n[features]\nhooks = true\n")
+            self.assertTrue(doctor_hooks._read_config(str(path), "codex")["features"]["hooks"])
+            self.assertTrue(_read_agent_config(path)["features"]["hooks"])
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
         self.root = Path(self.temp.name)
@@ -1042,6 +1051,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
 
+    def test_claude_launcher_guard_form_is_healthy_and_edits_are_not(self) -> None:
+        # GAP-1091: per-user Setup runs the launcher through cmd.exe so a
+        # missing launcher blocks; doctor must read it as the exec form it runs.
+        runtime = self._runtime()
+        processor = ntpath.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "cmd.exe")
+        guard = [
+            "/d", "/c", "if", "exist", str(runtime), "(", str(runtime), "hook", "--connector", "claudecode", ")",
+            "else", "(", "echo", *doctor_hooks._CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+        ]
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["command"] = processor
+            entries[0]["hooks"][0]["args"] = guard
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = [*guard[:-2], "0", ")"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
+
     def test_claude_exec_form_rejects_malformed_args(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))
@@ -1424,6 +1457,44 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.state, "policy-blocked")
         self.assertIn("native Windows .exe", raised.exception.detail)
+
+    def test_codex_executable_changed_after_setup_names_the_setup_rerun(self) -> None:
+        """GAP-0129: after a Codex update the evidence mismatch says to re-run
+        setup, and the Codex hooks row (like Hook contract, from the same
+        check) carries it as its Next step."""
+        executable = self.install / "codex.exe"
+        executable.write_bytes(b"MZnative-codex")
+        lock = {
+            "version": 2,
+            "connectors": {
+                "codex": {
+                    "contract_id": "codex-hooks-v3-generic",
+                    "compatibility_status": "known",
+                    "raw_agent_version": "codex-cli 0.144.3",
+                    "normalized_agent_version": "0.144.3",
+                    "agent_executable": str(executable),
+                    "agent_executable_source": "setup-selected",
+                    "agent_executable_sha256": "0" * 64,
+                }
+            },
+        }
+        (self.data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        with (
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch("defenseclaw.agent_selection.stable_executable_sha256", return_value="1" * 64),
+            self.assertRaises(_InspectionError) as raised,
+        ):
+            _inspect_codex_effective_hook_policy(str(self.data), str(self.data / "config.toml"))
+        self.assertIn("no longer matches protected Setup evidence", raised.exception.detail)
+        self.assertIn("defenseclaw setup codex --yes", raised.exception.repair)
+
+        check = WindowsHookCheck("policy-blocked", raised.exception.detail, repair=raised.exception.repair)
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+            _check_codex_hooks(self.cfg, result, platform_name="nt", config_path=str(self.data / "config.toml"))
+        self.assertEqual(result.checks[-1]["status"], "fail")
+        self.assertIn("defenseclaw setup codex --yes", result.checks[-1]["remediation"])
 
     def test_codex_policy_executable_never_uses_automatic_discovery_cache(self) -> None:
         (self.data / "agent_discovery.json").write_text(
@@ -2762,6 +2833,21 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(result.checks[-1]["status"], "pass", result.checks[-1])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+        # GAP-0158: the version is the one setup recorded, and says so.
+        self.assertRegex(result.checks[-1]["detail"], r" agent=\S+ \(recorded at setup\) ")
+
+    def test_a_failed_runtime_shows_an_encoded_wrapper_by_its_length(self) -> None:
+        # GAP-0158: a policy-blocked Codex row printed the whole 2.5 KB
+        # -EncodedCommand and pushed its Next step off the screen.
+        command = self._encoded_hook_command(self._runtime())
+        encoded = command.rsplit(" ", 1)[1]
+        check = WindowsHookCheck(
+            "policy-blocked", "selected Codex executable no longer matches protected Setup evidence", command
+        )
+        text = check.runtime_description
+        self.assertNotIn(encoded[:64], text)
+        self.assertIn(f"-EncodedCommand <{len(encoded)}-character encoded script>", text)
+        self.assertIn("runtime_state=policy-blocked runtime_error=selected Codex executable", text)
 
     def test_windows_hermes_contract_uses_protected_executable_not_stale_discovery(self) -> None:
         runtime = self._runtime()

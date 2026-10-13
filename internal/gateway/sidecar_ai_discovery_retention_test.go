@@ -76,25 +76,13 @@ func TestSidecarAIDiscoveryHistoryFollowsObservabilityRetention(t *testing.T) {
 		t.Fatalf("reloaded history retention = %d, want 30", got)
 	}
 
-	// ai_discovery edits are restart-required through ConfigManager; drive the
-	// apply boundary directly to cover its in-process service swap.
-	nextRaw := aiDiscoveryRetentionRaw(fixture.dataDir, 10, 0)
-	nextCfg, err := config.LoadRuntimeV8CandidateFromBytes(fixture.configPath, nextRaw)
-	if err != nil {
+	// ai_discovery edits reload hot through ConfigManager (GAP-0047): a
+	// restart-required ai_discovery used to fail the whole reload, so profile
+	// edits saved alongside it never applied.
+	if err := os.WriteFile(fixture.configPath, aiDiscoveryRetentionRaw(fixture.dataDir, 10, 0), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := config.ParseCompileObservabilityV8(
-		fixture.configPath, nextRaw,
-		config.ObservabilityV8CompileOptions{DefaultDataDir: fixture.dataDir},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.sidecar.applyConfigReloadSnapshot(
-		t.Context(), fixture.sidecar.currentConfig(), nextCfg,
-		ConfigDiff{Changed: []string{"ai_discovery", "observability"}},
-		configReloadSource{sourceName: fixture.configPath, raw: nextRaw, compiledV8: compiled},
-	); err != nil {
+	if err := mgr.Reload(t.Context(), "test"); err != nil {
 		t.Fatal(err)
 	}
 	replacement := fixture.sidecar.aiDiscoverySnapshot()

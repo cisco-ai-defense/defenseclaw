@@ -650,7 +650,6 @@ _RESOURCE_DYNAMIC_MEMBERS_FIELDS: Final = frozenset(
         "forbidden_value_classes",
     }
 )
-_RESOURCE_COMPATIBILITY_ALIAS_FIELDS: Final = frozenset({"alias", "canonical"})
 _GROUP_FIELDS: Final = frozenset(
     {
         "id",
@@ -685,7 +684,6 @@ _GROUP_FIELDS: Final = frozenset(
         "route_selector",
         "compatibility_profiles",
         "resource_dynamic_members",
-        "resource_compatibility_aliases",
         "legacy_bindings",
         "introduced_in",
         "deprecated_in",
@@ -5837,9 +5835,8 @@ def build_candidate_render_index(view: object) -> CandidateRenderIndex:
             if group["attribute_refs"] != tuple(direct_refs):
                 raise CandidateRenderError("materialized direct attribute refs disagree")
             dynamic = group["resource_dynamic_members"]
-            aliases = group["resource_compatibility_aliases"]
             if group_id == "resource.core":
-                if dynamic is None and aliases is None:
+                if dynamic is None:
                     groups[group_id] = group
                     continue
                 dynamic = _tagged(dynamic, "ResourceDynamicMembersIR", _RESOURCE_DYNAMIC_MEMBERS_FIELDS)
@@ -5883,10 +5880,13 @@ def build_candidate_render_index(view: object) -> CandidateRenderIndex:
                     ),
                     "reserved_keys": (
                         "defenseclaw.claw.home_dir",
+                        "defenseclaw.device.id",
                         "defenseclaw.gateway.host",
                         "defenseclaw.gateway.port",
                         "defenseclaw.preset",
                         "defenseclaw.preset_name",
+                        "deployment.environment",
+                        "deployment.mode",
                         "discovery.source",
                         "telemetry.sdk.language",
                         "telemetry.sdk.name",
@@ -5894,19 +5894,9 @@ def build_candidate_render_index(view: object) -> CandidateRenderIndex:
                     ),
                     "forbidden_value_classes": ("filesystem_path", "credential_material"),
                 }
-                if dict(dynamic) != expected_dynamic or not isinstance(aliases, tuple):
+                if dict(dynamic) != expected_dynamic:
                     raise CandidateRenderError("materialized resource dynamic-member contract is invalid")
-                alias_rows = tuple(
-                    _tagged(item, "ResourceCompatibilityAliasIR", _RESOURCE_COMPATIBILITY_ALIAS_FIELDS)
-                    for item in aliases
-                )
-                if tuple((row["alias"], row["canonical"]) for row in alias_rows) != (
-                    ("deployment.environment", "deployment.environment.name"),
-                    ("deployment.mode", "defenseclaw.deployment.mode"),
-                    ("defenseclaw.device.id", "defenseclaw.device.public_key_fingerprint"),
-                ):
-                    raise CandidateRenderError("materialized resource compatibility aliases are invalid")
-            elif dynamic is not None or aliases is not None:
+            elif dynamic is not None:
                 raise CandidateRenderError("resource dynamic-member ownership escaped resource.core")
             groups[group_id] = group
             group_type = group["type"]
@@ -6437,24 +6427,11 @@ def _uses_schema(
 def _resource_uses_schema(model: CandidateRenderIndex, group: Mapping[str, FrozenJSON]) -> JSONObject:
     result = _uses_schema(model, group["resolved_uses"])
     dynamic = group["resource_dynamic_members"]
-    raw_aliases = group["resource_compatibility_aliases"]
-    if dynamic is None and raw_aliases is None:
+    if dynamic is None:
         return result
     if not isinstance(dynamic, Mapping) or set(dynamic) != _RESOURCE_DYNAMIC_MEMBERS_FIELDS:
         raise CandidateRenderError("candidate resource dynamic-member contract is malformed")
-    if not isinstance(raw_aliases, tuple) or any(
-        not isinstance(item, Mapping) or set(item) != _RESOURCE_COMPATIBILITY_ALIAS_FIELDS for item in raw_aliases
-    ):
-        raise CandidateRenderError("candidate resource alias contract is malformed")
-    aliases = tuple(raw_aliases)
     properties = result["properties"]
-    for alias in aliases:
-        canonical = _string(alias["canonical"], "resource alias canonical")
-        alias_name = _string(alias["alias"], "resource alias name")
-        schema = _attribute_schema(model.attributes[canonical])
-        schema["x-defenseclaw-compatibility-alias-of"] = canonical
-        schema["x-defenseclaw-requirement-level"] = "optional"
-        properties[alias_name] = schema
 
     exact_excluded = tuple(properties) + tuple(dynamic["reserved_keys"])
     normalized_excluded = tuple(item.replace(".", "_").replace("-", "_") for item in exact_excluded)
@@ -7251,7 +7228,6 @@ def _render_catalog(
             "owner": "resource.core",
             "fixed_keys": list(resource_group["attribute_refs"]),
             "dynamic_members": _plain(resource_group["resource_dynamic_members"]),
-            "compatibility_aliases": _plain(resource_group["resource_compatibility_aliases"]),
         },
         "value_catalogs": [
             _plain_ir(_tagged(item, "ValueCatalogIR", _VALUE_CATALOG_FIELDS)) for item in model.fields["value_catalogs"]

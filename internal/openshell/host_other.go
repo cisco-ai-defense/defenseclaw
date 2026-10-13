@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !darwin
+//go:build !darwin && !linux
 
 package openshell
 
@@ -23,10 +23,10 @@ import "io/fs"
 // rosetta is macOS only.
 func rosetta() bool { return false }
 
-// hostMemory is asked only on macOS, whose MicroVM resources are sized
-// from it.
+// hostMemory is asked only where the MicroVM driver runs (macOS and
+// Linux), whose MicroVM resources are sized from it.
 func hostMemory() uint64 { return 0 }
 
-// allocatedBytes measures the MicroVM driver's cache, which is macOS
-// only: elsewhere a file's size stands in.
+// allocatedBytes measures the MicroVM driver's cache, which exists only on
+// macOS and Linux: elsewhere a file's size stands in.
 func allocatedBytes(info fs.FileInfo) uint64 { return uint64(info.Size()) }

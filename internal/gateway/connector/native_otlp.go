@@ -317,7 +317,7 @@ func (s NativeOTLPSpec) serializedHeaders() (string, error) {
 
 // TOMLBlock renders a TOML-block spec into a map suitable for embedding
 // into codex's config.toml under the `otel` key. The shape matches
-// codex's serde schema exactly — see buildCodexOtelBlock in codex.go.
+// codex's serde schema exactly.
 func (s NativeOTLPSpec) TOMLBlock() (map[string]interface{}, error) {
 	if s.Kind != NativeOTLPTOMLBlock {
 		return nil, fmt.Errorf("NativeOTLPSpec.TOMLBlock: kind %q is not toml_block", s.Kind)

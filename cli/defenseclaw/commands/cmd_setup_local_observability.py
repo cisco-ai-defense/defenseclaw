@@ -280,7 +280,7 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         )
 
         _require_v8_operator_status(app.cfg.data_dir)
-        _set_v8_destination_enabled(app.cfg.data_dir, "local-observability", False, "")
+        _set_v8_destination_enabled(app.cfg.data_dir, "local-observability", False)
         click.echo(f"  {ux.bold('Config updated:')} observability.destinations[local-observability].enabled=false")
     elif _local_destination_enabled(app.cfg.data_dir):
         click.echo(
@@ -658,7 +658,7 @@ def _print_stack_summary(
     click.echo()
     if logs_enabled:
         ux.ok(
-            "Logs:        canonical v8 logs enabled on local-observability "
+            "Logs:        logs enabled on local-observability "
             "(security, lifecycle, audit, and health families)."
         )
     else:

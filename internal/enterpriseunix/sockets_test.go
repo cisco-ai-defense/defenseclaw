@@ -13,6 +13,9 @@
 package enterpriseunix
 
 import (
+	"errors"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,5 +81,40 @@ func TestPackageUpgradeKeepsUnchangedSocketsListening(t *testing.T) {
 	calls := socketCalls(h, before)
 	if strings.Join(calls, ",") != "restart "+unitAPISocket {
 		t.Fatalf("a changed socket definition must be replaced in one restart, and only that socket: %v", calls)
+	}
+}
+
+// GAP-0746: after chown -R root:wheel over the deployment the stale
+// run/hook.sock belonged to root, the macOS gateway refused to replace it,
+// and every repair failed activation and rolled back. repair removes a hook
+// socket another account owns that nothing answers on.
+func TestRepairRemovesAStaleHookSocketAnotherAccountOwns(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	// A socket path under the test root is too long to bind; bind a short one
+	// and move it into place.
+	short, err := os.MkdirTemp("", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(short, "h.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	_ = listener.Close()
+	socket := h.env.P(h.env.Layout.HookSocketPath)
+	if err := os.Rename(filepath.Join(short, "h.sock"), socket); err != nil {
+		t.Fatal(err)
+	}
+	h.owners[socket] = [2]int{0, 0}
+	r := h.run(Options{Action: ActionRepair})
+	requireOK(t, r)
+	if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("repair left the stale root-owned hook socket in place: %v", err)
+	}
+	if !strings.Contains(strings.Join(r.Changes, "\n"), h.env.Layout.HookSocketPath) {
+		t.Fatalf("repair does not say it removed the socket: %v", r.Changes)
 	}
 }

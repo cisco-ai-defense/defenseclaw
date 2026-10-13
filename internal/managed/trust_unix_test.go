@@ -281,3 +281,62 @@ func TestTrustedRuntimeOwnerForTrustsLinuxServiceAccountOnBothPlatforms(t *testi
 		}
 	}
 }
+
+// A trusted policy_dir whose rego folder or a module in it a standard user
+// could write, or a module that is a symlink, passed the folder check, and
+// the gateway loaded the edited Rego as enforcement policy (GAP-1499).
+func TestValidateServiceRuntimeTreeEntriesRejectsWritableRego(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	t.Setenv(UnixServiceAccountEnv, current.Username)
+	cases := map[string]struct {
+		mutate func(t *testing.T, rego string)
+		want   string
+	}{
+		"clean tree": {func(*testing.T, string) {}, ""},
+		"writable rego dir": {func(t *testing.T, rego string) {
+			mustChmod(t, rego, 0o777)
+		}, "group/other writable"},
+		"writable module": {func(t *testing.T, rego string) {
+			mustChmod(t, filepath.Join(rego, "guardrail.rego"), 0o666)
+		}, "group/other writable"},
+		"symlinked module": {func(t *testing.T, rego string) {
+			target := filepath.Join(t.TempDir(), "other.rego")
+			if err := os.WriteFile(target, []byte("package other\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(rego, "other.rego")); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlinks are not allowed"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			rego := filepath.Join(root, "rego")
+			if err := os.Mkdir(rego, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rego, "guardrail.rego"), []byte("package guardrail\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(t, rego)
+			err := validateServiceRuntimeTreeEntries(root, "policy_dir")
+			if tc.want == "" && err != nil {
+				t.Fatalf("a clean tree is refused: %v", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func mustChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}

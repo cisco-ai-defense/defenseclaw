@@ -11,11 +11,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +28,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -41,10 +45,19 @@ var (
 	enterprisePolicyTimeout     time.Duration
 )
 
-var enterprisePolicyCmd = &cobra.Command{
-	Use:   "policy",
-	Short: "Inspect, export and verify standalone machine agent policy",
-	Long: `Inspect the machine agent policy the standalone managed_enterprise
+// The `enterprise policy` group, and the same group under `enterprise linux`
+// and `enterprise macos`, the per-OS spelling the other administrator views
+// use (profile-explain, sandbox list) and the docs give (GAP-0201,
+// GAP-0240). Both trees bind the same flag variables; one runs per process.
+var enterprisePolicyCmd, enterprisePolicyShowCmd, enterprisePolicyExportCmd, enterprisePolicyVerifyCmd = newEnterprisePolicyGroup("")
+
+// newEnterprisePolicyGroup builds `enterprise policy` (platform "") or
+// `enterprise <platform> policy` with its show, export and verify commands.
+func newEnterprisePolicyGroup(platform string) (group, show, export, verify *cobra.Command) {
+	group = &cobra.Command{
+		Use:   "policy",
+		Short: "Inspect, export and verify standalone machine agent policy",
+		Long: `Inspect the machine agent policy the standalone managed_enterprise
 profile publishes for each connector (Codex requirements.toml, Claude Code
 managed settings, Cursor enterprise hooks, Copilot policy.d, OpenCode managed
 config), export DefenseClaw's entries for an administrator's own policy tool,
@@ -52,38 +65,54 @@ and verify coverage statically or by running the real client as a user.
 
 These commands never write machine policy; the install and reconcile
 lifecycle does.`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Refuse an unavailable live check before the elevation pin, so the
-		// caller gets its reason instead of a refusal that points elsewhere.
-		if enterprisePolicyLive && cmd.Name() == "verify" {
-			if err := enterprisePolicyLiveAvailable(); err != nil {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if goos := enterprisePlatformGOOS(platform); platform != "" && runtime.GOOS != goos {
+				return invalidLifecycleArguments(fmt.Errorf("`%s` reads %s hosts; this host is %s",
+					strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name())), goos, runtime.GOOS))
+			}
+			// Refuse an unavailable live check before the elevation pin, so the
+			// caller gets its reason instead of a refusal that points elsewhere.
+			if enterprisePolicyLive && cmd.Name() == "verify" {
+				if err := enterprisePolicyLiveAvailable(); err != nil {
+					return err
+				}
+			}
+			// A standard user cannot read the administrator-owned deployment:
+			// the managed-view refusal that profile-explain and sandbox list
+			// give, instead of "failed to load config ... permission denied"
+			// (GAP-0339, GAP-0342, GAP-0349, GAP-0357). It runs before the
+			// pin: the pin names the managed config, and a named config keeps
+			// the ordinary path, so after it the check never refused.
+			if err := refuseEnterpriseIdentityViewForStandardUser(cmd); err != nil {
+				return managedAdminViewRefusal(cmd, err, enterprisePolicyJSON)
+			}
+			if err := pinStandaloneManagedEnv(); err != nil {
+				// A standard account's refusal (GAP-2114), as discovery gives it.
+				var coded *exitCodeError
+				if enterprisePolicyJSON && errors.As(err, &coded) {
+					writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
+					silenceJSONReportedError(cmd, true, err)
+				}
 				return err
 			}
-		}
-		if err := pinStandaloneManagedEnv(); err != nil {
-			// A standard account's refusal (GAP-2114), as discovery gives it.
-			var coded *exitCodeError
-			if enterprisePolicyJSON && errors.As(err, &coded) {
-				writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
-				silenceJSONReportedError(cmd, true, err)
-			}
-			return err
-		}
-		return rootPersistentPreRunNoAuditE(cmd, args)
-	},
-}
-
-var enterprisePolicyShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show each connector's route, lock and coverage",
-	Args:  cobra.NoArgs,
-	RunE:  runEnterprisePolicyShow,
-}
-
-var enterprisePolicyExportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Print DefenseClaw's machine policy entries for one connector",
-	Long: `Print DefenseClaw's entries for one connector in a format an
+			return rootPersistentPreRunNoAuditE(cmd, args)
+		},
+	}
+	if platform != "" {
+		// Main has only `enterprise policy`; a Secure Client computer keeps
+		// main's tree.
+		group.Annotations = map[string]string{secureClientAbsentAnnotation: "true"}
+	}
+	show = &cobra.Command{
+		Use:   "show",
+		Short: "Show each connector's route, lock and coverage",
+		Args:  cobra.NoArgs,
+		RunE:  runEnterprisePolicyShow,
+	}
+	export = &cobra.Command{
+		Use:   "export",
+		Short: "Print DefenseClaw's machine policy entries for one connector",
+		Long: `Print DefenseClaw's entries for one connector in a format an
 administrator can deploy through their own policy source:
 
   codex       toml (merged requirements.toml), plist (MDM requirements_toml_base64)
@@ -101,32 +130,33 @@ per_user) have no machine policy entries, so export refuses them.
 
 On Windows, show and verify also report a wsl row: agent sessions inside WSL,
 which Windows machine policy does not reach.`,
-	Args: cobra.NoArgs,
-	RunE: runEnterprisePolicyExport,
-}
-
-var enterprisePolicyVerifyCmd = &cobra.Command{
-	Use:   "verify",
-	Short: "Verify machine policy coverage (exit 1 when incomplete)",
-	Args:  cobra.NoArgs,
-	RunE:  runEnterprisePolicyVerify,
-}
-
-func init() {
-	for _, command := range []*cobra.Command{enterprisePolicyShowCmd, enterprisePolicyVerifyCmd} {
+		Args: cobra.NoArgs,
+		RunE: runEnterprisePolicyExport,
+	}
+	verify = &cobra.Command{
+		Use:   "verify",
+		Short: "Verify machine policy coverage (exit 1 when incomplete)",
+		Args:  cobra.NoArgs,
+		RunE:  runEnterprisePolicyVerify,
+	}
+	for _, command := range []*cobra.Command{show, verify} {
 		command.Flags().StringVar(&enterprisePolicyConnector, "connector", "", "Limit to one connector")
 		command.Flags().BoolVar(&enterprisePolicyJSON, "json", false, "Emit machine-readable JSON")
 		command.Flags().StringVar(&enterprisePolicyUser, "user", "", "Also check this local user's own agent config")
 	}
-	enterprisePolicyShowCmd.Flags().StringVar(&enterprisePolicyProject, "project", "", "With --user, also scan this project directory for foreign hooks")
-	enterprisePolicyExportCmd.Flags().StringVar(&enterprisePolicyConnector, "connector", "", "Connector to export (required)")
-	enterprisePolicyExportCmd.Flags().StringVar(&enterprisePolicyFormat, "format", "", "Output format (see --help); default is the connector's native file")
-	_ = enterprisePolicyExportCmd.MarkFlagRequired("connector")
-	enterprisePolicyVerifyCmd.Flags().BoolVar(&enterprisePolicyLive, "live", false, "Run the real client as --user and prove it loads DefenseClaw's hooks (codex, claudecode)")
-	enterprisePolicyVerifyCmd.Flags().StringVar(&enterprisePolicyAgentBinary, "agent-binary", "", "Absolute path of the client binary for --live")
-	enterprisePolicyVerifyCmd.Flags().StringVar(&enterprisePolicyAuditDB, "audit-db", "", "Gateway audit database whose event history is searched for the Claude Code canary tool call (default: the configured audit_db)")
-	enterprisePolicyVerifyCmd.Flags().DurationVar(&enterprisePolicyTimeout, "timeout", 90*time.Second, "Live check timeout")
-	enterprisePolicyCmd.AddCommand(enterprisePolicyShowCmd, enterprisePolicyExportCmd, enterprisePolicyVerifyCmd)
+	show.Flags().StringVar(&enterprisePolicyProject, "project", "", "With --user, also scan this project directory for foreign hooks")
+	export.Flags().StringVar(&enterprisePolicyConnector, "connector", "", "Connector to export (required)")
+	export.Flags().StringVar(&enterprisePolicyFormat, "format", "", "Output format (see --help); default is the connector's native file")
+	_ = export.MarkFlagRequired("connector")
+	verify.Flags().BoolVar(&enterprisePolicyLive, "live", false, "Run the real client as --user and prove it loads DefenseClaw's hooks (codex, claudecode)")
+	verify.Flags().StringVar(&enterprisePolicyAgentBinary, "agent-binary", "", "Absolute path of the client binary for --live")
+	verify.Flags().StringVar(&enterprisePolicyAuditDB, "audit-db", "", "Gateway audit database whose event history is searched for the Claude Code canary tool call (default: the configured audit_db)")
+	verify.Flags().DurationVar(&enterprisePolicyTimeout, "timeout", 90*time.Second, "Live check timeout")
+	group.AddCommand(show, export, verify)
+	return group, show, export, verify
+}
+
+func init() {
 	enterpriseCmd.AddCommand(enterprisePolicyCmd)
 }
 
@@ -185,7 +215,10 @@ type enterprisePolicyUserReport struct {
 	// (Linux and macOS), or is empty.
 	Enrollment string                                    `json:"enrollment,omitempty"`
 	Decisions  map[string]enterprisepolicy.GuardDecision `json:"foreign_hooks"`
-	Live       []enterprisepolicy.LiveResult             `json:"live,omitempty"`
+	// Sandbox is the account's sandbox policy and whether it can run one
+	// (Linux and macOS, only where the configuration has a sandbox policy).
+	Sandbox *enterprisePolicySandbox      `json:"sandbox,omitempty"`
+	Live    []enterprisepolicy.LiveResult `json:"live,omitempty"`
 	// DevinACP lists the Devin Desktop ACP registry entries that run
 	// outside DefenseClaw's Devin coverage. Report only: it never makes
 	// the report incomplete.
@@ -208,8 +241,27 @@ type enterprisePolicyReport struct {
 	// Errors carries the failure (an unknown --user, an unreadable policy
 	// source) for a --json caller, which gets no "Error:" line (GAP-2456).
 	Errors []string `json:"errors,omitempty"`
+	// Policy is the effective policy digest and config generation of the
+	// installed config (show only; spec section 5).
+	Policy *enterprisePolicyDigest `json:"policy,omitempty"`
 	// goos is the host the report describes; it only changes wording.
 	goos string
+}
+
+// enterprisePolicyDigest is effective_policy_digest and config_generation.
+type enterprisePolicyDigest struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+}
+
+// installedPolicyDigest computes the installed config's effective policy as
+// the gateway does; nil when it can not be computed.
+func installedPolicyDigest(ctx context.Context) *enterprisePolicyDigest {
+	policy, err := gateway.ComputeEffectivePolicy(ctx, cfg)
+	if err != nil || policy.Digest == "" {
+		return nil
+	}
+	return &enterprisePolicyDigest{EffectiveDigest: policy.Digest, ConfigGeneration: policy.ConfigGeneration}
 }
 
 func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []string, project string) (enterprisePolicyReport, error) {
@@ -274,6 +326,15 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 			name = enterprisePolicyUser
 		}
 		userReport.Enrollment = unixEnrollmentExclusion(cfg.Enterprise.Enrollment, name, target.UID)
+	}
+	if ctx.opts.GOOS != "windows" {
+		account := strings.TrimSpace(target.Username)
+		if account == "" {
+			account = enterprisePolicyUser
+		}
+		if userReport.Sandbox = buildEnterprisePolicySandbox(cfg, ctx.opts.GOOS, account, target.UID, result.States); userReport.Sandbox.failed() {
+			report.Complete = false
+		}
 	}
 	scanErr := runAsEnterprisePolicyTarget(target, func() error {
 		for _, name := range connectors {
@@ -362,6 +423,7 @@ func runEnterprisePolicyShow(cmd *cobra.Command, _ []string) error {
 	}
 	report, reportErr := buildEnterprisePolicyReport(ctx, connectors, project)
 	recordEnterprisePolicyReportError(cmd, &report, reportErr)
+	report.Policy = installedPolicyDigest(cmd.Context())
 	if err := writeEnterprisePolicyReport(cmd.OutOrStdout(), report); err != nil {
 		return err
 	}
@@ -477,7 +539,11 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n\n", report.HookBinary)
+	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n", report.HookBinary)
+	if p := report.Policy; p != nil {
+		fmt.Fprintf(out, "Effective policy %s, config generation %d\n", enterprisestatus.ShortDigest(p.EffectiveDigest), p.ConfigGeneration)
+	}
+	fmt.Fprintln(out)
 	for _, state := range report.Result.States {
 		if state.Ownership == config.MachinePolicyOwnershipOff && report.goos != "windows" &&
 			enterprisepolicy.RouteFor(state.Connector, report.goos) == enterprisepolicy.RouteMachinePolicy {
@@ -572,6 +638,15 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 					state = "reported"
 				}
 				fmt.Fprintf(out, "    %-12s %-11s %s %s %s sha256:%s\n", name, state, finding.Scope, finding.Path, dashIfEmpty(finding.Event), finding.Digest)
+			}
+		}
+		if sb := report.User.Sandbox; sb != nil {
+			fmt.Fprintf(out, "    sandbox      profile %s%s\n", dashIfEmpty(sb.Profile), sandboxMatchSuffix(sb))
+			if sb.Note != "" {
+				fmt.Fprintf(out, "    sandbox      note: %s\n", sb.Note)
+			}
+			for _, row := range sb.Rows {
+				fmt.Fprintf(out, "    sandbox      %-5s %s %s\n", row.State, dashIfEmpty(firstNonEmptyString(row.Connector, row.Check)), row.Detail)
 			}
 		}
 		for _, entry := range report.User.DevinACP {

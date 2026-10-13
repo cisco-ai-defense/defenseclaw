@@ -576,6 +576,43 @@ func TestHookDecisionV8CarriesSandboxBindingCorrelation(t *testing.T) {
 	}
 }
 
+// GAP-0317: the decision of a hook admitted under a registration (relayed by
+// the user's daemon or sent to the hook socket with the registration header)
+// names the registration, the effective sandbox policy, the person's keyed
+// pseudonym and the OpenShell provision, as the managed sandbox records do.
+func TestHookDecisionV8CarriesRegistrationManagedStamps(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	reg := managedTelemetryTestRegistration()
+	ctx := withSandboxRelayRegistration(context.Background(), reg)
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{SessionID: "session-reg-1", SandboxID: reg.SandboxID, SandboxName: reg.SandboxName})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-reg-1", ToolName: "Bash"}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "CRITICAL", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 })
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	if len(logs) != 1 || json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &wire) != nil {
+		t.Fatalf("generated hook decision logs=%d, want one with a JSON body", len(logs))
+	}
+	for key, want := range map[string]interface{}{
+		"defenseclaw.sandbox.registration.id":    reg.ID,
+		"defenseclaw.subject.key":                reg.SubjectKey,
+		"defenseclaw.sandbox.policy.digest":      reg.EffectiveDigest,
+		"defenseclaw.sandbox.policy.generation":  float64(reg.Generation),
+		"defenseclaw.sandbox.policy.provisional": false,
+		"defenseclaw.openshell.version":          reg.OpenShell,
+		"defenseclaw.openshell.install_mode":     reg.InstallMode,
+		"defenseclaw.sandbox.driver":             reg.Driver,
+		"defenseclaw.sandbox.name":               reg.SandboxName,
+	} {
+		if got := wire.Body[key]; got != want {
+			t.Errorf("hook decision %s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -588,7 +625,7 @@ func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 		{"free text is dropped", audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"}, "", ""},
 		{"name over the registered bound is dropped", audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)}, "sbx-2", ""},
 	} {
-		id, name := hookDecisionV8Sandbox(tc.envelope)
+		id, name := hookV8Sandbox(tc.envelope)
 		if got, ok := id.Get(); ok != (tc.wantID != "") || got != tc.wantID {
 			t.Errorf("%s: sandbox id=(%q,%v) want %q", tc.name, got, ok, tc.wantID)
 		}

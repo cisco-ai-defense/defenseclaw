@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,9 +85,7 @@ func TestWatcherAdmitsSkillSyncedIntoAccountFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"live-skill", "second-skill"} {
-		if err := store.SetActionField("skill", name, "install", "allow", "pre-approved"); err != nil {
-			t.Fatal(err)
-		}
+		cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: name, Reason: "pre-approved"})
 	}
 
 	var mu sync.Mutex

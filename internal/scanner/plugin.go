@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -38,15 +39,28 @@ import (
 const ScanRecordedByCallerEnv = "DEFENSECLAW_SCAN_RECORDED_BY_CALLER"
 
 type PluginScanner struct {
+	Connector   string
 	BinaryPath  string
 	Policy      string
 	Profile     string
 	IncludeSelf bool
+	// LLM is the resolved scanners.plugin judge (config ResolveLLM). Only
+	// the embedded Windows runtime needs it: the defenseclaw CLI resolves
+	// it from config itself.
+	LLM config.LLMConfig
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
 	if binaryPath == "" {
 		binaryPath = "defenseclaw"
+	}
+	if runtimeBinary := resolveScannerRuntime(binaryPath, "defenseclaw", "defenseclaw.exe"); usesScannerRuntime(runtimeBinary) {
+		return &PluginScanner{BinaryPath: runtimeBinary}
+	}
+	// A rejected managed runtime must not resolve a second executable from
+	// a packaged sibling or PATH.
+	if scannerRuntimePreflight(binaryPath, "defenseclaw", "defenseclaw.exe") != nil {
+		return &PluginScanner{BinaryPath: binaryPath}
 	}
 	binaryPath = resolveDefaultPluginScanner(binaryPath)
 	return &PluginScanner{BinaryPath: binaryPath}
@@ -65,6 +79,11 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	switch filepath.Base(binaryPath) {
 	case "defenseclaw-plugin-scanner", "defenseclaw-plugin-scanner.exe":
 		args = []string{target}
+	case scannerRuntimeName, scannerRuntimeName + ".exe":
+		args = []string{"plugin-scan", target}
+		if s.Connector != "" {
+			args = append(args, "--connector", s.Connector)
+		}
 	default:
 		args = []string{"plugin", "scan", "--json", target}
 	}
@@ -81,19 +100,28 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 }
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	if err := requireScannerTargetPath(target); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult
 
+	if err := scannerRuntimePreflight(s.BinaryPath, "defenseclaw", "defenseclaw.exe"); err != nil {
+		return nil, err
+	}
 	binaryPath, args := s.pluginScanCommand(target)
 	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	cmd.Env = append(os.Environ(), ScanRecordedByCallerEnv+"=1")
+	if usesScannerRuntime(binaryPath) {
+		cmd.Env = s.runtimeEnv(cmd.Env)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := processutil.RunTree(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -111,11 +139,11 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — repair the managed DefenseClaw installation; source checkouts: uv sync", s.Name(), s.BinaryPath)
+			scanErr = scannerNotFound(s.Name(), s.BinaryPath, "repair the managed DefenseClaw installation; source checkouts: uv sync")
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -133,13 +161,24 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 		}
 		result.Findings = findings
 	}
+	// A configured judge that failed at call time leaves an LLM-SCAN-ERROR
+	// finding: naming the judge on the result makes admission fail the scan
+	// closed rather than admit the plugin with a MEDIUM warning (GAP-1444).
+	if model := liteLLMModel(s.LLM); model != "" {
+		for _, f := range result.Findings {
+			if f.RuleID == RulePluginLLMScanError {
+				result.JudgeModel = model
+				break
+			}
+		}
+	}
 
 	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit even when stdout parsed cleanly. See the matching
 	// comment in mcp.go and finding "Non-zero plugin scanner exits
 	// can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 

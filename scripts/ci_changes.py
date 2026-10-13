@@ -59,6 +59,17 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     (("*.md", "*.mdx"), frozenset({"docs"})),
     (("macos/",), frozenset({"macos_app"})),
     (("third_party/",), frozenset({"go"})),
+    # The enterprise lifecycle, its result contract and the v9 config
+    # migration are what the enterprise install and upgrade lanes exercise.
+    (
+        (
+            "internal/enterpriseunix/",
+            "internal/enterprisestatus/",
+            "internal/managed/",
+            "internal/config/migrate_v9.go",
+        ),
+        frozenset({"go", "packaging"}),
+    ),
     (("*.go", "go.mod", "go.sum"), frozenset({"go"})),
     (("cli/defenseclaw/tui/", "cli/tests/tui/"), frozenset({"tui"})),
     (

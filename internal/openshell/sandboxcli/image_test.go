@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -117,6 +118,43 @@ func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 		t.Fatalf("the disk of the removed image is still there: %v", err)
 	}
 	for _, dir := range append([]string{still, booted}, own...) {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("prune removed %s", dir)
+		}
+	}
+}
+
+// After an in-place upgrade the MicroVM driver prepares its own disk from
+// each image and never boots those of the release before, which OpenShell
+// keeps: prune removes them (about 5 GB each), whatever the daemon lists,
+// and only once the gateway answers with another release.
+func TestImagePruneRemovesTheDisksOfAnotherRelease(t *testing.T) {
+	ta := newTestApp(t, "")
+	old := []string{prepareVMDisk(t, ta, "sha256:"+strings.Repeat("c", 64)), prepareVMDisk(t, ta, "sha256:"+strings.Repeat("d", 64))}
+	cache := filepath.Dir(old[0])
+	current := filepath.Join(cache, "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-"+openshell.InstallerVersion+"-configured-1000-1000-sha256-"+strings.Repeat("c", 64))
+	bootstrap := filepath.Join(cache, "sandbox-bootstrap-rootfs-ext4-openshell-0.1.1")
+	writeFile(t, filepath.Join(bootstrap, "rootfs.ext4"), "x")
+	fake, _ := useGateway(ta)
+	ta.images.pruneReport = &image.PruneReport{}
+	ta.ok(t, ta.ImagePrune(bg, false)) // the gateway still runs 0.1.1
+	has(t, ta.output(), "nothing to prune")
+
+	// Upgraded, the gateway prepares its own disk.
+	fake.SetRelease(openshell.InstallerVersion)
+	writeFile(t, filepath.Join(current, "rootfs.ext4"), "x")
+	what := "2 MicroVM disks OpenShell 0.1.1 prepared in ~/.local/state/openshell/vm-driver/images, which the OpenShell " + openshell.InstallerVersion + " gateway does not boot"
+	ta.ok(t, ta.fresh().ImagePrune(bg, true))
+	has(t, ta.output(), "would remove the "+what+" (8.0 KiB)")
+	ta.ok(t, ta.fresh().ImagePrune(bg, false))
+	has(t, ta.output(), "removed the "+what+", freeing 8.0 KiB")
+	lacks(t, ta.output(), "nothing to prune")
+	for _, dir := range old {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("the 0.1.1 disk %s is still there: %v", dir, err)
+		}
+	}
+	for _, dir := range []string{current, bootstrap} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("prune removed %s", dir)
 		}
@@ -390,6 +428,22 @@ func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
 	}
 }
 
+// GAP-0358: images an earlier DefenseClaw build made are named as not used
+// by this build, with the build that made them.
+func TestImageListNamesImagesOfAnotherBuild(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.images.recs = []image.Record{
+		{Tag: "defenseclaw/sandbox:claudecode-old-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, UID: 1000,
+			BuiltAt: ta.Now(), DefenseClawVersion: "1.0.30"},
+		{Tag: "defenseclaw/sandbox:codex-new-u1000", Connector: "codex", HarnessVersion: "0.146.0", HookFireVerified: true, UID: 1000,
+			BuiltAt: ta.Now(), DefenseClawVersion: manager.ImageVersion()},
+	}
+	ta.ok(t, ta.ImageList(bg, OutputText))
+	has(t, ta.output(), "not used by this DefenseClaw build ("+manager.ImageVersion()+"): defenseclaw/sandbox:claudecode-old-u1000, built by DefenseClaw 1.0.30, "+
+		"so no new sandbox uses it; the next run of each harness builds its image for this build")
+	lacks(t, ta.output(), "codex-new-u1000, built by")
+}
+
 // FIN-A-3: the list says which compute driver each image is for, and on a
 // gateway whose driver is known names the images it does not boot, as the
 // doctor does not count them: a MicroVM gateway's docker images (those
@@ -489,6 +543,15 @@ func TestDoctorImagesCoverEveryBuiltHarness(t *testing.T) {
 	}
 	ta.images.gone = nil
 	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "pass" || c.Detail != "hook-verified: claudecode 2.1.156, codex 0.146.0, kiro 2.24.1, openhands 1.16.0" {
+		t.Fatalf("images check = %+v", c)
+	}
+	// GAP-0320: after an upgrade, a harness with an image of the earlier
+	// build only is not "not built yet".
+	old := ready("codex", "0.146.0")
+	old.DefenseClawVersion = "earlier-build"
+	ta.images.recs = []image.Record{ready("claudecode", "2.1.156"), old}
+	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "warn" ||
+		!strings.HasPrefix(c.Detail, "built by an earlier DefenseClaw build only: codex (the next run builds it for this one") {
 		t.Fatalf("images check = %+v", c)
 	}
 }

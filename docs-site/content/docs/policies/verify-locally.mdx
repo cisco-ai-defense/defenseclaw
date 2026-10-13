@@ -71,12 +71,14 @@ defenseclaw policy show my-policy
 ```
 
 Replace `my-policy` with the policy name shown by the creator, here and in the
-later steps. The second command reports the resolved severity actions, guardrail thresholds, firewall,
+later steps. The second command reports the resolved severity actions, guardrail thresholds,
 and other fields that activation loaded.
 
 ## 4. Validate and test the active Rego
 
-`policy validate` checks the generated `data.json` shape and compiles the Rego.
+`policy validate` compiles the Rego modules. The admission policy itself is in
+`config.yaml`: check it with `defenseclaw config get admission.skill --effective`
+and the levels with `defenseclaw config get guardrail.block_at --effective`.
 `policy test` runs any Rego unit tests (`*_test.rego`) in the same directory.
 The installed policy directories ship without unit tests, so there it reports
 that there is nothing to run and exits 0.
@@ -114,7 +116,8 @@ running.
 
 ## 6. Validate and switch to the rule pack
 
-`policy activate` switches only the OPA policy. The script also writes a
+`policy activate` copies the admission policy and guardrail levels into
+`config.yaml`, not the rule pack. The script also writes a
 complete rule pack (rules, suppressions, sensitive tools and judges), but
 connectors keep their current pack until you switch to it:
 
@@ -124,14 +127,15 @@ defenseclaw guardrail use-pack my-policy
 defenseclaw guardrail list-packs
 ```
 
-`validate-pack` prints `Rule pack valid` and the component counts.
+`validate-pack` prints `Rule pack valid`, the component counts and the pack's
+digest, and `use-pack` pins that digest in `guardrail.custom_packs`.
 `list-packs` should then show the pack for the global scope and every
 connector, not `(built-in default)`.
 
 The throwaway gateway isn't running, so `policy activate` and `use-pack` warn
 that their audit events were not recorded. That is expected here; against an
-installation with a running gateway, both are audited and `use-pack` restarts
-the gateway so it loads the pack.
+installation with a running gateway, both are audited and the gateway loads the
+change on its next reload, without a restart.
 
 ## 7. Promote or clean up
 
@@ -158,9 +162,8 @@ DefenseClaw data directory.
 
 - **`policy activate` cannot find the policy** — confirm the generated script
   and the CLI see the same `DEFENSECLAW_HOME`.
-- **`policy validate` cannot find `data.json`** — activation did not complete,
-  or `--rego-dir` does not point at
-  `$DEFENSECLAW_HOME/policies/rego`.
+- **`policy validate` cannot find the Rego modules** — `--rego-dir` does not
+  point at `$DEFENSECLAW_HOME/policies/rego`.
 - **The dry run differs from the creator preview** — compare
   `defenseclaw policy show my-policy` with the creator's review pane, then test
   the exact severity and target type used by the preview.

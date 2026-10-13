@@ -32,7 +32,7 @@ func TestStrictSensitivePathPrecision(t *testing.T) {
 				Args:       sensitivePathArgs(t, "/home/alice/.ssh/authorized_keys", "fixture key"),
 				ActiveHome: "/home/alice",
 			},
-			present: "PATH-SSH-DIR",
+			present: "persistence.ssh_authorized_keys_command",
 		},
 		{
 			name: "structured authorized keys delete remains visible",
@@ -41,7 +41,7 @@ func TestStrictSensitivePathPrecision(t *testing.T) {
 				Args:       sensitivePathArgs(t, "/home/alice/.ssh/authorized_keys", ""),
 				ActiveHome: "/home/alice",
 			},
-			present: "PATH-SSH-DIR",
+			present: "persistence.ssh_authorized_keys_command",
 		},
 		{
 			name:   "sudoers read is quiet",

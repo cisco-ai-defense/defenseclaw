@@ -30,6 +30,7 @@ from defenseclaw.tui.panels.overview import (
 )
 from defenseclaw.tui.services.setup_state import build_readiness_checks
 from defenseclaw.tui.widgets.hint_bar import HintEngine
+from defenseclaw.tui.widgets.status_strip import status_segments
 
 _DATA_DIR = "/tmp/defenseclaw-tui-runtime"
 
@@ -518,6 +519,20 @@ def test_hook_only_footer_and_setup_readiness_are_online() -> None:
     readiness = build_readiness_checks({}, snapshot, None, ())
     gateway_check = next(check for check in readiness if check.title == "Gateway / API Health")
     assert gateway_check.status == "pass"
+
+
+def test_status_strip_names_the_applied_policy_generation_and_digest() -> None:
+    # Spec section 5: the TUI header shows the generation and digest the
+    # gateway applied (from /status policy).
+    overview = OverviewPanelModel(OverviewConfig(claw_mode="codex"))
+    overview.set_health(HealthSnapshot(policy_generation=7, policy_digest="sha256:" + "ab" * 32))
+    app = DefenseClawTUI(config=_config(), overview_model=overview)
+
+    status = app._hint_status_model()
+    # 12 hex digits on a wide terminal, 8 on a narrow one.
+    assert status.applied_policy.startswith("gen 7 · abababab")
+    # Next to the gateway, so a narrow status bar does not cut it (GAP-0042).
+    assert [segment.label for segment in status_segments(status)][:2] == ["Gateway", status.applied_policy]
 
 
 def test_disabled_gateway_availability_is_terminal_readiness() -> None:

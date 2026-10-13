@@ -59,12 +59,6 @@ function defaultResponse(request: RecordedRequest): MockResponse {
   if (request.url === "/enforce/blocked" || request.url === "/enforce/allowed") {
     return { status: 200, body: JSON.stringify([]) };
   }
-  if (request.url === "/skills") {
-    return { status: 200, body: JSON.stringify(["skill-a", "skill-b"]) };
-  }
-  if (request.url === "/mcps") {
-    return { status: 200, body: JSON.stringify(["mcp-a"]) };
-  }
   if (request.url.startsWith("/alerts")) {
     return { status: 200, body: JSON.stringify([]) };
   }
@@ -247,26 +241,6 @@ describe("DaemonClient", () => {
     });
   });
 
-  describe("listSkills", () => {
-    it("returns skill list", async () => {
-      const client = makeClient();
-      const res = await client.listSkills();
-
-      expect(res.ok).toBe(true);
-      expect(res.data).toEqual(["skill-a", "skill-b"]);
-    });
-  });
-
-  describe("listMCPs", () => {
-    it("returns MCP list", async () => {
-      const client = makeClient();
-      const res = await client.listMCPs();
-
-      expect(res.ok).toBe(true);
-      expect(res.data).toEqual(["mcp-a"]);
-    });
-  });
-
   describe("listBlocked", () => {
     it("returns empty block list", async () => {
       const client = makeClient();
@@ -319,7 +293,7 @@ describe("DaemonClient", () => {
     it("returns ok=false on HTTP 404", async () => {
       responseOverride = { status: 404, body: "not found" };
       const client = makeClient();
-      const res = await client.listSkills();
+      const res = await client.listBlocked();
 
       expect(res.ok).toBe(false);
       expect(res.status).toBe(404);

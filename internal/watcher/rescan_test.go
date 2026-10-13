@@ -510,6 +510,46 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 	if _, ok := byName["manifest-only"]; !ok {
 		t.Fatalf("scanable forged identity missing from live expansion: %+v", events)
 	}
+
+	// GAP-0285: the managed gateway also watches each user's own Hermes
+	// root, which IsRoot does not resolve; its category folders are not
+	// skills there either, and a bundle that account could forge (manifest
+	// and checkout are its own) is still rescanned.
+	profileHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileRoot := filepath.Join(profileHome, ".hermes", "skills")
+	k8s := filepath.Join(profileRoot, "devops", "k8s")
+	if err := os.MkdirAll(k8s, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(k8s, "SKILL.md"), []byte("---\nname: k8s\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(profileRoot, "productivity", "vendor-docs"),
+		filepath.Join(profileHome, ".hermes", "hermes-agent", "skills", "productivity", "vendor-docs"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), bundledMarker, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(profileRoot, ".bundled_manifest"), []byte(fmt.Sprintf("vendor-docs:%x\n", bundledHash)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, target := range New(cfg, []string{profileRoot}, nil, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallSkill {
+			names[target.Name] = true
+		}
+	}
+	if names["devops"] || !names["k8s"] || !names["vendor-docs"] {
+		t.Fatalf("profile Hermes root targets = %v, want the k8s and vendor-docs skills and not the devops category", names)
+	}
 }
 
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
@@ -518,6 +558,9 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 
 	pluginDir := filepath.Join(cfg.DataDir, "plugins")
 	if err := os.MkdirAll(filepath.Join(skillDir, "watched-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "watched-skill", "SKILL.md"), []byte("# watched\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(pluginDir, "watched-plugin"), 0o700); err != nil {
@@ -710,6 +753,33 @@ func TestEnumerateClaudeWatcherPluginsUsesManifestlessCacheVersionBoundary(t *te
 	}
 }
 
+// GAP-1573: a Codex plugin cache holds <marketplace>/<plugin>/<version>. The
+// rescan read it one level deep, so a fresh init scanned the vendor
+// marketplace folder (openai-curated-remote) as a plugin and raised a HIGH
+// MANIFEST-MISSING alert on it.
+func TestEnumerateTargetsReadsCodexPluginCacheAtVersionDepth(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	version := filepath.Join(cache, "openai-curated-remote", "github", "1.2.0")
+	if err := os.MkdirAll(filepath.Join(version, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(version, ".codex-plugin", "plugin.json"), []byte(`{"name":"github"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var plugins []InstallEvent
+	for _, target := range New(cfg, []string{skillDir}, []string{cache}, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target)
+		}
+	}
+	if len(plugins) != 1 || !sameWatcherPath(plugins[0].Path, version) ||
+		plugins[0].Name != "github@openai-curated-remote" || plugins[0].Connector != "codex" {
+		t.Fatalf("codex cache plugin targets = %+v, want only %s as github@openai-curated-remote", plugins, version)
+	}
+}
+
 // TestRescan_FromCodexConfigToml — Codex discovers MCP entries from the user
 // ~/.codex/config.toml table; pinned workspaces additionally contribute layered
 // .codex/config.toml entries, subject to the client's project trust decision.
@@ -765,7 +835,7 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg.Claw.ConfigFile = ocPath
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	snap, err := w.snapshotMCPServer("remote-mcp")
+	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp", Path: "remote-mcp"})
 	if err != nil {
 		t.Fatalf("snapshotMCPServer: %v", err)
 	}

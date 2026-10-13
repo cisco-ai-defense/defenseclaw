@@ -8,7 +8,7 @@
     "service.name",
     "service.version",
     "service.namespace",
-    "deployment.environment",
+    "deployment.environment.name",
     "host.name",
     "host.arch",
     "os.type",
@@ -35,7 +35,7 @@
       "const": "ai-governance",
       "description": "Service namespace for grouping in Splunk APM."
     },
-    "deployment.environment": {
+    "deployment.environment.name": {
       "type": "string",
       "minLength": 1,
       "description": "Detected runtime environment. Recommended values are 'macos', 'dgx-spark', and 'linux' for the in-tree probes; operators with bespoke deployments can override via configuration (e.g. 'prod-us-east-1', 'staging'). Downstream dashboards must treat unknown values as opaque rather than enforce an allow-list."
@@ -48,7 +48,7 @@
       "type": "string",
       "description": "Workspace identifier when configured."
     },
-    "deployment.mode": {
+    "defenseclaw.deployment.mode": {
       "type": "string",
       "enum": [
         "managed_enterprise",
@@ -122,7 +122,7 @@
         "/home/user/project/.openhands"
       ]
     },
-    "defenseclaw.device.id": {
+    "defenseclaw.device.public_key_fingerprint": {
       "type": "string",
       "description": "Hex-encoded SHA-256 fingerprint of the DefenseClaw Ed25519 device public key. This is DefenseClaw pairing identity, not a host hardware UUID or generic endpoint identifier."
     },

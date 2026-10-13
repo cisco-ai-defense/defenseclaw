@@ -373,8 +373,12 @@ lane_drills() {
     stage="${ROOT}/broken-stage"
     rm -rf "${stage}"; mkdir -p "${stage}"
     tar -xzf "${broken}/${archive}" -C "${stage}"
-    printf '#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version %s" ;; *) exit 1 ;; esac\n' "${TARGET}" \
-        > "${stage}/defenseclaw-gateway"
+    # Every other command goes to the real gateway, so the staged check, which
+    # runs the staged gateway's config validator (GAP-0158), passes and the
+    # drill reaches the swap.
+    mv "${stage}/defenseclaw-gateway" "${ROOT}/real-gateway"
+    printf '#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version %s" ;; start) exit 1 ;; *) exec "%s" "$@" ;; esac\n' \
+        "${TARGET}" "${ROOT}/real-gateway" > "${stage}/defenseclaw-gateway"
     chmod 755 "${stage}/defenseclaw-gateway"
     COPYFILE_DISABLE=1 tar -czf "${broken}/${archive}" -C "${stage}" .
     rechecksum "${broken}"

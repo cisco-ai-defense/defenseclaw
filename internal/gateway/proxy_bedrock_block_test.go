@@ -268,6 +268,29 @@ func TestPrivateUpstreamHintAndBedrockError(t *testing.T) {
 	}
 }
 
+// GAP-0246: agents show a 502 as a temporary provider error, so a refused
+// private upstream is answered as an assistant turn that names the fix.
+func TestHandlePassthroughPrivateUpstreamRefusalIsAReply(t *testing.T) {
+	host := "bedrock-runtime.us-east-1.amazonaws.com"
+	useSecureDialNames(t, egressNames{host: "10.0.3.65"})
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	body := mustJSON(t, map[string]interface{}{
+		"model": "us.openai.gpt-5.6-luna",
+		"input": []map[string]interface{}{{"type": "message", "role": "user", "content": "say ok"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://"+host)
+	req.Header.Set("X-AI-Auth", "Bearer bedrock-key")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "defenseclaw guardrail allow-private-upstream "+host) {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
 // GAP-1893: after a prompt block queues a security notification, the next
 // SigV4-signed Bedrock request is forwarded byte-for-byte (the proxy cannot
 // re-sign a changed body); an unsigned one still carries the notification.

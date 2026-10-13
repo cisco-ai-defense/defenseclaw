@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,10 +37,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // resolve resolves the effective sandbox policy for flags against the
@@ -79,7 +85,7 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 	}
 	var d *egress.Decider
 	if err == nil {
-		d, err = m.egressDecider(cfg, eff)
+		d, err = m.egressDeciderFor(cfg, eff, m.registrationOf(b))
 	}
 	if err != nil {
 		m.policyUnresolved(b, err)
@@ -107,7 +113,7 @@ func errUnrecorded(name string) error {
 
 // checkPolicySources refuses a policy the sandbox could rewrite. In mount
 // mode the agent writes the project as the host user, and a custom pack is
-// trusted because that user owns it (packs.LoadFile), so a pack file or
+// trusted because that user owns it (packs.Validate), so a pack file or
 // pack directory inside the project (or holding it) would let the agent
 // change its own policy on the next resolution: add allow entries that
 // lift the blocklist feed or open private networks, drop block entries,
@@ -157,6 +163,12 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	name, bindingID, skip := b.rec.Name, b.rec.BindingID, b.creating || b.deleted
 	cred, sandboxID := b.cred, scopeID(b.rec.ID, b.rec.Name)
 	id := b.identity()
+	// A sandbox that is not running sends nothing under the policy, and its
+	// start refuses with the reason: its record is no alert (GAP-0160).
+	severity := ""
+	if cmp.Or(b.phase, audit.SandboxPhase(b.rec.Phase)) != audit.SandboxPhaseReady {
+		severity = "MEDIUM"
+	}
 	m.mu.Unlock()
 	if skip {
 		return
@@ -176,12 +188,11 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	}
 	m.logf("%s: sandbox %s: its policy cannot be resolved; its egress is blocked until it can: %s",
 		gatewaylog.ErrCodeOpenShellPackInvalid, name, detail)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
-		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid),
-		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+detail, 512), Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid), Severity: severity,
+		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+truncate(detail, 320)+". Restore the pack or the configuration, "+
+			"or delete the sandbox: defenseclaw sandbox delete "+name, 512), Timestamp: m.now(),
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
 		Reason: policyUnresolvedReason, Message: truncate("✗ all web egress: the sandbox policy cannot be resolved ("+detail+
 			"); fix the pack or the configuration, or delete the sandbox", 512)})
@@ -203,11 +214,9 @@ func (m *Manager) policyRestored(b *box, eff *packs.Effective) {
 	}
 	m.syncCredential(b, eff)
 	m.logf("sandbox %s: its policy resolves again; its egress follows it", name)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthRestored, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "policy_restored",
 		Message: "the sandbox policy resolves again; its egress follows it"})
 }
@@ -221,8 +230,9 @@ func (m *Manager) orgPolicy(b *box) (*packs.Effective, error) {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
-	eff, _, err := packs.Resolve(m.config(), packs.Flags{
-		Pack: packs.DefaultPack, Harness: rec.Harness, Project: rec.Project, OpenShellGatewayPort: m.gatewayPort(),
+	cfg := m.config()
+	eff, _, err := packs.Resolve(cfg, packs.Flags{
+		Pack: packs.DefaultPackFor(cfg), Harness: rec.Harness, Project: rec.Project, OpenShellGatewayPort: m.gatewayPort(),
 	})
 	return eff, err
 }
@@ -253,16 +263,21 @@ func (m *Manager) checkStart(ctx context.Context, gw *Gateway, rec record, eff *
 		}
 	}
 	if gw.Driver.SandboxLimits {
-		if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+		if v := resourceViolation(rec.Resources, eff.MaxResources()); v != nil {
 			return m.violationError(ctx, v, rec.Name)
 		}
-	} else if _, v := m.driverResources(gw.Driver, packs.Resources{}); v != nil {
+	} else if _, v := m.driverResources(gw.Driver, eff); v != nil {
 		// What every sandbox of the driver gets now, not what it got at
 		// create: the gateway-wide values may have changed since.
 		return m.violationError(ctx, v, rec.Name)
 	}
-	// What the --llm and --credential providers open around the egress
-	// proxy is judged by the policy as it is now, as at create.
+	// The providers the sandbox was created with must still be ones the
+	// floor allows (allowed_credentials), and what the --llm and
+	// --credential providers open around the egress proxy is judged by the
+	// policy as it is now, as at create.
+	if v := credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0); v != nil {
+		return m.violationError(ctx, v, rec.Name)
+	}
 	for _, ep := range rec.ProviderEndpoints {
 		if err := endpointRefusal(eff, ep); err != nil {
 			var v *packs.Violation
@@ -350,9 +365,11 @@ func resourceViolation(applied *packs.Resources, max config.OpenShellResourcesCo
 	return nil
 }
 
-// enforceApprovedRules removes the approved OpenShell rules the current
-// policy would refuse to approve now: destinations the administrator
-// blocked or left off an allow-only list, host ports and private networks
+// enforceApprovedRules removes the OpenShell rules the current policy would
+// refuse to approve now, judging every rule DefenseClaw did not put there
+// itself (its own defenseclaw_* rules and the provider rules _provider_*,
+// see ownRule), whatever its name or how it got there: destinations the
+// administrator blocked or left off an allow-only list, host ports and private networks
 // the administrator closed, what DefenseClaw never opens, destinations the
 // sandbox's egress decider now refuses by a block list or the blocklist
 // feed with no unblock lifting it (the user's or the pack's block list, a
@@ -366,15 +383,19 @@ func resourceViolation(applied *packs.Resources, max config.OpenShellResourcesCo
 // administrator refuses, or, for a rule DefenseClaw approved on its own,
 // to a private network, which only the user approves. Approved rules
 // bypass the egress proxy, so an administrator change or a changed DNS
-// answer must reach them too. Only triaged rules (allow_*) are
-// judged; DefenseClaw renders its own and the provider rules. The user's
-// own approvals keep what the policy still lets the user approve. A nil
-// eff means no policy binds the sandbox at all (not even the
-// organization's, see enforceAll): every triaged rule is removed.
+// answer must reach them too. The user's own approvals keep what the
+// policy still lets the user approve, unless the floor's user_approvals is
+// none: then every rule the user approved goes. In managed mode a rule
+// DefenseClaw neither rendered nor approved, and no saved decision of the
+// person covers, is foreign (added through OpenShell's own API, say): it
+// is removed and reported (foreignRules), and a repeat stops the sandbox.
+// So is a rule there in DefenseClaw's or a provider's name that DefenseClaw
+// did not render or attach, or one of its own whose destinations changed.
+// A nil eff means no policy binds the sandbox at all (not even the
+// organization's, see enforceAll): every such rule is removed.
 func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	name, ready := b.rec.Name, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
-	origins := b.rec.ApprovedRules
 	m.mu.Unlock()
 	if !ready {
 		return
@@ -382,6 +403,22 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	cfg, err := gw.Client.SandboxConfig(ctx, name)
 	if err != nil || cfg == nil || cfg.Policy == nil {
 		return
+	}
+	// Who approved each rule is read after the policy: an approval applied
+	// in between is then known, not taken for a foreign rule.
+	m.mu.Lock()
+	rec := b.rec
+	applying := m.applyingRules(name)
+	m.mu.Unlock()
+	origins := rec.ApprovedRules
+	managedDaemon := m.authority() != nil
+	f := m.floor(eff)
+	noUserRules := strings.EqualFold(strings.TrimSpace(f.UserApprovals), config.OpenShellUserApprovalsNone)
+	var decided map[string]bool
+	var own map[string]v1.NetworkPolicyRule
+	if managedDaemon {
+		decided = decidedHosts(m.savedDecisions(m.registrationOf(b), f))
+		own = m.renderedOwnRules(rec)
 	}
 	// A rule no longer in the policy (removed outside DefenseClaw) loses
 	// its recorded approver: a rule of that name added later is not the
@@ -393,7 +430,9 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		}
 	}
 	var ops []openshell.PolicyMergeOperation
-	var removed, blocked, unapproved, rebound, unbound []string
+	var removed, blocked, unapproved, rebound, unbound, foreign, revoked []string
+	// revokedTo is the destination of each revoked rule: the feed names it.
+	revokedTo := map[string]triage.Endpoint{}
 	var pol triage.Policy
 	var decider *egress.Decider
 	if eff != nil {
@@ -407,12 +446,24 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	dnsCtx, cancel := context.WithTimeout(ctx, enforceDNSBudget)
 	defer cancel()
 	for ruleName, rule := range cfg.Policy.NetworkPolicies {
-		if !strings.HasPrefix(ruleName, "allow_") {
+		if ownRule(managedDaemon, own, rec.Providers, ruleName, rule) {
 			continue
 		}
 		p := triage.FromChunk(name, openshell.PolicyChunk{RuleName: ruleName, ProposedRule: &rule})
-		automatic := origins[ruleName] == actorAutomatic
+		origin, approved := origins[ruleName]
+		automatic := origin == actorAutomatic
 		switch {
+		case managedDaemon && reservedRuleName(ruleName):
+			// In DefenseClaw's or a provider's name, yet not what DefenseClaw
+			// rendered or attached: no decision of the person covers it.
+			foreign = append(foreign, ruleName)
+		case managedDaemon && !approved && !applying[ruleName] && !coveredByDecisions(p, decided):
+			foreign = append(foreign, ruleName)
+		case noUserRules && origin == actorOperator:
+			revoked = append(revoked, ruleName)
+			if len(p.Endpoints) > 0 {
+				revokedTo[ruleName] = p.Endpoints[0]
+			}
 		case eff == nil:
 			unbound = append(unbound, ruleName)
 		case orgRefusal(triage.CheckProposal(eff, p, false)):
@@ -454,9 +505,15 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	sort.Strings(unapproved)
 	sort.Strings(rebound)
 	sort.Strings(unbound)
-	all := slices.Concat(removed, blocked, unapproved, rebound, unbound)
+	sort.Strings(foreign)
+	sort.Strings(revoked)
+	all := slices.Concat(removed, blocked, unapproved, rebound, unbound, foreign, revoked)
 	reason, code := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation)
 	switch {
+	case len(foreign) > 0:
+		reason = "foreign-rule"
+	case len(revoked) > 0 && len(removed) == 0:
+		reason = "user-approvals-none"
 	case len(removed) > 0:
 	case len(blocked) > 0:
 		reason, code = "blocklist", "SANDBOX_RULE_BLOCKLISTED"
@@ -490,16 +547,15 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		rules  []string
 		reason string
 	}{{removed, policyReasonAdmin}, {blocked, policyReasonBlocklist}, {unapproved, policyReasonApprovalRequired},
-		{rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
+		{rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}, {foreign, policyReasonForeignRule},
+		{revoked, policyReasonAdmin}} {
 		for _, rule := range list.rules {
 			ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
 				Target: rule, Reason: list.reason, ChangeCount: 1, Timestamp: m.now()}
 			if res != nil {
 				ev.PolicyHash = res.PolicyHash
 			}
-			if err := m.tel.RecordSandboxPolicy(ctx, ev); err != nil {
-				m.logf("policy telemetry for %s of %s: %v", rule, name, err)
-			}
+			m.tel.RecordSandboxPolicy(ctx, ev)
 		}
 	}
 	if len(removed) > 0 {
@@ -527,6 +583,229 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			Reason: policyUnresolvedReason, Message: fmt.Sprintf(
 				"removed %d approved rule(s): neither the sandbox's nor your organization's policy can be resolved", len(unbound))})
 	}
+	for _, rule := range revoked {
+		// One line per destination the user had approved, with the managed
+		// refusal under it: a line without a host read "✗  (admin policy)"
+		// (GAP-0468).
+		ep := revokedTo[rule]
+		host := triage.NormalizeHost(ep.Host)
+		msg := "removed the rule you approved for " + firstNonEmpty(sandboxapi.HostPort(host, ep.Port), rule) +
+			": your profile doesn't let you approve sandbox access"
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Host: host, Port: ep.Port, Reason: "admin_policy", Message: "✗ " + msg,
+			Refusal: m.accessRefusal(b, f, "", sandboxreg.RuleUserApprovals, host)})
+		m.managedAccessRefused(ctx, b, host, ep.Port, sandboxreg.RuleUserApprovals, accessRefusedRuleRemoved)
+	}
+	if len(foreign) > 0 {
+		m.foreignRules(ctx, b, foreign)
+	}
+}
+
+// policyReasonForeignRule: a network rule DefenseClaw neither rendered nor
+// approved, and no saved decision covers, was removed (managed mode).
+const policyReasonForeignRule = "foreign_rule"
+
+// ownRulePrefix starts the names of the rules policy.Render gives a sandbox
+// of its own (policy.EgressRuleName, policy.IngressRuleName).
+const ownRulePrefix = "defenseclaw_"
+
+// reservedRuleName reports a rule name DefenseClaw and OpenShell reserve:
+// DefenseClaw's own rules and the provider rules.
+func reservedRuleName(name string) bool {
+	return strings.HasPrefix(name, ownRulePrefix) || strings.HasPrefix(name, providerRulePrefix)
+}
+
+// ownRule reports a rule DefenseClaw put in the sandbox's policy itself,
+// which enforcement leaves alone. Outside managed mode that is every rule
+// with a reserved name. On a managed daemon a name proves nothing (a rule
+// added through OpenShell's own API can take any), so it is a
+// defenseclaw_* rule whose destinations and binaries are those
+// policy.Render gives the sandbox (own, renderedOwnRules), or the provider
+// rule of a provider DefenseClaw attached to it (providers).
+func ownRule(managed bool, own map[string]v1.NetworkPolicyRule, providers []string, name string, rule v1.NetworkPolicyRule) bool {
+	switch {
+	case !reservedRuleName(name):
+		return false
+	case !managed:
+		return true
+	case strings.HasPrefix(name, providerRulePrefix):
+		return providerRuleOf(name, providers)
+	}
+	want, ok := own[name]
+	return ok && slices.Equal(ruleReach(want), ruleReach(rule))
+}
+
+// providerRuleOf reports the provider rule OpenShell adds for one of
+// providers: _provider_ and the provider's name with '-' spelled '_'
+// (_provider_<sandbox>_llm for <sandbox>-llm).
+func providerRuleOf(name string, providers []string) bool {
+	key := strings.TrimPrefix(name, providerRulePrefix)
+	for _, p := range providers {
+		if p != "" && key == strings.ReplaceAll(p, "-", "_") {
+			return true
+		}
+	}
+	return false
+}
+
+// renderedOwnRules are the rules of its own (defenseclaw_*) policy.Render
+// gives the sandbox of rec on this daemon's listeners. A record that no
+// longer renders gives none: every rule in DefenseClaw's name is then
+// foreign.
+func (m *Manager) renderedOwnRules(rec record) map[string]v1.NetworkPolicyRule {
+	uid, gid := m.runAs()
+	pol, err := policy.Render(policy.Input{
+		Profile: policy.Profile(rec.Profile), Harness: rec.Harness, Workdir: rec.Workdir, WorkdirMode: policy.WorkdirMode(rec.WorkdirMode),
+		RunAsUser: strconv.Itoa(uid), RunAsGroup: strconv.Itoa(gid), IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort,
+		APIPort: m.opts.APIPort, GatewayPort: packs.OpenShellGatewayPort,
+		IngressRule: rec.TokenDelivery == config.OpenShellTokenDeliveryEnv,
+	})
+	if err != nil {
+		m.logf("%s: sandbox %s: render its own network rules: %v", gatewaylog.ErrCodeOpenShellAdminViolation, rec.Name, err)
+		return nil
+	}
+	own := map[string]v1.NetworkPolicyRule{}
+	for name, rule := range pol.NetworkPolicies {
+		if strings.HasPrefix(name, ownRulePrefix) {
+			own[name] = rule
+		}
+	}
+	return own
+}
+
+// ruleReach is what a rule opens, in a canonical order: each endpoint's
+// host, ports and allowed addresses, and the binaries it opens them to.
+// How OpenShell spells a port (Port or Ports) does not count.
+func ruleReach(r v1.NetworkPolicyRule) []string {
+	out := make([]string, 0, len(r.Endpoints)+len(r.Binaries))
+	for _, ep := range r.Endpoints {
+		ports := slices.Clone(ep.Ports)
+		if ep.Port != 0 {
+			ports = append(ports, ep.Port)
+		}
+		slices.Sort(ports)
+		ips := slices.Clone(ep.AllowedIPs)
+		slices.Sort(ips)
+		out = append(out, fmt.Sprintf("endpoint %s %v %s", triage.NormalizeHost(ep.Host), slices.Compact(ports), strings.Join(slices.Compact(ips), ",")))
+	}
+	for _, bin := range r.Binaries {
+		out = append(out, "binary "+bin.Path)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// applyingRules are the rules an approval of the sandbox is applying or
+// just applied (queued, being decided, approved), which its record may not
+// list yet. Callers hold Manager.mu.
+func (m *Manager) applyingRules(sandbox string) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range m.approvals {
+		if a.sandbox != sandbox || a.proposal.RuleName == "" {
+			continue
+		}
+		switch a.status {
+		case sandboxapi.ApprovalQueued, approvalDeciding, sandboxapi.ApprovalApproved:
+			out[a.proposal.RuleName] = true
+		}
+	}
+	return out
+}
+
+// decidedHosts are the hosts saved decisions open for every sandbox of
+// the person: their "always" approvals and unblocks.
+func decidedHosts(saved []sandboxrelay.Decision) map[string]bool {
+	out := map[string]bool{}
+	for _, d := range saved {
+		if d.Scope == sandboxrelay.DecisionScopeAlways && d.Kind != sandboxrelay.DecisionEgressBlock {
+			out[triage.NormalizeHost(d.Host)] = true
+		}
+	}
+	return out
+}
+
+// coveredByDecisions reports a rule whose every endpoint a saved decision
+// opens (decidedHosts): the person decided it, so it is not foreign. A
+// rule with an endpoint on this machine is never covered.
+func coveredByDecisions(p triage.Proposal, decided map[string]bool) bool {
+	if len(decided) == 0 || len(p.Endpoints) == 0 {
+		return false
+	}
+	for _, ep := range p.Endpoints {
+		host := triage.NormalizeHost(ep.Host)
+		if host == "" || triage.IsHostLocal(host) || !decided[host] {
+			return false
+		}
+	}
+	return true
+}
+
+// foreignRuleStops is how many removals of foreign rules a sandbox gets:
+// the next one stops it.
+const foreignRuleStops = 2
+
+// foreignRules reports the foreign rules enforceApprovedRules removed from
+// a sandbox (managed mode), and stops the sandbox when it is not the first
+// time: its agent, or someone with the user's OpenShell credentials, keeps
+// opening destinations around DefenseClaw.
+func (m *Manager) foreignRules(ctx context.Context, b *box, rules []string) {
+	m.mu.Lock()
+	name, bindingID := b.rec.Name, b.rec.BindingID
+	key := scopeID(b.rec.ID, b.rec.Name)
+	m.mu.Unlock()
+	registration := m.registrationOf(b)
+	st := m.managedSide()
+	st.mu.Lock()
+	st.foreignRules[key]++
+	stop := st.foreignRules[key] >= foreignRuleStops
+	st.mu.Unlock()
+	action := "removed"
+	if stop {
+		action = "stopped"
+	}
+	m.logf("%s: sandbox %s: removed %d network rule(s) DefenseClaw did not render or approve: %s",
+		gatewaylog.ErrCodeOpenShellAdminViolation, name, len(rules), strings.Join(rules, ", "))
+	m.managedEvent(ctx, registration, sandboxrelay.EventForeignRule, map[string]any{
+		"sandbox": name, "rules": rules, "action": action,
+	})
+	msg := fmt.Sprintf("removed %d network rule(s) added outside DefenseClaw, which your organization requires for sandbox access: %s",
+		len(rules), strings.Join(rules, ", "))
+	if stop {
+		msg += "; this happened before, so DefenseClaw stops the sandbox"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+		Severity: "HIGH", Reason: policyReasonForeignRule, Message: truncate(msg, 512)})
+	if stop {
+		m.scheduleForeignStop(name, bindingID)
+	}
+}
+
+// scheduleForeignStop stops sandbox name in the background (its caller may
+// hold the sandbox's lifecycle lock), unless the session is over by then.
+func (m *Manager) scheduleForeignStop(name, bindingID string) {
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		defer cancel()
+		b, unlock, err := m.lockBox(name)
+		if err != nil {
+			m.logf("foreign rules: stop %s: %v", name, err)
+			return
+		}
+		defer unlock()
+		m.mu.Lock()
+		current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady
+		m.mu.Unlock()
+		if !current {
+			return
+		}
+		if err := m.stop(ctx, b); err != nil {
+			m.logf("foreign rules: stop %s: %v", name, err)
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules: stop it yourself"})
+		}
+	}()
 }
 
 // enforceProviderEndpoints detaches from a ready sandbox the --llm and
@@ -546,13 +825,14 @@ func (m *Manager) enforceProviderEndpoints(ctx context.Context, gw *Gateway, b *
 		return
 	}
 	refused := map[string]error{}
+	refusedAt := map[string]providerEndpoint{}
 	var order []string
 	for _, ep := range rec.ProviderEndpoints {
 		if _, seen := refused[ep.Provider]; seen || slices.Contains(rec.DetachedProviders, ep.Provider) {
 			continue
 		}
 		if err := endpointRefusal(eff, ep); err != nil {
-			refused[ep.Provider] = err
+			refused[ep.Provider], refusedAt[ep.Provider] = err, ep
 			order = append(order, ep.Provider)
 		}
 	}
@@ -577,16 +857,11 @@ func (m *Manager) enforceProviderEndpoints(ctx context.Context, gw *Gateway, b *
 		if serr := m.saveRecord(b); serr != nil {
 			m.logf("record the detached provider of %s: %v", rec.Name, serr)
 		}
-		if terr := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
-			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()}); terr != nil {
-			m.logf("policy telemetry for %s of %s: %v", provider, rec.Name, terr)
-		}
-		msg := "detached provider " + provider + ": its direct endpoint is on the egress block list now"
-		if admin {
-			msg = "detached provider " + provider + " " + sandboxapi.AdminMessage
-		}
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: rec.Name, Source: sandboxapi.SourceOpenShell,
-			Reason: reason, Message: msg})
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
+			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()})
+		ep := refusedAt[provider]
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Source: sandboxapi.SourceOpenShell,
+			Host: ep.Host, Port: ep.Port, Reason: reason, Message: providerClosedText(ep, err)})
 	}
 }
 
@@ -753,12 +1028,10 @@ func (m *Manager) recordAdminRefusal(ctx context.Context, sandbox string, op aud
 	if len(target) > 1024 || !policyTarget.MatchString(target) {
 		target = ""
 	}
-	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
-		Sandbox: id, Operation: op, Actor: "operator", Origin: "api", Target: target, Reason: policyReasonAdminRefused,
+	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+		Sandbox: id, Operation: op, Actor: m.person(), Origin: "api", Target: target, Reason: policyReasonAdminRefused,
 		NoChange: true, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("policy telemetry for the refusal of %s: %v", sandbox, err)
-	}
+	})
 }
 
 func wireViolation(v packs.Violation) sandboxapi.Violation {
@@ -782,8 +1055,16 @@ func wireAdmin(a packs.AdminStatus) sandboxapi.AdminStatus {
 
 // Explain resolves a sandbox posture with provenance.
 func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
-	cfg := m.config()
+	return m.ExplainUnder(ctx, m.config(), req)
+}
+
+// ExplainUnder is Explain against cfg instead of the manager's own
+// configuration. A managed computer's sandbox daemon explains against the
+// floor the managed gateway names for the caller, which its own
+// configuration holds only after a create registered a run.
+func (m *Manager) ExplainUnder(ctx context.Context, cfg *config.Config, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
 	var flags packs.Flags
+	tier := ""
 	if req.Sandbox != "" {
 		b, err := m.box(req.Sandbox)
 		if err != nil {
@@ -793,20 +1074,14 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 		rec := b.rec
 		m.mu.Unlock()
 		flags = rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec))
+		tier = rec.TamperTier
 	} else {
-		project := req.Project
-		if project != "" {
-			if !filepath.IsAbs(project) {
-				return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "project must be an absolute path")
-			}
-			if real, err := filepath.EvalSymlinks(project); err == nil {
-				project = real
-			}
+		var err error
+		if flags, err = m.newRunFlags(req); err != nil {
+			return nil, err
 		}
-		flags = packs.Flags{
-			Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
-			Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
-			MountUnsupported: m.gatewayDriver().MountRefusal,
+		if spec, ok := harness.Get(flags.Harness); ok && req.Harness != "" {
+			tier = spec.TamperTier
 		}
 	}
 	eff, violations, err := m.resolve(cfg, flags)
@@ -817,19 +1092,201 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 		Profile: eff.Profile, NetworkMode: eff.NetworkMode, Approvals: eff.Approvals,
 		Admin: wireAdmin(eff.Admin), Violations: wireViolations(violations),
 	}
+	out.Workspace = WorkspacePolicyOf(eff)
 	if eff.Pack != nil {
 		out.Pack, out.PackSource, out.PackDigest = eff.Pack.Name, eff.Pack.Source, eff.Pack.Digest
+		for _, link := range eff.Pack.Chain {
+			out.PackChain = append(out.PackChain, sandboxapi.PackLink{Name: link.Name, Builtin: link.Builtin, Source: link.Source, Digest: link.Digest})
+		}
 	}
-	for _, s := range eff.Explain() {
-		out.Settings = append(out.Settings, sandboxapi.Setting{
-			Key: s.Key, Value: s.Value, Source: string(s.Source), Origin: s.Origin, Requested: s.Requested,
-		})
+	if rp := eff.RepoPolicy; rp != nil {
+		out.RepoPolicy = &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: eff.RepoTightened, Content: rp.Content}
 	}
+	out.Settings = ExplainSettings(eff, tier)
 	if req.Sandbox == "" {
 		// Only the daemon knows the image a new sandbox would boot.
 		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff, req.Run)
 	}
 	return out, nil
+}
+
+// WorkspacePolicyOf is the copy policy of eff (sandboxapi.WorkspacePolicy).
+func WorkspacePolicyOf(eff *packs.Effective) *sandboxapi.WorkspacePolicy {
+	ws := eff.Workspace
+	return &sandboxapi.WorkspacePolicy{Masks: slices.Clone(ws.Masks), Unmask: slices.Clone(ws.Unmask), GitDepth: ws.GitDepth,
+		MaxUploadMB: ws.MaxUploadMB}
+}
+
+// silenceOrigin is the origin of an explained hooks.on_silence that the
+// agent's tamper tier decides (ExplainSettings).
+const silenceOrigin = "the agent's hooks are managed: alert only"
+
+// ExplainSettings are eff's settings in the API's form. For an agent of
+// tamper tier tier ("" when no agent was named) hooks.on_silence is what its
+// sandbox does when the hooks fall silent (silenceResponse): an agent whose
+// hooks neither it nor a repository can switch off (the managed tier) only
+// raises an alert, whatever the policy asks, so the explain does not show
+// the user tier's stop for it (GAP-0477).
+func ExplainSettings(eff *packs.Effective, tier string) []sandboxapi.Setting {
+	var out []sandboxapi.Setting
+	for _, s := range eff.Explain() {
+		w := sandboxapi.Setting{Key: s.Key, Value: s.Value, Source: string(s.Source), Origin: s.Origin, Requested: s.Requested}
+		if s.Key == "hooks.on_silence" && tier != "" {
+			if response, _ := silenceResponse(tier, eff); response != s.Value {
+				w.Value, w.Source, w.Origin, w.Requested = response, string(packs.SourceDefault), silenceOrigin, s.Value
+			}
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// ManagedPostureOf is the posture a managed explain carries (the managed
+// gateway's resolution of the caller's own run, sandboxapi.ManagedPosture):
+// eff's pack, profile, modes and settings, and the run's violations. The
+// pack sources name no host path: an administrator's pack is
+// "organization", a built-in one "builtin:<name>".
+func ManagedPostureOf(eff *packs.Effective, violations []packs.Violation, tier string) *sandboxapi.ManagedPosture {
+	if eff == nil {
+		return nil
+	}
+	source := func(builtin bool, name string) string {
+		if builtin {
+			return "builtin:" + name
+		}
+		return sandboxapi.ExplainSourceOrganization
+	}
+	out := &sandboxapi.ManagedPosture{
+		Profile: eff.Profile, NetworkMode: eff.NetworkMode, Approvals: eff.Approvals,
+		Settings: ExplainSettings(eff, tier), RepoTightened: slices.Clone(eff.RepoTightened),
+	}
+	if len(violations) > 0 {
+		out.Violations = wireViolations(violations)
+	}
+	if p := eff.Pack; p != nil {
+		out.Pack, out.PackSource, out.PackDigest = p.Name, source(p.Builtin, p.Name), p.Digest
+		for _, link := range p.Chain {
+			out.PackChain = append(out.PackChain, sandboxapi.PackLink{Name: link.Name, Builtin: link.Builtin,
+				Source: source(link.Builtin, link.Name), Digest: link.Digest})
+		}
+	}
+	return out
+}
+
+// newRunFlags are the policy flags of a new run an explain describes: its
+// harness and flags in its project, with that folder's repository policy.
+func (m *Manager) newRunFlags(req sandboxapi.ExplainRequest) (packs.Flags, error) {
+	project := req.Project
+	if project != "" {
+		if !filepath.IsAbs(project) {
+			return packs.Flags{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "project must be an absolute path")
+		}
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+	}
+	repo, err := m.repoPolicy(project, "")
+	if err != nil {
+		return packs.Flags{}, err
+	}
+	return packs.Flags{
+		Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
+		Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
+		MountUnsupported: m.gatewayDriver().MountRefusal, RepoPolicy: repo,
+	}, nil
+}
+
+// validPolicyChecks bounds the destinations of a policy test.
+func validPolicyChecks(checks []sandboxapi.PolicyCheck) error {
+	switch {
+	case len(checks) == 0:
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "name at least one destination to test")
+	case len(checks) > sandboxapi.MaxPolicyChecks:
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "a policy test takes at most %d destinations", sandboxapi.MaxPolicyChecks)
+	}
+	for _, c := range checks {
+		if c.Port < 0 || c.Port > 65535 {
+			return sandboxapi.Errorf(sandboxapi.CodeInvalid, "port %d must be between 1 and 65535 (0: any port)", c.Port)
+		}
+	}
+	return nil
+}
+
+// PolicyTest judges destinations with a sandbox's egress policy as its
+// proxy does: the policy resolved against the current configuration, with
+// the sandbox's own decider and principal, so its unblocks count. The
+// decision walks the proxy's order (packs.Effective.CheckEgress, which asks
+// the egress decider). A destination one of the sandbox's providers opens
+// directly, around the proxy, is named as well.
+func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
+	if err := validPolicyChecks(req.Checks); err != nil {
+		return nil, err
+	}
+	b, err := m.box(req.Sandbox)
+	if err != nil {
+		return nil, err
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		return nil, err
+	}
+	pol := m.triagePolicy(b, eff)
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	out := &sandboxapi.PolicyTestResult{Sandbox: rec.Name, Profile: eff.Profile, NetworkMode: eff.NetworkMode}
+	if eff.Pack != nil {
+		out.Pack = eff.Pack.Name
+	}
+	for _, c := range req.Checks {
+		if d, ok := hostPortTest(rec, eff, c); ok {
+			out.Decisions = append(out.Decisions, d)
+			continue
+		}
+		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
+		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
+			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
+			Reason: chk.Reason, Unblockable: chk.Unblockable, Direct: directProvider(rec.ProviderEndpoints, c.Host, c.Port),
+		})
+	}
+	return out, nil
+}
+
+// hostPortTest is what a policy test says of a --host-port the sandbox was
+// started with: approved, the user opened it; otherwise its first
+// connection raises an ask (hostPortDenied), not the plain host_internal
+// block the egress check reads (GAP-0265). ok is false for any other
+// destination.
+func hostPortTest(rec record, eff *packs.Effective, c sandboxapi.PolicyCheck) (d sandboxapi.PolicyDecision, ok bool) {
+	if triage.NormalizeHost(c.Host) != openshellHostAlias || c.Port <= 0 || !slices.Contains(rec.Flags.HostPorts, c.Port) ||
+		eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: c.Port}) != nil {
+		return d, false
+	}
+	port := strconv.Itoa(c.Port)
+	d = sandboxapi.PolicyDecision{PolicyCheck: c, Rule: "host_port", Source: "--host-port " + port}
+	if _, approved := rec.ApprovedRules[hostPortRule(c.Port)]; approved {
+		d.Allowed, d.Reason = true, "you approved the sandbox's --host-port "+port
+		return d, true
+	}
+	d.Ask = true
+	d.Reason = "port " + port + " is a --host-port of this sandbox: its first connection raises an ask you answer with `defenseclaw sandbox approvals`, and is allowed once approved"
+	return d, true
+}
+
+// directProvider names the provider of the sandbox whose OpenShell rule
+// opens host (on port, 0 any) around the egress proxy, or "".
+func directProvider(endpoints []providerEndpoint, host string, port int) string {
+	host = triage.NormalizeHost(host)
+	for _, ep := range endpoints {
+		if ep.Host != host || (port != 0 && ep.Port != 0 && ep.Port != port) {
+			continue
+		}
+		if ep.Role == roleCredential {
+			return "the --credential " + ep.Name + " provider (" + ep.Provider + ") opens it directly for the programs it binds"
+		}
+		return "the model provider (" + ep.Provider + ") opens it directly for the harness's own programs"
+	}
+	return ""
 }
 
 // baseEffective is the configured posture without run flags; the egress

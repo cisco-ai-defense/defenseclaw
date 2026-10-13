@@ -318,11 +318,12 @@ var ruleAxes = map[string][]DataAxis{
 	// network, some exec). Only the data-axis-bearing members are
 	// listed; SRC-EXEC / SRC-CHILD-PROC carry a capability instead
 	// (see CapabilityForRuleID) and intentionally have no axis.
-	"SRC-ENV-READ":    {AxisSensitiveAccess},
-	"SRC-FETCH":       {AxisEgressExternal},
-	"SRC-NET-SERVER":  {AxisEgressExternal},
-	"SRC-HTTP-SERVER": {AxisEgressExternal},
-	"SRC-WS":          {AxisEgressExternal},
+	"SRC-ENV-READ":              {AxisSensitiveAccess},
+	"SRC-FETCH":                 {AxisEgressExternal},
+	"SRC-NET-SERVER":            {AxisEgressExternal},
+	"SRC-HTTP-SERVER":           {AxisEgressExternal},
+	"SRC-WS":                    {AxisEgressExternal},
+	"JUDGE-TOOL-SENSITIVE-READ": {AxisSensitiveAccess},
 }
 
 // judgeAxes maps "judge.category" (both lowercased) to axes. The keys
@@ -355,6 +356,7 @@ var judgeAxes = map[string][]DataAxis{
 	"tool-injection.instruction manipulation": {AxisIngressUntrusted},
 	"tool-injection.context manipulation":     {AxisIngressUntrusted},
 	"tool-injection.obfuscation":              {AxisIngressUntrusted},
+	"tool-injection.sensitive data access":    {AxisSensitiveAccess},
 	"tool-injection.data exfiltration":        {AxisSensitiveAccess, AxisEgressExternal},
 	"tool-injection.destructive commands":     {}, // destructive = separate flow, not trifecta
 }

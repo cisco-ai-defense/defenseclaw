@@ -186,6 +186,10 @@ func ignoredAreaOf(rel string, roots map[string]bool) (string, ignoredKind) {
 	segs := strings.Split(rel, "/")
 	for i := 0; i < len(segs)-1; i++ {
 		if _, ok := dependencyAreas[segs[i]]; ok {
+			if i+2 < len(segs) && toolCacheDirs[segs[i+1]] {
+				// A tool's cache, which no package is (GAP-0275).
+				return strings.Join(segs[:i+2], "/") + "/", ignoredOther
+			}
 			return strings.Join(segs[:i+1], "/") + "/", ignoredDependencies
 		}
 		if segs[i] == "__pycache__" {
@@ -401,8 +405,7 @@ func writeIgnored(lay layout, name string, m *ignoredManifest) error {
 	return nil
 }
 
-// loadIgnored reads a snapshot's manifest; nil when the snapshot has none
-// (taken by an older build).
+// loadIgnored reads a snapshot's manifest, which every snapshot writes.
 func loadIgnored(dataDir, name string) (*ignoredManifest, error) {
 	lay, err := newLayout(dataDir)
 	if err != nil {
@@ -410,9 +413,6 @@ func loadIgnored(dataDir, name string) (*ignoredManifest, error) {
 	}
 	var m ignoredManifest
 	if err := readJSON(lay.ignoredManifest(name), &m); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	if m.Files == nil {

@@ -51,8 +51,9 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
 // hook tool call, which for a sandbox shell tool call also judges the
 // command on its own. command is the call's command in the plain shell
-// shape and commandTool the tool to judge it as (sandboxShellCommand); with
-// no command it is inspectTrustedToolPolicyCtx.
+// shape and commandTool the tool to judge it as (sandboxShellCommand, or
+// codexPowerShellCommand for a Codex shell call on Windows); with no command
+// it is inspectTrustedToolPolicyCtx.
 //
 // A shell call's arguments reach the trusted-action parser through the
 // connector's projection, which takes out only the arguments it knows with
@@ -94,13 +95,15 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	input := action.Input
 	input.Tool, input.Args = commandTool, command
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
-		Input:                     input,
-		LegacyText:                string(command),
-		Connector:                 action.Connector,
-		EnforcementCapable:        action.EnforcementCapable,
-		DowngradeReadOnlyDataArgs: action.DowngradeReadOnlyDataArgs,
+		Input:                         input,
+		LegacyText:                    string(command),
+		Connector:                     action.Connector,
+		EnforcementCapable:            action.EnforcementCapable,
+		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 	})
-	return mergeSandboxShellCommandVerdict(a.scannerCfg, firstNonEmpty(req.Connector, action.Connector), verdict, findings)
+	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
 }
 
 // mergeSandboxShellCommandVerdict raises verdict to the action findings, the
@@ -109,7 +112,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 // rules (there only candidates) and name the reason. A verdict at least as
 // strong is returned unchanged.
 func mergeSandboxShellCommandVerdict(cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
-	action := guardrailToolCallActionForFindings(cfg, connectorName, findings, true)
+	action := guardrailActionForConnectorFindings(cfg, connectorName, findings, true)
 	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
 		return verdict
 	}

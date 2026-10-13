@@ -13,8 +13,13 @@
 package gateway
 
 import (
+	"context"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -31,6 +36,18 @@ var userScopedIdentityName = func(identity string) string {
 	return managedHookPeerName(uid)
 }
 
+// userScopedIdentityForName is the uid of the account an account name names
+// now through the platform account database, or false when none has it.
+var userScopedIdentityForName = func(name string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	account, err := unixidentity.Default(ctx).LookupUser(strings.TrimSpace(name))
+	if err != nil {
+		return "", false
+	}
+	return connector.CanonicalUserScopedIdentity(strconv.Itoa(account.UID))
+}
+
 // userScopedIdentityHome is the home of the account a per-user credential is
 // bound to, resolved like a hook-socket caller's home, or "".
 var userScopedIdentityHome = func(identity string) string {
@@ -42,4 +59,24 @@ var userScopedIdentityHome = func(identity string) string {
 		return ""
 	}
 	return managedHookPeerHome(uid)
+}
+
+// agentIdentityAccountName names the account that holds a uid for the uid's
+// agent identity: the account database's name, or while a lookup fails (a
+// directory outage) the last name the uid resolved to, which a managed
+// gateway keeps across restarts with the uid's home (GAP-0314). "" for a
+// uid that never resolved.
+var agentIdentityAccountName = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	if name := userScopedIdentityName(identity); name != "" {
+		managedHookPeerHomes.rememberName(uid, name)
+		return name
+	}
+	return managedHookPeerHomes.lastName(uid)
 }

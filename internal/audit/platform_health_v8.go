@@ -131,18 +131,6 @@ func (occurrence sinkHealthV8Occurrence) eventName() observability.EventName {
 	}
 }
 
-// emitSinkHealthV8 emits exactly one generated platform-health log through the
-// binding captured at the beginning of the sink occurrence. authoritative=true
-// always suppresses legacy fallback, including a detached/unavailable runtime.
-func (l *Logger) emitSinkHealthV8(
-	ctx context.Context,
-	binding runtimeV8Binding,
-	occurrence sinkHealthV8Occurrence,
-) error {
-	_, err := l.emitPlatformHealthV8Occurrence(ctx, binding, occurrence)
-	return err
-}
-
 func (l *Logger) emitPlatformHealthV8Occurrence(
 	ctx context.Context,
 	binding runtimeV8Binding,
@@ -751,22 +739,4 @@ func (l *Logger) recordRuntimeV8GeneratedMetricBatch(
 		}
 	}
 	return binding.metricBatch.RecordRuntimeV8GeneratedMetricBatch(ctx, metrics)
-}
-
-func (l *Logger) recordSinkMetricV8(
-	ctx context.Context,
-	binding runtimeV8Binding,
-	input sinkMetricV8Input,
-) error {
-	if binding.metricEmitter == nil {
-		return fmt.Errorf("audit: v8 sink metric runtime is unavailable")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	metric, err := newSinkRuntimeV8GeneratedMetric(input)
-	if err != nil {
-		return err
-	}
-	return binding.metricEmitter.RecordRuntimeV8GeneratedMetric(ctx, metric)
 }

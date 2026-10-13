@@ -54,13 +54,16 @@ func TestLethalTrifecta_FiresOnAllThreeAxes(t *testing.T) {
 	// which is the exfil direction LETHAL-TRIFECTA now requires.
 	window := []CorrelationFinding{
 		{ID: "f-003", DataAxis: []DataAxis{AxisEgressExternal}, Severity: "HIGH"},
-		{ID: "f-002", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "HIGH"},
+		{ID: "f-002", DataAxis: AxesForFinding("JUDGE-TOOL-SENSITIVE-READ", "Sensitive Data Access", nil), Severity: "MEDIUM"},
 		{ID: "f-001", DataAxis: []DataAxis{AxisIngressUntrusted}, Severity: "HIGH"},
 	}
 
 	contributing := pattern.Match(window)
 	if len(contributing) != 3 {
 		t.Fatalf("expected 3 contributing findings, got %d", len(contributing))
+	}
+	if pattern.SeverityOnMatch != "CRITICAL" {
+		t.Fatalf("three-stage correlation severity = %s", pattern.SeverityOnMatch)
 	}
 	// Contributing is returned in temporal (oldest-first) order.
 	if contributing[0].ID != "f-001" || contributing[1].ID != "f-002" || contributing[2].ID != "f-003" {

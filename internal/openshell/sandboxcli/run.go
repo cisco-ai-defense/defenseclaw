@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // RunOptions are the `sandbox run` flags.
@@ -56,6 +57,7 @@ type RunOptions struct {
 	Credentials []string
 	GitHubWrite bool
 	NoMCP       bool
+	ProcessTree bool
 	Detach      bool
 	// Rm deletes the sandbox when the session ends.
 	Rm bool
@@ -169,12 +171,45 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		Harness: spec.Name, Pack: o.Pack, Profile: o.Profile, Project: project, Copy: o.Copy, Safe: o.Safe, Unmask: o.Unmask,
 	})
 	if err != nil {
+		if st.Managed != nil && harnessUnenrolled(err) {
+			return a.unenrolledHarnessRefusal(ctx, api, spec, project, st.Managed)
+		}
 		return apiError(err)
 	}
+	// Every refusal on its own line: a repository policy that would loosen
+	// several settings names each of them. On a managed computer the
+	// managed gateway judges the run when the create resolves it
+	// (managedRefusal).
+	var fatal []string
 	for _, v := range ex.Violations {
 		if v.Fatal {
-			return errors.New(violationMessage(&v, v.Message, v.Detail, v.Admin))
+			fatal = append(fatal, violationMessage(&v, v.Message, v.Detail, v.Admin))
 		}
+	}
+	if len(fatal) > 0 {
+		if ex.Managed != nil {
+			return a.managedRefusal(ctx, api, spec, project, o, fatal)
+		}
+		return errors.New(strings.Join(fatal, "\n"))
+	}
+	if ex.Managed != nil && a.managedSeen == nil {
+		// The run's refusals and warnings name this profile and contact.
+		a.managedSeen = managedStatusOfExplain(ex.Managed)
+	}
+	if err := a.managedFlagRefusal(ex, st, o); err != nil {
+		return err
+	}
+	if ex.Managed != nil || st.Managed != nil || a.ManagedHost() {
+		if err := a.checkAccount(ctx); err != nil {
+			return err
+		}
+	}
+	repo, err := parseRepoPolicy(ex.RepoPolicy)
+	if err != nil {
+		return err
+	}
+	if note := a.parentRepoPolicyNote(project, ex.RepoPolicy); note != "" {
+		a.warn(note)
 	}
 	// The flags replace the configured limits a clamp of which the
 	// preflight reported. A driver without per-sandbox limits takes neither
@@ -218,14 +253,16 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// sandbox keeps the settings it was created with, so flags that only a
 	// new sandbox takes (and it does not have already), and grants
 	// (credentials, host ports) it holds that this run did not ask for, turn
-	// the default answer to no. A sandbox the policy would not start is not
-	// offered.
+	// the default answer to no, as does a repository policy that changed
+	// since it was created (it keeps the copy its run read). A sandbox the
+	// policy would not start is not offered.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
-			if why := a.startRefusal(ctx, api, sb); why != "" {
+			kept := keptPolicy(ctx, api, sb)
+			if why := startRefusal(kept, sb); why != "" {
 				a.note(fmt.Sprintf("Sandbox %s (%s, %s) holds this folder but cannot start under the current policy (%s); `%s delete %s` removes it.",
 					sb.Name, sb.Phase, sb.WorkdirMode, why, CommandName, sb.Name))
-			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode); resumed || err != nil {
+			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode, repoPolicyChanged(ex, kept)); resumed || err != nil {
 				return err
 			}
 		}
@@ -258,6 +295,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	// The daemon reads the repository policy again and refuses the create
+	// when it changed since this preflight, whose copy a staged copy used.
+	req.RepoPolicyDigest = repoPolicyDigest(ex.RepoPolicy)
 	if llm.Credential != nil {
 		if err := harness.LaunchEnvProblem(llm.Credential.Profile, env); err != nil {
 			return err
@@ -309,7 +349,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 				return err
 			}
 		}
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv, repo, ex.Workspace); err != nil {
 			return err
 		}
 	}
@@ -329,7 +369,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			}
 		}
 		a.warn(a.needsCopyText(project, refusal, req.Name))
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv, repo, ex.Workspace); err != nil {
 			return err
 		}
 		sb, err = api.Create(ctx, req)
@@ -343,12 +383,18 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		if taken {
 			return nameTakenError(req.Name, headless)
 		}
-		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
+		problem := a.landlockHint(apiError(err), func() openshell.Driver { return drv })
+		if ex.VMFirstBoot && !policyRefusal(err) && firstStartFailure(err) {
+			return fmt.Errorf("%w; a MicroVM first start prepares a 5-8 GB disk and may need a retry; "+
+				"run defenseclaw sandbox doctor to inspect leftover staging disks", problem)
+		}
+		return problem
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	a.warnUnkeptOptionValue(spec, o.Args)
 	autoRm := a.headlessRm(o, headless)
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
+		passArgs: len(o.Args) > 0}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
@@ -371,7 +417,8 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return fail(err)
 		}
 	}
-	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings})
+	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings, repo: ex.RepoPolicy,
+		managed: firstManaged(managedStatusOfExplain(ex.Managed), st.Managed)})
 	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
@@ -394,6 +441,59 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		return err
 	}
 	return s.exit(code)
+}
+
+// The managed gateway's refusals of a caller it knows no enrollment of for
+// a connector (managed_hook_peer.go): on a managed computer the
+// organization sets each agent's connector up per account.
+var unenrolledReasons = map[string]bool{
+	"enterprise_managed_uid_unregistered":  true,
+	"enterprise_managed_connector_unknown": true,
+}
+
+// harnessUnenrolled reports the managed gateway's refusal of a request for
+// a connector the caller's account is not set up for.
+func harnessUnenrolled(err error) bool {
+	var e *sandboxapi.Error
+	return errors.As(err, &e) && unenrolledReasons[strings.TrimSpace(e.Detail)]
+}
+
+// unenrolledHarnessRefusal is the refusal of a run of spec on a managed
+// computer whose managed gateway refused the preflight because the account
+// is not set up for spec's connector. The caller's own policy, which a
+// preflight without a harness reads (the agent `policy explain` shows),
+// says whether the profile allows spec at all: the refusal names that
+// limit, or the setup only IT can do, never the gateway's reason code
+// (GAP-0459).
+func (a *App) unenrolledHarnessRefusal(ctx context.Context, api API, spec *harness.Spec, project string, m *sandboxapi.ManagedStatus) error {
+	profile, access := m.Profile, m.RequestAccess
+	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Project: project}); err == nil && ex.Managed != nil {
+		me := ex.Managed
+		profile, access = firstNonEmpty(me.Profile, profile), firstNonEmpty(me.RequestAccess, access)
+		if len(me.AllowedHarnesses) > 0 && !slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
+			return config.NormalizeConnectorName(h) == spec.Name
+		}) {
+			return errors.New(sandboxapi.HarnessNotAllowed(spec.Name, profile, access))
+		}
+	}
+	return errors.New(sandboxapi.HarnessNotEnabled(spec.Name, profile, access))
+}
+
+// firstStartFailure reports a create failure a MicroVM's first start, which
+// prepares a disk, may be behind: OpenShell's or DefenseClaw's own error,
+// not a refusal of the policy, the account or the request, which a retry
+// does not change and the disk hint has nothing to do with (GAP-0493,
+// GAP-0483).
+func firstStartFailure(err error) bool {
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) {
+		return true
+	}
+	switch e.Code {
+	case sandboxapi.CodeUpstream, sandboxapi.CodeInternal, sandboxapi.CodePolicyRejected:
+		return true
+	}
+	return false
 }
 
 // headlessRm reports whether a run's sandbox goes at the end of its session
@@ -599,20 +699,113 @@ func (a *App) runNative(spec *harness.Spec, args []string) error {
 	return a.ExecProcess(path, append([]string{spec.Command}, args...), a.Environ())
 }
 
-// preflight checks that the daemon runs with sandboxes available.
+// preflight checks that the daemon runs with sandboxes available, after it
+// readied a managed computer's OpenShell for the run (readyManaged).
 func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error) {
+	return a.checkSandboxes(ctx, api, true)
+}
+
+// checkSandboxes is preflight; without ready, a managed computer's OpenShell
+// that a run readies passes as it is (`sandbox wrap` installs nothing).
+func (a *App) checkSandboxes(ctx context.Context, api API, ready bool) (*sandboxapi.Status, error) {
 	st, err := api.Status(ctx)
 	if err != nil {
 		return nil, apiError(err)
 	}
+	a.noteManaged(st)
 	if !st.Enabled {
-		return nil, fmt.Errorf("OpenShell sandboxes are off; run `%s setup` to turn them on", CommandName)
+		return nil, errors.New(st.OffMessage())
+	}
+	if !ready && readiesAtRun(api, st) {
+		return st, nil
+	}
+	if st, err = a.readyManaged(ctx, api, st); err != nil {
+		return nil, err
+	}
+	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
+		// Another account runs sandboxes on this computer now: the daemon's
+		// one-account-at-a-time text and who to contact (GAP-0461).
+		if ready {
+			a.recordBusyRefusal(ctx, api)
+		}
+		return nil, errors.New(sandboxapi.DisplayText(firstNonEmpty(st.Reason, sandboxapi.AccountBusyMessage+".")) + " " +
+			"F" + strings.TrimPrefix(busyContact(st.Managed.RequestAccess), "f") + ".")
 	}
 	if !st.Available {
 		reason := firstNonEmpty(st.Reason, "the daemon is not connected to an OpenShell gateway")
 		return nil, fmt.Errorf("sandboxes are unavailable: %s (see `%s doctor`)", reason, CommandName)
 	}
 	return st, nil
+}
+
+// recordBusyRefusal lets a managed computer's daemon record this run's
+// account-busy refusal in the managed audit and telemetry (GAP-0598): the
+// daemon answers busy at once, starting and installing nothing, and reports
+// it to the managed gateway. Its answer is not used; the run is refused with
+// the status's own text either way.
+func (a *App) recordBusyRefusal(ctx context.Context, api API) {
+	ready, ok := api.(readier)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = ready.Ready(ctx)
+}
+
+// policyRefusal reports a create the sandbox policy refused or could not
+// load: no MicroVM disk was prepared, so the disk hint does not apply
+// (GAP-0440).
+func policyRefusal(err error) bool {
+	e := sandboxapi.AsError(err)
+	switch e.Code {
+	case sandboxapi.CodePackInvalid, sandboxapi.CodeAdminViolation, sandboxapi.CodePolicyViolation:
+		return true
+	}
+	return strings.HasPrefix(e.Detail, sandboxrelay.ReasonPolicyUnloadable)
+}
+
+// readier is a daemon client that readies a managed computer's OpenShell
+// (sandboxapi.Client.Ready).
+type readier interface {
+	Ready(ctx context.Context) (*sandboxapi.Status, error)
+}
+
+// readyManaged asks a managed computer's sandbox daemon to ready the
+// account's OpenShell when the organization runs sandboxes here but it is
+// not ready yet: setup mode installs the pinned release at the first run,
+// and both modes start the account's gateway on demand. A run whose
+// preflight stopped at that status never reached the create that readied it
+// (GAP-0437, GAP-0441). Any other status is st.
+func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status) (*sandboxapi.Status, error) {
+	if !readiesAtRun(api, st) {
+		return st, nil
+	}
+	if a.managedInstallPending(st.Managed) {
+		a.note(strings.TrimSpace("Installing OpenShell "+st.Managed.OpenShellVersion) + " for your account and starting it (first run only)…")
+	} else {
+		a.note("Starting your OpenShell gateway…")
+	}
+	ready, err := api.(readier).Ready(ctx)
+	if err != nil {
+		return nil, apiError(err)
+	}
+	// The openshell CLI the daemon installed was not there when this
+	// command read where it is.
+	if a.Cfg != nil && a.OpenShellCLI != nil {
+		if cli := a.OpenShellCLI(); cli != "" {
+			a.Cfg.OpenShell.Binary = cli
+		}
+	}
+	return ready, nil
+}
+
+// readiesAtRun reports a managed computer's status whose organization runs
+// sandboxes here while the account's OpenShell is not ready yet, which the
+// daemon readies for a run.
+func readiesAtRun(api API, st *sandboxapi.Status) bool {
+	_, ok := api.(readier)
+	return ok && !st.Available && st.Managed != nil && st.Managed.Unavailable == "" && st.GatewayElsewhere == ""
 }
 
 // checkNewName refuses, before anything else happens, a --name OpenShell
@@ -626,8 +819,6 @@ func checkNewName(name string) error {
 	case !openshell.ValidNewSandboxName(name):
 		return fmt.Errorf("--name %q: use at most %d lowercase letters, digits and '-', starting and ending with a letter or digit",
 			name, openshell.MaxSandboxNameLen)
-	case workspace.ValidateName(name) != nil:
-		return fmt.Errorf("--name %q is reserved; choose another", name)
 	}
 	return nil
 }
@@ -912,7 +1103,7 @@ func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool,
 			shown[violationKey(v)] = true
 			continue
 		}
-		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+		a.warn(a.violationText(&v, v.Message, v.Detail, v.Admin))
 		shown[violationKey(v)] = true
 		overridden = overridden || (v.Admin && v.Source == string(packs.SourceFlag))
 	}
@@ -995,6 +1186,9 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 			// The gateway's clamp: its source is the gateway, not the
 			// organization.
 			return driverCopyNote(d)
+		}
+		if s.Source == string(packs.SourceRepo) {
+			return "copy mode: the project's repository policy (" + packs.RepoPolicyPath + ") asks for a copy; " + copyBackText
 		}
 		if s.Source != string(packs.SourceAdmin) {
 			continue
@@ -1092,8 +1286,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 // harness, and resumes it when the answer is yes. Flags sb does not
 // already have are named and turn the default to no; when the folder's
 // live mount is sb's, a new sandbox needs a copy (or sb deleted), and the
-// hint says so.
-func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode bool) (bool, error) {
+// hint says so. repoChanged names the project's repository policy, which
+// changed since sb was created, among what a resume ignores.
+func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
 	if n := a.attachedSessions(sb.Name); n > 0 {
@@ -1106,8 +1301,18 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		question += "It keeps grants this run did not ask for: " + strings.Join(grants, ", ") + ". "
 	}
 	ignored := resumeIgnores(o, sb, run)
+	if repoChanged {
+		ignored = append(ignored, "the changed repository policy "+packs.RepoPolicyPath)
+	}
+	next := "pass --new"
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
+		// The folder takes one live mount, and it is sb's.
+		next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
+	}
 	if len(ignored) > 0 {
-		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
+		// The way to get them is in the question, not only after a yes
+		// (GAP-0249).
+		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ", which only a new sandbox takes (" + next + "). "
 	}
 	if len(ignored) > 0 || len(grants) > 0 {
 		question += "Resume it anyway?"
@@ -1119,24 +1324,29 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		return false, err
 	}
 	if len(ignored) > 0 {
-		next := "pass --new"
-		if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
-			// The folder takes one live mount, and it is sb's.
-			next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
-		}
 		a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: " + next + ")")
 	}
 	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 }
 
-// startRefusal says why the current policy would refuse to start sb (a
-// setting it can no longer have, like a live mount the organization now
-// runs on a copy, or a harness it no longer allows), or "" when a start
-// would go ahead or the daemon cannot tell. The daemon checks the same at
-// the start.
-func (a *App) startRefusal(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+// keptPolicy is the explain of sb's own policy, what a start of it
+// resolves (with the repository policy its run read), or nil when the
+// daemon cannot tell.
+func keptPolicy(ctx context.Context, api API, sb *sandboxapi.Sandbox) *sandboxapi.Explain {
 	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name})
 	if err != nil {
+		return nil
+	}
+	return ex
+}
+
+// startRefusal says why the current policy, as ex (keptPolicy) resolves
+// it, would refuse to start sb (a setting it can no longer have, like a
+// live mount the organization now runs on a copy, or a harness it no longer
+// allows), or "" when a start would go ahead or the daemon cannot tell (ex
+// nil). The daemon checks the same at the start.
+func startRefusal(ex *sandboxapi.Explain, sb *sandboxapi.Sandbox) string {
+	if ex == nil {
 		return ""
 	}
 	for _, v := range ex.Violations {
@@ -1203,20 +1413,26 @@ func (a *App) warnSecretEnv(env map[string]string) {
 	}
 }
 
-// warnUnkeptOptionValue warns when an option is recorded without its value
-// (launchOptionsSplit): a later `sandbox connect` then passes the harness the
-// option and no value, and the harness fails to start or starts without the
-// setting. The run itself is unaffected - it uses the arguments as given -
-// and an option written as --option=value is recorded whole. The word that
-// was left out may have been a prompt instead (an option keeps a prompt out
-// of the record on purpose), so the message names both readings.
+// warnUnkeptOptionValue warns when the record of a run stops at an option
+// followed by a word with a space (launchOptionsSplit): a later `sandbox
+// connect` passes the harness that option without the word, and none of the
+// options after it. The run itself is unaffected - it uses the arguments as
+// given - and an option written as --option=value is recorded whole. The
+// word may have been a prompt instead (a prompt is kept out of the record on
+// purpose), so the message names both readings. When it is the last word,
+// the common `-- --verbose "fix the tests"`, nothing else is lost and a
+// prompt after a switch is recorded right, so it is a one-line note.
 func (a *App) warnUnkeptOptionValue(spec *harness.Spec, args []string) {
-	_, unkept := launchOptionsSplit(spec, args)
-	for _, flag := range unkept {
-		a.warn(flag + " is followed by a word with a space, so the sandbox records the option without it: " +
-			"a later `" + CommandName + " connect` passes " + spec.DisplayName + " the option and no value, and it may fail to start " +
-			"or start without the setting. That is intended for a prompt; if the word is this option's value, " +
-			"write it attached (" + flag + `="…") to have it recorded`)
+	_, flag, later := launchOptionsSplit(spec, args)
+	switch {
+	case flag == "":
+	case len(later) == 0:
+		a.note("A later `" + CommandName + " connect` passes " + flag + " without the last word; if that word is its value, write " +
+			flag + `="…"`)
+	default:
+		a.warn(flag + " is followed by a word with a space, so the record of this run stops there: a later `" +
+			CommandName + " connect` passes " + flag + " without that word and leaves out " + strings.Join(later, " ") +
+			". Put a prompt last, or write " + flag + `="…" if the word is its value`)
 	}
 }
 
@@ -1268,6 +1484,7 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 		}), "--credential")
 	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }) && !slices.ContainsFunc(sb.Credentials, githubWrite), "--github-write")
 	add(o.NoMCP && !had(func(r *runLaunch) bool { return r.NoMCP }), "--no-mcp")
+	add(o.ProcessTree && !sb.ProcessTree, "--process-tree")
 	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto) && !had(func(r *runLaunch) bool { return strings.EqualFold(o.LLM, r.LLM) }), "--llm "+o.LLM)
 	add(o.BedrockRegion != "" && o.BedrockRegion != sb.Launch.BedrockRegion &&
 		!had(func(r *runLaunch) bool { return o.BedrockRegion == r.BedrockRegion }), "--bedrock-region")
@@ -1294,11 +1511,31 @@ func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, b
 }
 
 // createRequest turns the flags into the daemon's create request.
+// managedRefusal is a run on a managed computer that the preflight would
+// refuse. The managed gateway judges it: the create asks it before anything
+// is staged or created, and its refusal names the caller's profile and rule
+// and is recorded there (GAP-0197). A create it lets through is deleted
+// again and the run stays refused with the preflight's words (fail closed).
+func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, project string, o RunOptions, fatal []string) error {
+	req := sandboxapi.CreateRequest{
+		Name: o.Name, Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile, Copy: true, Safe: o.Safe,
+		Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP, CPU: o.CPU, Memory: o.Memory, ProcessTree: o.ProcessTree,
+	}
+	sb, err := api.Create(ctx, req)
+	if err != nil {
+		return apiError(err)
+	}
+	if _, err := api.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
+		a.warn("could not delete " + sb.Name + ": " + err.Error())
+	}
+	return errors.New(strings.Join(fatal, "\n"))
+}
+
 func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, copyMode bool, env map[string]string) (sandboxapi.CreateRequest, llmChoice, error) {
 	req := sandboxapi.CreateRequest{
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
-		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
+		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env, ProcessTree: o.ProcessTree,
 		// The sandbox's clock reads like this machine's.
 		TimeZone: openshell.HostTimeZone(a.Getenv),
 	}
@@ -1378,8 +1615,10 @@ func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.Ex
 
 // stageCopy stages the copy-mode project with the effective workspace
 // policy.
-func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver) (*workspace.CopyRecord, error) {
-	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe, Unmask: o.Unmask}, name)
+func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver,
+	repo *packs.RepoPolicy, ws *sandboxapi.WorkspacePolicy) (*workspace.CopyRecord, error) {
+	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe,
+		Unmask: o.Unmask, RepoPolicy: repo}, name, ws)
 	if err != nil {
 		return nil, err
 	}
@@ -1414,29 +1653,65 @@ func (a *App) stageHint(err error, d openshell.Driver) string {
 // discardStagedCopy removes the copy staged for a sandbox the daemon did
 // not create, unless a sandbox of that name exists (its copy is not this
 // run's to remove).
+//
+// A create a Ctrl-C cut off is rolled back by the daemon a moment later,
+// and a sandbox of the name reads as creating meanwhile: the discard waits
+// for it, up to discardWait, or the stage outlived it as leftover data that
+// teardown listed (GAP-0360).
 func (a *App) discardStagedCopy(ctx context.Context, api API, name string) {
 	ctx = context.WithoutCancel(ctx)
-	if _, err := api.Get(ctx, name); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		return
+	for waited := time.Duration(0); ; waited += discardInterval {
+		sb, err := api.Get(ctx, name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			break
+		}
+		if err != nil || !passingPhase(sb.Phase) || waited >= discardWait {
+			return
+		}
+		if waited == 0 {
+			a.note("waiting for the daemon to undo the create of " + name + " before removing its staged copy…")
+		}
+		if a.Sleep(ctx, discardInterval) != nil {
+			return
+		}
 	}
 	if err := a.Workspace.Discard(a.dataDir(), name); err != nil {
 		a.warn("could not remove the staged copy of " + name + ": " + err.Error())
 	}
 }
 
+// discardWait and discardInterval pace discardStagedCopy's wait for a
+// create the daemon rolls back.
+const (
+	discardWait     = 30 * time.Second
+	discardInterval = time.Second
+)
+
 // copyStageOptions stages flags.Project for sandbox name with the effective
-// workspace policy: masks, exceptions, history depth and the size cap.
-func (a *App) copyStageOptions(flags packs.Flags, name string) (workspace.StageOptions, error) {
+// workspace policy: masks, exceptions, history depth and the size cap. On a
+// managed computer that policy is the daemon's (ws, from its explain). The
+// organization's pack decides it, and that pack is the administrator's file,
+// which this process cannot read: a local resolve named the pack by name in
+// the user's own pack folder and failed (GAP-0478). A managed computer whose
+// daemon does not say refuses rather than stage with a guess.
+func (a *App) copyStageOptions(flags packs.Flags, name string, ws *sandboxapi.WorkspacePolicy) (workspace.StageOptions, error) {
+	home, _ := a.Home()
+	opts := workspace.StageOptions{Project: flags.Project, Name: name, DataDir: a.dataDir(), Home: home, UnmaskAsked: flags.Unmask, Replace: true}
+	if a.ManagedHost() {
+		if ws == nil {
+			return workspace.StageOptions{}, errors.New("your sandbox service did not say what your organization's policy holds back from a project copy; " +
+				"run this again, and if it persists, " + sandboxapi.RequestAccessFallback)
+		}
+		opts.GitDepth, opts.MaxBytes, opts.Masks, opts.Unmask = ws.GitDepth, int64(ws.MaxUploadMB)<<20, ws.Masks, ws.Unmask
+		return opts, nil
+	}
 	flags.Copy = true
 	eff, _, err := packs.Resolve(a.Cfg, flags)
 	if err != nil {
 		return workspace.StageOptions{}, err
 	}
-	home, _ := a.Home()
-	return workspace.StageOptions{
-		Project: flags.Project, Name: name, DataDir: a.dataDir(), Home: home, GitDepth: eff.Workspace.GitDepth,
-		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Replace: true,
-	}, nil
+	opts.GitDepth, opts.MaxBytes, opts.Masks, opts.Unmask = eff.Workspace.GitDepth, int64(eff.Workspace.MaxUploadMB)<<20, eff.Workspace.Masks, eff.Workspace.Unmask
+	return opts, nil
 }
 
 // bannerInfo is what the launch banner shows beyond the sandbox itself.
@@ -1453,6 +1728,11 @@ type bannerInfo struct {
 	// policy is the effective policy the sandbox runs under (the daemon's
 	// explain): the banner names the large-upload block from it.
 	policy []sandboxapi.Setting
+	// repo is the project's repository policy the sandbox runs with.
+	repo *sandboxapi.RepoPolicy
+	// managed is the caller's own policy on a managed computer: the banner
+	// adds the Policy line of the plan (profile, description, details).
+	managed *sandboxapi.ManagedStatus
 }
 
 // launchModel is the banner's model: the one a launch of sb with the
@@ -1480,13 +1760,38 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(kept, sep)
 }
 
+// modelChannelNote is the banner line under a model credential: OpenShell's
+// provider rule for it opens the model hosts to the harness's network
+// binaries (harness.ProbeSpec.NetworkBinaries) directly, not through
+// DefenseClaw's egress proxy, and a harness that runs on an interpreter (an
+// npm build's node, a Python harness's python) has that interpreter as its
+// network binary, which runs any script.
+const modelChannelNote = "opened to the harness's own program directly, around DefenseClaw's egress proxy; " +
+	"for an npm or Python harness that is its node or python, so a script it runs reaches them too"
+
+// refusesAsks reports a sandbox whose floor refuses every ask
+// (user_approvals: none): nothing in it waits for the user's approval.
+func refusesAsks(sb *sandboxapi.Sandbox) bool {
+	return sb.UserApprovals == config.OpenShellUserApprovalsNone
+}
+
+// bannerContact is the organization's request-access contact, or the
+// fallback, for a line that sends the user to it.
+func bannerContact(m *sandboxapi.ManagedStatus) string {
+	if m == nil {
+		return sandboxapi.RequestAccessText("")
+	}
+	return sandboxapi.RequestAccessText(m.RequestAccess)
+}
+
 // banner prints the plan's launch banner.
 func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
 	perms := a.permissionsText(sb)
 	a.println()
 	a.printf("%s %s · %s · %s · network: %s\n", a.bold("Sandbox"), a.bold(sb.Name), name, perms, networkLabel(sb))
-	row := func(label, text string) { a.line(fmt.Sprintf("%-10s%s", label, text)) }
+	// Keep separation even when the label fills the minimum column width.
+	row := func(label, text string) { a.line(fmt.Sprintf("%-10s%s", label+"  ", text)) }
 	switch {
 	case sb.WorkdirMode == config.OpenShellWorkdirCopy:
 		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" (copy)   changes come back with `"+CommandName+" pull "+sb.Name+"`")
@@ -1503,10 +1808,19 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	default:
 		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir)
 	}
+	repoLabel := "Policy"
+	if line := managedPolicyLine(b.managed); line != "" {
+		row("Policy", line)
+		repoLabel = "Repository"
+	}
+	if line := managedDriverLine(sb, b.managed); line != "" {
+		row("Driver", line)
+	}
 	model := launchModel(sb, b.o.Args)
 	switch {
 	case b.llm.Credential != nil:
 		row("Model", joinNonEmpty(" · ", model, b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)"))
+		row("", modelChannelNote)
 	case b.llm.Note != "":
 		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
 	case model != "":
@@ -1520,42 +1834,117 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		for _, p := range ports {
 			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
 		}
-		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
+		if refusesAsks(sb) {
+			// Nothing to approve under user_approvals: none (GAP-0468).
+			row("Host", strings.Join(hosts, " ")+" (stays closed: your profile doesn't let you approve connections to it; "+
+				"request access: "+bannerContact(b.managed)+")")
+		} else {
+			row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
+		}
 	}
 	if text := uploadBlockText(b.policy); text != "" {
 		row("Uploads", text)
+	}
+	if text := repoPolicyText(b.repo); text != "" {
+		row(repoLabel, text)
 	}
 	// Asks (a host port, a private address, a destination the profile
 	// does not list) wait for the user while the harness owns the terminal;
 	// its screen is the harness's, so a live session announces them in the
 	// terminal title (session.notice).
 	where := "shown here as they come"
-	if a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
-		where = "announced in this terminal's title as they come"
+	live := a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args)
+	// The Python TUI is not offered on a managed computer, which only has
+	// the sandbox commands (GAP-0590).
+	tui := ""
+	if b.managed == nil && a.tuiOffered() {
+		tui = " (or `defenseclaw tui`: 7, then t)"
 	}
-	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
+	switch {
+	case refusesAsks(sb):
+		// The banner promised approvals the profile refuses (GAP-0468).
+		row("Asks", "your profile doesn't let you approve asks, so a new destination stays closed; request access: "+bannerContact(b.managed))
+	case b.o.Detach:
+		// Nothing in this terminal follows a background run (GAP-0345).
+		row("Asks", "the run is in the background, so watch for them: "+CommandName+" approvals --watch --sandbox "+sb.Name+tui)
+	case live && titleTakers[sb.Harness]:
+		// The harness rewrites the title on and on (Claude Code's
+		// spinner): the title cannot be promised (GAP-0239).
+		row("Asks", firstNonEmpty(sb.HarnessName, sb.Harness)+" keeps this terminal's title, so watch for them in another terminal: "+
+			CommandName+" approvals --watch --sandbox "+sb.Name+tui+"; each one also rings the bell here")
+	case live:
+		where = "announced in this terminal's title as they come"
+		fallthrough
+	default:
+		row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+tui)
+	}
 	if keys := sessionKeys[sb.Harness]; keys != "" && a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
 		row("Keys", keys)
 	}
-	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
+	if text := mcpBannerText(sb.MCP); text != "" {
 		// Servers left behind and a repository's blocked servers arrive as
 		// warnings below, one line each.
-		row("MCP", strings.Join(sb.MCP.Imported, " ✓ · ")+" ✓")
+		row("MCP", text)
 	}
 	if text := hooksTierText(sb); text != "" {
 		row("Hooks", text)
 	}
 	for _, v := range sb.Violations {
 		if !b.shown[violationKey(v)] {
-			a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+			a.warn(a.violationText(&v, v.Message, v.Detail, v.Admin))
 		}
 	}
 	for _, w := range sb.Warnings {
-		if !b.shown[warningKey(w)] {
+		// The project's own warnings came with the Project lines above
+		// (GAP-0247).
+		if !b.shown[warningKey(w)] && (sb.Workspace == nil || sb.WorkdirMode == config.OpenShellWorkdirCopy || !slices.Contains(sb.Workspace.Warnings, w)) {
 			a.warn(w)
 		}
 	}
 	a.println()
+}
+
+// titleTakers are the harnesses that keep setting the terminal title
+// themselves while they run, so a notice there is overwritten at once:
+// Claude Code's spinner, and Codex, which names the project there
+// (GAP-0345).
+var titleTakers = map[string]bool{"claudecode": true, "codex": true}
+
+// mcpBannerText is the banner's MCP line: the user's servers the run
+// brought along and, when the organization's policy left some out, how
+// many were included and how many were blocked (the names of those left
+// behind follow as a warning). "" when there is nothing to say.
+func mcpBannerText(s *sandboxapi.MCPSummary) string {
+	if s == nil {
+		return ""
+	}
+	var org, asset int
+	for _, l := range s.LeftBehind {
+		switch l.Code {
+		case sandboxapi.MCPCodeOrganizationBlock:
+			org++
+		case sandboxapi.MCPCodeAssetPolicy:
+			asset++
+		}
+	}
+	names := ""
+	if len(s.Imported) > 0 {
+		names = strings.Join(s.Imported, " ✓ · ") + " ✓"
+	}
+	if org+asset == 0 {
+		return names
+	}
+	counts := fmt.Sprintf("%d of your servers included", len(s.Imported))
+	if org > 0 {
+		counts += fmt.Sprintf("; %d blocked by your organization", org)
+	}
+	if asset > 0 {
+		counts += fmt.Sprintf("; %d left out by your organization's asset policy", asset)
+	}
+	if names == "" {
+		return counts
+	}
+	return names + " (" + counts + ")"
 }
 
 // hooksTierText is the banner's Hooks line for a sandbox whose hooks are
@@ -1570,7 +1959,19 @@ func hooksTierText(sb *sandboxapi.Sandbox) string {
 	if spec, ok := harness.Get(sb.Harness); ok && spec.TamperNote != "" {
 		note = spec.TamperNote
 	}
-	return sb.TamperTier + " tier: " + note + " (hook silence is detected)"
+	return sb.TamperTier + " tier: " + note + " (" + silenceText(sb.Hooks) + ")"
+}
+
+// silenceText says what silent hooks of the sandbox lead to (the pack's
+// hooks.on_silence and hooks.silence_after, as the daemon resolved them).
+func silenceText(h sandboxapi.HookCoverage) string {
+	switch {
+	case h.OnSilence == "stop" && h.SilenceAfter != "":
+		return "DefenseClaw stops the sandbox when the harness works for " + h.SilenceAfter + " without its hooks"
+	case h.OnSilence == "alert" && h.SilenceAfter != "":
+		return "DefenseClaw alerts when the harness works for " + h.SilenceAfter + " without its hooks"
+	}
+	return "hook silence is detected"
 }
 
 // bannerHostPorts are the host ports the sandbox may ask to reach, as the
@@ -1644,7 +2045,7 @@ func (a *App) promptsKept(sb *sandboxapi.Sandbox) string {
 			return "harness prompts kept by your organization's policy"
 		}
 	}
-	if a.Cfg != nil && a.Cfg.OpenShell.Admin.AllowYolo != nil && !*a.Cfg.OpenShell.Admin.AllowYolo {
+	if ad := packs.BaseFloor(a.Cfg); ad.AllowYolo != nil && !*ad.AllowYolo {
 		return orgOff
 	}
 	return "harness prompts kept"

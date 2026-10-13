@@ -21,8 +21,13 @@ package hookexec
 import (
 	"errors"
 	"syscall"
+	"time"
 )
 
 func connectionRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
 }
+
+// hookDialTimeout bounds the connect to the gateway. A refused loopback
+// connect fails at once here (see the Windows variant).
+const hookDialTimeout = 2 * time.Second

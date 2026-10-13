@@ -179,7 +179,9 @@ rules:
     confidence: 0.80
     tags: [destructive]
   - id: CMD-CHMOD-WORLD
-    expression: 'false'
+    expression: >-
+      f.commands.exists(c,
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)
     pattern: 'a^'
     title: "chmod world-writable"
     severity: HIGH

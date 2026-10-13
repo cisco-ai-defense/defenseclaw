@@ -229,6 +229,16 @@ function Assert-DataKept {
 
 function Get-Sha256([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }
 
+# Move-File FROM TO: a rename that waits out a sharing violation, as
+# install.ps1's Move-Path does. Right after gateway stop, Windows (or a
+# virus scanner reading the image) can hold a DefenseClaw .exe for a moment.
+function Move-File([string]$From, [string]$To, [int]$Seconds = 10) {
+    for ($waited = 0; ; $waited++) {
+        try { [IO.File]::Move($From, $To); return } catch { if ($waited -ge $Seconds) { throw } }
+        Start-Sleep -Seconds 1
+    }
+}
+
 function Stop-Lane {
     if (Test-Path -LiteralPath (Join-Path $Bin "defenseclaw-gateway.exe")) {
         [void](Invoke-Exe (Join-Path $Bin "defenseclaw-gateway.exe") @("stop") -Quiet)
@@ -376,6 +386,26 @@ print(json.dumps(client.scan_skill(target=sys.argv[1], name='lifecycle')))
     Assert-Healthy
 }
 
+# Removes the Everyone deny ACE of a drill and proves the file reads again.
+# If it does not, resets the DACL of the file to its inherited ACEs and fails
+# the lane, so later steps do not fail on the same unreadable file.
+function Clear-ReadDeny([string]$Path) {
+    & icacls.exe $Path /remove:d "*S-1-1-0" | Out-Null
+    try { $null = Get-FileHash -LiteralPath $Path -ErrorAction Stop; return $true }
+    catch { Write-Log "$Path is still unreadable: $($_.Exception.Message)" }
+    $readable = $true
+    try {
+        & takeown.exe /f $Path | Out-Null
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($false, $false)
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.WindowsIdentity]::GetCurrent().User, "FullControl", "Allow"))
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $acl)
+        $null = Get-FileHash -LiteralPath $Path -ErrorAction Stop
+    } catch { $readable = $false }
+    Fail "icacls could not remove the deny ACE from $Path (after a DACL reset readable=$readable); stopping the lane"
+    return $false
+}
+
 # Upgrade from the previous 1.x release, `defenseclaw rollback`, then roll forward.
 function Test-UpgradePrevious {
     Enter-Lane upgrade-previous
@@ -393,10 +423,13 @@ function Test-UpgradePrevious {
 
     Write-Log "a rollback that cannot restore the previous install puts the current one back"
     $blocked = Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe"
-    & icacls.exe $blocked /deny "*S-1-1-0:(R)" | Out-Null
+    # (RD) denies only reading the data. (R) also denies READ_CONTROL and
+    # SYNCHRONIZE, and then icacls cannot remove the ACE again.
+    & icacls.exe $blocked /deny "*S-1-1-0:(RD)" | Out-Null
     try {
         Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -ne 0) "a rollback whose previous gateway cannot be read succeeded"
-    } finally { & icacls.exe $blocked /remove:d "*S-1-1-0" | Out-Null }
+    } finally { $unblocked = Clear-ReadDeny $blocked }
+    if (-not $unblocked) { return }
     Assert-Versions $Target
     Assert-Healthy
     Assert-DataKept
@@ -473,6 +506,8 @@ function Test-UpgradeLegacy([string]$From) {
         Check ($code -eq 0) "defenseclaw rollback exited $code"
         $log = Wait-Detached
         Check ($log.Contains("Now running DefenseClaw $From")) "the rollback log does not report success"
+        $exportCommand = '& "' + (Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe") + '" audit export --db "' + (Join-Path $DcHome "previous\data\audit.db") + '"'
+        Check ($log.Contains($exportCommand)) "the rollback log does not print a PowerShell-safe audit export command"
         Assert-Versions $From
         Assert-Healthy
         Assert-DataKept
@@ -482,6 +517,18 @@ function Test-UpgradeLegacy([string]$From) {
         Assert-Versions $Target
         Assert-Healthy
         Assert-DataKept
+
+        # GAP-1388: a damaged 0.x audit store is moved aside, so the restored
+        # gateway starts on a new one instead of failing with no hooks.
+        Write-Log "rollback over a damaged $From audit store"
+        # Its -wal or -journal would repair the header, so they go too.
+        Invoke-Python "import os, sys; p = sys.argv[1]; f = open(p, 'r+b'); f.write(b'not a database!!'); f.close(); [os.remove(p + s) for s in ('-wal', '-shm', '-journal') if os.path.exists(p + s)]" @((Join-Path $DcHome "previous\data\audit.db")) | Out-Null
+        Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "the rollback over a damaged audit store failed"
+        Check (@(Get-ChildItem -LiteralPath $DcHome -Filter "audit.db.corrupt-*" -File).Count -eq 1) "the damaged audit store was not kept as audit.db.corrupt-*"
+        Assert-Versions $From
+        Assert-Healthy
+        Check ((Invoke-Installer (Join-Path $DcHome "previous\installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "roll forward after the damaged-store rollback failed"
+        Assert-Versions $Target
     } finally {
         Set-UserPath $pathRaw $pathKind
         if ($placedCodex) {
@@ -585,7 +632,9 @@ function Test-FilesInUse {
 
 # A release whose gateway reports its version but does not start: the
 # install is undone. A start that exits 3 (a connector needs attention)
-# keeps the new version and exits 3.
+# keeps the new version and exits 3. The drill gateway hands every other
+# command to the real one, so the staged check, which runs the staged
+# gateway's config validator (GAP-0158), passes and the swap happens.
 function Test-FailureDrill {
     Enter-Lane failure-drill
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
@@ -594,18 +643,25 @@ function Test-FailureDrill {
     $goodGateway = Get-Sha256 $gateway
     $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
     $source = Join-Path $Lane "DrillGateway.cs"
+    $realGateway = Join-Path $Lane "real-gateway.exe"
+    # The command line after the program name goes to the real gateway as is.
     [IO.File]::WriteAllText($source, @"
 public static class DrillGateway {
     public static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "--version") { System.Console.WriteLine("defenseclaw-gateway version $Target"); return 0; }
         if (args.Length > 0 && args[0] == "start") { return int.Parse(System.Environment.GetEnvironmentVariable("DC_DRILL_START_EXIT") ?? "1"); }
-        return 0;
+        string line = System.Environment.CommandLine;
+        int end = line.StartsWith("\"") ? line.IndexOf('"', 1) + 1 : line.IndexOf(' ');
+        string rest = end > 0 && end < line.Length ? line.Substring(end) : "";
+        System.Diagnostics.ProcessStartInfo info = new System.Diagnostics.ProcessStartInfo(@"$realGateway", rest);
+        info.UseShellExecute = false;
+        using (System.Diagnostics.Process real = System.Diagnostics.Process.Start(info)) { real.WaitForExit(); return real.ExitCode; }
     }
 }
 "@)
     $drill = New-DrillAssets "drill-assets" {
         param([string]$Zip)
-        Remove-Item -LiteralPath (Join-Path $Zip "defenseclaw-gateway.exe")
+        Move-Item -LiteralPath (Join-Path $Zip "defenseclaw-gateway.exe") -Destination $realGateway
         # Only Windows PowerShell's Add-Type builds a standalone .exe.
         $built = Invoke-Exe $PowerShell @("-NoProfile", "-Command",
             "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $Zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
@@ -685,7 +741,7 @@ function Test-SetupImport {
         $hookRuntime = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime"
         foreach ($dir in "bin", "installer", "runtime\python") { New-Item -ItemType Directory -Path (Join-Path $setupRoot $dir) -Force | Out-Null }
         New-Item -ItemType Directory -Path $cache, $hookRuntime -Force | Out-Null
-        foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe") { Move-Item -LiteralPath (Join-Path $Bin $name) -Destination (Join-Path $setupRoot "bin") }
+        foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe") { Move-File (Join-Path $Bin $name) (Join-Path $setupRoot "bin\$name") }
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-gateway.exe") -Destination (Join-Path $setupRoot "bin\defenseclaw-startup.exe")
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-hook.exe") -Destination (Join-Path $hookRuntime "defenseclaw-hook.exe")
         Get-ChildItem -LiteralPath $Bin -Force | Remove-Item -Force

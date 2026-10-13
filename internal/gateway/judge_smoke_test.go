@@ -23,9 +23,9 @@ import (
 )
 
 func TestJudgeSmokeManual(t *testing.T) {
-	cfg, err := config.Load()
+	cfg, err := config.LoadFromFile(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadFromFile: %v", err)
 	}
 	resolved := cfg.ResolveLLM("guardrail.judge")
 	t.Logf("resolved judge LLM: provider=%s model=%s api_key_env=%s has_key=%v base_url=%q",

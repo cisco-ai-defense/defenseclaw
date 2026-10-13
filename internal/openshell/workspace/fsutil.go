@@ -375,41 +375,6 @@ func (r *rootFS) symlink(rel, target string) error {
 	return r.root.Symlink(target, rel)
 }
 
-// ensureDirMode makes every component of rel a real directory with the given mode.
-// It refuses to operate if any component is a symlink (to prevent directory traversal attacks).
-func (r *rootFS) ensureDirMode(rel string, mode fs.FileMode) error {
-	rel = path.Clean(rel)
-	if rel == "." || rel == "" {
-		return nil
-	}
-	cur := ""
-	for _, part := range strings.Split(rel, "/") {
-		if cur == "" {
-			cur = part
-		} else {
-			cur = cur + "/" + part
-		}
-		info, err := r.root.Lstat(cur)
-		switch {
-		case err == nil && info.IsDir():
-			continue
-		case err == nil && info.Mode()&fs.ModeSymlink != 0:
-			// Refuse to replace symlinks - potential directory traversal attack.
-			return fmt.Errorf("refusing to create directory at %s: path component is a symlink", cur)
-		case err == nil:
-			if err := r.root.Remove(cur); err != nil {
-				return err
-			}
-		case !errors.Is(err, fs.ErrNotExist):
-			return err
-		}
-		if err := r.root.Mkdir(cur, mode); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // realParents reports an error unless every parent directory of rel is a
 // real directory inside the root (no symlinks, no missing components).
 func (r *rootFS) realParents(rel string) error {
@@ -463,50 +428,4 @@ func (r *rootFS) readRegular(rel string, max int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s is larger than %d bytes", rel, max)
 	}
 	return data, nil
-}
-
-// writeFileNoFollow writes a file atomically with O_NOFOLLOW to prevent
-// following symlinks and O_EXCL to ensure atomicity. It refuses to write if
-// any parent path component is a symlink by checking each component before
-// creating directories.
-func (r *rootFS) writeFileNoFollow(rel string, src io.Reader, mode fs.FileMode, mtime time.Time) error {
-	rel = path.Clean(rel)
-	if err := r.ensureDirMode(path.Dir(rel), 0o700); err != nil {
-		return err
-	}
-	// The temporary name is random and created with O_EXCL inside the
-	// os.Root, so it can never be an existing file or a symlink, and the
-	// root refuses any path that resolves outside the project.
-	tmp := path.Join(path.Dir(rel), ".dc-restore-"+randomSuffix())
-	f, err := r.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, src); err != nil {
-		_ = f.Close()
-		_ = r.root.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = r.root.Remove(tmp)
-		return err
-	}
-	if err := r.root.Chmod(tmp, mode.Perm()); err != nil {
-		_ = r.root.Remove(tmp)
-		return err
-	}
-	if info, err := r.root.Lstat(rel); err == nil && info.IsDir() {
-		if err := r.root.RemoveAll(rel); err != nil {
-			_ = r.root.Remove(tmp)
-			return err
-		}
-	}
-	if err := r.root.Rename(tmp, rel); err != nil {
-		_ = r.root.Remove(tmp)
-		return err
-	}
-	if !mtime.IsZero() {
-		_ = r.root.Chtimes(rel, mtime, mtime)
-	}
-	return nil
 }

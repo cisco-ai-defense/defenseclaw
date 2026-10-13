@@ -346,7 +346,7 @@ function StepBlock({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we block?"
-        subtitle="Pick everything you want flagged. We'll enable the matching rules and add destinations to the firewall."
+        subtitle="Pick rules to include. Firewall destinations are planning notes and are not applied by the install script."
       />
       <div className="space-y-5">
         {BLOCK_CATEGORIES.map((cat) => {
@@ -388,7 +388,7 @@ function StepAllow({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we allow even when flagged?"
-        subtitle="Let your own plugins skip admission scans and your internal domains through the firewall."
+        subtitle="Let your own plugins skip admission scans. Internal domains are planning notes; the install script does not configure a firewall."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {ALLOW_CARDS.map((card) => (
@@ -418,7 +418,7 @@ function StepAllow({ answers, update }: StepProps) {
           placeholder="*.corp.internal"
           items={answers.domainsExtra}
           onChange={(next) => update((d) => void (d.domainsExtra = next))}
-          hint="One per line. Added to firewall.allowed_domains."
+          hint="One per line. Planning notes only; policy activation does not configure the firewall."
         />
       </div>
     </>
@@ -452,8 +452,12 @@ function StepSinks({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="Where should events go?"
-        subtitle="Wire one or more destinations. Local audit log is on by default — turn it off only if you really mean to."
+        subtitle="Wire webhook destinations. Local audit settings are planning notes; policy activation does not apply them."
       />
+      <p className="mb-3 text-xs text-fd-muted-foreground">
+        Splunk HEC uses a separate observability destination. Configure it with{' '}
+        <a href="/docs/observability/splunk" className="underline">setup splunk</a> after installing this policy.
+      </p>
       <div className="space-y-2">
         {SINK_CARDS.map((card) => (
           <SinkRow
@@ -523,7 +527,7 @@ function StepReview({
           <div className="min-w-[200px] flex-1">
             <div className="text-sm font-semibold text-fd-foreground">Download &amp; run</div>
             <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
-              One self-contained bash script. Drops every YAML / <code>data.json</code> / Rego file
+              One self-contained bash script. Drops every YAML and Rego file
               under <code>~/.defenseclaw/policies/</code> via heredocs (no curl, no scp), then
               runs <code>defenseclaw policy activate {policy.name}</code>. Re-runs are idempotent.
             </p>
@@ -674,7 +678,7 @@ function CheckCard({
         )}
         {(card.destinations?.length ?? 0) > 0 && (
           <span className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">
-            {card.destinations!.length} firewall destination
+            {card.destinations!.length} planned firewall destination
             {card.destinations!.length === 1 ? '' : 's'}
           </span>
         )}

@@ -278,7 +278,6 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 			_ = tx.Rollback()
 			semantic = attachOccurrence.SemanticEventID
 			logical = audit.LogicalEventID(semantic)
-			reportedSemantic, reportedLogical = "", ""
 			existingSemantic = audit.CorrelationMatchResult{}
 			matched = audit.CorrelationMatchResult{
 				Rank: audit.CorrelationMatchReceipt, Conflict: true,

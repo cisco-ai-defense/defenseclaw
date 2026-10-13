@@ -220,6 +220,7 @@ func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
 		{`tool "Write" is on the static block list`, "(tool Write is on the block list)"},
 		{`mcp server "github" is blocked`, "(MCP server github is on the block list)"},
+		{`mcp server "notes" is disabled because its install admission rejected it (scanner failure (fail-closed): loopback); asset_policy.mode does not apply to admission verdicts`, "(MCP server notes is disabled because its install admission rejected it (scanner failure (fail-closed)))"},
 	} {
 		display := agentDisplayReason(tc.source, redaction.SinkPolicyDefault)
 		got := agentVerdictReason("block", tc.source, display, redaction.SinkPolicyDefault)
@@ -263,6 +264,14 @@ func TestAgentVerdictReasonNamesAssetPolicyBlock(t *testing.T) {
 	want := "DefenseClaw policy blocked this action (MCP server f1r10-off is not in the approved registry). " + agentBlockNoRetry
 	if got != want {
 		t.Errorf("agentVerdictReason(%q) = %q, want %q", source, got, want)
+	}
+	// GAP-0572: a non-ASCII name gets the same plain sentence.
+	cafe := assetPolicyResponseReason(config.AssetPolicyDecision{
+		Source: "admin-deny", TargetType: "skill", TargetName: "epa-caf\u00e9", Connector: "claudecode", RuntimeSurface: "hook",
+	})
+	got = agentVerdictReason("block", cafe, agentDisplayReason(cafe, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault)
+	if want := "DefenseClaw policy blocked this action (skill epa-caf\u00e9 is denied by asset policy). " + agentBlockNoRetry; got != want {
+		t.Errorf("non-ASCII name: got %q, want %q", got, want)
 	}
 	// A name outside the plain shape keeps the existing redaction.
 	odd := "ASSET-POLICY reason_code=not-in-approved-registry asset_type=mcp asset_name=a;b"

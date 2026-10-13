@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1780,6 +1781,26 @@ func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("RemoveManagedPolicy was not called")
+	}
+}
+
+func TestResolveEnterpriseHookTargetValuesBindsWindowsUserAndHome(t *testing.T) {
+	oldLookup, oldProfile, oldCfg := enterpriseHookLookupUser, enterpriseHookSIDProfilePath, cfg
+	t.Cleanup(func() { enterpriseHookLookupUser, enterpriseHookSIDProfilePath, cfg = oldLookup, oldProfile, oldCfg })
+	cfg = nil
+	enterpriseHookLookupUser = func(name string) (*user.User, error) {
+		if name != "alice" {
+			t.Fatalf("lookup %q", name)
+		}
+		return &user.User{Uid: "S-1-5-21-1-2-3-1001", HomeDir: `C:\Users\alice`}, nil
+	}
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return `C:\Users\alice`, nil }
+	target, err := resolveEnterpriseHookTargetValuesForPlatform("alice", `C:\Users\alice`, -1, -1, "", "", true)
+	if err != nil || target.sid != "S-1-5-21-1-2-3-1001" {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	if _, err := resolveEnterpriseHookTargetValuesForPlatform("alice", `C:\Users\bob`, -1, -1, "", "", true); err == nil {
+		t.Fatal("mismatched user home accepted")
 	}
 }
 

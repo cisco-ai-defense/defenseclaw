@@ -11,9 +11,10 @@
 package gatewaylog
 
 import (
-	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // runID is the per-process run identifier stamped on every event
@@ -55,5 +56,5 @@ func ProcessRunID() string {
 	if v, _ := runID.Load().(string); v != "" {
 		return v
 	}
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	return strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 }

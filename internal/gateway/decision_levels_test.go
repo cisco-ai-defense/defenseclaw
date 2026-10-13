@@ -17,11 +17,16 @@
 package gateway
 
 import (
+	"context"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 const (
@@ -109,7 +114,7 @@ func TestGuardrailLevelThresholds(t *testing.T) {
 			if tt.edit != nil {
 				tt.edit(cfg)
 			}
-			block, alert := guardrailToolCallThresholdsForConfigConnector(cfg, tt.connector)
+			block, alert := guardrailThresholdRanks(resolveThresholds(cfg, tt.connector))
 			if block != tt.wantBlock || alert != tt.wantAlert {
 				t.Fatalf("thresholds(%q) = block %d / alert %d, want %d / %d",
 					tt.connector, block, alert, tt.wantBlock, tt.wantAlert)
@@ -117,7 +122,7 @@ func TestGuardrailLevelThresholds(t *testing.T) {
 		})
 	}
 
-	if block, alert := guardrailToolCallThresholdsForConfigConnector(nil, "codex"); block != severityCritical || alert != severityMedium {
+	if block, alert := guardrailThresholdRanks(resolveThresholds(nil, "codex")); block != severityCritical || alert != severityMedium {
 		t.Fatalf("nil config thresholds = %d / %d, want the default pack's", block, alert)
 	}
 }
@@ -146,7 +151,7 @@ func TestGuardrailLevelThresholdsForGuardrailConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			block, alert := guardrailToolCallThresholdsForConnector(tt.gc, tt.connector)
+			block, alert := guardrailThresholdRanks(resolveGuardrailThresholds(tt.gc, tt.connector))
 			if block != tt.wantBlock || alert != tt.wantAlert {
 				t.Fatalf("thresholds(%q) = block %d / alert %d, want %d / %d",
 					tt.connector, block, alert, tt.wantBlock, tt.wantAlert)
@@ -155,10 +160,10 @@ func TestGuardrailLevelThresholdsForGuardrailConfig(t *testing.T) {
 	}
 }
 
-// TestGuardrailLevelActions checks the resulting tool-call severity → action
-// mapping on the hook lane and the proxy lane, that blocking still comes
-// before human approval, and that prompts, completions and other content keep
-// the rule pack's levels.
+// TestGuardrailLevelActions checks the severity → action mapping on the hook
+// lane and the proxy lane, that blocking still comes before human approval,
+// and that prompts, completions and other content take the same levels as
+// tool calls (one threshold model).
 func TestGuardrailLevelActions(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.BlockAt = "HIGH" // default pack otherwise blocks CRITICAL only
@@ -177,39 +182,44 @@ func TestGuardrailLevelActions(t *testing.T) {
 		{"claudecode", "HIGH", guardrailActionBlock},
 		{"claudecode", "MEDIUM", guardrailActionAllow},
 	} {
-		if got := guardrailToolCallActionForConnector(cfg, c.connector, c.severity, true); got != c.want {
+		if got := guardrailActionForConnector(cfg, c.connector, c.severity, true); got != c.want {
 			t.Errorf("%s %s = %q, want %q", c.connector, c.severity, got, c.want)
 		}
 	}
-	// Content decisions ignore the levels: the default pack alerts on HIGH.
-	if got := guardrailRuntimeActionForConnector(cfg, "opencode", "HIGH", true); got != guardrailActionAlert {
-		t.Errorf("content HIGH with block_at HIGH = %q, want alert (the pack's level)", got)
-	}
 	high := []RuleFinding{{RuleID: "levels-content", Severity: "HIGH"}}
-	if got := buildVerdictWithConfig(high, "completion", cfg, false).Action; got != guardrailActionAlert {
-		t.Errorf("completion verdict with block_at HIGH = %q, want alert", got)
+	if got := buildVerdictWithConfig(high, "completion", cfg, "", false).Action; got != guardrailActionBlock {
+		t.Errorf("completion verdict with block_at HIGH = %q, want block", got)
+	}
+	// A hook verdict takes the requesting connector's levels.
+	if got := buildVerdictWithConfig(high, "completion", cfg, "codex", false).Action; got != guardrailActionAlert {
+		t.Errorf("codex completion verdict with its block_at CRITICAL = %q, want alert", got)
 	}
 
 	hilt := &config.Config{}
 	hilt.Guardrail.HILT = config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}
 	hilt.Guardrail.BlockAt = "HIGH"
-	if got := guardrailToolCallActionForConnector(hilt, "codex", "HIGH", true); got != guardrailActionBlock {
+	if got := guardrailActionForConnector(hilt, "codex", "HIGH", true); got != guardrailActionBlock {
 		t.Errorf("block_at HIGH + HILT HIGH: HIGH = %q, want block (blocking precedes approval)", got)
 	}
 	hilt.Guardrail.BlockAt = "CRITICAL"
-	if got := guardrailToolCallActionForConnector(hilt, "codex", "HIGH", true); got != guardrailActionConfirm {
+	if got := guardrailActionForConnector(hilt, "codex", "HIGH", true); got != guardrailActionConfirm {
 		t.Errorf("block_at CRITICAL + HILT HIGH: HIGH = %q, want confirm", got)
 	}
 
 	proxy := &config.GuardrailConfig{BlockAt: "MEDIUM"}
-	if got := guardrailToolCallActionForGuardrailConnector(proxy, "", "MEDIUM", false); got != guardrailActionBlock {
+	if got := guardrailActionForGuardrailConnector(proxy, "", "MEDIUM", false); got != guardrailActionBlock {
 		t.Errorf("proxy tool call block_at MEDIUM: MEDIUM = %q, want block", got)
 	}
-	if got := guardrailToolCallActionForGuardrailConnector(proxy, "", "LOW", false); got != guardrailActionAllow {
+	if got := guardrailActionForGuardrailConnector(proxy, "", "LOW", false); got != guardrailActionAllow {
 		t.Errorf("proxy tool call block_at MEDIUM: LOW = %q, want allow", got)
 	}
-	if got := guardrailRuntimeActionForGuardrail(proxy, "MEDIUM", false); got != guardrailActionAlert {
-		t.Errorf("proxy prompt block_at MEDIUM: MEDIUM = %q, want alert (the pack's level)", got)
+
+	// The OpenClaw session-message prompt path takes the connector's levels.
+	session := &config.GuardrailConfig{AlertAt: "MEDIUM", Connectors: map[string]config.PerConnectorGuardrailConfig{
+		"openclaw": {AlertAt: "LOW"},
+	}}
+	if got := guardrailContentActionForGuardrail(session, "openclaw", "LOW"); got != guardrailActionAlert {
+		t.Errorf("openclaw session prompt alert_at LOW: LOW = %q, want alert", got)
 	}
 }
 
@@ -226,7 +236,7 @@ func TestGuardrailLevelsNeverReleaseCritical(t *testing.T) {
 				cfg.Guardrail.BlockAt = blockAt
 				cfg.Guardrail.AlertAt = alertAt
 				cfg.Guardrail.HILT = config.HILTConfig{Enabled: true, MinSeverity: "CRITICAL"}
-				if got := guardrailToolCallActionForConnector(cfg, "codex", "CRITICAL", true); got != guardrailActionBlock {
+				if got := guardrailActionForConnector(cfg, "codex", "CRITICAL", true); got != guardrailActionBlock {
 					t.Errorf("pack=%q block_at=%q alert_at=%q: CRITICAL = %q, want block", pack, blockAt, alertAt, got)
 				}
 			}
@@ -234,49 +244,141 @@ func TestGuardrailLevelsNeverReleaseCritical(t *testing.T) {
 	}
 }
 
-// TestGuardrailLevelsReloadClassification pins the reload contract: hook
-// tool-call decisions read the start-time config, so a global block_at /
-// alert_at change restarts the guardrail (a hot reload is refused), and a
-// per-connector one is inside guardrail.connectors and restarts like any
-// other per-connector change.
+// TestGuardrailLevelsReloadClassification pins the reload contract: every
+// decision reads the live configuration generation, so global and
+// per-connector block_at / alert_at changes reload hot.
 func TestGuardrailLevelsReloadClassification(t *testing.T) {
 	base := &config.Config{}
 	base.Guardrail.Enabled = true
 	base.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
-	pair := func(edit func(*config.Config)) (*config.Config, *config.Config) {
-		newCfg := *base
-		newCfg.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
-		edit(&newCfg)
-		return base, &newCfg
-	}
-
 	for name, edit := range map[string]func(*config.Config){
 		"global block_at": func(c *config.Config) { c.Guardrail.BlockAt = "HIGH" },
-		"global alert_at": func(c *config.Config) { c.Guardrail.AlertAt = "LOW" },
-	} {
-		oldCfg, newCfg := pair(edit)
-		if !guardrailNeedsRestart(oldCfg, newCfg) {
-			t.Errorf("%s: guardrailNeedsRestart = false, want true", name)
-		}
-		if diff := diffConfigs(oldCfg, newCfg); !slices.Contains(diff.RestartRequired, "guardrail") {
-			t.Errorf("%s: diff = %+v, want guardrail to require a restart", name, diff)
-		}
-	}
-
-	for name, edit := range map[string]func(*config.Config){
-		"connector block_at": func(c *config.Config) {
-			c.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{BlockAt: "HIGH"}
-		},
 		"connector alert_at": func(c *config.Config) {
 			c.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{AlertAt: "LOW"}
 		},
 	} {
-		oldCfg, newCfg := pair(edit)
-		if !guardrailNeedsRestart(oldCfg, newCfg) {
-			t.Errorf("%s: guardrailNeedsRestart = false, want true", name)
+		newCfg := *base
+		newCfg.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
+		edit(&newCfg)
+		if diff := diffConfigs(base, &newCfg); len(diff.RestartRequired) != 0 || !slices.Contains(diff.Changed, "guardrail") {
+			t.Errorf("%s: diff = %+v, want a hot guardrail change", name, diff)
 		}
-		if diff := diffConfigs(oldCfg, newCfg); !slices.Contains(diff.RestartRequired, "guardrail.connectors") {
-			t.Errorf("%s: diff = %+v, want guardrail.connectors to require a restart", name, diff)
-		}
+	}
+}
+
+// TestSecureClientContentKeepsPackLevels pins Secure Client invariance for
+// the one threshold model: under that integration content surfaces keep
+// the rule pack's posture levels, while tool calls take block_at as before.
+func TestSecureClientContentKeepsPackLevels(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Guardrail.BlockAt = "HIGH"
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("fixture is not a Secure Client configuration")
+	}
+	if got := guardrailContentAction(cfg, "", "HIGH", false); got != guardrailActionAlert {
+		t.Errorf("Secure Client content HIGH = %q, want alert (the pack's level)", got)
+	}
+	if got := guardrailActionForConnector(cfg, "", "HIGH", false); got != guardrailActionBlock {
+		t.Errorf("Secure Client tool call HIGH = %q, want block", got)
+	}
+	cfg.DeploymentMode = ""
+	if got := guardrailContentAction(cfg, "", "HIGH", false); got != guardrailActionBlock {
+		t.Errorf("OSS content HIGH = %q, want block (one threshold model)", got)
+	}
+}
+
+// TestConfigThresholdsReadTheCustomPackManifestPosture: `policy show` runs
+// where no generation build recorded the pack's manifest posture, so it reads
+// the manifest itself and reports the levels the gateway enforces.
+func TestConfigThresholdsReadTheCustomPackManifestPosture(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, guardrail.PackManifestFile), []byte(`{"posture":"strict"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "acme-manifest-posture"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme-manifest-posture": {Path: dir}}
+	got := ConfigThresholds(cfg, "")
+	if got.Block != "MEDIUM" || got.Source != "pack-default:acme-manifest-posture" {
+		t.Fatalf("policy show levels = %+v, want block MEDIUM from the strict manifest posture", got)
+	}
+}
+
+// TestPackPostureFollowsTheReloadedPack: a reload that points a pack name at
+// a pack without a manifest posture drops the posture the old pack had, and
+// a candidate that points the name elsewhere (then is rejected) leaves the
+// running generation's directory, and so its levels, alone.
+func TestPackPostureFollowsTheReloadedPack(t *testing.T) {
+	ref := config.RulePackRef{Name: "posture-reload-test"}
+	rememberPackPosture("/packs/a", "strict")
+	if got := packPosture(ref, "/packs/a"); got != "strict" {
+		t.Fatalf("posture = %q, want strict", got)
+	}
+	rememberPackPosture("/packs/rejected", "permissive")
+	if got := packPosture(ref, "/packs/a"); got != "strict" {
+		t.Fatalf("posture after a rejected candidate = %q, want strict", got)
+	}
+	rememberPackPosture("/packs/b", "")
+	if got := packPosture(ref, "/packs/b"); got != "default" {
+		t.Fatalf("posture after the reload = %q, want default", got)
+	}
+}
+
+// TestAlertLevelIsReportedClampedToBlock: guardrail.alert_at above block_at
+// alerts at the block level, and policy show reports that level.
+func TestAlertLevelIsReportedClampedToBlock(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.BlockAt = "LOW"
+	cfg.Guardrail.AlertAt = "HIGH"
+	if got := ConfigThresholds(cfg, ""); got.Block != "LOW" || got.Alert != "LOW" {
+		t.Fatalf("levels = %+v, want block and alert LOW", got)
+	}
+}
+
+// TestBuildPostureIsVisibleOnlyOnceTheGenerationPublishes: a build that is then
+// rejected must not change the levels the running generation's hooks use.
+func TestBuildPostureIsVisibleOnlyOnceTheGenerationPublishes(t *testing.T) {
+	ref := config.RulePackRef{Name: "posture-pending-test"}
+	rememberPackPosture("/packs/live", "strict")
+	notePackPosture("/packs/live", "permissive")
+	if got := packPosture(ref, "/packs/live"); got != "strict" {
+		t.Fatalf("posture before publish = %q, want strict", got)
+	}
+	// The threshold table the build precomputes for the proxy path is served
+	// once the generation publishes, so it carries the build's posture.
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "posture-pending-test"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"posture-pending-test": {Path: "/packs/live"}}
+	table := buildThresholdTable(cfg, nil)
+	publishPackPostures()
+	if got := packPosture(ref, "/packs/live"); got != "permissive" {
+		t.Fatalf("posture after publish = %q, want permissive", got)
+	}
+	if got, want := table[thresholdKey{}], resolveThresholds(cfg, ""); got != want {
+		t.Fatalf("precomputed levels = %+v, want %+v as resolved after publish", got, want)
+	}
+}
+
+// TestSecureClientProxyKeepsTheDataJSONLevels: the 1.0 proxy verdict read the
+// data.json levels and trust level whatever the rule pack or block_at.
+func TestSecureClientProxyKeepsTheDataJSONLevels(t *testing.T) {
+	policyDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(policyDir, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"guardrail":{"block_threshold":3,"alert_threshold":1,"cisco_trust_level":"advisory"}}`
+	if err := os.WriteFile(filepath.Join(policyDir, "rego", "data.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: policyDir}
+	cfg.Guardrail.RulePack = "strict"
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("fixture is not a Secure Client configuration")
+	}
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	if got := requestThresholds(context.Background()); got != (policy.ThresholdsInput{Block: 3, Alert: 1, CiscoTrustLevel: "advisory"}) {
+		t.Fatalf("Secure Client proxy thresholds = %+v, want the data.json levels", got)
 	}
 }

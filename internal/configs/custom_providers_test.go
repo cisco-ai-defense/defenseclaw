@@ -191,7 +191,7 @@ func TestApplyOverlay_NormalizesDomainCase(t *testing.T) {
 			{Name: "InternalLLM", Domains: []string{"LLM.CORP.Example.COM", "Api.OpenAI.Com"}},
 		},
 	}
-	applyOverlay(&base, overlay)
+	ApplyOverlay(&base, overlay)
 	// InternalLLM must have both domains in lowercase form.
 	var internal *Provider
 	for i := range base.Providers {
@@ -232,7 +232,7 @@ func TestApplyOverlay_DeduplicatesDomains(t *testing.T) {
 		},
 		OllamaPorts: []int{11434, 11434},
 	}
-	applyOverlay(&base, overlay)
+	ApplyOverlay(&base, overlay)
 	var count int
 	for _, d := range base.Providers[0].Domains {
 		if d == "api.openai.com" {

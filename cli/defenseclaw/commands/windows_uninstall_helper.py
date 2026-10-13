@@ -50,6 +50,8 @@ _LAUNCHER_WAIT_SECONDS = 15.0
 # An interactive cmd.exe that ran the shim stays open; do not wait long on it.
 _SHIM_SHELL_WAIT_SECONDS = 5.0
 _MAX_LAUNCHER_DEPTH = 4
+# A .cmd shim is one command line; a far larger file is not the installer's.
+_SHIM_MAX_BYTES = 16_384
 # cmd.exe would interpret these in a path (paths cannot hold a quote anyway).
 _CMD_METACHARACTERS = set('"%!^&|<>()')
 
@@ -121,6 +123,44 @@ def _validate_root(path: str, label: str) -> str:
     return root
 
 
+def _shim_encodings() -> list[str]:
+    """The encodings a .cmd shim may be in: UTF-8, then the OEM and ANSI code pages.
+
+    install.ps1 writes its shims in the OEM code page, the one cmd.exe reads
+    them in; a shim written by hand or by another tool is often UTF-8 or ANSI.
+    """
+    encodings = ["utf-8-sig"]
+    if hasattr(ctypes, "WinDLL"):  # The code pages come from the Windows API.
+        kernel32 = ctypes.WinDLL("kernel32")
+        encodings.extend(f"cp{page}" for page in (kernel32.GetOEMCP(), kernel32.GetACP()))
+    return encodings
+
+
+def shim_runs(path: str, executable: str) -> bool:
+    """Report whether the .cmd shim at path runs executable with its arguments.
+
+    The CLI uses this check too. A non-ASCII profile path is encoded
+    differently in each code page (install.ps1 writes "\u00e9" as byte 0x82
+    in code page 850, which is not valid UTF-8; GAP-0751), so each candidate
+    decoding is tried. A byte a code page cannot decode becomes U+FFFD, which
+    no path holds: a decoding problem is a mismatch, never an error. Raises
+    OSError when the file cannot be read and ValueError when it is oversized.
+    """
+    with open(path, "rb") as stream:
+        data = stream.read(_SHIM_MAX_BYTES + 1)
+    if len(data) > _SHIM_MAX_BYTES:
+        raise ValueError("Windows CLI shim is oversized")
+    invocation = f'"{executable}" %*'.lower()
+    for encoding in _shim_encodings():
+        try:
+            text = data.decode(encoding, errors="replace")
+        except LookupError:
+            continue
+        if invocation in text.lower():
+            return True
+    return False
+
+
 def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
     install_root = _validate_root(str(plan["install_root"]), "install root")
     data_dir = _validate_root(str(plan["data_dir"]), "data root")
@@ -164,12 +204,7 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
         shim = os.path.join(install_root, "defenseclaw.cmd")
         if not os.path.isfile(shim) or _is_reparse(shim):
             raise ValueError("installer-owned defenseclaw.cmd shim is missing")
-        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
-            contents = stream.read(16_385)
-        if len(contents) > 16_384:
-            raise ValueError("Windows CLI shim is oversized")
-        expected_cli = os.path.join(managed_venv, "Scripts", "defenseclaw.exe")
-        if f'"{expected_cli}" %*'.lower() not in contents.lower():
+        if not shim_runs(shim, os.path.join(managed_venv, "Scripts", "defenseclaw.exe")):
             raise ValueError("Windows CLI shim targets an unrelated runtime")
     targets.sort(key=lambda target: os.path.basename(target).lower() == "defenseclaw.cmd")
     return install_root, data_dir, targets

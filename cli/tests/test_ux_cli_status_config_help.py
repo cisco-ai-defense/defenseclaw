@@ -163,10 +163,9 @@ def test_config_path_pads_labels_and_hides_openclaw_without_openclaw(tmp_path: P
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_config_show_hides_reveal_and_reference_section_is_optional() -> None:
+def test_config_reference_section_is_optional() -> None:
     # GAP-1116
-    show = config_cmd.commands["show"]
-    assert next(p for p in show.params if p.name == "reveal").hidden
+    assert "reveal" not in {p.name for p in config_cmd.commands["show"].params}
     section = next(p for p in config_cmd.commands["reference"].params if p.name == "section")
     assert not section.required and section.default == "observability"
 
@@ -189,7 +188,20 @@ def test_source_builds_stamp_commit_and_date() -> None:
     assert "-X main.commit=${COMMIT} -X main.date=${BUILT}" in assets
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)" in makefile
-    assert 'GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"' in makefile
+    assert 'GO_BUILD_FLAGS := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"' in makefile
+
+
+def test_makefile_go_commands_ignore_inherited_build_variables() -> None:
+    # make exports command-line GOOS/GOARCH, and any variable also set in the environment, to every
+    # recipe command: a Makefile GOFLAGS broke go when GOFLAGS was set, and `go run` of the resource
+    # stamper under GOOS=windows built a Windows exe that a Linux or macOS build host cannot exec.
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert not re.search(r"^GOFLAGS\s*[:?+]?=", makefile, re.MULTILINE)
+    assert "HOST_GO_RUN := env -u GOOS -u GOARCH go run" in makefile
+    recipe = makefile.split("\ngateway-cross:", 1)[1].split("\n\n", 1)[0]
+    stamper_runs = [line for line in recipe.splitlines() if "./internal/tools/windowsresources" in line]
+    assert len(stamper_runs) == 3
+    assert all(line.strip().startswith("$(HOST_GO_RUN) ") for line in stamper_runs)
 
 
 def test_upgrade_and_rollback_usage_errors_exit_2(capsys: pytest.CaptureFixture[str]) -> None:

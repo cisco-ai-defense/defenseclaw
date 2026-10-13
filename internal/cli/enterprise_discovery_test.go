@@ -20,12 +20,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/spf13/cobra"
 )
 
 // GAP-1144: an administrator had no command to read the AI Discovery
@@ -52,7 +57,7 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		502: {{Name: "Codex CLI", Category: "agent_cli", SupportedConnector: "codex", State: "active", LastSeen: scanned}},
 	} {
 		user := map[int]string{501: "dcm-std1", 502: "dcm-std2"}[uid]
-		record := inventory.UserScanRecord{Version: 1, UID: uid, User: user, UpdatedAt: scanned,
+		record := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: uid, User: user, UpdatedAt: scanned,
 			Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: signals}}
 		data, _ := json.Marshal(record)
 		if err := os.WriteFile(filepath.Join(dir, filepath.Base(user)+".tmp"), nil, 0o600); err != nil {
@@ -93,7 +98,29 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		t.Fatalf("--json --user 502 = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) {
+	// GAP-1081: an SSSD account recorded as id prints it is selected by the
+	// bare name the records and boards carry, in any case, and by
+	// DOMAIN\name as NSS resolves it; a name that selects nothing lists the
+	// spellings --user takes instead of saying the account is not enrolled.
+	sssd := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: 94403992, User: "dcad-o4u1@dclab.test", UpdatedAt: scanned,
+		Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{{Name: "Continue", Category: "editor_extension"}}}}
+	data, _ := json.Marshal(sssd)
+	if err := os.WriteFile(filepath.Join(dir, "94403992.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousIDs := enterpriseDiscoveryAccountIDs
+	t.Cleanup(func() { enterpriseDiscoveryAccountIDs = previousIDs })
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4u1`: {"94403992"}}[user]
+	}
+	for _, spelling := range []string{"dcad-o4u1", "DCAD-O4U1@DCLAB.TEST", `DCLAB\dcad-o4u1`, "94403992"} {
+		var picked bytes.Buffer
+		if err := writeEnterpriseDiscovery(&picked, dir, spelling, false); err != nil || !strings.Contains(picked.String(), "dcad-o4u1@dclab.test (uid 94403992)") {
+			t.Fatalf("--user %s = %v:\n%s", spelling, err, picked.String())
+		}
+	}
+	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) ||
+		!strings.Contains(err.Error(), "user@domain as id prints it") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 	var empty bytes.Buffer
@@ -156,6 +183,100 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 	}
 }
 
+// On managed Linux, agent actions name their kernel backend: the host's
+// Tetragon, or the native fallback and why, and the kernel floor.
+func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
+	var view enterpriseRuntimeView
+	if err := json.Unmarshal([]byte(`{"enabled":true,"planes":[
+		{"plane":"c","name":"agent actions","available":true,"running":true,"mechanism":"tetragon",
+		 "backend":{"kind":"tetragon","version":"v1.7.1","mode":"enforce","events_lost":0,"loss_known":true,
+		  "kernel_floor":{"mode":"enforce","enforced_users":2,"enrolled_users":3,"burn_in_users":1,"paused_until":"2026-10-07T14:05:00Z",
+		   "approval":"approved","next_ready_hours":216},
+		  "customer_policies":[{"name":"10-file-sensitive","mode":"enforce","state":"enabled","seen":40,"forwarded":12,"attributed":12},
+		   {"name":"20-net-connect","mode":"monitor","state":"enabled","seen":3}],
+		  "customer_events":{"seen":43,"forwarded":15,"dropped":0,"container":1,"attributed":12,"gated":3}}},
+		{"plane":"b","name":"shadow egress","available":true,"running":true,"mechanism":"proc"}]}`), &view); err != nil {
+		t.Fatal(err)
+	}
+	stubEnterpriseDiscoveryRuntime(t, &view, nil)
+	var out bytes.Buffer
+	if err := writeEnterpriseDiscovery(&out, filepath.Join(t.TempDir(), "missing"), "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"agent actions: running via tetragon\n    kernel sensor: Tetragon v1.7.1, enforce, 0 events lost\n" +
+			"    kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days; paused until 2026-10-07T14:05:00Z\n" +
+			"    your Tetragon policies: 2 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)\n",
+		"shadow egress: running via proc\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	var asJSON bytes.Buffer
+	if err := writeEnterpriseDiscovery(&asJSON, filepath.Join(t.TempDir(), "missing"), "", true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(asJSON.String(), `"backend": {`) || strings.Count(asJSON.String(), `"backend"`) != 1 {
+		t.Fatalf("--json carries the backend only where the gateway reports one:\n%s", asJSON.String())
+	}
+
+	for backend, want := range map[string]string{
+		`{"kind":"native","fallback_reason":"tetragon_tcp_api: localhost:54321"}`:                                                           "kernel sensor: cn_proc and fanotify (Tetragon not used: its API listens on TCP instead of a local socket)",
+		`{"kind":"native","fallback_reason":"something_new: the stream ended"}`:                                                             "kernel sensor: cn_proc and fanotify (Tetragon not used: the stream ended)",
+		`{"kind":"tetragon","version":"1.7.1","mode":"consume","events_lost":4,"loss_known":false}`:                                         "kernel sensor: Tetragon v1.7.1, consume, events lost unknown",
+		`{"kind":"tetragon","mode":"observe"}`:                                                                                              "kernel sensor: Tetragon, observe, events lost unknown",
+		`{"kind":"tetragon","mode":"observe","events_lost":3}`:                                                                              "kernel sensor: Tetragon, observe, 3 events lost",
+		`{"kind":"native","kernel_floor":{"mode":"observe","enrolled_users":2}}`:                                                            "kernel controls: monitoring 2 users, not enforcing",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":1,"approval":"missing"}}`:                                       "kernel controls: monitoring 1 user; enforce is not approved yet",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":3,"approval":"stale"}}`:                                         "kernel controls: monitoring 3 users; the approval is for another build",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":2,"burn_in_users":1,"next_ready_hours":20}}`: "kernel controls: enforcing 1 of 2 users; 1 in burn-in, next ready ~20 hours",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":1}}`:                                         "kernel controls: enforcing 1 of 1 user",
+		`{"kind":"native","customer_events":{"forwarded":1,"attributed":1}}`:                                                                "your Tetragon policies: 0 loaded (0 enforcing); 1 agent event forwarded (DefenseClaw never changes them)",
+		// Events below no agent (a cron job) are not agent events, and only
+		// the budget is "over the budget" (customer_events off drops them too).
+		`{"kind":"native","customer_events":{"forwarded":5000,"attributed":0,"gated":5000,"dropped":9,"capped":4}}`: "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded, 4 over the budget (DefenseClaw never changes them)",
+		`{"kind":"native","customer_events":{"dropped":5000,"capped":0}}`:                                           "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded (DefenseClaw never changes them)",
+	} {
+		var b enterpriseRuntimeBackend
+		if err := json.Unmarshal([]byte(backend), &b); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(b.lines(), "\n"); got != want {
+			t.Fatalf("%s: %q, want %q", backend, got, want)
+		}
+	}
+	if lines := (*enterpriseRuntimeBackend)(nil).lines(); lines != nil {
+		t.Fatalf("no backend: %v", lines)
+	}
+}
+
+// defenseclaw-gateway status prints one Kernel sensor line under Subsystems
+// when /health carries the Plane C backend, and nothing otherwise.
+func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
+	var snap gateway.HealthSnapshot
+	if err := json.Unmarshal([]byte(`{"ai_runtime":{"state":"running","details":{"planes":{"c":{"backend":
+		{"kind":"tetragon","version":"1.7.1","mode":"observe","kernel_floor":{"mode":"observe","enrolled_users":3}}}}}}}`), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := kernelSensorStatusLine(&snap), "Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing"; got != want {
+		t.Fatalf("line %q, want %q", got, want)
+	}
+	if out := captureStdout(t, func() { printSubsystems(&snap) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
+		t.Fatalf("subsystems:\n%s", out)
+	}
+	var native gateway.HealthSnapshot
+	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"backend":{"kind":"native","fallback_reason":"tetragon_tcp_api: localhost:54321"}}}}}}`), &native)
+	if got := kernelSensorStatusLine(&native); got != "cn_proc and fanotify (Tetragon not used: its API listens on TCP instead of a local socket)" {
+		t.Fatalf("native line %q", got)
+	}
+	var plain gateway.HealthSnapshot
+	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"running":true}}}}}`), &plain)
+	if out := captureStdout(t, func() { printSubsystems(&plain) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
+		t.Fatalf("a gateway without a backend prints a kernel line:\n%s", out)
+	}
+}
+
 // GAP-1144: root's discovery view read root's own ~/.defenseclaw/config.yaml
 // and never reached the managed gateway. The runtime read now pins the
 // managed deployment's config first; this runs the real fetch against a
@@ -163,6 +284,18 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/guardrail/profiles/resolve" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"unknown connector \"bogus\"; valid connectors: claudecode, codex"}`))
+			return
+		}
+		if r.URL.Path == "/api/v1/slow" {
+			select { // a gateway still resolving a user
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/ai-usage/runtime" || r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -201,6 +334,46 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	if view.Gateway != "127.0.0.1:"+port || !view.Enabled || len(view.Planes) != 1 || view.Planes[0].Mechanism != "ps(1)" {
 		t.Fatalf("runtime view = %+v", view)
 	}
+	var bad json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/guardrail/profiles/resolve?connector=bogus", &bad); err == nil ||
+		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
+		!strings.Contains(err.Error(), "claudecode, codex") {
+		t.Fatalf("unknown connector = %v", err)
+	}
+
+	// GAP-0215: a gateway that took the connection and is still resolving a
+	// user is running, so a timeout blames the directory lookup; only a
+	// connection that fails sends the administrator to the deployment status.
+	previousWait := enterpriseGatewayWait
+	enterpriseGatewayWait = 100 * time.Millisecond
+	t.Cleanup(func() { enterpriseGatewayWait = previousWait })
+	var answer json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil ||
+		!strings.Contains(err.Error(), "took the connection but did not answer within 0.1 s") ||
+		strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("slow gateway error = %v, want the directory lookup blamed", err)
+	}
+	// Secure Client keeps the 5 s wait and the error of main (GAP-0303,
+	// issue #1092).
+	previousLoad, previousSecureClientWait := enterpriseDiscoveryLoadConfig, secureClientGatewayWait
+	t.Cleanup(func() {
+		enterpriseDiscoveryLoadConfig, secureClientGatewayWait = previousLoad, previousSecureClientWait
+	})
+	secureClientGatewayWait = 100 * time.Millisecond
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: gateway.Listener.Addr().(*net.TCPAddr).Port,
+		}}
+		return nil
+	}
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "did not answer; check the deployment") {
+		t.Fatalf("Secure Client slow gateway error = %v, want the error of main", err)
+	}
+	enterpriseDiscoveryLoadConfig = previousLoad
+	gateway.Close()
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
+	}
 }
 
 // GAP-1964: managed Windows had no `enterprise windows discovery`. The
@@ -214,16 +387,16 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
 			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
-			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"dccert-mcp", "mcp.json"}, Evidence: []inventory.AIEvidence{
 					{Type: "mcp", Basename: "mcp.json"}, {Type: "mcp_server", Basename: "dccert-mcp"}}},
 			// GAP-2337: a config file that declares no server is no MCP server.
-			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"mcp_config.json"}, Evidence: []inventory.AIEvidence{{Type: "mcp", Basename: "mcp_config.json"}}},
-			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills"}, Evidence: []inventory.AIEvidence{{Type: "skill", Basename: "skills"}},
 				Partial: true, CoverageReason: "read_error"},
-			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "dccert-skill", Category: "skill", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills", "ewr6-hello2"}, Evidence: []inventory.AIEvidence{
 					{Type: "skill", Basename: "skills"}, {Type: "skill_entry", Basename: "ewr6-hello2"}}},
 			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
@@ -292,7 +465,9 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 		t.Fatalf("--json --user <sid> = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
+	// GAP-0079: the bare name selects the DOMAIN\name rows above; an
+	// unknown account says what the scan did find.
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), "found signals for 2 other account(s)") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 
@@ -310,5 +485,286 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
 		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
 		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
+	}
+}
+
+// GAP-1091: a domain account and a local account of one name are two
+// entries, each under its own SID and named DOMAIN\name or COMPUTER\name;
+// a qualified --user lists only the account it names, the bare name both.
+func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	previous, previousIDs, previousName := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName = previous, previousIDs, previousName
+	})
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "dcad-o4wd", UserID: domainSID},
+			{Name: "Continue", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+			{Name: "GitHub Copilot", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4wd`: {domainSID}, `DCFC-WIN2-RS2\dcad-o4wd`: {localSID}, `.\dcad-o4wd`: {localSID}}[user]
+	}
+	enterpriseDiscoveryAccountName = func(sid string) string {
+		return map[string]string{domainSID: `DCLAB\dcad-o4wd`, localSID: `DCFC-WIN2-RS2\dcad-o4wd`}[sid]
+	}
+	var summary bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&summary, "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`DCLAB\dcad-o4wd (SID ` + domainSID + `): scanned`, `DCFC-WIN2-RS2\dcad-o4wd (SID ` + localSID + `): scanned`} {
+		if !strings.Contains(summary.String(), want) {
+			t.Fatalf("summary lacks %q:\n%s", want, summary.String())
+		}
+	}
+	for user, want := range map[string]string{`DCFC-WIN2-RS2\dcad-o4wd`: localSID, `.\dcad-o4wd`: localSID, `DCLAB\dcad-o4wd`: domainSID} {
+		var one bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&one, user, true); err != nil || json.Unmarshal(one.Bytes(), &report) != nil ||
+			len(report.Accounts) != 1 || report.Accounts[0].SID != want {
+			t.Fatalf("--json --user %s = %v:\n%s", user, err, one.String())
+		}
+		for _, signal := range report.Accounts[0].Signals {
+			if signal.UserID != want {
+				t.Fatalf("--user %s lists a signal of %s", user, signal.UserID)
+			}
+		}
+	}
+	var both bytes.Buffer
+	var report enterpriseDiscoveryReport
+	if err := writeWindowsEnterpriseDiscovery(&both, "dcad-o4wd", true); err != nil || json.Unmarshal(both.Bytes(), &report) != nil || len(report.Accounts) != 2 {
+		t.Fatalf("--json --user <bare name> = %v:\n%s", err, both.String())
+	}
+}
+
+// A qualified account selection must not attribute a bare runtime finding
+// to one of two accounts with the same name (GAP-1250).
+func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(t *testing.T) {
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: domainSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: localSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		if user == `DCLAB\alice` {
+			return []string{domainSID}
+		}
+		if user == `.\alice` {
+			return []string{localSID}
+		}
+		return nil
+	}
+	runtimeView := &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+		{PID: 41, User: "alice", Process: "node"},
+		{PID: 42, User: `DCLAB\alice`, UserSID: domainSID, Process: "python3"},
+		{PID: 43, User: `LOCAL\alice`, UserSID: localSID, Process: "codex"},
+	}}
+	stubEnterpriseDiscoveryRuntime(t, runtimeView, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		view := *runtimeView
+		view.Findings = append([]enterpriseRuntimeFinding(nil), runtimeView.Findings...)
+		return &view, nil
+	}
+
+	var out bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
+		t.Fatal(err)
+	}
+	var report enterpriseDiscoveryReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Accounts) != 1 || report.Accounts[0].SID != domainSID ||
+		report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 42 {
+		t.Fatalf("qualified account runtime findings: %s", out.String())
+	}
+	for _, tc := range []struct {
+		user string
+		want int
+	}{
+		{user: "alice", want: 3},
+		{user: `.\alice`, want: 43},
+		{user: localSID, want: 43},
+		{user: domainSID, want: 42},
+	} {
+		out.Reset()
+		if err := writeWindowsEnterpriseDiscovery(&out, tc.user, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Runtime == nil || (tc.want == 3 && len(report.Runtime.Findings) != 3) ||
+			(tc.want != 3 && (len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != tc.want)) {
+			t.Fatalf("--user %q runtime findings: %s", tc.user, out.String())
+		}
+	}
+}
+
+// GAP-1117/GAP-1250: every spelling of one account lists that account and
+// exactly its runtime findings; a host-wide finding the gateway could not
+// attribute matches no account and is listed apart.
+func TestWindowsEnterpriseDiscoveryUserFormsListOnlyThatAccountsRuntimeFindings(t *testing.T) {
+	const aliceSID, bobSID = "S-1-5-21-1-2-3-1104", "S-1-5-21-9-8-7-1001"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: aliceSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "bob", UserID: bobSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	// A fake LSA: the workgroup test host has no DCLAB domain.
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\alice`: {aliceSID}, `DCFC-WIN2-RS1\bob`: {bobSID}, `.\bob`: {bobSID}}[user]
+	}
+	findings := []enterpriseRuntimeFinding{
+		{PID: 10, Process: "codex.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "process_owner"},
+		{PID: 11, Process: "uvx.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "session"},
+		{PID: 20, Process: "python.exe", User: `DCFC-WIN2-RS1\bob`, UserSID: bobSID, Attribution: "enrolled_profile"},
+		{PID: 30, Process: "claude", Attribution: "unattributed", AttributionReason: "owner unknown"},
+	}
+	stubEnterpriseDiscoveryRuntime(t, nil, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		return &enterpriseRuntimeView{Enabled: true, Findings: append([]enterpriseRuntimeFinding(nil), findings...)}, nil
+	}
+	for _, test := range []struct {
+		user, sid string
+		pids      []int
+	}{
+		{"alice", aliceSID, []int{10, 11}},
+		{`DCLAB\alice`, aliceSID, []int{10, 11}},
+		{aliceSID, aliceSID, []int{10, 11}},
+		{"bob", bobSID, []int{20}},
+		{`DCFC-WIN2-RS1\bob`, bobSID, []int{20}},
+		{`.\bob`, bobSID, []int{20}},
+		{bobSID, bobSID, []int{20}},
+	} {
+		var out bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&out, test.user, true); err != nil || json.Unmarshal(out.Bytes(), &report) != nil {
+			t.Fatalf("--user %s: %v\n%s", test.user, err, out.String())
+		}
+		if len(report.Accounts) != 1 || report.Accounts[0].SID != test.sid || report.Runtime == nil {
+			t.Fatalf("--user %s accounts: %s", test.user, out.String())
+		}
+		var pids []int
+		for _, finding := range report.Runtime.Findings {
+			pids = append(pids, finding.PID)
+		}
+		if !slices.Equal(pids, test.pids) {
+			t.Errorf("--user %s runtime findings = %v, want %v", test.user, pids, test.pids)
+		}
+		if len(report.Runtime.UnattributedFindings) != 1 || report.Runtime.UnattributedFindings[0].PID != 30 {
+			t.Errorf("--user %s unattributed = %+v, want the host-wide pid 30 apart", test.user, report.Runtime.UnattributedFindings)
+		}
+	}
+	var text bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&text, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "4 finding(s), 1 of them unattributed (host-wide)") ||
+		!strings.Contains(text.String(), "host-wide (unattributed)") {
+		t.Fatalf("summary does not label the unattributed finding:\n%s", text.String())
+	}
+}
+
+// A Secure Client computer keeps the enterprise groups and the discovery
+// --user match it had before the identity views (GAP-0138), and drops the
+// other commands main does not have (issue #1092).
+func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
+	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
+	t.Cleanup(func() {
+		secureClientHost, cfg, enterpriseDiscoveryGatewayReport = previousHost, previousCfg, previousReport
+	})
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	enterprise := &cobra.Command{Use: "enterprise"}
+	group := &cobra.Command{Use: "windows"}
+	discovery := &cobra.Command{Use: "discovery"}
+	var discoveryUser string
+	addWindowsDiscoveryUserFlag(discovery, &discoveryUser)
+	group.AddCommand(discovery)
+	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
+	// Nor does it have enterprise acp setup or its help line (GAP-0302).
+	acpGroup := &cobra.Command{Use: "acp", Long: enterpriseACPCmd.Long, Annotations: enterpriseACPCmd.Annotations}
+	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
+	enterprise.AddCommand(group, acpGroup)
+	root.AddCommand(enterprise)
+	policyGroup := &cobra.Command{Use: "policy"}
+	policyGroup.AddCommand(&cobra.Command{Use: "show", Short: policyShowCmd.Short, Annotations: policyShowCmd.Annotations},
+		&cobra.Command{Use: "digest", Annotations: policyDigestCmd.Annotations})
+	scanGroup := &cobra.Command{Use: "scan"}
+	scanGroup.AddCommand(&cobra.Command{Use: "code"}, &cobra.Command{Use: "skill", Annotations: scanSkillCmd.Annotations},
+		&cobra.Command{Use: "mcp", Annotations: scanMCPCmd.Annotations}, &cobra.Command{Use: "plugin", Annotations: scanPluginCmd.Annotations})
+	root.AddCommand(policyGroup, scanGroup)
+	// Nor the config group, audit export --db, and the newer help of
+	// rulepack and sandbox setup --no-mounts (GAP-0270).
+	configGroup := &cobra.Command{Use: "config", Annotations: configCmd.Annotations}
+	export := &cobra.Command{Use: "export", Long: auditExportCmd.Long, Annotations: auditExportCmd.Annotations}
+	db := *auditExportCmd.Flags().Lookup("db")
+	export.Flags().AddFlag(&db)
+	rulePack := &cobra.Command{Use: "rulepack", Long: rulePackCmd.Long, Annotations: rulePackCmd.Annotations}
+	sandboxSetup := newSandboxSetupCmd()
+	root.AddCommand(configGroup, export, rulePack, sandboxSetup)
+	hook := newHookCmd()
+	root.AddCommand(hook)
+	secureClientHost = func() bool { return false }
+	keepCommandTreeOfMainOnSecureClient(root)
+	if got := len(group.Commands()); got != 3+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
+		t.Fatalf("standalone groups have %d and %d commands, want the identity, sandbox and policy views and setup too", got, len(acpGroup.Commands()))
+	}
+	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
+		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())
+	}
+	secureClientHost = func() bool { return true }
+	keepCommandTreeOfMainOnSecureClient(root)
+	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
+		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {
+		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
+	}
+	if len(hook.Commands()) != 0 {
+		t.Fatal("Secure Client retained hook session-facts or resolve-writes")
+	}
+	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
+		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
+		t.Fatalf("Secure Client acp group = %v, help %q, want the ones of main", got, acpGroup.Long)
+	}
+	if p, s := policyGroup.Commands(), scanGroup.Commands(); len(p) != 1 || p[0].Name() != "show" || len(s) != 1 || s[0].Name() != "code" {
+		t.Fatalf("Secure Client policy %v, scan %v: want the commands of main (policy show, scan code)", p, s)
+	}
+	if got := policyGroup.Commands()[0].Short; got != "Display the current OPA data.json policy configuration" {
+		t.Fatalf("Secure Client policy show help = %q, want the line of main", got)
+	}
+	if !configGroup.Hidden || export.Flag("db") != nil || strings.Contains(export.Long, "--db") ||
+		!strings.HasSuffix(rulePack.Long, "pointing guardrail.rule_pack_dir at it.") ||
+		sandboxSetup.Flag("no-mounts").Usage != "leave bind mounts off (Linux); every run then works on a copy" {
+		t.Fatalf("Secure Client config hidden=%v, export --db %v, help %q / %q / %q: want the tree of main",
+			configGroup.Hidden, export.Flag("db"), export.Long, rulePack.Long, sandboxSetup.Flag("no-mounts").Usage)
+	}
+
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex CLI", Category: "supported_connector", UserName: "alice", UserID: "S-1-5-21-7"},
+		}}, "127.0.0.1:18970", nil
+	}
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	user := `DCLAB\alice`
+	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
+		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
 	}
 }

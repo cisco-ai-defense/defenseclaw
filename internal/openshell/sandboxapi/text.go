@@ -21,10 +21,20 @@ import (
 	"unicode/utf8"
 )
 
+// IndefiniteArticle chooses a or an for provider names by their first letter.
+func IndefiniteArticle(name string) string {
+	first, _ := utf8.DecodeRuneInString(strings.TrimSpace(name))
+	if strings.ContainsRune("aeiouAEIOU", first) {
+		return "an"
+	}
+	return "a"
+}
+
 // DisplayText makes text a sandbox may control (a directory or tool name, a
 // binary path, a proposal's notes) safe to print on the user's terminal:
-// tabs and line breaks become spaces, and invalid UTF-8, the other C0 and
-// C1 control characters (ESC among them, which starts terminal escape
+// tabs and line breaks (U+2028 and U+2029 too, which YAML and some readers
+// break lines at) become spaces, and invalid UTF-8, the other C0 and C1
+// control characters (ESC among them, which starts terminal escape
 // sequences), DEL and the Unicode bidirectional controls become U+FFFD.
 // Text without any of them is returned as is.
 func DisplayText(s string) string {
@@ -42,7 +52,7 @@ func DisplayText(s string) string {
 	b.Grow(len(s))
 	for _, r := range strings.ToValidUTF8(s, string(utf8.RuneError)) {
 		switch {
-		case r == '\t' || r == '\n' || r == '\r':
+		case r == '\t' || r == '\n' || r == '\r' || r == 0x2028 || r == 0x2029:
 			b.WriteByte(' ')
 		case unsafeRune(r):
 			b.WriteRune(utf8.RuneError)
@@ -51,6 +61,45 @@ func DisplayText(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// MaxRequestAccessBytes bounds the request-access contact an administrator
+// sets (openshell.admin.request_access): config validation refuses more, and
+// every surface cuts what it shows to it.
+const MaxRequestAccessBytes = 512
+
+// RequestAccessFallback is the contact when the administrator set none.
+const RequestAccessFallback = "contact your IT help desk"
+
+// RequestAccessText is the caller's request-access contact made safe to
+// print: control characters and bidirectional marks replaced, cut to
+// MaxRequestAccessBytes at a character boundary, and RequestAccessFallback
+// when it is empty.
+func RequestAccessText(contact string) string {
+	contact = strings.TrimSpace(DisplayText(contact))
+	if len(contact) > MaxRequestAccessBytes {
+		contact = strings.ToValidUTF8(contact[:MaxRequestAccessBytes], "")
+	}
+	if contact == "" {
+		return RequestAccessFallback
+	}
+	return contact
+}
+
+// AccountUnknownText is the sentence for an account the computer cannot look
+// up right now (the directory does not answer): the managed gateway says it
+// to a caller it does not know, and the CLI when ssh finds no user for it.
+const AccountUnknownText = "Your account can't be looked up on this computer right now. Try again in a moment."
+
+// AccessContact is the closing sentence of a refusal or an off message:
+// "Need an exception? Contact it-security@example.com". With no contact set
+// it reads "Need an exception? Please contact your IT help desk".
+func AccessContact(contact string) string {
+	text := RequestAccessText(contact)
+	if text == RequestAccessFallback {
+		return "Need an exception? Please " + text + "."
+	}
+	return "Need an exception? Contact " + text
 }
 
 // DisplayTexts applies DisplayText to every element, copying the slice only
@@ -77,6 +126,8 @@ func unsafeRune(r rune) bool {
 	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 		return true
 	case r == 0x061c, r == 0x200e, r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	case r == 0x2028, r == 0x2029: // line and paragraph separators
 		return true
 	}
 	return false

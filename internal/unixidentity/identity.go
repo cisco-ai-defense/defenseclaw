@@ -20,6 +20,13 @@ import (
 	"strings"
 )
 
+// maxDirectoryGroups bounds how many group ids are named per account. An
+// Active Directory token holds about a thousand groups at most; an account
+// past the bound has no facts (the lookup fails, and the default profile
+// applies as default_lookup_failed) instead of facts with some of its
+// groups missing, which would select a profile on part of its membership.
+const maxDirectoryGroups = 2048
+
 // ErrNotFound is the definitive "no such account or group" answer.
 var ErrNotFound = errors.New("unixidentity: not found")
 
@@ -35,9 +42,8 @@ type Account struct {
 
 // Group is one resolved group.
 type Group struct {
-	Name    string
-	GID     int
-	Members []string
+	Name string
+	GID  int
 }
 
 // Resolver resolves accounts and group membership.
@@ -92,34 +98,23 @@ func ParsePasswdLine(line string) (Account, error) {
 	return Account{Name: name, UID: uid, GID: gid, Gecos: fields[4], Home: fields[5], Shell: fields[6]}, nil
 }
 
-// ParseGroupLine strictly parses one group(5) entry (name:passwd:gid:members).
+// ParseGroupLine strictly parses the name and gid of one group(5) entry
+// (name:passwd:gid:members). The members are not read: the NSS resolver
+// drops them from getent's output (withoutGroupMembers).
 func ParseGroupLine(line string) (Group, error) {
 	line = strings.TrimRight(line, "\r\n")
 	fields := strings.Split(line, ":")
 	if len(fields) != 4 {
 		return Group{}, fmt.Errorf("unixidentity: group entry has %d fields, want 4", len(fields))
 	}
-	if err := validName(fields[0]); err != nil {
+	if err := validGroupName(fields[0]); err != nil {
 		return Group{}, err
 	}
 	gid, err := parseID(fields[2], "gid")
 	if err != nil {
 		return Group{}, err
 	}
-	group := Group{Name: fields[0], GID: gid}
-	if fields[3] != "" {
-		for _, member := range strings.Split(fields[3], ",") {
-			member = strings.TrimSpace(member)
-			if member == "" {
-				continue
-			}
-			if err := validName(member); err != nil {
-				return Group{}, err
-			}
-			group.Members = append(group.Members, member)
-		}
-	}
-	return group, nil
+	return Group{Name: fields[0], GID: gid}, nil
 }
 
 // ParseInitgroups parses `getent initgroups <user>` output: the user name
@@ -188,6 +183,19 @@ func validName(name string) error {
 		}
 	}
 	return nil
+}
+
+// validGroupName is validName for a group looked up or read by name, which
+// may hold a space between words: directory groups are named "domain
+// users@corp.example.com" or "CORP\Domain Users". Refusing the space made
+// every such lookup an error, which the profile assignment check reads as
+// "unknown", so an assignment naming one was never warned about (GAP-1111).
+// A leading or trailing space is still refused.
+func validGroupName(name string) error {
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("unixidentity: group name %q starts or ends with a space", name)
+	}
+	return validName(strings.ReplaceAll(name, " ", "_"))
 }
 
 func parseID(raw, label string) (int, error) {

@@ -45,3 +45,13 @@ def test_managed_dotenv_without_metadata_entry_warns(tmp_path):
     tag, detail, fix = _status(tmp_path, {"HTTPS_PROXY": "http://proxy.test:3128"}, dotenv=old)
     assert tag == "warn" and "instance-metadata" in detail
     assert "defenseclaw-gateway restart" in fix
+
+
+def test_later_no_proxy_line_that_drops_the_loopback_warns(tmp_path):
+    # GAP-1097: Codex applies .env lines in order, so a later corporate line wins.
+    env = {"HTTPS_PROXY": "http://proxy.test:3128"}
+    block = f"{_CODEX_DOTENV_PROXY_MARKER} >>>\nNO_PROXY=\"${{NO_PROXY}},127.0.0.1,169.254.169.254\"\n# <<< DefenseClaw <<<\n"
+    tag, detail, fix = _status(tmp_path, env, dotenv=block + "NO_PROXY=.corp.example.com\n")
+    assert tag == "warn" and "line 4" in detail and "OTLP credential" in detail
+    assert "127.0.0.1,localhost,::1" in fix
+    assert _status(tmp_path, env, dotenv=block + 'NO_PROXY="${NO_PROXY},.corp.example.com"\n')[0] == "pass"

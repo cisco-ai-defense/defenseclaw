@@ -220,14 +220,6 @@ export class DaemonClient {
     return this.get<AdmissionResult[]>(`/alerts?limit=${limit}`);
   }
 
-  async listSkills(): Promise<ApiResponse<string[]>> {
-    return this.get<string[]>("/skills");
-  }
-
-  async listMCPs(): Promise<ApiResponse<string[]>> {
-    return this.get<string[]>("/mcps");
-  }
-
   async listBlocked(): Promise<ApiResponse<BlockEntry[]>> {
     return this.get<BlockEntry[]>("/enforce/blocked");
   }

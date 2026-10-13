@@ -45,6 +45,34 @@ func TestCLIRestartProcessProbe(t *testing.T) {
 	}
 }
 
+// waitForCLIProbe waits until the probe child has written its marker. A -race
+// -cover test binary needs seconds just to start on a loaded CI runner, so a
+// fixed 5 s budget failed there; wait for the marker or for the child to exit,
+// bounded only by the test deadline.
+func waitForCLIProbe(t *testing.T, d *daemon.Daemon, marker string) {
+	t.Helper()
+	limit := time.Now().Add(2 * time.Minute)
+	if deadline, ok := t.Deadline(); ok {
+		limit = deadline.Add(-30 * time.Second)
+	}
+	for {
+		_, err := os.Stat(marker)
+		if err == nil {
+			return
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("probe marker stat: %v", err)
+		}
+		if running, _ := d.IsRunning(); !running {
+			t.Fatal("probe exited before it created its marker")
+		}
+		if time.Now().After(limit) {
+			t.Fatal("probe marker was not created before the test deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", dataDir)
@@ -61,18 +89,7 @@ func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(marker); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("probe marker stat: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("probe marker was not created: %v", err)
-	}
+	waitForCLIProbe(t, d, marker)
 
 	watchdogPath := filepath.Join(dataDir, daemon.WatchdogPIDFileName)
 	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {
@@ -104,18 +121,7 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(marker); err == nil {
-			break
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("probe marker stat: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("probe marker was not created: %v", err)
-	}
+	waitForCLIProbe(t, d, marker)
 
 	watchdogPath := filepath.Join(dataDir, daemon.WatchdogPIDFileName)
 	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {

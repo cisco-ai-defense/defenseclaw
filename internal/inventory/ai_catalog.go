@@ -17,11 +17,14 @@
 package inventory
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -85,6 +88,12 @@ type AISignature struct {
 	ApplicationNames   []string `json:"application_names,omitempty"`
 	ConfigPaths        []string `json:"config_paths,omitempty"`
 	ExtensionIDs       []string `json:"extension_ids,omitempty"`
+	// JetBrainsPluginIDs, ZedExtensionIDs and VimPlugins flag the AI
+	// plugins of the IDE inventory: JetBrains plugin.xml ids, Zed
+	// extension ids and Vim/Neovim plugin folder (repository) names.
+	JetBrainsPluginIDs []string `json:"jetbrains_plugin_ids,omitempty"`
+	ZedExtensionIDs    []string `json:"zed_extension_ids,omitempty"`
+	VimPlugins         []string `json:"vim_plugins,omitempty"`
 	MCPPaths           []string `json:"mcp_paths,omitempty"`
 	// SkillPaths / RulePaths / PluginPaths are directory globs whose
 	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
@@ -92,7 +101,8 @@ type AISignature struct {
 	// no content scan) but each targets a specific agent-component surface:
 	//   - Codex: $CODEX_HOME/skills, ~/.agents/skills, project skill roots,
 	//     ~/.codex/plugins, and .codex/rules
-	//   - Claude Code: ~/.claude/skills, ~/.claude/rules
+	//   - Claude Code: ~/.claude/skills, ~/.claude/rules and the project's
+	//     .claude/skills and .claude/rules
 	//   - Cursor: ~/.cursor/rules, .cursor/rules
 	// Watcher-scanned skills/plugins live under the same directories, so an
 	// inventory hit here means "this endpoint has that surface configured
@@ -165,11 +175,18 @@ func LoadAISignatures() ([]AISignature, error) {
 }
 
 // AISignatureLoadOptions controls runtime catalog merging. The embedded
-// catalog is always loaded first, followed by managed packs under DataDir,
-// explicit pack paths/globs, and optional workspace-local packs.
+// catalog is always loaded first, followed by the configured pack paths and
+// globs (ai_discovery.signature_packs, the only operator source since
+// config_version 9) and optional workspace-local packs.
 type AISignatureLoadOptions struct {
-	DataDir                  string
-	SignaturePacks           []string
+	// DataDir is the data directory whose signature-packs/*.json the Secure
+	// Client profile still loads (issue #1092).
+	DataDir        string
+	SignaturePacks []string
+	// PackDigests pins pack files by path (ai_discovery.signature_pack_digests).
+	PackDigests map[string]string
+	// RequireDigests refuses a pack without a pin (managed standalone).
+	RequireDigests           bool
 	AllowWorkspaceSignatures bool
 	ScanRoots                []string
 	DisabledSignatureIDs     []string
@@ -177,6 +194,9 @@ type AISignatureLoadOptions struct {
 	WorkingDir               string
 	MaxPacks                 int
 	MaxPackBytes             int64
+	// SecureClient loads the embedded catalog as 1.0.0 shipped it
+	// (secureClientSignatures).
+	SecureClient bool
 }
 
 // LoadAISignaturesForConfig loads the embedded catalog plus any configured
@@ -188,15 +208,104 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	}
 	home, _ := platformDiscoveryHomeDir()
 	wd, _ := os.Getwd()
+	dataDir := ""
+	if cfg.SecureClientIntegration() {
+		dataDir = cfg.DataDir
+	}
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
-		DataDir:                  cfg.DataDir,
+		DataDir:                  dataDir,
 		SignaturePacks:           append([]string{}, cfg.AIDiscovery.SignaturePacks...),
-		AllowWorkspaceSignatures: cfg.AIDiscovery.AllowWorkspaceSignatures,
+		PackDigests:              cfg.AIDiscovery.SignaturePackDigests,
+		RequireDigests:           cfg.StandaloneEnterprise(),
+		AllowWorkspaceSignatures: WorkspaceSignaturesAllowed(cfg),
 		ScanRoots:                append([]string{}, cfg.AIDiscovery.ScanRoots...),
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
 		HomeDir:                  home,
 		WorkingDir:               wd,
+		SecureClient:             cfg.SecureClientIntegration(),
 	})
+}
+
+// CheckSignaturePackPins refuses, on a managed standalone host, a configured
+// signature pack file that the loader would skip: it does not match its pin in
+// ai_discovery.signature_pack_digests, or it has none. The loader only logs
+// the skip, so without this check an apply accepts a config whose pack never
+// loads (GAP-0173). A pack file that is not there yet is not a pin problem.
+func CheckSignaturePackPins(cfg *config.Config) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	home, _ := platformDiscoveryHomeDir()
+	packs, err := signaturePackPaths(AISignatureLoadOptions{SignaturePacks: cfg.AIDiscovery.SignaturePacks, HomeDir: home})
+	if err != nil {
+		return nil // reported when the catalog loads
+	}
+	pins := pinnedDigests(cfg.AIDiscovery.SignaturePackDigests, home, !cfg.SecureClientIntegration())
+	for _, pack := range packs {
+		raw, err := readAISignaturePackBytes(pack, defaultMaxSignatureBytes)
+		if err != nil {
+			continue
+		}
+		if refusal := pinRefusal(pins[signaturePinPath(pack, !cfg.SecureClientIntegration())], raw, true); refusal != "" {
+			return &config.V8SemanticError{
+				Path:     "$.ai_discovery.signature_pack_digests",
+				Summary:  "signature pack " + pack + " would not load: " + refusal,
+				Expected: "a sha256:<hex> digest of the pack file, keyed by its path",
+				Action:   "pin the file's current digest (sha256sum), or restore the pack the pin was taken from",
+			}
+		}
+	}
+	return nil
+}
+
+// SignaturePackEntry resolves one ai_discovery.signature_packs entry the way
+// the loader does (a ~ path, a directory of *.json, a glob). files are the
+// pack files it names now (a plain path stays listed while the file is not
+// there yet); watchDir is the folder a new pack would appear in, "" for an
+// entry that names one file.
+func SignaturePackEntry(entry string) (files []string, watchDir string) {
+	home, _ := platformDiscoveryHomeDir()
+	files, _ = expandSignaturePackCandidate(entry, home)
+	expanded := expandHome(entry, home)
+	if info, err := os.Stat(expanded); err == nil && info.IsDir() {
+		return files, filepath.Clean(expanded)
+	}
+	if hasGlobMeta(expanded) {
+		if dir := filepath.Dir(expanded); !hasGlobMeta(dir) {
+			return files, filepath.Clean(dir)
+		}
+		return files, ""
+	}
+	if len(files) == 0 && expanded != "" {
+		files = []string{expanded}
+	}
+	return files, ""
+}
+
+// Signature data added to the embedded catalog after 1.0.0. The Secure Client
+// profile keeps the catalog of 1.0.0 (issue #1092), so secureClientSignatures
+// removes it there.
+var (
+	postReleaseSignatureIDs = map[string]bool{"jetbrains-ai": true}
+	postReleaseExtensionIDs = map[string]string{"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+)
+
+// secureClientSignatures returns the embedded catalog as 1.0.0 shipped it:
+// without the signatures and VS Code extension ids added since, and without
+// the JetBrains, Zed and Vim plugin ids, which only the IDE inventory reads.
+func secureClientSignatures(base []AISignature) []AISignature {
+	out := make([]AISignature, 0, len(base))
+	for _, sig := range base {
+		if postReleaseSignatureIDs[sig.ID] {
+			continue
+		}
+		if added := postReleaseExtensionIDs[sig.ID]; added != "" {
+			sig.ExtensionIDs = slices.DeleteFunc(slices.Clone(sig.ExtensionIDs), func(id string) bool { return id == added })
+		}
+		sig.JetBrainsPluginIDs, sig.ZedExtensionIDs, sig.VimPlugins = nil, nil, nil
+		out = append(out, sig)
+	}
+	return out
 }
 
 // LoadAISignaturesWithOptions merges all configured catalog sources and
@@ -205,6 +314,9 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	base, err := LoadAISignatures()
 	if err != nil {
 		return nil, err
+	}
+	if opts.SecureClient {
+		base = secureClientSignatures(base)
 	}
 	disabled := normalizedSignatureIDSet(opts.DisabledSignatureIDs)
 	merged := make([]AISignature, 0, len(base))
@@ -232,8 +344,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxSignatureBytes
 	}
+	pins := pinnedDigests(opts.PackDigests, opts.HomeDir, !opts.SecureClient)
 	for _, packPath := range packs {
-		sigs, err := readAISignaturePack(packPath, maxBytes)
+		raw, err := readAISignaturePackBytes(packPath, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if refusal := pinRefusal(pins[signaturePinPath(packPath, !opts.SecureClient)], raw, opts.RequireDigests); refusal != "" {
+			// A pack that is not the one the administrator pinned is not
+			// loaded; the rest of the catalog still is.
+			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: %s\n", packPath, refusal)
+			continue
+		}
+		sigs, err := parseAISignatureCatalog(packPath, raw)
 		if err != nil {
 			return nil, err
 		}
@@ -242,7 +365,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 				continue
 			}
 			if prev := seen[sig.ID]; prev != "" {
-				return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				// This ID was introduced in the 1.0 builtin catalog. An older
+				// operator pack with the same ID keeps its configured signature.
+				if sig.ID != "jetbrains-ai" || prev != "builtin" || opts.SecureClient {
+					return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				}
+				for i := range merged {
+					if merged[i].ID == sig.ID {
+						merged[i] = sig
+						break
+					}
+				}
+				seen[sig.ID] = packPath
+				continue
 			}
 			merged = append(merged, sig)
 			seen[sig.ID] = packPath
@@ -276,7 +411,54 @@ func parseAISignatureCatalog(source string, raw []byte) ([]AISignature, error) {
 	return cat.Signatures, nil
 }
 
-func readAISignaturePack(path string, maxBytes int64) ([]AISignature, error) {
+// pinnedDigests keys ai_discovery.signature_pack_digests by resolved path
+// outside Secure Client. Secure Client keeps the legacy cleaned-path lookup.
+func pinnedDigests(pins map[string]string, home string, resolve bool) map[string]string {
+	out := make(map[string]string, len(pins))
+	for path, digest := range pins {
+		path = strings.TrimSpace(path)
+		if strings.HasPrefix(path, "~/") && home != "" {
+			path = filepath.Join(home, path[2:])
+		}
+		out[signaturePinPath(path, resolve)] = strings.ToLower(strings.TrimSpace(digest))
+	}
+	return out
+}
+
+// signaturePinPath matches Python Path.resolve for existing pack files and
+// relative keys, including symlinked directories.
+func signaturePinPath(path string, resolve bool) string {
+	path = filepath.Clean(path)
+	if !resolve {
+		return path
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
+}
+
+// pinRefusal is why raw may not load under the pinned digest want ("" when
+// it may): a pin that does not match, or no pin where one is required.
+func pinRefusal(want string, raw []byte, required bool) string {
+	if want == "" {
+		if required {
+			return "a managed device loads only packs pinned in ai_discovery.signature_pack_digests"
+		}
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	if got := "sha256:" + hex.EncodeToString(sum[:]); got != want {
+		return "its digest " + got + " does not match the pinned " + want
+	}
+	return ""
+}
+
+func readAISignaturePackBytes(path string, maxBytes int64) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("ai signature catalog: stat %s: %w", path, err)
@@ -291,12 +473,19 @@ func readAISignaturePack(path string, maxBytes int64) ([]AISignature, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ai signature catalog: read %s: %w", path, err)
 	}
-	return parseAISignatureCatalog(path, raw)
+	return raw, nil
 }
 
 type signaturePackCandidate struct {
 	path     string
 	required bool
+}
+
+// WorkspaceSignaturesAllowed is ai_discovery.allow_workspace_signatures,
+// forced off on a managed standalone host: a workspace pack is
+// user-controlled input, and there the administrator config is the policy.
+func WorkspaceSignaturesAllowed(cfg *config.Config) bool {
+	return cfg != nil && cfg.AIDiscovery.AllowWorkspaceSignatures && !cfg.StandaloneEnterprise()
 }
 
 func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
@@ -324,7 +513,15 @@ func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 			return nil, err
 		}
 		if len(paths) == 0 && candidate.required {
-			return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			if opts.SecureClient {
+				return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			}
+			// A configured pack whose file is gone is left out, like one
+			// that fails its pin: the rest of the catalog, and every other
+			// key of the configuration generation, still applies (GAP-0232).
+			// doctor and config set name it.
+			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: the path matches no file\n", candidate.path)
+			continue
 		}
 		for _, p := range paths {
 			if !seen[p] {
@@ -492,20 +689,23 @@ func validateAISignature(sig AISignature) error {
 		return fmt.Errorf("ai signature catalog: %s: unsupported category %q", sig.ID, sig.Category)
 	}
 	for field, values := range map[string][]string{
-		"binary_names":      sig.BinaryNames,
-		"process_names":     sig.ProcessNames,
-		"application_names": sig.ApplicationNames,
-		"config_paths":      sig.ConfigPaths,
-		"extension_ids":     sig.ExtensionIDs,
-		"mcp_paths":         sig.MCPPaths,
-		"skill_paths":       sig.SkillPaths,
-		"rule_paths":        sig.RulePaths,
-		"plugin_paths":      sig.PluginPaths,
-		"package_names":     sig.PackageNames,
-		"env_var_names":     sig.EnvVarNames,
-		"domain_patterns":   sig.DomainPatterns,
-		"history_patterns":  sig.HistoryPatterns,
-		"local_endpoints":   sig.LocalEndpoints,
+		"binary_names":         sig.BinaryNames,
+		"process_names":        sig.ProcessNames,
+		"application_names":    sig.ApplicationNames,
+		"config_paths":         sig.ConfigPaths,
+		"extension_ids":        sig.ExtensionIDs,
+		"jetbrains_plugin_ids": sig.JetBrainsPluginIDs,
+		"zed_extension_ids":    sig.ZedExtensionIDs,
+		"vim_plugins":          sig.VimPlugins,
+		"mcp_paths":            sig.MCPPaths,
+		"skill_paths":          sig.SkillPaths,
+		"rule_paths":           sig.RulePaths,
+		"plugin_paths":         sig.PluginPaths,
+		"package_names":        sig.PackageNames,
+		"env_var_names":        sig.EnvVarNames,
+		"domain_patterns":      sig.DomainPatterns,
+		"history_patterns":     sig.HistoryPatterns,
+		"local_endpoints":      sig.LocalEndpoints,
 	} {
 		if err := validateSignatureValues(sig.ID, field, values); err != nil {
 			return err

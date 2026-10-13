@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,9 +23,7 @@ func TestWatcherDoesNotCreateHermesAgentCheckout(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".hermes")
 	userPlugins := filepath.Join(home, "plugins")
 	agentPlugins := filepath.Join(home, "hermes-agent", "plugins")
-	if err := store.SetActionField("plugin", "late-plugin", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Plugin.Allowed = append(cfg.AssetPolicy.Plugin.Allowed, config.AssetPolicyRule{Name: "late-plugin", Reason: "pre-approved"})
 
 	var mu sync.Mutex
 	seen := map[string]string{}

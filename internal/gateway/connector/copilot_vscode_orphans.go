@@ -92,8 +92,9 @@ func orphanCopilotPluginHoldsOnlyRenders(plugin string) bool {
 }
 
 // orphanedCopilotVSCodeLocalDocument reports a regular file holding a hook
-// document whose every handler is the enterprise vscode-local command for
-// one absolute hook binary that no longer exists.
+// document whose every handler is the enterprise vscode-local command (the
+// current render or the one 1.0.0 wrote) for one absolute hook binary that
+// no longer exists.
 func orphanedCopilotVSCodeLocalDocument(path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
@@ -123,7 +124,8 @@ func orphanedCopilotVSCodeLocalDocument(path string) bool {
 			command, _ := handler["command"].(string)
 			bin, ok := orphanCopilotVSCodeCommandBinary(command)
 			if !ok || (binary != "" && bin != binary) ||
-				command != CopilotVSCodeLocalManagedHookCommand(runtime.GOOS, bin, event) {
+				(command != CopilotVSCodeLocalManagedHookCommand(runtime.GOOS, bin, event) &&
+					command != CopilotVSCodeLocalPriorReleaseHookCommand(runtime.GOOS, bin, event)) {
 				return false
 			}
 			binary = bin
@@ -138,8 +140,12 @@ func orphanedCopilotVSCodeLocalDocument(path string) bool {
 }
 
 // orphanCopilotVSCodeCommandBinary returns the hook binary a POSIX
-// vscode-local command runs (the single-quoted word before " hook").
+// vscode-local command runs (the single-quoted word before " hook", after
+// the removed-deployment guard's exec).
 func orphanCopilotVSCodeCommandBinary(command string) (string, bool) {
+	if _, rest, ok := strings.Cut(command, "|| exit 0; exec "); ok {
+		command = rest
+	}
 	idx := strings.Index(command, orphanCopilotVSCodeCmdMiddle)
 	if !strings.HasPrefix(command, "'") || idx < 1 {
 		return "", false

@@ -80,19 +80,19 @@ def _open_goal(model: SetupPanelModel, wizard: SetupWizard, goal_id: str) -> Non
 
 
 def test_rerun_form_hides_proxy_only_fields_for_hook_connectors(monkeypatch) -> None:
-    # GAP-2129: Scanner Mode / Verify After Setup showed for Claude Code and
-    # changing them did not change the command. Pin Linux: Windows has no
+    # GAP-2129: Scanner Mode showed for Claude Code and changing it did not
+    # change the command. Pin Linux: Windows has no
     # openclaw, so the form would open on a hook connector there.
     monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     model = SetupPanelModel({"guardrail": {"connector": "openclaw"}})
     _open_goal(model, SetupWizard.CONNECTOR_SETUP, "rerun")
-    assert {"Scanner Mode", "Verify After Setup"} <= {field.label for field in model.form_fields}
+    assert "Scanner Mode" in {field.label for field in model.form_fields}
     model.form_fields = [
         field.with_value("claudecode") if field.label == "Connector" else field for field in model.form_fields
     ]
     model.recompute_dependent_fields()
     labels = {field.label for field in model.form_fields}
-    assert "Scanner Mode" not in labels and "Verify After Setup" not in labels
+    assert "Scanner Mode" not in labels
     assert model.wizard_command_preview().startswith("defenseclaw setup claude-code --yes")
 
 

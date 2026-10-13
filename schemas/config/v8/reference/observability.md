@@ -41,7 +41,6 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.trace_policy.sampler` | string | `"parentbased_always_on"` | `always_on, always_off, traceidratio, parentbased_always_on, parentbased_always_off, parentbased_traceidratio` |  |
 | `observability.trace_policy.sampler_arg` | string |  |  |  |
 | `observability.trace_policy.semantic_profile` | constant | `"defenseclaw-genai-rich-v1"` | `"defenseclaw-genai-rich-v1"` |  |
-| `observability.trace_policy.compatibility_aliases` | boolean | `true` |  |  |
 | `observability.trace_policy.limits` | object |  |  |  |
 | `observability.trace_policy.limits.max_attributes_per_span` | integer | `128` |  |  |
 | `observability.trace_policy.limits.max_events_per_span` | integer | `64` |  |  |

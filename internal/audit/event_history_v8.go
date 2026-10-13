@@ -36,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -455,6 +456,86 @@ func (writer *EventHistoryWriter) AppendContext(
 	return nil
 }
 
+// AppendBatchContext commits records in one transaction, all or none, with
+// the validation AppendContext applies to each. A producer that writes a
+// group of related rows per occurrence (the correlation relationship rows of
+// one hook) pays one commit and one write-ahead-log sync instead of one per
+// row (GAP-0246). Every record is persisted when it returns nil.
+func (writer *EventHistoryWriter) AppendBatchContext(
+	ctx context.Context,
+	records []observability.Record,
+	projections []observabilityredaction.Projection,
+) error {
+	if len(records) == 0 || len(records) != len(projections) {
+		return fmt.Errorf("audit: v8 event-history batch needs one projection per record")
+	}
+	if len(records) == 1 {
+		return writer.AppendContext(ctx, records[0], projections[0])
+	}
+	if writer == nil || writer.store == nil || writer.store.db == nil {
+		return fmt.Errorf("audit: v8 event-history writer is not initialized")
+	}
+	if ctx == nil {
+		return fmt.Errorf("audit: v8 event-history context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	release, err := writer.store.acquireReady()
+	if err != nil {
+		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
+		return err
+	}
+	released := false
+	releaseReady := func() {
+		if !released {
+			release()
+			released = true
+		}
+	}
+	defer releaseReady()
+	err = retryBusyObserved(
+		ctx,
+		"v8_event_history_transaction",
+		writer.store.sqliteBusyObservabilityV8(),
+		func() error {
+			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
+			if beginErr != nil {
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: beginErr},
+				)
+			}
+			outcomes := make([]eventHistoryAppendOutcome, 0, len(records))
+			for index := range records {
+				outcome, appendErr := writer.appendContextTx(ctx, tx, records[index], projections[index])
+				if appendErr != nil {
+					_ = tx.Rollback()
+					return appendErr
+				}
+				outcomes = append(outcomes, outcome)
+			}
+			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcomes...); commitErr != nil {
+				_ = tx.Rollback()
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: commitErr},
+				)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
+		releaseReady()
+		writer.flushHealth()
+		return err
+	}
+	releaseReady()
+	writer.flushHealth()
+	return nil
+}
+
 // appendContextTx is the one authoritative prepare-and-insert path for both
 // ordinary event-history appends and storage operations that require the event
 // plus a normalized projection to commit atomically. Callers own tx commit or
@@ -642,7 +723,14 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyToolID = nullStr(legacy.ToolID)
 		legacyStepIndex = nullInt(legacy.StepIdx)
 		legacyEnforced = nullBool(legacy.Enforced)
-		legacyRulePackDir = nullStr(legacy.RulePackDir)
+		// The directory is a path-class field of the projection: the column keeps
+		// what the local profile kept, as target and details do, so a store that
+		// hashes or removes paths never holds the raw one.
+		if legacy.RulePackDirInEnvelope {
+			legacyRulePackDir = nullStr(legacy.RulePackDir)
+		} else if value, kept := keptCompatibilityValue(projected, "rule_pack_dir", strings.TrimSpace(legacy.RulePackDir)); kept {
+			legacyRulePackDir = nullStr(value)
+		}
 	}
 
 	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
@@ -845,7 +933,7 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 func (writer *EventHistoryWriter) commitAppendTransactionContext(
 	ctx context.Context,
 	tx *sql.Tx,
-	outcome eventHistoryAppendOutcome,
+	outcomes ...eventHistoryAppendOutcome,
 ) error {
 	if writer == nil || tx == nil {
 		return fmt.Errorf("audit: event-history commit transaction is unavailable")
@@ -859,7 +947,9 @@ func (writer *EventHistoryWriter) commitAppendTransactionContext(
 		)
 		return err
 	}
-	writer.stageAppendOutcome(outcome, writer.nextHealthSequence())
+	for _, outcome := range outcomes {
+		writer.stageAppendOutcome(outcome, writer.nextHealthSequence())
+	}
 	return nil
 }
 
@@ -1147,6 +1237,14 @@ func validEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary ui
 	}
 }
 
+// ClassifyEventHistoryWriteFailure is the coarse SQLite class of a failed
+// event-history write, the class gateway health reports, so the local-write
+// loss journal can count each lost record under its reason (GAP-1129).
+func ClassifyEventHistoryWriteFailure(err error) EventHistorySQLiteClass {
+	class, _ := classifyEventHistorySQLiteFailure(err)
+	return class
+}
+
 func classifyEventHistorySQLiteFailure(err error) (EventHistorySQLiteClass, uint8) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		primary := sqlitePrimaryCode(err)
@@ -1198,10 +1296,20 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	}
 	// Scan and finding records name the asset only in their typed target
 	// reference; without this a plugin scan row had no target (GAP-2272).
-	for _, field := range []string{"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"} {
+	// Egress records name the host in their network target reference, and
+	// every other sandbox record its sandbox (GAP-0082).
+	for _, field := range []string{
+		"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref",
+		"defenseclaw.network.target_ref", "defenseclaw.sandbox.name",
+	} {
 		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
 			return target
 		}
+	}
+	// The OpenShell integration's own health (a gateway that does not
+	// answer) names no sandbox: its target is OpenShell (GAP-0169).
+	if subsystem, _ := payload["defenseclaw.health.subsystem"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) {
+		return subsystem
 	}
 	return ""
 }
@@ -1221,6 +1329,11 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	// "subsystem.degraded".
 	if subsystem, ok := payload["defenseclaw.health.subsystem"].(string); ok && subsystem != "" {
 		label := subsystem
+		if name, _ := payload["defenseclaw.sandbox.name"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) && strings.TrimSpace(name) != "" {
+			// One sandbox's health (the target names it), not the OpenShell
+			// integration's (GAP-0160).
+			label = "sandbox"
+		}
 		if state, ok := payload["defenseclaw.health.state"].(string); ok && state != "" {
 			label += " " + state
 		}
@@ -1246,6 +1359,25 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		} {
 			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
 				label += " " + field.name + "=" + fmt.Sprint(value)
+			}
+		}
+		return label
+	}
+	// Sandbox records carry no message: name the sandbox, and for an egress
+	// decision the decision, the binary, its code and why, instead of only
+	// "egress.blocked" (GAP-0082). The reason is free text, so it goes last.
+	if sandbox, ok := payload["defenseclaw.sandbox.name"].(string); ok && strings.TrimSpace(sandbox) != "" {
+		label := fallback + " sandbox=" + strings.TrimSpace(sandbox)
+		if decision, ok := payload["defenseclaw.network.decision"].(string); ok && decision != "" {
+			label = "decision=" + decision + " sandbox=" + strings.TrimSpace(sandbox)
+			for _, field := range []struct{ key, name string }{
+				{"defenseclaw.sandbox.process.executable", "binary"},
+				{"defenseclaw.network.decision_code", "code"},
+				{"defenseclaw.network.reason", "reason"},
+			} {
+				if value, ok := payload[field.key].(string); ok && strings.TrimSpace(value) != "" {
+					label += " " + field.name + "=" + strings.TrimSpace(value)
+				}
 			}
 		}
 		return label

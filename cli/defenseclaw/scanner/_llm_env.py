@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -204,15 +205,68 @@ def llm_analyzer_ready(
 
     ``model`` and ``api_key`` allow a scanner's one-shot CLI flags or legacy
     environment variables to override the resolved unified config.
+
+    On Windows a Bedrock judge in the default ``api_key`` auth mode also needs
+    a key, ``AWS_BEARER_TOKEN_BEDROCK`` or a resolving AWS credential chain:
+    the managed scanner runtime has none, so the key-less judge failed at call
+    time and the plugin scan only warned instead of stopping with the error
+    that names the model (GAP-1444). ``iam_credentials`` needs the variables
+    ``llm.bedrock`` names (``access_key_env``/``secret_key_env``, by default
+    ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``) or the AWS credential
+    chain, as the gateway judge does; before, the runtime searched only the
+    chain and missed keys under custom names (GAP-1460). The ``profile`` and
+    ``instance_role`` modes stay ready.
     """
     effective_model = model or litellm_model(llm)
     if not effective_model:
         return False
     if llm.is_local_provider():
         return True
-    if "bedrock/" in effective_model.lower():
+    if api_key or llm.resolved_api_key():
         return True
-    return bool(api_key or llm.resolved_api_key())
+    if "bedrock/" not in effective_model.lower():
+        return False
+    if not _bedrock_needs_credential_source():
+        return True
+    mode = llm.keyless_auth_mode()
+    if mode == "iam_credentials":
+        return _bedrock_iam_keys_set(llm) or _aws_credential_chain_found()
+    if mode:
+        return True
+    return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()) or _aws_credential_chain_found()
+
+
+def _bedrock_iam_keys_set(llm: LLMConfig) -> bool:
+    """Whether the access and secret key variables ``llm.bedrock`` names are set."""
+    bedrock = llm.bedrock
+    names = (
+        (bedrock.access_key_env if bedrock else "") or "AWS_ACCESS_KEY_ID",
+        (bedrock.secret_key_env if bedrock else "") or "AWS_SECRET_ACCESS_KEY",
+    )
+    return all(os.environ.get(name.strip(), "").strip() for name in names)
+
+
+def _bedrock_needs_credential_source() -> bool:
+    """Whether a key-less Bedrock judge must show a credential source first.
+
+    Only on Windows, where the managed scanner runtime runs under the gateway
+    service with no AWS credential chain; Linux and macOS keep relying on it.
+    """
+    return sys.platform == "win32"
+
+
+def _aws_credential_chain_found() -> bool:
+    """Whether the boto3 AWS credential chain resolves (environment, profile,
+    SSO, container or instance role). Without boto3 nothing signs SigV4."""
+    try:
+        import boto3
+    except ImportError:
+        return False
+    try:
+        return boto3.Session().get_credentials() is not None
+    except Exception as exc:  # noqa: BLE001 - any chain error means no usable credentials
+        _log.debug("llm env: AWS credential lookup failed: %s", exc)
+        return False
 
 
 def litellm_completion_kwargs(llm: LLMConfig) -> dict:
@@ -246,5 +300,5 @@ def litellm_completion_kwargs(llm: LLMConfig) -> dict:
     if api_key:
         kwargs["api_key"] = api_key
     if llm.base_url:
-        kwargs["api_base"] = llm.base_url
+        kwargs["api_base"] = llm.request_base_url()
     return kwargs

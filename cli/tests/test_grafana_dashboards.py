@@ -238,6 +238,56 @@ def test_local_dashboards_and_rules_use_active_v8_event_sources() -> None:
     assert "severity: critical" in managed_aid_alert
 
 
+def test_kernel_tables_keep_their_no_data_sentence_out_of_empty_cells() -> None:
+    # GAP-0025: a table's fieldConfig.defaults.noValue is also what Grafana
+    # prints in an empty cell, so a kernel event with no hook join showed "No
+    # agent events in range" in its Hook join column. Each kernel table keeps
+    # the sentence for an empty table and gives empty text cells a short
+    # placeholder; the hook join reads "none".
+    seen = 0
+    for name in ("defenseclaw-ai-runtime.json", "defenseclaw-blocked-events.json"):
+        def walk(panels: list) -> None:
+            nonlocal seen
+            for panel in panels:
+                walk(panel.get("panels", []))
+                field_config = panel.get("fieldConfig", {})
+                exprs = " ".join(target.get("expr", "") for target in panel.get("targets", []))
+                if panel.get("type") != "table" or "kernel" not in (exprs + panel.get("title", "")).lower():
+                    continue
+                if not field_config.get("defaults", {}).get("noValue"):
+                    continue
+                seen += 1
+                overrides = field_config.get("overrides", [])
+                strings = [o for o in overrides if o.get("matcher") == {"id": "byType", "options": "string"}]
+                assert strings and strings[0]["properties"] == [{"id": "noValue", "value": "-"}], panel["title"]
+                if "hook_join" in exprs:
+                    hook = [o for o in overrides if o.get("matcher") == {"id": "byName", "options": "Hook join"}]
+                    assert hook and hook[0]["properties"] == [{"id": "noValue", "value": "none"}], panel["title"]
+        walk(_dashboard(name).get("panels", []))
+    assert seen >= 5
+
+
+def test_kernel_fleet_panels_show_each_hosts_current_state() -> None:
+    # GAP-0048: the fleet table listed a host once per backend and pause value
+    # it had in 10 minutes, and the stats counted states a host had left. The
+    # table keeps each host's latest record only (the newest record time wins
+    # per host), and the stats read the defenseclaw_kernel_state gauge, whose
+    # series a host leaves drop to 0.
+    board = _dashboard("defenseclaw-ai-runtime.json")
+    panels = [*board["panels"], *(child for row in board["panels"] for child in row.get("panels", []))]
+    by_title = {panel.get("title"): panel for panel in panels}
+    table = by_title["Kernel controls per host (last 10 minutes)"]
+    for target in table["targets"]:
+        expr = target["expr"]
+        assert " and on (host_name, " in expr and "topk by (host_name) (1, " in expr, target["refId"]
+        assert "{{ __timestamp__ | unixEpoch }}" in expr and "unwrap ts" in expr, target["refId"]
+    for title in ("Hosts reporting kernel controls", "Hosts with a stale approval", "Hosts on fallback", "Paused hosts"):
+        panel = by_title[title]
+        assert panel["datasource"]["type"] == "prometheus", title
+        expr = panel["targets"][0]["expr"]
+        assert expr.startswith("count(max by (host_name) (defenseclaw_kernel_state{") and expr.endswith("> 0) or vector(0)"), title
+
+
 def test_security_dashboard_exposes_generated_ai_defense_metrics() -> None:
     dashboard = _dashboard("defenseclaw-security.json")
     attempts = _panel(dashboard, "AI Defense attempts / min")
@@ -279,6 +329,65 @@ def test_security_and_policy_log_queries_preserve_connector_scope() -> None:
     assert 'event_name=~"policy[.](updated|reload[.]rejected)"' in policy_targets["C"]
     assert "connector=" not in policy_targets["C"]
     assert "process-global control-plane records without a connector" in policy["description"]
+
+
+# Loki panels whose records carry no user, so the User box cannot narrow them.
+_FLEET_WIDE_LOG_PANELS = {
+    "defenseclaw-agent-360.json": {
+        "Relationship warnings observed",
+        "Relationship evidence and conflict chronology",
+    },
+    "defenseclaw-agent-identity.json": {"Discovery runs ($__range)"},
+    # Plane health records describe a host, not an account.
+    "defenseclaw-ai-runtime.json": {
+        "Planes not running",
+        "Processes observed",
+        "Connections observed",
+        "Unattributable connections",
+        "Processes not fully readable",
+        "Partial poll cycles",
+        "Plane C events classified",
+        "Plane C events gated",
+        "Plane health — every plane, every cycle",
+        "Plane C source — which backend, and what it lost",
+        "Kernel denials (every user)",
+        "Would-blocks (every user)",
+        "Kernel controls per host (last 10 minutes)",
+        "Would-block (monitor)",
+        "Events your policies saw (every process)",
+    },
+    "defenseclaw-ai-discovery.json": {
+        "AI discovery summary log (all names)",
+        "AI components inside sandboxes (records in range)",
+    },
+    "defenseclaw-policy-decisions.json": {"Recent OPA + egress events"},
+}
+
+
+def _all_panels(panels: list[dict]):
+    for panel in panels:
+        yield panel
+        yield from _all_panels(panel.get("panels", []))
+
+
+def test_user_variable_narrows_every_log_panel_that_carries_a_user() -> None:
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        variables = {v["name"]: v for v in dashboard.get("templating", {}).get("list", [])}
+        if "user" not in variables:
+            continue
+        fleet_wide = _FLEET_WIDE_LOG_PANELS.get(path.name, set())
+        unfiltered = {
+            panel["title"]
+            for panel in _all_panels(dashboard["panels"])
+            for target in panel.get("targets", [])
+            if "loki" in json.dumps(target.get("datasource") or panel.get("datasource") or "").lower()
+            and "$user" not in target.get("expr", "")
+        }
+        assert unfiltered == fleet_wide, path.name
+        description = variables["user"].get("description", "")
+        for title in fleet_wide:
+            assert title.split(" (")[0] in description, (path.name, title)
 
 
 def test_traffic_dashboard_exposes_generated_stream_metrics() -> None:
@@ -848,6 +957,20 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
                 "targets": [{"expr": "sum(increase(defenseclaw_agent_token_usage_total[1h])) or vector(0)", "instant": True}],
             },
             {
+                "type": "bargauge",
+                "title": "Top hosts",
+                "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+                "targets": [
+                    {
+                        "expr": (
+                            'topk(10, sum by (dest) (count_over_time({service_name="defenseclaw"} '
+                            '| json | __error__="" [$__range])))'
+                        ),
+                        "instant": True,
+                    }
+                ],
+            },
+            {
                 "type": "traces",
                 "title": "Selected trace",
                 "description": "Trace waterfall.",
@@ -880,6 +1003,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("latest-value discovery gauges" in error for error in errors)
     assert any("optional token/cost absence" in error for error in errors)
     assert any("blank trace selection" in error for error in errors)
+    assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
     assert any("agent variable must enumerate" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
@@ -988,6 +1112,164 @@ def test_low_risk_dashboard_labels_match_their_queries() -> None:
     vendors = _panel(identity, "Top vendors / products ($__range)")
     assert "$__range" in vendors["targets"][0]["expr"]
     assert vendors["transformations"][0]["options"]["renameByName"]["Value"] == "signals/$__range"
+
+
+def test_local_rules_alert_on_sustained_sandbox_errors() -> None:
+    # GAP-0078: the Splunk Observability detector had a local Prometheus twin
+    # for egress blocks only. The phase label is not projected, so it keeps
+    # its canonical name defenseclaw_sandbox_phase_to.
+    import yaml
+
+    rules = yaml.safe_load(
+        (DASHBOARD_DIR.parents[1] / "prometheus/rules/alerts.yml").read_text(encoding="utf-8")
+    )
+    alerts = {r["alert"]: r for group in rules["groups"] for r in group["rules"] if "alert" in r}
+    errors = alerts["DefenseClawSandboxErrorsSustained"]
+    assert errors["expr"] == (
+        "sum by (connector) (rate(defenseclaw_sandbox_transitions_total"
+        '{defenseclaw_sandbox_phase_to="error"}[5m])) * 60 > 0.2'
+    )
+    assert errors["for"] == "10m"
+    assert errors["labels"] == {"severity": "warning", "surface": "sandbox"}
+    assert "{{ $labels.connector }}" in errors["annotations"]["summary"]
+    assert errors["annotations"]["description"].strip()
+
+
+def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
+    # GAP-0109, GAP-0114: what discovery found inside a sandbox is told apart
+    # from the host's signals, by the sandbox name the records carry.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    assert any(variable["name"] == "sandbox" for variable in board["templating"]["list"])
+    expr = _panel(board, "AI components inside sandboxes (records in range)")["targets"][0]["expr"]
+    assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
+
+
+def test_ai_discovery_board_marks_what_ignores_the_sandbox_box() -> None:
+    # GAP-0342: with one sandbox picked, the headline and metric panels kept
+    # their fleet-wide values with nothing to say so. What does not follow the
+    # Sandbox box is marked (all names) in its title or its row's, as on the
+    # Sandboxes board, and what follows it is not.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    row = ""
+    for panel in board["panels"]:
+        if panel.get("type") == "row":
+            row = panel["title"]
+        for child in ([] if panel.get("type") == "row" else [panel]) + panel.get("panels", []):
+            follows = any("$sandbox" in target.get("expr", "") for target in child.get("targets", []))
+            marked = "(all names)" in child["title"] or "(all names)" in row
+            assert follows != marked, (row, child["title"])
+
+
+def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
+    # GAP-0141: with one row in range (one finding kind) Grafana drops the
+    # series name of a Loki instant bar gauge; each bar takes its label.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    gauges = [panel for panel in board["panels"] if panel.get("type") == "bargauge"]
+    assert gauges
+    for panel in gauges:
+        label = panel["targets"][0]["legendFormat"].strip("{}")
+        assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
+
+
+def test_merged_tables_name_their_value_columns() -> None:
+    # GAP-0178: a table that merges several queries shows each value column
+    # as "Value #<refId>" until organize renames it by that name. The
+    # Sandboxes Destinations table renamed "ALLOWED", so its headers read
+    # Value #ALLOWED and its unit, colour and sort settings matched nothing.
+    # GAP-0066: the Prometheus tables Per-connector traffic and Per-connector
+    # verdict summary ran renameByRegex before the merge, where the
+    # "Value #<refId>" names do not exist yet, so their headers read
+    # Value #INGEST, Value #TOTAL and so on. organize also orders by the names
+    # it is given, not by the names it renames to.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            steps = panel.get("transformations", [])
+            targets = panel.get("targets", [])
+            ids = [step["id"] for step in steps]
+            if panel.get("type") != "table" or "merge" not in ids or len(targets) < 2:
+                continue
+            assert "renameByRegex" not in ids[: ids.index("merge")], (path.name, panel["title"], ids)
+            options = next(step for step in steps if step["id"] == "organize")["options"]
+            renames = options["renameByName"]
+            for target in targets:
+                assert f"Value #{target['refId']}" in renames, (path.name, panel["title"], target["refId"])
+            assert not set(options.get("indexByName", {})) & (set(renames.values()) - set(renames)), (path.name, panel["title"])
+            checked += 1
+    assert checked >= 6
+
+
+def test_rename_by_regex_steps_use_grafanas_option_names() -> None:
+    # GAP-0057: five tables (kernel policies, the customer-policy hook join,
+    # kernel denials, per-connector traffic and verdicts) set renameByRegex's
+    # pattern as "regexp". Grafana reads "regex", so the step renamed nothing,
+    # the value column kept "Value #<refId>" and organize's rename of the bare
+    # refId matched nothing.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            for step in panel.get("transformations", []):
+                if step["id"] != "renameByRegex":
+                    continue
+                assert set(step["options"]) == {"regex", "renamePattern"}, (path.name, panel["title"], step["options"])
+                checked += 1
+    assert checked
+
+
+def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
+    # GAP-0134: a refused name lookup is audited before the refused
+    # connection it precedes, and a harness's own request is expected
+    # (GAP-0130): neither counts as blocked egress, as on `sandbox status`.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    exprs = [
+        target["expr"]
+        for panel in board["panels"]
+        for target in panel.get("targets", [])
+        if "egress.blocked" in target.get("expr", "") or "egress[.]blocked" in target.get("expr", "")
+    ]
+    assert exprs
+    for expr in exprs:
+        assert 'body_defenseclaw_network_decision_code!~"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)"' in expr, expr
+
+
+def test_equal_sandbox_names_on_two_hosts_stay_apart() -> None:
+    # GAP-0298: two hosts ran sandboxes named inc-ua06 and the boards read
+    # them as one: Sandboxes seen counts host and name, and the AI discovery
+    # board's metric and log panels follow a Host box too.
+    sandboxes = _dashboard("defenseclaw-sandboxes.json")
+    seen = _panel(sandboxes, "Sandboxes seen")["targets"][0]["expr"]
+    assert seen.startswith("count(sum by (host_name, defenseclaw_sandbox_name) (")
+    discovery = _dashboard("defenseclaw-ai-discovery.json")
+    assert discovery["templating"]["list"][0]["name"] == "host"
+    panels = [*discovery["panels"], *(child for row in discovery["panels"] for child in row.get("panels", []))]
+    for panel in panels:
+        for target in panel.get("targets", []):
+            if (target.get("datasource") or panel.get("datasource") or {}).get("type") in ("prometheus", "loki"):
+                assert 'host_name=~"$host"' in target["expr"], panel["title"]
+
+
+def test_sandboxes_board_scopes_to_one_computer() -> None:
+    # GAP-0195: every panel follows Environment and Host; a metric panel,
+    # which cannot follow the Sandbox box, says so in its title; the active
+    # count adds hosts up instead of taking one maximum per connector; and
+    # Health degraded no longer counts gateway-wide records as the sandbox's.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    assert [variable["name"] for variable in board["templating"]["list"]][:2] == ["environment", "host"]
+    for panel in board["panels"]:
+        for target in panel.get("targets", []):
+            expr = target["expr"]
+            assert 'deployment_environment_name=~"$environment"' in expr and 'host_name=~"$host"' in expr, panel["title"]
+            if target["datasource"]["type"] == "prometheus":
+                assert "all names)" in panel["title"], panel["title"]
+    active = _panel(board, "Active (all names)")["targets"][0]["expr"]
+    assert active.startswith("sum(max by (deployment_environment_name, host_name, connector) (")
+    health = [target["expr"] for target in _panel(board, "Health degraded")["targets"]]
+    assert ['body_defenseclaw_sandbox_name=~"$sandbox"' in e for e in health] == [True, False]
+    assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
@@ -3380,3 +3662,61 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
         "Rule activity — rule_id (rows) × time (cols)",
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
+
+
+def test_identity_dashboard_counts_acp_only_agents_and_sessions() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    for title in (
+        "Agent identities (agt-)",
+        "Agent sessions (ais-)",
+        "SSH vs local sessions",
+        "Agents per user (agt- ids)",
+        "Sessions per agent",
+    ):
+        expression = _panel(dashboard, title)["targets"][0]["expr"]
+        assert "guardrail[.]evaluation[.]completed" in expression, title
+
+
+def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    expression = _panel(dashboard, "Verified principal share")["targets"][0]["expr"]
+    numerator, denominator = expression.split(" / ", 1)
+    assert "or vector(0)" in numerator
+    assert "claimed" in denominator
+
+
+def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    panel = _panel(dashboard, "Verified vs claimed identity")
+    expression = panel["targets"][0]["expr"]
+
+    assert "unless on (host_name, user_id)" in expression
+    assert 'body_defenseclaw_user_principal_assurance="verified"' in expression
+    assert 'body_defenseclaw_user_principal_assurance="claimed"' in expression
+    assert "sum by (host_name, user_id, assurance)" in expression
+
+
+def test_user_name_regex_is_case_insensitive_on_filtered_log_panels() -> None:
+    filtered = 0
+    for path in DASHBOARD_DIR.glob("*.json"):
+        dashboard = _dashboard(path.name)
+        for panel in _all_panels(dashboard["panels"]):
+            for target in panel.get("targets", []):
+                expression = target.get("expr", "")
+                if 'body_defenseclaw_user_name=~' in expression:
+                    filtered += 1
+                    assert 'body_defenseclaw_user_name=~"(?i)$user"' in expression, (path.name, panel["title"])
+    assert filtered > 0
+
+
+def test_identity_dashboard_keeps_host_local_user_ids_separate() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    variables = {variable["name"] for variable in dashboard["templating"]["list"]}
+    assert "host" in variables
+    users_observed = _panel(dashboard, "Users observed")["targets"][0]["expr"]
+    assert "sum by (host_name, user_id)" in users_observed
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            expression = target.get("expr", "")
+            if "$user" in expression:
+                assert 'host_name=~"$host"' in expression, panel["title"]

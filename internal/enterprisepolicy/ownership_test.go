@@ -203,8 +203,8 @@ func TestPreimageNeverKeepsDefenseClawContent(t *testing.T) {
 	})
 }
 
-// Whole-file drop-ins: removal never leaves an empty file (Claude Code
-// refuses to start with an unparsable managed drop-in).
+// Whole-file drop-ins: removal never leaves an empty file, which is not
+// valid JSON.
 func TestRemoveNeverLeavesAnEmptyDropIn(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

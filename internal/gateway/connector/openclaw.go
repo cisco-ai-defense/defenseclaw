@@ -58,23 +58,31 @@ const openClawPluginRoot = "openclaw_extension"
 // embed at all and remain fully usable.
 const openClawPlaceholderName = ".placeholder"
 
+// openClawBundleFiles are the runtime files a usable OpenClaw plugin bundle
+// must contain: the manifest OpenClaw reads and the entry point that
+// package.json declares. A tree with package.json but no dist/index.js (for
+// example a sync from a partial dist/) would install a plugin OpenClaw cannot
+// load, so it counts as missing.
+var openClawBundleFiles = []string{"package.json", "openclaw.plugin.json", "dist/index.js"}
+
 // openClawExtensionAvailable returns true when the embedded OpenClaw
-// extension contains the runtime files (package.json, dist/, etc.) and
-// false when it only contains the build-time placeholder marker. This
-// lets the gateway boot cleanly for non-OpenClaw operators while still
-// failing loudly when someone tries to switch to OpenClaw without
-// having built the plugin.
+// extension contains the plugin runtime files and false when it holds only
+// the build-time placeholder or a partial sync. This lets the gateway boot
+// cleanly for non-OpenClaw operators while still failing loudly when
+// someone tries to switch to OpenClaw without having built the plugin.
 func openClawExtensionAvailable() bool {
-	// embed.FS always uses forward-slash paths; filepath.Join would emit
-	// backslashes on Windows and never match the embedded entries, so use
-	// path.Join here.
-	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, "package.json")); err == nil {
-		return true
+	return openClawBundleComplete(openClawExtensionFS, openClawPluginRoot)
+}
+
+func openClawBundleComplete(fsys fs.FS, root string) bool {
+	for _, rel := range openClawBundleFiles {
+		// fs.FS paths always use forward slashes; filepath.Join would emit
+		// backslashes on Windows and never match, so use path.Join.
+		if info, err := fs.Stat(fsys, path.Join(root, rel)); err != nil || !info.Mode().IsRegular() {
+			return false
+		}
 	}
-	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
-		return false
-	}
-	return false
+	return true
 }
 
 // OpenClawExtensionAvailable reports whether this gateway build embeds the

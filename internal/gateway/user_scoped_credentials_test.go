@@ -5,11 +5,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/user"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -69,9 +71,17 @@ func newUserScopedTestServer(t *testing.T, standalone bool, ledger *userScopedTe
 			return now
 		},
 	}
-	restoreName := userScopedIdentityName
+	restoreName, restoreForName := userScopedIdentityName, userScopedIdentityForName
 	userScopedIdentityName = func(identity string) string { return names[identity] }
-	t.Cleanup(func() { userScopedIdentityName = restoreName })
+	userScopedIdentityForName = func(name string) (string, bool) {
+		for identity, held := range names {
+			if strings.EqualFold(held, name) {
+				return identity, true
+			}
+		}
+		return "", false
+	}
+	t.Cleanup(func() { userScopedIdentityName, userScopedIdentityForName = restoreName, restoreForName })
 
 	observed := &userScopedObservation{}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,10 +119,15 @@ func userScopedTestToken(t *testing.T, kind, scope, identity string) string {
 	return token
 }
 
-func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, method, path, token string, headers map[string]string) int {
+func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, method, path, token string, headers map[string]string, peerUID ...int) int {
 	*observed = userScopedObservation{}
 	req := httptest.NewRequest(method, path, strings.NewReader("{}"))
 	req.RemoteAddr = "127.0.0.1:54321"
+	uid := 1001
+	if len(peerUID) != 0 {
+		uid = peerUID[0]
+	}
+	req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: uid, known: true}))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -122,6 +137,26 @@ func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response.Code
+}
+
+// A copied credential must not turn another process account into a verified user.
+func TestUserScopedCredentialRequiresTheConnectingAccount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no loopback TCP caller UID")
+	}
+	ledger := &userScopedTestLedger{}
+	ledger.set(managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true})
+	_, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
+	alice := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", "1001")
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, 1002); code != http.StatusForbidden || observed.called {
+		t.Fatalf("copied credential: status %d called=%v", code, observed.called)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, -1); code != http.StatusForbidden || observed.called {
+		t.Fatalf("unverified caller: status %d called=%v", code, observed.called)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, 1001); code != http.StatusOK || observed.userID != "1001" {
+		t.Fatalf("credential owner: status %d identity=%q", code, observed.userID)
+	}
 }
 
 // A per-user hook credential authenticates only its own connector, is
@@ -188,7 +223,7 @@ func TestUserScopedHookCredentialIsBoundToItsUser(t *testing.T) {
 		t.Fatalf("revoked user: status %d called=%v", code, observed.called)
 	}
 	bob := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", "1002")
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", bob, nil); code != http.StatusOK || observed.userID != "1002" {
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", bob, nil, 1002); code != http.StatusOK || observed.userID != "1002" {
 		t.Fatalf("remaining user: status %d %+v", code, *observed)
 	}
 }
@@ -273,6 +308,9 @@ func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
 // Windows rows bind credentials to the SID; account names compare
 // case-insensitively.
 func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("SID credentials are served only on Windows")
+	}
 	const sid = "S-1-5-21-1111-2222-3333-1001"
 	ledger := &userScopedTestLedger{}
 	ledger.set(managedHookLedgerTarget{User: "alice", SID: strings.ToLower(sid), Connector: "codex", OK: true})
@@ -283,9 +321,30 @@ func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
 		observed.userID != sid || observed.idKind != useridentity.KindWindowsSID || observed.userName != "Alice" {
 		t.Fatalf("SID-bound credential: status %d %+v", code, *observed)
 	}
+	// GAP-0907, GAP-0702: after Rename-LocalUser the hook still sends the
+	// name its user signed in with, which no account has now; the SID
+	// matches, so it is served and the records carry the current name.
+	headers[llmEventUserNameHeader] = "old-alice"
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, headers); code != http.StatusOK ||
+		observed.userID != sid || observed.userName != "Alice" {
+		t.Fatalf("renamed account: status %d %+v", code, *observed)
+	}
+	headers[llmEventUserNameHeader] = "alice"
 	headers[llmEventUserIDHeader] = "S-1-5-21-1111-2222-3333-1002"
 	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, headers); code != http.StatusForbidden || observed.called {
 		t.Fatalf("SID naming another user: status %d called=%v", code, observed.called)
+	}
+}
+
+// GAP-0290: a directory account the host names qualified keeps its per-user
+// credential when the caller sends the bare account name.
+func TestUserScopedNamesCompareBareAccounts(t *testing.T) {
+	if !userScopedNamesEqual("4545", "alice", "alice@corp.example.com") ||
+		!userScopedNamesEqual("4545", "alice@corp.example.com", "alice@corp.example.com") {
+		t.Fatal("the bare account of a qualified host name was refused")
+	}
+	if userScopedNamesEqual("4545", "bob", "alice@corp.example.com") || userScopedNamesEqual("4545", "Alice", "alice") {
+		t.Fatal("another account, or another case of a POSIX name, matched")
 	}
 }
 

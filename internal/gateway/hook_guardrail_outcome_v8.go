@@ -229,7 +229,7 @@ func newGuardrailOutcomeEvent(
 		DefenseClawGuardrailSeverity: hookV8OptionalText(outcome.Severity, 16),
 		DefenseClawConnectorSource:   hookV8OptionalIdentifier(connector),
 		UserID:                       hookV8OptionalIdentifier(userID),
-		DefenseClawUserName:          hookV8OptionalIdentifier(userName),
+		DefenseClawUserName:          v8UserName(userName, hookV8OptionalIdentifier),
 		DefenseClawGuardrailReason:   hookV8OptionalText(outcome.Reason, 65536),
 	}
 }

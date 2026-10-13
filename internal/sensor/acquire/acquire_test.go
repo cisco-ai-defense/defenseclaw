@@ -23,6 +23,7 @@ package acquire
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -32,7 +33,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/sensor/dnscapture"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
 
 // serveHelper starts a helper on a temporary socket and returns a client
@@ -280,4 +283,102 @@ func TestVersionMismatchIsDistinguishable(t *testing.T) {
 // to read is exactly the change that must not pass unnoticed.
 func requestFieldCount(request Request) int {
 	return reflect.TypeOf(request).NumField()
+}
+
+// GAP-1250: a brokered process row keeps its Windows owner SID and session,
+// so a finding read through the helper is attributed as a direct one is.
+// GAP-1464: so does a brokered event the account it named for its process.
+func TestProcessRowKeepsOwnerSIDAndSessionOverTheWire(t *testing.T) {
+	row := procprobe.Process{PID: 7, Name: "uvx.exe", User: `DCLAB\alice`, UserSID: "S-1-5-21-1-2-3-1104", SessionID: 2}
+	got := decodeProcess(encodeProcess(row))
+	if got.User != row.User || got.UserSID != row.UserSID || got.SessionID != row.SessionID {
+		t.Fatalf("round trip = %+v, want %+v", got, row)
+	}
+	event := plane.Event{Kind: plane.KindFileWrite, PID: 7, User: row.User, UserSID: row.UserSID}
+	if got := decodeEvent(encodeEvent(event)); got.User != event.User || got.UserSID != event.UserSID {
+		t.Fatalf("event round trip = %+v, want %+v", got, event)
+	}
+}
+
+// serveDNSAnswerOnce is a sensor helper that serves one dns subscription on
+// socket -- the header and one answer -- until stop closes it, the way a
+// restarting helper ends the gateway's stream.
+func serveDNSAnswerOnce(t *testing.T, socket, address, hostname string) (stop func()) {
+	t.Helper()
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("unix sockets unavailable here: %v", err)
+	}
+	conns := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conns <- conn
+		var request Request
+		if readFrame(conn, &request, time.Second) != nil || request.Op != OpDNS {
+			return
+		}
+		for _, frame := range []dnsStreamFrame{{Mechanism: "fake"}, {Address: address, Hostname: hostname}} {
+			body, _ := json.Marshal(frame)
+			if writeFrame(conn, Response{Version: protocolVersion, Op: OpDNS, Body: body}, time.Second) != nil {
+				return
+			}
+		}
+	}()
+	return func() {
+		_ = listener.Close()
+		select {
+		case conn := <-conns:
+			_ = conn.Close()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// GAP-1418: the helper restarts on a config push and a package upgrade. The
+// gateway's dns subscription ended with it and the capture kept reporting
+// itself running while it recorded nothing until the gateway restarted. A
+// helper back on the same path is subscribed to again.
+func TestBrokeredDNSCaptureResubscribesAfterTheHelperRestarts(t *testing.T) {
+	dir, err := os.MkdirTemp("", "acq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s")
+	cache := dnscapture.NewCache()
+	waitFor := func(address string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, ok := cache.Lookup(address); ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no answer for %s recorded", address)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	stopFirst := serveDNSAnswerOnce(t, socket, "192.0.2.1", "one.example")
+	capturer := NewHelper(socket).DNSCapturer()
+	if err := capturer.Start(context.Background(), cache); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor("192.0.2.1")
+	stopFirst()
+
+	stopSecond := serveDNSAnswerOnce(t, socket, "192.0.2.2", "two.example")
+	defer stopSecond()
+	waitFor("192.0.2.2")
+	closed := make(chan struct{})
+	go func() { _ = capturer.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
 }

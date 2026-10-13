@@ -178,7 +178,6 @@ def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
         "amp",
         "cursor",
         "copilot",
-        "openhands",
         "hermes",
         "devin",
         "antigravity",

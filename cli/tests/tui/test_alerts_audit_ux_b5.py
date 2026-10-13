@@ -55,6 +55,30 @@ def _row(row_id: str, payload: dict[str, object], *, action: str = "scan-finding
     )
 
 
+def test_hermes_prompt_finding_in_action_mode_is_not_observe_mode() -> None:
+    """GAP-0898: a Hermes pre_llm_call cannot be blocked; action mode sends a notice."""
+    row = "connector=hermes action=allow raw_action=block mode={} would_block=true"
+    notice = "agent told not to carry out the prompt (prompts cannot be blocked)"
+    for decide in (cmd_alerts._hook_decision, alerts_panel._hook_decision_from_rows):  # noqa: SLF001
+        assert decide([row.format("action")], "hermes:pre_llm_call") == notice
+        assert decide([row.format("observe")], "hermes:pre_llm_call") == "would block (observe mode)"
+        assert decide([row.format("action")], "hermes:post_tool_call") == (
+            "detected after the tool ran (cannot block)"
+        )
+
+
+def test_copilot_prompt_finding_is_never_observe_mode() -> None:
+    """GAP-1244: Copilot has no prompt veto, so action mode must not say observe mode."""
+    row = "connector=copilot action=allow raw_action=block mode=action would_block=true"
+    label = "detected in the prompt (cannot block)"
+    for target in ("copilot:userPromptSubmitted", "copilot:userPromptTransformed"):
+        assert cmd_alerts._hook_decision([row], target) == label  # noqa: SLF001
+        assert alerts_panel._hook_decision_from_rows([row], target) == label  # noqa: SLF001
+    # A Copilot tool call can still block, so its observe label is unchanged.
+    observed = [row.replace("mode=action", "mode=observe")]
+    assert cmd_alerts._hook_decision(observed, "copilot:preToolUse") == "would block (observe mode)"  # noqa: SLF001
+
+
 def test_message_display_finding_cannot_block_in_cli_and_tui() -> None:
     """GAP-1531: MessageDisplay runs async; its finding is never "observe mode"."""
     observed = ["connector=claudecode action=allow raw_action=block mode=action would_block=true"]
@@ -87,6 +111,38 @@ async def test_shared_snapshot_alerts_get_the_hook_decision(tmp_path, monkeypatc
     assert seen and seen[0] is not None
     assert result.snapshot is not None and result.snapshot.alert_events
     assert all(("Decision", "would block (observe mode)") in e.facts for e in result.snapshot.alert_events)
+
+
+async def test_alerts_panel_says_how_many_detection_only_findings_it_leaves_out(tmp_path) -> None:
+    """GAP-0314: `defenseclaw alerts` named the detection-only findings it
+    leaves out (GAP-0176), the TUI's Alerts panel said nothing of them."""
+    import json
+    import sqlite3
+
+    path = tmp_path / "audit.db"
+    create_synthetic_v8_database(path, 8)
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(path) as db:
+        db.executemany(
+            """INSERT INTO audit_events (id, timestamp, action, actor, details, severity, bucket, event_name, payload_json)
+               VALUES (?, ?, 'scan-finding', 'defenseclaw', '', 'CRITICAL', 'security.finding', 'finding.observed', ?)""",
+            [
+                (f"det-{i}", (now - timedelta(hours=h)).isoformat(), json.dumps({"defenseclaw.finding.tags": ["detection-only"]}))
+                for i, h in enumerate((0, 2, 30))
+            ],
+        )
+    repository = read_repository.TUIReadRepository(path)
+    try:
+        result = await repository.refresh()
+    finally:
+        repository.close()
+    assert result.snapshot is not None and result.snapshot.detection_only == 2
+    model = alerts_panel.AlertsPanelModel()
+    model.detection_only = result.snapshot.detection_only
+    assert (
+        "2 detection-only findings (24 h) not listed: a rule matched but could not decide the call; "
+        "defenseclaw audit export --since 24h lists them"
+    ) in model.summary_text()
 
 
 def test_sandbox_finding_detail_has_the_openshell_decision() -> None:

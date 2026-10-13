@@ -81,18 +81,28 @@ def test_statuses_follow_the_config(config) -> None:
     config.guardrail.hook_fail_mode = "open"
     config.scanners.skill_scanner.policy = "strict"
     config.acp.enabled = True
-    config.privacy.disable_redaction = True
 
     guardrail = _status(SetupWizard.GUARDRAIL, config)
     assert guardrail.state == "ok" and "action" in guardrail.text
     assert "open" in _status(SetupWizard.GUARDRAIL_ACTIONS, config).text
     assert "strict" in _status(SetupWizard.SKILL_SCANNER, config).text
     assert _status(SetupWizard.ACP_GUARD, config).state == "ok"
-    # Turning redaction off weakens protection, so it needs attention.
-    assert _status(SetupWizard.REDACTION, config).state == "attention"
 
     config.guardrail.enabled = False
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).state == "off"
+
+
+def test_fail_mode_status_is_the_effective_value_per_connector(config) -> None:
+    # GAP-0152: an observe-mode connector fails open whatever the global value says.
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    config.guardrail.enabled = True
+    config.guardrail.hook_fail_mode = "closed"
+    config.guardrail.connectors = {"claudecode": PerConnectorGuardrailConfig()}
+
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
+    config.guardrail.connectors["codex"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed, 1 open"
 
 
 def test_counted_tasks_count_what_is_configured() -> None:

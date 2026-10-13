@@ -41,13 +41,14 @@ the config ([Two profiles](/docs/enterprise#two-profiles)).
 
 Each agent you protect is a key under `guardrail.connectors` in the config.
 Nothing is protected until you list one. DefenseClaw protects each agent in
-one of three ways:
+one of two ways:
 
 | Route | Agents | What DefenseClaw writes |
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
 | [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
-| [ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | Nothing per user: the editor runs Kiro through `defenseclaw-gateway enterprise acp` |
+
+ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
 OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
 were verified in this release is in the
@@ -92,8 +93,11 @@ deliver:
 
 ## 4. Deliver the config and the AI Defense key
 
-The config is one YAML file that only administrators can change. The lifecycle
-installs it at a fixed path:
+The config is one YAML file that only administrators can change, and it is the
+only policy the host enforces: thresholds, block and allow lists, rule packs and
+the agents to protect all live in it. Local tools cannot change it on a managed
+host ([Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host)).
+The lifecycle installs it at a fixed path:
 
 | OS | Installed config |
 | --- | --- |
@@ -164,8 +168,11 @@ $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 </Tabs>
 
 Read `coverage_complete` and `security_complete` in the result
-([Health fields](/docs/enterprise/operations#health-fields)). Every exit code
-is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
+([Health fields](/docs/enterprise/operations#health-fields)). On Linux and
+macOS, `policy.effective_digest` and `policy.applied` say which config the host
+runs and whether the gateway applied it
+([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
+Every exit code is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
 
 ## 6. Pilot in observe mode, then expand in rings
 

@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -41,7 +42,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"gopkg.in/yaml.v3"
 )
 
 // The sandbox manager is the SandboxController the REST API drives.
@@ -60,6 +63,8 @@ type sandboxRuntime struct {
 	proxy      *egress.Proxy
 	egressAddr string
 	health     *SidecarHealth
+	// bindings is the sandbox binding store the manager mints into.
+	bindings *sandboxauth.FileStore
 
 	// report marks one part of the subsystem healthy (nil) or not; run
 	// installs it.
@@ -150,6 +155,11 @@ func (s *Sidecar) sandboxTelemetry() *audit.SandboxRecorder {
 
 // newSandboxRuntime prepares the sandbox subsystem for api, or returns nil
 // when sandboxes are off or unsupported here (reported through health).
+//
+// A managed_enterprise gateway never runs sandboxes itself: it is the
+// policy authority. On a standalone managed computer each user's sandbox
+// daemon runs them under the user's own account (newSandboxDaemonRuntime)
+// and relays their hooks to this gateway's hook socket.
 func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	cfg := s.currentConfig()
 	if cfg == nil || !cfg.OpenShell.Enabled {
@@ -160,9 +170,67 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		return nil, nil
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		msg := "OpenShell sandboxes are not supported in managed_enterprise deployments yet"
-		s.health.SetSandbox(StateDisabled, msg, nil)
+		s.health.SetSandbox(StateDisabled, managedGatewaySandboxNote(cfg), nil)
 		return nil, nil
+	}
+	mcp := &sandboxMCPInventory{config: s.currentConfig}
+	mcp.policy = enforce.NewPolicyEngine(api.store).WithConfig(s.currentConfig)
+	return buildSandboxRuntime(api, sandboxRuntimeDeps{
+		config:           s.currentConfig,
+		health:           s.health,
+		telemetry:        s.sandboxTelemetry(),
+		mcp:              mcp,
+		persist:          sandboxConfigPersister{api: api},
+		syncConfig:       api.syncSandboxConfig,
+		discoveryRemoved: func(string) { api.rescanAIDiscovery() },
+	}, RuntimeOptions{})
+}
+
+// managedGatewaySandboxNote is the managed gateway's sandbox health detail.
+func managedGatewaySandboxNote(cfg *config.Config) string {
+	if cfg.StandaloneEnterprise() {
+		return "sandboxes run in each user's own sandbox daemon on this managed computer, not in the managed gateway"
+	}
+	return "OpenShell sandboxes are not available in this managed deployment"
+}
+
+// sandboxRuntimeDeps are what a sandbox runtime takes from its host process:
+// the per-user gateway (newSandboxRuntime) or a managed host's per-user
+// sandbox daemon (newSandboxDaemonRuntime).
+type sandboxRuntimeDeps struct {
+	// config is the configuration the manager reads: config.yaml for the
+	// per-user gateway, the managed gateway's settings for the daemon.
+	config func() *config.Config
+	health *SidecarHealth
+	// telemetry records the v8 sandbox records: the per-user gateway's
+	// recorder, or a managed daemon's relay to the managed gateway
+	// (daemonRelayTelemetry). nil drops them.
+	telemetry audit.SandboxTelemetry
+	// mcp lists the user's MCP servers; nil brings none.
+	mcp manager.MCPInventory
+	// persist keeps "always" decisions; nil refuses them.
+	persist    triage.Persister
+	syncConfig func(context.Context) error
+	// hostUser is the account sandboxes run as; nil is this process's.
+	hostUser         *manager.HostUser
+	discoveryRemoved func(string)
+	// registration and onGeneration are forwarding mode's
+	// (SandboxIngressConfig.Registration, OnGeneration).
+	registration func(sandboxauth.Binding) (string, bool)
+	onGeneration func(uint64)
+}
+
+// buildSandboxRuntime prepares the hook ingress, the egress proxy and the
+// manager. RuntimeOptions{} is the per-user gateway's runtime; Managed is a
+// managed host's per-user daemon, whose ingress forwards every call to the
+// managed gateway through opts.Relay (forwarding mode).
+func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOptions) (*sandboxRuntime, error) {
+	cfg := deps.config()
+	if cfg == nil {
+		return nil, errors.New("sandbox runtime: no configuration")
+	}
+	if opts.Managed && (opts.Relay == nil || opts.Settings == nil || deps.registration == nil) {
+		return nil, errors.New("sandbox runtime: a managed runtime needs the managed gateway relay, its settings and the registrations")
 	}
 	dataDir := cfg.DataDir
 	store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(dataDir))
@@ -178,16 +246,24 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	ingressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(ingressPort))
 	egressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(egressPort))
 	inflight := sandboxauth.NewInFlight(nil)
-	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: s.health}
-	mcp := &sandboxMCPInventory{config: s.currentConfig}
-	if api.store != nil {
-		mcp.policy = enforce.NewPolicyEngine(api.store)
+	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: deps.health, bindings: store}
+	telemetry := deps.telemetry
+	discoveryRemoved := deps.discoveryRemoved
+	if discoveryRemoved == nil {
+		discoveryRemoved = func(string) {}
 	}
 
+	// A managed daemon also stops what the account's other registered
+	// OpenShell gateways run (GAP-0678).
+	var otherGateways func(context.Context, *manager.Gateway) []*manager.Gateway
+	if opts.Managed {
+		otherGateways = manager.OtherRegisteredGateways(openshell.DiscoverOptions{},
+			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace})
+	}
 	mgr, err := manager.New(manager.Options{
 		DataDir: dataDir,
 		Owner:   owner,
-		Config:  s.currentConfig,
+		Config:  deps.config,
 		Connect: manager.DiscoverConnector(
 			openshell.DiscoverOptions{Gateway: cfg.OpenShell.Gateway.Name},
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace},
@@ -196,10 +272,16 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		Images: manager.BuilderImages{Builder: &image.Builder{
 			Docker: image.CLI{}, Store: images, Log: io.Discard,
 		}},
-		Profiles:           manager.CLIProfileImporter{Binary: cfg.OpenShell.EffectiveBinary()},
-		MCP:                mcp,
-		Telemetry:          s.sandboxTelemetry(),
-		Persist:            sandboxConfigPersister{api: api},
+		Profiles: manager.CLIProfileImporter{BinaryFunc: func() string {
+			if c := deps.config(); c != nil {
+				return c.OpenShell.EffectiveBinary()
+			}
+			return cfg.OpenShell.EffectiveBinary()
+		}},
+		MCP:                deps.mcp,
+		Telemetry:          telemetry,
+		Persist:            deps.persist,
+		SyncConfig:         deps.syncConfig,
 		Quiesce:            inflight,
 		ForgetBinding:      api.ForgetSandboxBinding,
 		IngressPort:        ingressPort,
@@ -207,16 +289,20 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		APIPort:            cfg.Gateway.APIPort,
 		IngressAddr:        ingressAddr,
 		EgressAddr:         egressAddr,
+		HostUser:           deps.hostUser,
 		DefenseClawVersion: manager.ImageVersion(),
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
+		DiscoveryRemoved:   discoveryRemoved,
+		ManagedAccount:     opts.Managed,
+		OtherGateways:      otherGateways,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := api.SetSandboxIngress(SandboxIngressConfig{
+	ingress := SandboxIngressConfig{
 		Addr: ingressAddr, Bindings: store, InFlight: inflight,
 		OnRequest:   mgr.ObserveIngress,
 		OnListening: func() { rt.setListening("ingress", true) },
@@ -226,6 +312,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {
@@ -242,11 +329,15 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 			out := make([]SandboxEgressRefusal, 0, len(refused))
 			for _, r := range refused {
 				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
-					Cut: r.Cut, Sent: r.Sent})
+					Cut: r.Cut, Sent: r.Sent, Note: r.Note})
 			}
 			return out
 		},
-	}); err != nil {
+	}
+	if opts.Managed {
+		ingress.Relay, ingress.Registration, ingress.OnGeneration = opts.Relay, deps.registration, deps.onGeneration
+	}
+	if err := api.SetSandboxIngress(ingress); err != nil {
 		return nil, err
 	}
 	decider, err := mgr.Decider()
@@ -269,7 +360,10 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	api.SetSandboxController(mgr)
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
-	rt.fleet, rt.tel = mgr, s.sandboxTelemetry()
+	rt.fleet = mgr
+	if deps.telemetry != nil {
+		rt.tel = deps.telemetry
+	}
 	rt.publish = func(ev sandboxapi.ActivityEvent) { feed.Publish(ev) }
 	return rt, nil
 }
@@ -350,12 +444,14 @@ func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause e
 	fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, cause)
 	report(part, fmt.Errorf("%w (running sandboxes are stopped until DefenseClaw holds this port again)", cause))
 	if rt.tel != nil {
-		_ = rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+		if err := rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 			State:        audit.SandboxHealthFailed,
 			ErrorCode:    strings.ToLower(string(gatewaylog.ErrCodeOpenShellListenerFailed)),
 			ErrorSummary: "the sandbox " + part + " listener is not running: " + cause.Error(),
 			Timestamp:    time.Now(),
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox] %s: record the lost %s listener: %v\n", gatewaylog.ErrCodeOpenShellTelemetryFailed, part, err)
+		}
 	}
 	if rt.fleet == nil {
 		<-ctx.Done()
@@ -474,6 +570,14 @@ func (rt *sandboxRuntime) serveEgress(ctx context.Context) error {
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
+	return rt.serveEgressOn(ctx, ln, false)
+}
+
+// serveEgressOn serves the proxy on ln, which it owns, until ctx ends. The
+// proxy is shut down then, unless keep: the managed sandbox daemon releases
+// its port when no sandbox runs and serves the same proxy on a new listener
+// at the next create, so only the listener closes.
+func (rt *sandboxRuntime) serveEgressOn(ctx context.Context, ln net.Listener, keep bool) error {
 	fmt.Fprintf(os.Stderr, "[sandbox-egress] listening on %s\n", ln.Addr())
 	rt.setListening("egress", true)
 	defer rt.setListening("egress", false)
@@ -481,14 +585,20 @@ func (rt *sandboxRuntime) serveEgress(ctx context.Context) error {
 	go func() { errCh <- rt.proxy.Serve(ln) }()
 	select {
 	case err := <-errCh:
+		_ = ln.Close()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = rt.proxy.Shutdown(shutdownCtx)
+		if keep {
+			_ = ln.Close()
+		} else {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = rt.proxy.Shutdown(shutdownCtx)
+			_ = ln.Close()
+		}
 		<-errCh
 		return nil
 	}
@@ -511,6 +621,16 @@ func (p sandboxConfigPersister) BlockAlways(ctx context.Context, host string) er
 	return p.api.appendSandboxConfigList(ctx, "openshell.egress.block", host)
 }
 
+// syncSandboxConfig reloads config.yaml through the central reload
+// transaction, so a sandbox decision sees a change the CLI wrote a moment
+// ago instead of waiting for the reload watcher (manager.Options.SyncConfig).
+func (a *APIServer) syncSandboxConfig(ctx context.Context) error {
+	if a.configReloader == nil {
+		return nil
+	}
+	return a.configReloader(ctx, "sandbox_decision")
+}
+
 func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host string) error {
 	if a.configReloader == nil {
 		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the daemon cannot write its configuration")
@@ -525,14 +645,31 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
 			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
 	}
-	var list []string
-	switch key {
-	case "openshell.egress.unblocked":
-		list = current.OpenShell.Egress.Unblocked
-	case "openshell.egress.block":
-		list = current.OpenShell.Egress.Block
-	default:
+	if key != "openshell.egress.unblocked" && key != "openshell.egress.block" {
 		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
+	}
+	// The list comes from the file the write replaces, not from the applied
+	// generation, which lags it (debounce, a rejected reload, another
+	// writer): the CAS below then covers the whole read-modify-write.
+	path := configFilePathForSnapshot(current)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var doc struct {
+		OpenShell struct {
+			Egress struct {
+				Unblocked []string `yaml:"unblocked"`
+				Block     []string `yaml:"block"`
+			} `yaml:"egress"`
+		} `yaml:"openshell"`
+	}
+	if err := yaml.Unmarshal(original, &doc); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	list := doc.OpenShell.Egress.Unblocked
+	if key == "openshell.egress.block" {
+		list = doc.OpenShell.Egress.Block
 	}
 	for _, have := range list {
 		if strings.EqualFold(strings.TrimSpace(have), host) {
@@ -540,20 +677,23 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		}
 	}
 	next := append(append([]string{}, list...), host)
-	path := configFilePathForSnapshot(current)
-	original, err := captureConfigFileState(path)
+	actor := configwrite.ActorPrefixSandbox + host
+	written, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: key, Value: next}}, configwrite.Options{
+		Actor:        actor,
+		Reason:       "sandbox always decision",
+		ExpectSHA256: configwrite.SHA256Hex(original),
+	})
+	if errors.Is(err, configwrite.ErrManaged) {
+		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
+			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
+	}
 	if err != nil {
-		return err
-	}
-	if err := config.PatchYAMLFile(path, map[string]any{key: next}); err != nil {
-		return err
-	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		_ = restoreConfigFileState(path, original)
-		return fmt.Errorf("the updated %s is invalid: %w", key, err)
+		return fmt.Errorf("save %s: %w", key, err)
 	}
 	if err := a.configReloader(ctx, "sandbox_always_decision"); err != nil {
-		rollbackErr := restoreConfigFileState(path, original)
+		_, rollbackErr := configwrite.ReplaceDocument(ctx, path, original, configwrite.Options{
+			Actor: actor, Reason: "sandbox always decision rollback", ExpectSHA256: written.SHA256,
+		})
 		if rollbackErr == nil {
 			rollbackErr = a.configReloader(ctx, "sandbox_always_decision_rollback")
 		}

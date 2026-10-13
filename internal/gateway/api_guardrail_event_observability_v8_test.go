@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 type storedGuardrailEventV8 struct {
@@ -25,11 +26,21 @@ type storedGuardrailEventV8 struct {
 
 func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
-	api.recordACPEvaluationV8(t.Context(), acp.Evaluation{
-		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
-		Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
-	}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"},
-		nil, nil, "kiro", "kiro-only", 12*time.Millisecond)
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	// The record names the account and the agent instance it belongs to, not
+	// only the facts about the login (GAP-0252).
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{
+		UserID: "1001", UserIDKind: useridentity.KindPOSIXUID, UserName: "dci-ih3", AgentInstanceID: "ais-acp-test",
+	})
+	record := func() {
+		api.recordACPEvaluationV8(ctx, acp.Evaluation{
+			ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
+			Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
+		}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"},
+			nil, nil, "kiro", "kiro-only", 12*time.Millisecond)
+	}
+	record()
 
 	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
 	if len(events) != 1 {
@@ -42,10 +53,29 @@ func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
 		"defenseclaw.acp.protocol.version": acp.SchemaVersion,
 		"defenseclaw.guardrail.raw_action": "block", "defenseclaw.guardrail.would_block": true,
 		"defenseclaw.guardrail.effective_action": "allow",
+		"user.id":                                "1001", "defenseclaw.user.id_kind": useridentity.KindPOSIXUID, "defenseclaw.user.name": "dci-ih3",
+		"defenseclaw.agent.instance_id": "ais-acp-test",
 	}
 	for key, value := range want {
 		if got := events[0].Body[key]; got != value {
 			t.Errorf("%s = %#v, want %#v (body=%v)", key, got, value, events[0].Body)
+		}
+	}
+	// Secure Client keeps the record of main, which names no user, also
+	// for a caller whose loopback claim names one (issue #1092).
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
+	SetManagedEnterpriseActive(true)
+	record()
+	events = readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 2 {
+		t.Fatalf("stored events = %d, want 2", len(events))
+	}
+	for _, event := range events[1:] {
+		for _, key := range []string{"user.id", "defenseclaw.user.id_kind", "defenseclaw.user.name"} {
+			if got, ok := event.Body[key]; ok {
+				t.Errorf("Secure Client record has %s = %#v; main has none", key, got)
+			}
 		}
 	}
 }

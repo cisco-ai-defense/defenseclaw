@@ -101,7 +101,7 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 		if err != nil {
 			return err
 		}
-		plan := enterprisehooks.WindowsManagedRuntimePlan{}
+		var plan enterprisehooks.WindowsManagedRuntimePlan
 		if opts.validation {
 			plan, err = enterprisehooks.PlanWindowsManagedRuntimeRootsForValidation(manifest, manifestPath, digest)
 		} else {

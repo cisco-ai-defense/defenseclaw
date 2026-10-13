@@ -696,8 +696,8 @@ func mergeFamilyTraceResource(
 		return TraceResourceInput{}, nil, familyBuildFailure(FamilyBuildInvalidDescriptor)
 	}
 
-	descriptors := make([]familyFieldDescriptor, 0, len(resource.customValues)+len(contract.aliases))
-	values := make(familyFieldValues, 0, len(resource.customValues)+len(fixed)+len(contract.aliases))
+	descriptors := make([]familyFieldDescriptor, 0, len(resource.customValues))
+	values := make(familyFieldValues, 0, len(resource.customValues)+len(fixed))
 	normalizedKeys := make(map[string]struct{}, len(resource.customValues))
 	totalBytes := 0
 	previousKey := ""
@@ -737,8 +737,8 @@ func mergeFamilyTraceResource(
 	}
 
 	values = append(values, fixed...)
-	if resource.compatibilityAliases {
-		for _, alias := range contract.aliases {
+	if resource.secureClientAliases {
+		for _, alias := range secureClientResourceAliases {
 			for _, entry := range fixed {
 				if entry.key != alias.canonical || !entry.present {
 					continue

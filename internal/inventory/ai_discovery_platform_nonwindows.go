@@ -16,19 +16,17 @@ func platformDiscoveryHomeDir() (string, error) {
 	return os.UserHomeDir()
 }
 
-// platformDiscoveryHomeDirs enumerates additional user profile roots the scan
-// should walk. On macOS/Linux the process user's `$HOME` already resolves to
-// the right place (launchd agents run per-user; systemd/systemd-user likewise),
-// so this returns nil and the single HomeDir path drives the scan. The Windows
-// override enumerates HKLM\...\ProfileList so a service-context scan sees each
-// real interactive user's home rather than its own virtual ServiceProfiles dir.
-func platformDiscoveryHomeDirs(_ bool) []string {
-	return nil
-}
-
+// platformDiscoveryHomeOwners lists no profiles: on macOS and Linux the
+// process user's $HOME already resolves to the right place (launchd agents
+// run per-user; systemd/systemd-user likewise), and a standalone managed
+// host scans each user's home through the guardian's per-user scans. The
+// Windows override enumerates HKLM\...\ProfileList.
 func platformDiscoveryHomeOwners(_ bool) []discoveryHomeOwner {
 	return nil
 }
+
+// platformDiscoveryAccountName has no profile owners to name here.
+func platformDiscoveryAccountName(string, string) string { return "" }
 
 func platformDiscoveryVariable(name, _ string) (string, bool) {
 	return os.LookupEnv(name)
@@ -71,6 +69,12 @@ func platformInstalledApplicationNames(home string) []string {
 		}
 	}
 	return out
+}
+
+// platformIDEAppData returns the current user's %APPDATA% and
+// %LOCALAPPDATA%; only Windows has them.
+func platformIDEAppData(string) (string, string) {
+	return "", ""
 }
 
 func platformEditorExtensionRoots(string) []string {

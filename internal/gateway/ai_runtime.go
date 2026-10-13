@@ -113,7 +113,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig, runtimeConfig))
+	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig))
 	if acquirer.Brokered() {
 		defer inventory.SetProcessAccountLookup(brokeredProcessAccounts(ctx, acquirer))()
 	}
@@ -127,6 +127,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		// managed_enterprise the hook-enumerator already populates it from the
 		// eligible-users enumeration that renders targets.yaml.
 		HomeDirs: activeConfig.AIDiscovery.HomeDirs,
+		Owners:   s.aiRuntimeOwnerLookups(activeConfig),
 	})
 	if err != nil {
 		// A platform with no backend is a hard stop rather than a degraded
@@ -188,6 +189,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 				continue
 			}
 			lastEmitted = snapshot.ScannedAt
+			notifyKernelBlocks(s.OSNotifier(), snapshot)
 			// Emission is best-effort and never blocks the planes. A
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
@@ -269,6 +271,12 @@ func (s *Sidecar) publishAIRuntimeHealth(snapshot sensor.Snapshot) {
 		if health.Reason != "" {
 			entry["reason"] = health.Reason
 		}
+		// Plane C's backend on the managed Linux sensor helper, in the same
+		// snake_case shape as the runtime API; `defenseclaw-gateway status` reads
+		// it here.
+		if backend := renderAIRuntimeBackend(health.Backend, snapshot.Kernel); backend != nil {
+			entry["backend"] = *backend
+		}
 		planes[string(health.Plane)] = entry
 	}
 	details := map[string]interface{}{
@@ -312,6 +320,29 @@ func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
 // the sensor helper, which reads every process's token. The managed Windows
 // gateway's own restricted token sees neither the token nor the session
 // user of another account's process (GAP-2043).
+// aiRuntimeOwnerLookups attributes a runtime finding whose process owner
+// the gateway service cannot read (GAP-1250): the managed Windows service
+// account holds only SeChangeNotifyPrivilege, so another user's token is
+// often closed to it. The session's signed-in user and the enrolled-user
+// table of the AI Discovery scan come next. Secure Client keeps main's
+// process-owner-only attribution (issue #1092).
+func (s *Sidecar) aiRuntimeOwnerLookups(activeConfig *config.Config) sensor.OwnerLookups {
+	if activeConfig.SecureClientIntegration() {
+		return sensor.OwnerLookups{}
+	}
+	return sensor.OwnerLookups{
+		SessionUser: procprobe.SessionUser,
+		Accounts: func() []sensor.Account {
+			enrolled := s.aiDiscoverySnapshot().EnrolledAccounts()
+			accounts := make([]sensor.Account, 0, len(enrolled))
+			for _, account := range enrolled {
+				accounts = append(accounts, sensor.Account{Name: account.Name, SID: account.SID, Home: account.Home})
+			}
+			return accounts
+		},
+	}
+}
+
 func brokeredProcessAccounts(ctx context.Context, acquirer acquire.Acquirer) func() map[int]inventory.ProcessAccount {
 	return func() map[int]inventory.ProcessAccount {
 		readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -364,50 +395,33 @@ func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Proces
 
 // chooseAcquirer decides where the privileged reads come from.
 //
-// The default is auto, and auto is not "try the helper and fall back". It
-// keys on deployment mode, because that is what determines whether this
-// process was de-privileged on purpose. A managed install sandboxes the
-// gateway precisely so it cannot read what the planes need, so brokering is
-// the only way it sees anything. An unmanaged install is the operator's own
-// process with whatever privilege they granted it, where inserting a broker
-// would add a failure mode and buy nothing.
+// It is not "try the helper and fall back". It keys on deployment mode,
+// because that is what determines whether this process was de-privileged on
+// purpose. A managed install sandboxes the gateway precisely so it cannot read
+// what the planes need, so brokering is the only way it sees anything. An
+// unmanaged install is the operator's own process with whatever privilege
+// they granted it, where inserting a broker would add a failure mode and buy
+// nothing. There is no setting: the managed socket path is part of what the
+// installer owns, and an unmanaged gateway has no helper to ask.
 //
-// An explicit setting is honoured either way, including the combination
-// that sees nothing: "direct" on a sandboxed gateway is a legitimate thing
-// to configure while diagnosing, and the coverage report will say what it
-// found rather than quietly substituting a working path.
-func chooseAcquirer(
-	activeConfig *config.Config, runtimeConfig config.AIRuntimeConfig,
-) acquire.Acquirer {
+// Broker only where this process was de-privileged on purpose and a helper is
+// therefore installed. Both halves matter.
+//
+// Managed alone is not the test: on macOS the managed gateway runs as root,
+// because the cloud auth provider has to re-perm its per-machine credential
+// store, so it can read everything directly and a broker would add a failure
+// mode for nothing. Linux sandboxes its gateway to an unprivileged account
+// with no capabilities, and Windows runs it as a virtual service account;
+// those are the cases that need the helper.
+//
+// Privilege alone is not the test either: an unmanaged workstation gateway
+// running without sudo also lacks wide coverage, and there is no helper
+// installed for it to ask. It should read what it can and report the
+// shortfall, not dial a socket nobody is serving.
+func chooseAcquirer(activeConfig *config.Config) acquire.Acquirer {
 	managedEnterprise := managed.IsManagedEnterprise(activeConfig.DeploymentMode)
-	mode := runtimeConfig.EffectiveAcquisition()
-	if mode == config.AcquisitionAuto {
-		mode = config.AcquisitionDirect
-		// Broker only where this process was de-privileged on purpose and a
-		// helper is therefore installed. Both halves matter.
-		//
-		// Managed alone is not the test: on macOS the managed gateway runs
-		// as root, because the cloud auth provider has to re-perm its
-		// per-machine credential store, so it can read everything directly
-		// and a broker would add a failure mode for nothing. Linux sandboxes
-		// its gateway to an unprivileged account with no capabilities, and
-		// Windows runs it as a virtual service account; those are the cases
-		// that need the helper.
-		//
-		// Privilege alone is not the test either: an unmanaged workstation
-		// gateway running without sudo also lacks wide coverage, and there
-		// is no helper installed for it to ask. It should read what it can
-		// and report the shortfall, not dial a socket nobody is serving.
-		if managedEnterprise && !acquire.NewLocal().WideCoverage() {
-			mode = config.AcquisitionHelper
-		}
-	}
-	if mode != config.AcquisitionHelper {
+	if !managedEnterprise || acquire.NewLocal().WideCoverage() {
 		return acquire.NewLocal()
 	}
-	socket := runtimeConfig.HelperSocket
-	if socket == "" {
-		socket = acquire.DefaultSocketPath(activeConfig.DataDir, managedEnterprise)
-	}
-	return acquire.NewHelper(socket)
+	return acquire.NewHelper(acquire.DefaultSocketPath(activeConfig.DataDir, managedEnterprise))
 }

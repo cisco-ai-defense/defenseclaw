@@ -57,7 +57,8 @@ func (a *APIServer) registerProviderRoutes(mux *http.ServeMux) {
 // both the legacy proxy route and the sidecar management route require the
 // configured gateway token.
 func (p *GuardrailProxy) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -106,7 +107,8 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		// authenticateRequest only emits the auth-failure audit
 		// event; it does not write a status. The 401 surface is
 		// our responsibility.

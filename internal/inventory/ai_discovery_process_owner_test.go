@@ -26,6 +26,9 @@ func TestPerUserDiscoveryListsOnlyOwnAccountProcesses(t *testing.T) {
 			t.Errorf("perUserProcessOwners(%+v) = %v, want nil (machine-wide)", opts, owners)
 		}
 	}
+	if account := perUserAccount(AIDiscoveryOptions{SecureClient: true}); account.id != "" {
+		t.Errorf("perUserAccount(Secure Client) = %+v, want none", account)
+	}
 	owners := perUserProcessOwners(AIDiscoveryOptions{})
 	if !owners[name] || !owners[uid] {
 		t.Fatalf("perUserProcessOwners = %v, want %s and %s", owners, name, uid)
@@ -47,12 +50,15 @@ func TestPerUserDiscoveryListsOnlyOwnAccountProcesses(t *testing.T) {
 			{ID: "codex", Name: "Codex", ProcessNames: []string{"codex"}},
 		},
 		processOwners: owners,
+		account:       perUserAccount(AIDiscoveryOptions{}),
 	}
-	signals, err := svc.detectProcesses()
-	if err != nil {
-		t.Fatal(err)
-	}
+	signals, _ := svc.scanSignals(t.Context(), "scan-per-user", nil, false, nil)
 	if len(signals) != 1 || signals[0].Runtime == nil || signals[0].Runtime.PID != 64731 {
 		t.Fatalf("signals = %+v, want only this account's claude (pid 64731)", signals)
+	}
+	// GAP-0016: the signal names the install's account, so its records carry
+	// that account's identity.
+	if signals[0].UserID != uid || signals[0].UserName == "" {
+		t.Fatalf("signal account = %q/%q, want uid %s", signals[0].UserID, signals[0].UserName, uid)
 	}
 }

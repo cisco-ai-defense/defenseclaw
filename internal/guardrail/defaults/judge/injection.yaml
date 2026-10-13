@@ -77,8 +77,9 @@ categories:
     finding_id: JUDGE-INJ-TOKEN
     severity: HIGH
 
-# See policies/guardrail/default/judge/injection.yaml for rationale.
-# These defaults ship as fallback when no profile directory is found.
+# Severity rubric (decision.go SeverityCriteria):
+#   HIGH     — clear adversarial intent; requires context to cause harm
+#   CRITICAL — direct unambiguous harm (e.g. coordinated multi-category attack)
 min_categories_for_high: 1
 single_category_max_severity: HIGH
 min_categories_for_critical: 2

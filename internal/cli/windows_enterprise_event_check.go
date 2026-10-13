@@ -72,8 +72,9 @@ earlier entry carried the same record. Entries older than the lifecycle log's
 first event record are shown as unverifiable.
 
 Exits 1 when an entry was not written by DefenseClaw, or when the newest
-lifecycle record written to the checked log has no entry there. Any account
-can run it.`,
+lifecycle record written to the checked log has no entry there. Run it as an
+administrator or a member of Event Log Readers: only they can read the
+lifecycle log, whose results name other accounts.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -382,6 +383,9 @@ func readWindowsLifecycleEventLines(path string, generations int) ([]windowsLife
 		body, err := os.ReadFile(name)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return nil, fmt.Errorf("read the lifecycle log %s: only Administrators and members of Event Log Readers can read it; run events from an elevated prompt: %w", name, err)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read the lifecycle log %s: %w", name, err)

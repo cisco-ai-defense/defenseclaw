@@ -6,21 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.tui.app import DefenseClawTUI, _config_label_cells
-from defenseclaw.tui.panels.setup import action_matrix_fields
+from defenseclaw.tui.panels.setup import admission_action_fields
 
 
-@pytest.mark.parametrize("prefix", ["skill_actions", "mcp_actions", "plugin_actions"])
+@pytest.mark.parametrize("asset_type", ["skill", "mcp", "plugin"])
 @pytest.mark.parametrize("room", [20, 30, 34])
-def test_action_matrix_header_reads_whole(prefix: str, room: int) -> None:
-    header = action_matrix_fields(prefix, {})[0]
+def test_admission_header_reads_whole(asset_type: str, room: int) -> None:
+    header = admission_action_fields(asset_type, {})[0]
 
     label, value = _config_label_cells(header, room, room)
 
     assert "…" not in label + value
     assert label.startswith(".. ") and label.endswith(" ..")
-    assert prefix.split("_")[0].upper() in label
+    assert asset_type.upper() in label
     assert len(label) <= room and len(value) <= 12
-    assert "install: none/block/allow" in header.hint
 
 
 def test_overview_signature_changes_with_width(monkeypatch: pytest.MonkeyPatch) -> None:

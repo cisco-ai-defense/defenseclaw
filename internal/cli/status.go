@@ -61,6 +61,9 @@ The sidecar must be running for this command to work.`,
 	// On a standalone managed host an administrator's status reads the
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		gatewayStatusConfigProblem = nil
 		err := loadGatewayCommandConfigFor(cmd)
@@ -303,9 +306,10 @@ func gatewayStatusConfigLoadError(err error) error {
 	}
 	if problem, ok := configSchemaProblem(err); ok {
 		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
-			problem, state)
+			strings.TrimRight(problem, ". "), state)
 	}
-	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
+	return fmt.Errorf("%s. %s Fix the file (check it with: defenseclaw config validate)",
+		strings.TrimRight(err.Error(), ". "), state)
 }
 
 func printGatewayStatusBanner() {
@@ -509,6 +513,13 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 	}
 	newest := moved[len(moved)-1]
 	fmt.Println()
+	if newest.PreCutover {
+		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
+		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s (since %s); %s",
+			newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+		Subhead("Delete the archive and its -wal/-shm files when you no longer need it.")
+		return
+	}
 	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
 		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
 	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"
@@ -1057,6 +1068,47 @@ func printSubsystems(snap *gateway.HealthSnapshot) {
 	if snap.Sandbox != nil {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
+	if line := kernelSensorStatusLine(snap); line != "" {
+		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
+	}
+}
+
+// kernelSensorStatusLine is the managed Linux sensor helper's kernel sensor
+// and kernel controls in one line, from /health
+// ai_runtime.details.planes.c.backend; "" when the gateway reports no
+// backend (every host but a managed Linux one).
+func kernelSensorStatusLine(snap *gateway.HealthSnapshot) string {
+	planes, _ := snap.AIRuntime.Details["planes"].(map[string]interface{})
+	planeC, _ := planes["c"].(map[string]interface{})
+	raw, ok := planeC["backend"]
+	if !ok {
+		return ""
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	var backend enterpriseRuntimeBackend
+	if json.Unmarshal(data, &backend) != nil {
+		return ""
+	}
+	sensor := "cn_proc and fanotify (Tetragon not used: " + tetragonFallback(backend.FallbackReason) + ")"
+	if strings.EqualFold(backend.Kind, "tetragon") {
+		version := strings.TrimSpace(backend.Version)
+		if version != "" && version[0] >= '0' && version[0] <= '9' {
+			version = "v" + version
+		}
+		sensor = strings.TrimSpace("Tetragon " + version)
+		if backend.Mode != "" {
+			sensor += " (" + backend.Mode + ")"
+		}
+	}
+	for _, line := range backend.lines() {
+		if controls, ok := strings.CutPrefix(line, "kernel controls: "); ok {
+			sensor += "; kernel controls: " + controls
+		}
+	}
+	return sensor
 }
 
 func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {

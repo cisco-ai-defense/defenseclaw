@@ -47,6 +47,7 @@ type toolCallCorpusCase struct {
 	ProfilePosture       string              `json:"profile_posture,omitempty"`
 	ProfileRuleIDs       map[string]string   `json:"profile_rule_ids,omitempty"`
 	ProfileRoutes        map[string]string   `json:"profile_routes,omitempty"`
+	ProfileDetectionOnly map[string]bool     `json:"profile_detection_only,omitempty"`
 }
 
 const toolCallCorpusStrictOnlyPosture = "strict_only"
@@ -127,6 +128,11 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 				t.Fatalf("case %q: invalid profile route override %q=%q", test.ID, profile, route)
 			}
 		}
+		for profile := range test.ProfileDetectionOnly {
+			if !slices.Contains(toolCallCorpusProfiles, profile) {
+				t.Fatalf("case %q: invalid detection-only profile %q", test.ID, profile)
+			}
+		}
 	}
 
 	for _, profile := range toolCallCorpusProfiles {
@@ -152,6 +158,9 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 		t.Run(test.ID, func(t *testing.T) {
 			expectRoute := test.ExpectRoute
 			expectDetectionOnly := test.DetectionOnly
+			if override, ok := test.ProfileDetectionOnly[profile]; ok {
+				expectDetectionOnly = override
+			}
 			if profileRoute := test.ProfileRoutes[profile]; profileRoute != "" {
 				expectRoute = profileRoute
 			}

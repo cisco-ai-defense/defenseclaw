@@ -34,12 +34,9 @@ import (
 // maxCustomPacks bounds how many entries of a pack directory List inspects.
 const maxCustomPacks = 256
 
-// userHomeDir, validateTrustedFile, currentUID and fileOwner are swapped in
-// tests.
+// validateTrustedFile and fileOwner are swapped in tests.
 var (
-	userHomeDir         = os.UserHomeDir
 	validateTrustedFile = managed.ValidateTrustedFilePath
-	currentUID          = os.Getuid
 	fileOwner           = statOwner
 )
 
@@ -87,8 +84,38 @@ func Builtin(name string) (*Pack, error) {
 //   - an absolute path (or "~/…") selects that pack.yaml or pack directory.
 //
 // Built-in names always resolve to the embedded packs, so a custom file can
-// never impersonate one.
+// never impersonate one. A pack that extends another finds a custom parent
+// by name in packDir.
 func Load(ref, packDir string) (*Pack, error) {
+	return loadFor(callerSubject(), ref, packDir, false)
+}
+
+// loadFor is Load (loadTrusted when trusted) for subject s: "~/" is s's
+// home, and a custom pack must be s's or root's (checkPackOwnership).
+func loadFor(s Subject, ref, packDir string, trusted bool) (*Pack, error) {
+	if trusted {
+		return loadTrusted(s, ref, packDir)
+	}
+	return (&loader{packDir: packDir, subject: s}).load(ref)
+}
+
+// MaxExtendsDepth bounds an extends chain: a pack has at most this many
+// ancestors.
+const MaxExtendsDepth = 4
+
+// loader loads one pack reference and the chain of parents it extends.
+// trusted holds every custom pack of the chain to loadTrusted's rule.
+type loader struct {
+	packDir string
+	trusted bool
+	// subject is whose home "~/" names and whose files count as the
+	// user's own.
+	subject Subject
+	// chain are the pack files being loaded, the first reference first.
+	chain []string
+}
+
+func (l *loader) load(ref string) (*Pack, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		ref = DefaultPack
@@ -97,23 +124,57 @@ func Load(ref, packDir string) (*Pack, error) {
 		return Builtin(ref)
 	}
 	if packNamePattern.MatchString(ref) {
-		return loadNamed(ref, packDir)
+		return l.loadNamed(ref)
 	}
-	return LoadFile(ref)
+	return l.loadFile(ref)
 }
 
-// LoadTrusted is Load for a pack an administrator relies on (a
+// parent loads the parent a pack of the chain extends.
+func (l *loader) parent(ref string) (*Pack, error) {
+	if len(l.chain) > MaxExtendsDepth {
+		return nil, packErr(l.chain[0], "extends", "extends_depth", "a pack may have at most %d ancestors: %s → %s",
+			MaxExtendsDepth, strings.Join(l.chain, " → "), ref)
+	}
+	if IsBuiltin(ref) {
+		return Builtin(ref)
+	}
+	file, err := packFilePath(ref, l.packDir, l.subject.Home)
+	if err != nil {
+		return nil, err
+	}
+	for _, seen := range l.chain {
+		if seen == file {
+			return nil, packErr(l.chain[0], "extends", "extends_cycle", "the extends chain comes back to %s", file)
+		}
+	}
+	if l.trusted {
+		if _, err := os.Lstat(file); errors.Is(err, fs.ErrNotExist) {
+			return nil, packErr(file, "", "not_found", "no such pack file")
+		}
+		if err := validateTrustedFile(file, "sandbox policy pack"); err != nil {
+			return nil, packErr(file, "", "untrusted",
+				"must be an administrator-owned file that other users cannot modify (%v)", err)
+		}
+	}
+	return l.loadNamed(ref)
+}
+
+// loadTrusted is Load for subject s of a pack an administrator relies on (a
 // managed_enterprise openshell.admin.required_pack): before a custom pack is
 // read, its file and every directory above it must be administrator-owned and
 // not writable by other users (managed.ValidateTrustedFilePath), so a user
 // cannot swap the pack the administrator-owned config.yaml names. Built-in
 // packs are embedded and always trusted.
-func LoadTrusted(ref, packDir string) (*Pack, error) {
+func loadTrusted(s Subject, ref, packDir string) (*Pack, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" || IsBuiltin(ref) {
-		return Load(ref, packDir)
+		return loadFor(s, ref, packDir, false)
 	}
-	file, err := packFilePath(ref, packDir)
+	if pack := authorityPack(ref); pack != nil {
+		// The managed gateway's copy of the administrator's pack.
+		return pack, nil
+	}
+	file, err := packFilePath(ref, packDir, s.Home)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +185,8 @@ func LoadTrusted(ref, packDir string) (*Pack, error) {
 		return nil, packErr(file, "", "untrusted",
 			"must be an administrator-owned file that other users cannot modify (%v)", err)
 	}
-	pack, err := Load(ref, packDir)
+	// The packs it extends must be the administrator's as well.
+	pack, err := (&loader{packDir: packDir, trusted: true, subject: s}).load(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -135,21 +197,21 @@ func LoadTrusted(ref, packDir string) (*Pack, error) {
 }
 
 // packFilePath returns the pack.yaml a custom pack reference names, without
-// reading it (see Load).
-func packFilePath(ref, packDir string) (string, error) {
+// reading it (see Load); "~/" is home.
+func packFilePath(ref, packDir, home string) (string, error) {
 	var target string
 	if packNamePattern.MatchString(ref) {
 		packDir = strings.TrimSpace(packDir)
 		if packDir == "" {
 			return "", packErr(ref, "", "not_found", "no built-in pack named %q and openshell.pack_dir is not set", ref)
 		}
-		dir, err := expandHome(packDir)
+		dir, err := expandHome(packDir, home)
 		if err != nil {
 			return "", packErr(ref, "", "not_found", "openshell.pack_dir %q: %v", packDir, err)
 		}
 		target = filepath.Join(dir, ref)
 	} else {
-		expanded, err := expandHome(ref)
+		expanded, err := expandHome(ref, home)
 		if err != nil {
 			return "", packErr(ref, "", "not_found", "%v", err)
 		}
@@ -164,12 +226,12 @@ func packFilePath(ref, packDir string) (string, error) {
 	return target, nil
 }
 
-func loadNamed(name, packDir string) (*Pack, error) {
-	packDir = strings.TrimSpace(packDir)
+func (l *loader) loadNamed(name string) (*Pack, error) {
+	packDir := strings.TrimSpace(l.packDir)
 	if packDir == "" {
 		return nil, packErr(name, "", "not_found", "no built-in pack named %q and openshell.pack_dir is not set", name)
 	}
-	dir, err := expandHome(packDir)
+	dir, err := expandHome(packDir, l.subject.Home)
 	if err != nil {
 		return nil, packErr(name, "", "not_found", "openshell.pack_dir %q: %v", packDir, err)
 	}
@@ -178,7 +240,7 @@ func loadNamed(name, packDir string) (*Pack, error) {
 		return nil, packErr(name, "", "not_found", "no built-in or custom pack named %q (custom packs live in %s/<name>/%s)",
 			name, dir, PackFileName)
 	}
-	pack, err := LoadFile(candidate)
+	pack, err := l.loadFile(candidate)
 	if err != nil {
 		return nil, err
 	}
@@ -188,15 +250,15 @@ func loadNamed(name, packDir string) (*Pack, error) {
 	return pack, nil
 }
 
-// LoadFile loads a custom pack from an absolute path to a pack.yaml or to the
-// directory holding one ("~/" expands to the home directory). The pack
+// loadFile loads a custom pack from an absolute path to a pack.yaml or to the
+// directory holding one ("~/" expands to the subject's home). The pack
 // directory and the file must not be symbolic links, the file must be a
 // regular file of at most MaxPackBytes, no other local user may have written
 // it or be able to replace it (checkPackOwnership), and the pack may not
 // claim a built-in name.
-func LoadFile(p string) (*Pack, error) {
+func (l *loader) loadFile(p string) (*Pack, error) {
 	raw := strings.TrimSpace(p)
-	expanded, err := expandHome(raw)
+	expanded, err := expandHome(raw, l.subject.Home)
 	if err != nil {
 		return nil, packErr(raw, "", "not_found", "%v", err)
 	}
@@ -234,7 +296,7 @@ func LoadFile(p string) (*Pack, error) {
 		return nil, packErr(target, "", "too_large", "pack exceeds %d bytes", MaxPackBytes)
 	}
 	if runtime.GOOS != "windows" {
-		if err := checkPackOwnership(target, info); err != nil {
+		if err := checkPackOwnership(target, info, l.subject.UID); err != nil {
 			return nil, err
 		}
 	}
@@ -242,7 +304,8 @@ func LoadFile(p string) (*Pack, error) {
 	if err != nil {
 		return nil, packErr(target, "", "unreadable", "cannot read the pack file safely")
 	}
-	pack, err := Parse(data, target)
+	l.chain = append(l.chain, target)
+	pack, err := parse(data, target, l.parent)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +316,8 @@ func LoadFile(p string) (*Pack, error) {
 }
 
 // checkPackOwnership refuses a pack file that another local user wrote or
-// could replace. The file and its directory must be owned by the current
-// user or root, and neither may be writable by its group or by every user,
+// could replace. The file and its directory must be owned by uid (the
+// subject's) or root, and neither may be writable by its group or by every user,
 // with one exception: a root-owned file may sit in a sticky directory others
 // can write to, where no other user can replace it. A file of the user's own
 // in such a directory (for example under /tmp) is refused, because the
@@ -262,8 +325,7 @@ func LoadFile(p string) (*Pack, error) {
 // write bit also reflects a POSIX ACL that grants write to a named user or
 // group (the ACL mask); macOS ACLs, which leave the mode bits alone, are not
 // inspected.
-func checkPackOwnership(file string, info fs.FileInfo) error {
-	uid := currentUID()
+func checkPackOwnership(file string, info fs.FileInfo, uid int) error {
 	owner, ok := fileOwner(info)
 	switch {
 	case !ok:
@@ -301,9 +363,19 @@ func checkPackOwnership(file string, info fs.FileInfo) error {
 	return nil
 }
 
-// Validate strictly loads a pack file for `defenseclaw sandbox pack validate`.
-func Validate(p string) (*Pack, error) {
-	return LoadFile(p)
+// LoadRequired loads a required pack (openshell.admin.required_pack or a
+// profile's) for subject s in an administrator's view: with the
+// administrator-owned file rule of loadTrusted when trusted (a
+// managed_enterprise deployment), so the view refuses what the gateway
+// would refuse for s.
+func LoadRequired(s Subject, ref, packDir string, trusted bool) (*Pack, error) {
+	return loadFor(s, ref, packDir, trusted)
+}
+
+// Validate strictly loads a pack file for `defenseclaw sandbox pack
+// validate`; a custom pack it extends is looked up in packDir.
+func Validate(p, packDir string) (*Pack, error) {
+	return (&loader{packDir: packDir, subject: callerSubject()}).loadFile(p)
 }
 
 // Entry describes one pack for `defenseclaw sandbox pack list`.
@@ -314,6 +386,8 @@ type Entry struct {
 	Description string `json:"description,omitempty"`
 	Profile     string `json:"profile,omitempty"`
 	Digest      string `json:"digest,omitempty"`
+	// Extends is the parent pack, for a pack that extends one.
+	Extends string `json:"extends,omitempty"`
 	// Err is set for a custom pack that failed to load; the other fields
 	// then describe only where it was found.
 	Err error `json:"-"`
@@ -335,7 +409,8 @@ func List(packDir string) ([]Entry, error) {
 	if packDir == "" {
 		return entries, nil
 	}
-	dir, err := expandHome(packDir)
+	subject := callerSubject()
+	dir, err := expandHome(packDir, subject.Home)
 	if err != nil {
 		return nil, packErr(packDir, "", "unreadable", "%v", err)
 	}
@@ -379,7 +454,7 @@ func List(packDir string) ([]Entry, error) {
 				Err: packErr(full, "", "reserved_name", "%q is a built-in pack name; this directory is ignored", name)})
 			continue
 		}
-		pack, err := loadNamed(name, dir)
+		pack, err := (&loader{packDir: dir, subject: subject}).loadNamed(name)
 		if err != nil {
 			entries = append(entries, Entry{Name: name, Source: full, Err: err})
 			continue
@@ -397,15 +472,16 @@ func entryFor(p *Pack) Entry {
 		Description: p.Description,
 		Profile:     p.Profile(),
 		Digest:      p.Digest,
+		Extends:     p.Extends,
 	}
 }
 
-func expandHome(p string) (string, error) {
+// expandHome expands a leading "~/" to home; without a home it refuses.
+func expandHome(p, home string) (string, error) {
 	if p != "~" && !strings.HasPrefix(p, "~/") {
 		return p, nil
 	}
-	home, err := userHomeDir()
-	if err != nil || home == "" {
+	if home == "" {
 		return "", errors.New("cannot resolve the home directory")
 	}
 	return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/")), nil

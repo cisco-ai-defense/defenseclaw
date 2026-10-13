@@ -41,3 +41,14 @@ func ValidateIdentityBinding(brokerService, gatewayService, pipeName string) err
 	}
 	return nil
 }
+
+// gatewayServiceAccountAccepted reports whether an SCM ServiceStartName is a
+// supported logon account for the gateway service: LocalSystem, or the
+// gateway's own virtual account used by earlier releases. Hosts upgrading
+// between the two keep a working broker.
+func gatewayServiceAccountAccepted(startName, gatewayServiceName string) bool {
+	startName = strings.TrimSpace(startName)
+	return strings.EqualFold(startName, "LocalSystem") ||
+		strings.EqualFold(startName, `NT AUTHORITY\SYSTEM`) ||
+		strings.EqualFold(startName, `NT SERVICE\`+gatewayServiceName)
+}

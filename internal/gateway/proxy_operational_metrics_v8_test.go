@@ -19,7 +19,7 @@ import (
 
 func TestProxyOperationalMetricsUseGeneratedFamiliesAndCorrelation(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
-	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.bindObservabilityV8Trace(runtime)
 
 	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
@@ -121,7 +121,7 @@ func TestProxyOperationalMetricsUseGeneratedFamiliesAndCorrelation(t *testing.T)
 }
 
 func TestProxyOperationalMetricsRequireV8Runtime(t *testing.T) {
-	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.recordProxyRateLimitV8(context.Background(), "/v1/chat/completions")
 	proxy.recordProxyForwardedHeadersV8(context.Background(), "passthrough", "ok", 1)
 	proxy.recordProxyStreamV8(

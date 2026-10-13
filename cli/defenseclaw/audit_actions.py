@@ -109,6 +109,10 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 
+# A standalone enterprise hook call from an exempt_users account. Mirrors
+# internal/audit/actions.go::ActionEnterpriseExemptUser.
+ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -127,6 +131,11 @@ ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
 ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
 ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
 ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+ACTION_SANDBOX_ACTIVITY: Final[str]  = "sandbox-activity"
+ACTION_SANDBOX_PROCESS: Final[str]   = "sandbox-process"
+ACTION_SANDBOX_POLICY_REMATCHED: Final[str]   = "sandbox.policy.rematched"
+ACTION_SANDBOX_POLICY_FOREIGN_RULE: Final[str] = "sandbox.policy.foreign_rule"
+ACTION_SANDBOX_MANAGED: Final[str]   = "sandbox.managed"
 
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
@@ -345,6 +354,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_ENTERPRISE_EXEMPT_USER,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
@@ -355,6 +365,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_SANDBOX_POLICY,
     ACTION_SANDBOX_HEALTH,
     ACTION_SANDBOX_FINDING,
+    ACTION_SANDBOX_ACTIVITY,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,

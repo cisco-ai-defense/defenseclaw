@@ -69,6 +69,7 @@ type templateData struct {
 	ListenerProofJS string
 	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed         bool
+	SecureClient    bool // render-time profile marker for Unix shell identity headers
 	TokenFile       string
 	ScopedToken     bool
 	ConnectorName   string
@@ -431,11 +432,13 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 	return nil
 }
 
-// WriteHookScriptsWithToken generates every hook script into hookDir,
-// baking the gateway bearer token into the curl Authorization header so
-// the API server's auth middleware accepts the hook's POST. When token
-// is empty the scripts omit the header entirely so the middleware's
-// loopback-allow branch still applies.
+// WriteHookScriptsWithToken generates every hook script into hookDir and
+// writes the gateway bearer token to the .token file the scripts read at run
+// time, so the API server's auth middleware accepts the hook's POST. The
+// scripts hand the token to curl on a descriptor (defenseclaw_gateway_post in
+// _hardening.sh), never on its command line. When token is empty the scripts
+// omit the header entirely so the middleware's loopback-allow branch still
+// applies.
 //
 // Hook scripts generated:
 //   - inspect-tool.sh          (pre-tool)
@@ -513,7 +516,7 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
-	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "")
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "", false)
 }
 
 // writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
@@ -521,7 +524,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 // TCP) and foreign-hook guard block (empty unless the connector's standalone
 // shell hook runs the guard). The shared inspect-* scripts keep TCP: no
 // per-user enterprise hook registration invokes them.
-func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) error {
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient bool) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -540,7 +543,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode strin
 		return err
 	}
 
-	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard)
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient)
 	if err != nil {
 		return err
 	}
@@ -573,12 +576,13 @@ type renderedHookScript struct {
 // scripts and the connector-owned lifecycle scripts named in extras, in the
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
 // basename of the token file the connector scripts read.
-func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) ([]renderedHookScript, error) {
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient bool) ([]renderedHookScript, error) {
 	connectorData := templateData{
 		APIAddr:              apiAddr,
 		APIToken:             "",
 		FailMode:             normalizeHookFailMode(failMode),
 		Managed:              managed,
+		SecureClient:         secureClient,
 		TokenFile:            tokenFile,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
@@ -595,7 +599,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 	// bytes must therefore depend only on install-wide inputs; connector mode,
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
-	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
+	sharedData := templateData{APIAddr: apiAddr, Managed: managed, SecureClient: connectorData.SecureClient}
 	// renderHookScriptSet is the one renderer the host and sandbox hook
 	// files share (hook_render.go).
 	set, err := renderHookScriptSet(connectorData, sharedData, extras)
@@ -680,7 +684,7 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 		tokenFile = filepath.Base(path)
 	}
 	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
-		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -1482,7 +1486,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.extras, opts.ManagedEnterprise,
-		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts))
 }
 
 // connectorHookRender is what WriteHookScriptsForConnectorObjectWithOpts
@@ -1494,6 +1498,13 @@ type connectorHookRender struct {
 	scopedToken     bool
 	socketTransport string
 	foreignGuard    string
+}
+
+// Secure Client renders managed hooks into each users home. The deployment
+// profile, not that path, decides which identity headers they send.
+func shellHookSecureClientProfile(opts SetupOpts) bool {
+	return opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedHookSocket) == "" &&
+		strings.TrimSpace(opts.ManagedHookBinary) == ""
 }
 
 func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender {
@@ -1522,7 +1533,7 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	// does for in-agent plugins. Every other install (per-user, Secure
 	// Client, Windows) has no socket here and keeps the TCP transport.
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
-		render.socketTransport = shellHookSocketTransport(socket, serviceUID)
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts))
 	}
 	// The standalone Hermes hook also runs the foreign-hook guard first
 	// (shellHookForeignGuardBinary); no other hook or install does.
@@ -1700,8 +1711,41 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	// A managed Windows hook folder holds only files with the managed runtime
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
+	body := disabledHookTombstone(vendorLabel)
+	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
+		body = failedSetupHookPlaceholder(vendorLabel)
+	}
 	return hookRuntimeFileWriter(opts.ManagedEnterprise)(
-		filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+		filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+}
+
+// failedSetupPlaceholderBlocks lists the hook scripts whose agents treat
+// exit 2 as a block and show its stderr to the user.
+var failedSetupPlaceholderBlocks = map[string]bool{
+	"claude-code-hook.sh": true,
+	"codex-hook.sh":       true,
+}
+
+// failedSetupHookPlaceholder is the hook body a rollback leaves for a
+// fail-closed connector whose setup failed at gateway start. It keeps the
+// tombstone marker, so teardown and doctor still recognise it, but blocks
+// every call and says why (GAP-0367).
+func failedSetupHookPlaceholder(vendorLabel string) string {
+	return "#!/bin/sh\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# The gateway could not set up the fail-closed " + vendorLabel + " connector when it\n" +
+		"# started. Block every call until a gateway start sets it up again.\n" +
+		"echo \"defenseclaw: " + vendorLabel + " is not guarded: the gateway failed to set it up when it started, so this call is blocked (fail mode closed). Run defenseclaw-gateway status to see the error, fix it, then run defenseclaw-gateway start.\" >&2\n" +
+		"exit 2\n"
+}
+
+// HookFailClosed reports whether conn blocks agent calls when its gateway is
+// unavailable under opts.
+func HookFailClosed(opts SetupOpts, conn Connector) bool {
+	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {
+		return false
+	}
+	return resolveHookFailMode(opts, conn) == "closed"
 }
 
 // disabledHookTombstone is the body writeDisabledHookTombstone writes.

@@ -57,11 +57,6 @@ def _validate_from_version(_ctx, _param, value):
     )
 
 
-def _release_tuple(value: str) -> tuple[int, int, int]:
-    match = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", value or "")
-    return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)  # type: ignore[return-value]
-
-
 @click.command("migrate")
 @click.option(
     "--check",
@@ -82,21 +77,13 @@ def _release_tuple(value: str) -> tuple[int, int, int]:
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-@click.option("--yes", "-y", is_flag=True, hidden=True, help="Accepted for installer compatibility.")
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, yes) -> None:
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json) -> None:
     """Bring config and data to this version's schema."""
-    del yes
-    from defenseclaw import __version__
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
-    if from_version and _release_tuple(from_version) > _release_tuple(__version__):
-        # The installer passes the release it replaces, which may be newer on
-        # a downgrade, so this warns instead of refusing (GAP-1610).
-        ux.echo(
-            f"  ⚠ --from-version {from_version} is newer than this DefenseClaw ({__version__}). "
-            "It should name the release that wrote the data (the one installed before this one).",
-            err=True,
-        )
+    # A --from-version newer than this release is warned about where it is
+    # read: a 0.x config without a cursor (migrations._warn_from_version_newer).
+    # The installer passes the release it replaces, newer on a downgrade.
 
     # With --json, stdout carries only the JSON document; step progress goes to stderr.
     progress = contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext()
@@ -148,8 +135,40 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.subhead("Nothing was changed. 'defenseclaw migrate' (or the upgrade) applies them.")
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
-    if not check and not as_json:
+    if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
+        _report_ignored_dotenv_keys(data_dir or _default_data_dir())
+
+
+def _report_ignored_dotenv_keys(data_dir: str) -> None:
+    """Name each 0.x .env control key this release no longer reads (GAP-0387)."""
+    from defenseclaw.config import ignored_dotenv_control_keys
+
+    keys = ignored_dotenv_control_keys(data_dir)
+    if not keys:
+        return
+    env_path = os.path.join(data_dir, ".env")
+    ux.warn(f"{env_path} sets {len(keys)} variable(s) DefenseClaw no longer reads from .env:")
+    for entry in keys:
+        ux.subhead(entry, indent="    ")
+    ux.subhead(f"Then remove those lines from {env_path}; 'defenseclaw doctor' lists them until then.", indent="    ")
+
+
+# The first config_version a 1.x release wrote: below it is a 0.x config,
+# whose hooks 0.8.x sealed with the global fail mode.
+_FIRST_1X_CONFIG_VERSION = 8
+
+
+def _upgraded_from_0x(result) -> bool:
+    """Whether this run migrated a 0.x config, the one upgrade that changes the fail mode.
+
+    A same-release reinstall or a 1.x upgrade printed the fail-open notice
+    too, about a connector already in action mode (GAP-0276): the gateway had
+    rewritten its hooks since, and this check reads the config by Python's
+    rules, not the gateway's.
+    """
+    source = result.from_config_version
+    return bool(result.applied) and source is not None and source < _FIRST_1X_CONFIG_VERSION
 
 
 def _report_hook_fail_mode_changes(data_dir: str) -> None:
@@ -172,7 +191,11 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
         return
     for name, entry in sorted(connectors.items()):
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
+        if (
+            sealed != "closed"
+            or guardrail.effective_mode(name).strip().lower() != "observe"
+            or guardrail.effective_hook_fail_mode(name) != "open"
+        ):
             continue
         ux.warn(
             f"{name} hooks now fail open: in observe mode they let a call through when "

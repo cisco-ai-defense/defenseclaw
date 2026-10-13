@@ -249,7 +249,7 @@ func scanFindingV8Operation(
 			DefenseClawScanScanner:                optionalScanV8Text(scanFindingV8Scanner(finding, result)),
 			UserID:                                optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
-			DefenseClawUserName:                   optionalScanV8Identifier(correlation.UserName),
+			DefenseClawUserName:                   observability.UserName(correlation.UserName, optionalScanV8Identifier),
 		})
 		return verifyRuntimeV8Record(record, buildErr, event, false)
 	}
@@ -318,11 +318,14 @@ func scanSummaryV8Event(
 	observedAt time.Time,
 	correlation ScanCorrelation,
 ) Event {
+	details := fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
+		result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration)
+	if judge := strings.TrimSpace(correlation.JudgeModel); judge != "" {
+		details += " judge=" + judge
+	}
 	event := Event{
 		ID: uuid.NewString(), Timestamp: observedAt, Action: string(ActionScan), Target: result.Target,
-		Actor: "defenseclaw",
-		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
-			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
+		Actor: "defenseclaw", Details: details,
 		Severity: string(result.MaxSeverity()), RunID: correlation.RunID, SpanID: correlation.SpanID,
 		RequestID: correlation.RequestID, SessionID: correlation.SessionID, TraceID: correlation.TraceID,
 		AgentID: correlation.AgentID, AgentName: correlation.AgentName,
@@ -388,7 +391,7 @@ func scanSummaryV8Operation(
 			DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
 			UserID:                       optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:        optionalNetworkUserIDKind(correlation.UserIDKind),
-			DefenseClawUserName:          optionalScanV8Identifier(correlation.UserName),
+			DefenseClawUserName:          observability.UserName(correlation.UserName, optionalScanV8Identifier),
 		}
 		var record observability.Record
 		if eventName == observability.EventName(observability.TelemetryEventScanFailed) {

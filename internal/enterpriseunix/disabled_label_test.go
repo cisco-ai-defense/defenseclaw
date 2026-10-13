@@ -56,3 +56,71 @@ func TestLaunchdDisabledReadsTheOverride(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0530: after `systemctl disable --now defenseclaw-gateway` the hook
+// socket starts the gateway again, so it runs but would not start at boot;
+// the next ensure was a no-op and verify passed.
+func TestEnsureReEnablesADisabledSystemdUnitThatStillRuns(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.disabled = map[string]bool{unitGateway: true}
+	ensure := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")})
+	requireOK(t, ensure)
+	if ensure.Noop || !strings.Contains(strings.Join(ensure.Changes, "\n"), "re-enabled "+unitGateway) {
+		t.Fatalf("ensure noop=%v changes=%q, want the gateway re-enabled", ensure.Noop, ensure.Changes)
+	}
+}
+
+// GAP-0475: a masked unit read as "loaded from /etc/systemd/system ...;
+// remove the other unit file" in verify, and repair failed to enable it with
+// a cause-less activation_failed.
+func TestVerifyNamesAMaskedUnitAndRepairUnmasksIt(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.masked = map[string]bool{unitGuardian: true}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, unitGuardian+" is masked") || !strings.Contains(got, "systemctl unmask "+unitGuardian) {
+		t.Fatalf("verify does not name the masked unit: %s", got)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	requireOK(t, repair)
+	if got := strings.Join(repair.Changes, "\n"); !strings.Contains(got, "unmasked "+unitGuardian) {
+		t.Fatalf("repair does not say it unmasked the unit: %q", repair.Changes)
+	}
+}
+
+// GAP-0423: the apply oneshot a refused package upgrade left failed kept
+// verify warning unit_failed after a later ensure recovered the host.
+func TestARecoveringEnsureClearsTheFailedApplyOneshot(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.failed[unitApplyService] = true
+	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")}))
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeUnitFailed); got != "" {
+		t.Fatalf("status still warns: %s", got)
+	}
+}
+
+// GAP-0956: with the apply and daily verify jobs booted out, status and
+// verify read ok (rc 0) although nothing would apply the next config push.
+// Both fail naming the label and the repair, and repair loads them again.
+func TestVerifyFailsWhileTheApplyOrVerifyJobIsNotLoaded(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	for _, label := range []string{labelApply, labelVerify} {
+		_ = h.services.Stop(context.Background(), Unit{Name: label})
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		requireError(t, r, codeVerify)
+		got := messagesOf(r.Errors, codeVerify)
+		for _, label := range []string{labelApply, labelVerify} {
+			if !strings.Contains(got, label+" is not loaded") || !strings.Contains(got, " repair`") {
+				t.Fatalf("%s does not name %s and the repair: %s", action, label, got)
+			}
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}

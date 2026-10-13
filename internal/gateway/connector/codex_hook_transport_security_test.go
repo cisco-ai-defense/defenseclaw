@@ -29,7 +29,7 @@ func TestCodexHookKeepsCredentialsAndPayloadOutOfCurlArgv(t *testing.T) {
 	hooksDir := t.TempDir()
 	if err := WriteHookScriptsForConnectorObject(
 		hooksDir,
-		"127.0.0.1:18970",
+		freeAPIAddr(t),
 		scopedToken,
 		NewCodexConnector(),
 	); err != nil {
@@ -141,7 +141,7 @@ func TestCodexHookEscapesCurlConfigTokenMetacharacters(t *testing.T) {
 	hooksDir := t.TempDir()
 	if err := WriteHookScriptsForConnectorObject(
 		hooksDir,
-		"127.0.0.1:18970",
+		freeAPIAddr(t),
 		scopedToken,
 		NewCodexConnector(),
 	); err != nil {

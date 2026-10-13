@@ -13,6 +13,7 @@
 package local
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 
@@ -20,7 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
+func secureOpenAppend(path string, checkReadACL bool) (*os.File, os.FileInfo, int64, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, 0, err
 	}
@@ -76,11 +77,14 @@ func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
 	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
 		return nil, nil, 0, unsafeFailure()
 	}
+	if checkReadACL && jsonlACLProblem(path) != "" {
+		return nil, nil, 0, unsafeFailure()
+	}
 	failed = false
 	return file, opened, opened.Size(), nil
 }
 
-func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
+func secureOpenRead(path string, checkReadACL bool) (*os.File, os.FileInfo, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, err
 	}
@@ -101,6 +105,10 @@ func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
 	if err := validateSecureFileInfo(info); err != nil {
 		_ = file.Close()
 		return nil, nil, err
+	}
+	if checkReadACL && jsonlACLProblem(path) != "" {
+		_ = file.Close()
+		return nil, nil, unsafeFailure()
 	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, pathInfo) {
@@ -162,7 +170,7 @@ func validateSecureFileInfo(info os.FileInfo) error {
 	return nil
 }
 
-func validateSecureOpenFile(file *os.File) error {
+func validateSecureOpenFile(file *os.File, checkReadACL bool) error {
 	if file == nil {
 		return unsafeFailure()
 	}
@@ -170,7 +178,13 @@ func validateSecureOpenFile(file *os.File) error {
 	if err != nil {
 		return ioFailure()
 	}
-	return validateSecureFileInfo(info)
+	if err := validateSecureFileInfo(info); err != nil {
+		return err
+	}
+	if checkReadACL && jsonlACLProblem(file.Name()) != "" {
+		return unsafeFailure()
+	}
+	return nil
 }
 
 func validateSecureDirectory(_ string, info os.FileInfo) error {
@@ -185,4 +199,35 @@ func validateSecureDirectory(_ string, info os.FileInfo) error {
 		return unsafeFailure()
 	}
 	return nil
+}
+
+// jsonlFolderProblem is JSONLPathProblem for an existing folder. The owner
+// check stays with the gateway, which runs as the account that owns it.
+func jsonlFolderProblem(folder string, info os.FileInfo, _ []string) string {
+	if info.Mode().Perm()&0o022 != 0 {
+		return "is in " + folder + ", a folder its group or other users can write"
+	}
+	if info.Mode().Perm()&0o300 != 0o300 {
+		return "is in " + folder + ", a folder its owner cannot traverse or write"
+	}
+	return ""
+}
+
+// jsonlMissingFolderProblem is JSONLPathProblem for a missing folder: the
+// gateway creates it owner-only (mode 0700).
+func jsonlMissingFolderProblem(string, string, int, []string) string { return "" }
+
+// jsonlFileProblem is JSONLPathProblem for an existing regular file, by the
+// rules validateSecureFileInfo applies at open: a mode with group or other
+// bits (a file created with umask 022 is 0644) or a second name. The
+// gateway does not tighten the mode itself: an account that could read the
+// file may already hold it open and would read every event appended after.
+func jsonlFileProblem(info os.FileInfo) string {
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Sprintf("is mode %04o, so its group or other users can read or write it (the gateway needs 0600)", uint32(perm))
+	}
+	if status, ok := info.Sys().(*syscall.Stat_t); ok && status.Nlink != 1 {
+		return "has another name (a hard link)"
+	}
+	return ""
 }

@@ -303,10 +303,14 @@ func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorG
 	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false
 	}
+	overlay := c.ApplicationProtection.Guardrail
 	if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
-		return pc.Guardrail, true
+		overlay = pc.Guardrail
 	}
-	return c.ApplicationProtection.Guardrail, true
+	// A profile's own connectors[c] entry wins over the automatic-protection
+	// overlay (see guardrail_profiles.go). Only derived configurations carry
+	// one.
+	return c.Guardrail.profileConnectorOverlay(connector, overlay), true
 }
 
 // EffectiveGuardrailModeForConnector resolves manual per-connector guardrail
@@ -359,17 +363,18 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 	if c == nil {
 		return ""
 	}
-	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
-		if strings.TrimSpace(pc.RulePackDir) != "" {
-			return pc.RulePackDir
-		}
-	}
-	return c.Guardrail.EffectiveRulePackDir(connector)
+	return c.ResolveRulePackDir(c.EffectiveRulePackRefForConnector(connector))
 }
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return "closed"
+	}
+	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
+		if strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
+			return "closed"
+		}
+		return "open"
 	}
 	configured := ""
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {

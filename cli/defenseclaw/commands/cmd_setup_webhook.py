@@ -48,7 +48,12 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_WEBHOOK
-from defenseclaw.config import config_path_for_data_dir, locked_config_yaml, write_config_yaml_secure
+from defenseclaw.config import (
+    config_path_for_data_dir,
+    locked_config_yaml,
+    parse_config_yaml,
+    write_config_yaml_secure,
+)
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import (
     DispatchResult,
@@ -655,11 +660,10 @@ def _print_write_result(result: WebhookWriteResult, *, connector: str = "") -> N
 
 
 def _wh_load_raw(path: str) -> dict[str, Any]:
-    import yaml
+    from defenseclaw.config import read_config_text
 
     try:
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
+        data = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     if not isinstance(data, dict):

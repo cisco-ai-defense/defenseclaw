@@ -5,6 +5,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,25 @@ func TestV8SchemaNamesTheFirstUndeclaredKeyInFileOrder(t *testing.T) {
 			if schemaErr.Path != tc.path || schemaErr.Line != tc.line || schemaErr.Keyword != "additionalProperties" {
 				t.Fatalf("%s run %d: %s line %d (%s), want %s line %d", name, run, schemaErr.Path, schemaErr.Line, schemaErr.Keyword, tc.path, tc.line)
 			}
+		}
+	}
+}
+
+// A v9 source reports the key and the settings reference without v8 internals.
+func TestV9SchemaErrorUsesCurrentVersion(t *testing.T) {
+	err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\nbogus_key: true\n"))
+	if err == nil {
+		t.Fatal("unknown key accepted")
+	}
+	message := err.Error()
+	for _, want := range []string{"config_version 9", "bogus_key", "defenseclaw config reference --format json-schema"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("%q missing from %q", want, message)
+		}
+	}
+	for _, internal := range []string{"canonical v8", "[config_schema_invalid]", "$."} {
+		if strings.Contains(message, internal) {
+			t.Fatalf("internal wording %q in %q", internal, message)
 		}
 	}
 }

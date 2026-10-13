@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -26,20 +27,20 @@ func TestProxyGuardrailOverlayStampsTheOutcome(t *testing.T) {
 		}
 	}
 	request := &proxyV8RequestTrace{agent: &observabilityruntime.AgentTrace{}}
-	request.AddGuardrailOverlay(facts("prompt", "block").overlay())
+	request.AddGuardrailOverlay(facts("prompt", "block").overlay(context.Background()))
 	alert := facts("prompt", "alert")
 	alert.ruleIDs = observability.Present([]string{"OTHER-RULE"})
-	request.AddGuardrailOverlay(alert.overlay())
+	request.AddGuardrailOverlay(alert.overlay(context.Background()))
 	assertGuardrailAttributes(t, "agent", request.agentInput.DefenseClawGuardrailAction,
 		request.agentInput.DefenseClawGuardrailRuleID, request.agentInput.DefenseClawGuardrailSeverity)
 
 	model := &proxyV8ModelTrace{model: &observabilityruntime.ModelTrace{}}
-	model.AddGuardrailOverlay(facts("completion", "block").overlay())
+	model.AddGuardrailOverlay(facts("completion", "block").overlay(context.Background()))
 	assertGuardrailAttributes(t, "chat", model.input.DefenseClawGuardrailAction,
 		model.input.DefenseClawGuardrailRuleID, model.input.DefenseClawGuardrailSeverity)
 
 	observed := &proxyV8RequestTrace{agent: &observabilityruntime.AgentTrace{}}
-	observed.AddGuardrailOverlay(facts("prompt", "allow").overlay())
+	observed.AddGuardrailOverlay(facts("prompt", "allow").overlay(context.Background()))
 	if observed.agentInput.DefenseClawGuardrailAction.IsPresent() {
 		t.Fatal("an observe-mode would-block stamped a guardrail action")
 	}

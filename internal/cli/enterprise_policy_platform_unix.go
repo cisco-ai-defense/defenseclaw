@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // standaloneEnterprisePolicyLayout returns the standalone layout and, on
@@ -68,11 +69,9 @@ func pinStandaloneManagedEnv() error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
 		return nil
 	}
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return nil
-	}
-	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
+	// The same deployment read the standard-user refusal makes, so tests
+	// that fake one deployment see both.
+	layout, descriptor, err := managedStandaloneAdminDeployment()
 	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
 		return nil
 	}
@@ -104,17 +103,44 @@ func enterprisePolicyLiveAvailable() error { return nil }
 // listing of policy show; Linux and macOS status and verify report them.
 var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent { return nil }
 
+// enterprisePolicyTarget resolves the account through the platform resolver
+// profile-explain uses (NSS on Linux, Open Directory on macOS): os/user in
+// the static binary reads only /etc/passwd, so no SSSD, Okta or AD account
+// resolved (GAP-0740).
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
-	account, err := user.Lookup(name)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The hooks step checks the account again (its primary gid) before it
+	// reads the files as the user; the standalone rules let that check use
+	// NSS too, not only /etc/passwd, which is all a static build's os/user
+	// reads (GAP-0740).
+	configureEnterpriseHooksStandaloneUnix()
+	resolver := unixidentity.Default(ctx)
+	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
-		return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+		// A uid names its account as profile-explain takes it: getent answers
+		// a uid with the account name, which is not the spelling typed. A name
+		// that resolves to nothing gets profile-explain's plain sentence and
+		// its did-you-mean spelling (GAP-1089).
+		uid, convErr := strconv.Atoi(name)
+		if convErr != nil || uid < 0 {
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, unixidentity.QualifiedUserName(ctx, resolver, name), err)
+		}
+		if account, err = resolver.LookupUID(uid); err != nil {
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, "", err)
+		}
+	} else if !strings.ContainsAny(name, `@\`) && strings.Trim(name, "0123456789") != "" {
+		// A bare name a local and a directory account share names both;
+		// policy show refuses it as profile-explain does (GAP-1087).
+		if twins := unixidentity.SameNameAccounts(ctx, resolver, account); len(twins) > 0 {
+			refs := []useridentity.AccountRef{{ID: strconv.Itoa(account.UID), Name: account.Name}}
+			for _, twin := range twins {
+				refs = append(refs, useridentity.AccountRef{ID: strconv.Itoa(twin.UID), Name: twin.Name})
+			}
+			return enterprisehooks.TargetCredentials{}, &useridentity.AmbiguousAccountError{Name: name, Accounts: refs}
+		}
 	}
-	uid, uidErr := strconv.Atoi(account.Uid)
-	gid, gidErr := strconv.Atoi(account.Gid)
-	if uidErr != nil || gidErr != nil {
-		return enterprisehooks.TargetCredentials{}, fmt.Errorf("user %q has a non-numeric uid/gid", name)
-	}
-	return enterprisehooks.TargetCredentials{UserHome: account.HomeDir, UID: uid, GID: gid, Username: account.Username}, nil
+	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil
 }
 
 // runAsEnterprisePolicyTarget reads the user's files with the user's own
@@ -141,12 +167,18 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 		}
 		groups := []uint32{}
 		if account, err := user.LookupId(strconv.Itoa(target.UID)); err == nil {
-			if ids, err := account.GroupIds(); err == nil {
+			if ids, err := unixidentity.AccountGroupIDs(context.Background(), account); err == nil {
 				for _, id := range ids {
 					if value, err := strconv.ParseUint(id, 10, 32); err == nil {
 						groups = append(groups, uint32(value))
 					}
 				}
+			}
+		} else if ids, err := unixidentity.Default(context.Background()).GroupIDs(unixidentity.Account{
+			Name: target.Username, UID: target.UID, GID: target.GID, Home: target.UserHome}); err == nil {
+			// A directory account os/user cannot see keeps its groups too.
+			for _, id := range ids {
+				groups = append(groups, uint32(id))
 			}
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
@@ -175,6 +207,36 @@ var hookForeignGuardAccountHome = func() string {
 		return filepath.Clean(account.Home)
 	}
 	return ""
+}
+
+// accountGroupNames names uid's groups through the account database the
+// gateway's sandbox availability check reads (NSS on Linux, Open Directory
+// on macOS), so directory groups count. os/user in the static binary reads
+// only /etc/passwd and /etc/group: an AD account was "unknown userid" and
+// its docker membership unreadable although getent resolved it (GAP-0275).
+func accountGroupNames(uid int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return accountGroupNamesFrom(unixidentity.Default(ctx), uid)
+}
+
+// accountGroupNamesFrom is accountGroupNames over resolver.
+func accountGroupNamesFrom(resolver unixidentity.Resolver, uid int) ([]string, error) {
+	account, err := resolver.LookupUID(uid)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := resolver.GroupIDs(account)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if g, err := resolver.LookupGroupID(id); err == nil {
+			names = append(names, g.Name)
+		}
+	}
+	return names, nil
 }
 
 // hookForeignGuardEnvHomes lists the homes the agent's environment names

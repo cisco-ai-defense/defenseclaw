@@ -21,7 +21,10 @@
 
 package tactics
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestDetectionMatrix is the deterministic classification suite: every tactic
 // path the classifier can take, plus the benign cases that must stay quiet.
@@ -221,6 +224,32 @@ func matrixFor(goos string) []matrixCase {
 			Observation{Kind: KindExec, Cmdline: "openssl enc -aes-256-cbc -in a -out b"},
 			fires(Exfiltration, "agent_encoded_payload"),
 		},
+
+		// --- packaging is the program a command runs (GAP-1419) -------------
+		{
+			"Claude Code writes its shell snapshot",
+			Observation{Kind: KindExec, Name: "bash", Cmdline: claudeSnapshotWriter(home)},
+			quiet,
+		},
+		{
+			"Claude Code runs a harmless tool call",
+			Observation{Kind: KindExec, Name: "bash", Cmdline: claudeToolCall(home, "awk 'END{print NR}' notes.txt")},
+			quiet,
+		},
+		{
+			"Claude Code stages an archive through base64",
+			Observation{Kind: KindExec, Name: "bash", Cmdline: claudeToolCall(home, "tar czf - project | base64")},
+			fires(Exfiltration, "agent_encoded_payload"),
+		},
+		{
+			"runs base64 as a program",
+			Observation{Kind: KindExec, Name: "base64", Cmdline: "/usr/bin/base64 -w0 report.tar"},
+			fires(Exfiltration, "agent_encoded_payload"),
+		},
+		{"says base64 without running it",
+			Observation{Kind: KindExec, Name: "bash", Cmdline: "echo base64"}, quiet},
+		{"names zip in a commit message",
+			Observation{Kind: KindExec, Name: "git", Cmdline: "git commit -m 'zip the build output'"}, quiet},
 
 		// --- local inference ----------------------------------------------
 		{
@@ -439,4 +468,38 @@ func TestMatrixKeepsBenignCasesQuiet(t *testing.T) {
 		t.Fatalf("only %d benign cases; the quiet half is what keeps this deployable", quietCases)
 	}
 	t.Logf("%d benign cases stay quiet", quietCases)
+}
+
+// claudeToolCall is the argv Claude Code runs a Bash tool call with,
+// joined the way the Linux sensor reads /proc/<pid>/cmdline (captured on RHEL,
+// Claude Code 2.1.292; macOS runs the same form under zsh).
+func claudeToolCall(home, command string) string {
+	quoted := "'" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
+	return "/bin/bash -c source " + home + "/.claude/shell-snapshots/snapshot-bash-1791667821277-rg6sb4.sh " +
+		"2>/dev/null || true && shopt -u extglob 2>/dev/null || true && " +
+		`{ \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && ` +
+		"eval " + quoted + " < /dev/null && pwd -P >| /tmp/claude-7c17-cwd"
+}
+
+// claudeSnapshotWriter is the head of the script Claude Code writes its shell
+// snapshot with, once per session at the first Bash tool call (same capture).
+// Its comments name base64.
+func claudeSnapshotWriter(home string) string {
+	return "/bin/bash -c -l SNAPSHOT_FILE=" + home + "/.claude/shell-snapshots/snapshot-bash-1791667821277-rg6sb4.sh\n" +
+		`      source "` + home + `/.bashrc" < /dev/null
+      echo "# Snapshot file" >| "$SNAPSHOT_FILE"
+      echo "# Functions" >> "$SNAPSHOT_FILE"
+      # One eval per function so a body that no longer parses (rc=2, not fatal
+      # in non-POSIX bash) drops only itself. The %q literal needs no fork
+      # at source time, unlike a base64 command substitution.
+      declare -F | cut -d' ' -f3 | grep -vE '^_[^_]' | while read func; do
+        printf 'eval %q > /dev/null 2>&1\n' "$(declare -f "$func")" >> "$SNAPSHOT_FILE"
+      done
+      cat >> "$SNAPSHOT_FILE" << 'RIPGREP_FUNC_END'
+  function rg {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=` + home + `/.local/bin/claude
+}
+RIPGREP_FUNC_END
+`
 }

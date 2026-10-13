@@ -136,7 +136,7 @@ flowchart TB
     ENM["DefenseClawHookEnumerator"]
   end
   subgraph Z2["Z2 · Restricted gateway"]
-    GW["DefenseClawGateway<br/>NT SERVICE virtual account"]
+    GW["DefenseClawGateway<br/>write-restricted LocalSystem"]
   end
   subgraph Z3["Z3 · Administrator-owned state"]
     CFG["ProgramData config · policies · secrets"]
@@ -195,7 +195,8 @@ Windows enterprise lifecycle transaction
   |      writes: broker log only
   |
   +--> DefenseClawGateway
-  |      identity: NT SERVICE\DefenseClawGateway, restricted service SID
+  |      logon: LocalSystem, only ChangeNotify retained
+  |      token: write-restricted by the NT SERVICE\DefenseClawGateway service SID
   |      depends on: DefenseClawSensorHelper; DefenseClawCMIDBroker
   |                  (Secure Client profile)
   |      reads: protected config and guardian authorization
@@ -253,7 +254,7 @@ authority.
 | Guardian authorization ledger | LocalSystem/Administrators write; exact gateway service SID read-only |
 | Gateway runtime and scoped tokens | Administrators/LocalSystem and exact gateway service SID only; no standard-user read |
 | Per-user hook footprint | Confined to the manifest SID's canonical profile; exact protected OWNER RIGHTS DACL; regular files have one NTFS link; repairable after target-user tamper |
-| Inventory-directory grants | Exact gateway service SID receives inheritable Read+Execute/Traverse only on the fixed inventory-dotdir set beneath unique manifest homes; existing non-null DACLs are merged, missing directories are retried, and per-directory failures are logged |
+| Inventory-directory grants | Exact gateway service SID receives inheritable Read+Execute/Traverse only on the fixed inventory-dotdir set and the enrolled connectors' skill and plugin folders beneath unique manifest homes; existing non-null DACLs are merged, missing directories are retried, and per-directory failures are logged. A folder on a managed hook path is not granted, except the Amp and OpenCode plugin folders: their exact guardian DACL admits this one grant for `NT SERVICE\DefenseClawGateway` (both of its ACEs or none; no write, append, delete, delete-child, WRITE_DAC or WRITE_OWNER), added only to a folder at that exact DACL; DefenseClaw's plugin file keeps its own protected DACL and does not inherit it. Uninstall revokes every grant |
 | Codex machine requirements | Exact `%ProgramData%\OpenAI\Codex\requirements.toml`, ten managed hook groups, protected ownership/ACL preimage records, and guardian-repaired enrollment state |
 | Claude Code managed policy | DefenseClaw-owned protected drop-in and ownership state; effective precedence verified with the real approved Claude client |
 | Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude effective-policy verification |
@@ -268,8 +269,8 @@ authority.
 - A local standard user, including a member of the local Administrators group
   running with a split, medium-integrity token.
 - A user-controlled AI-agent process.
-- A compromised gateway process running as the restricted virtual service
-  account.
+- A compromised gateway process running as LocalSystem with a write-restricted
+  token: its restricted service SID and only `SeChangeNotifyPrivilege`.
 - Accidental drift, deletion, failed upgrades, service crashes, missed watcher
   events, malformed manifests, and partial target failures.
 - User-controlled reparse points, path replacement, ACL changes, PATH and
@@ -289,6 +290,35 @@ authority.
 - Prevention of all local resource-exhaustion attacks.
 - Forcing a client outside the approved application-control allow-list to honor
   a vendor hook mechanism. Such a client is blocked, not certified.
+
+### Managed gateway scanner path boundary
+
+The LocalSystem gateway refuses file reads and scans inside any ProfileList
+`ProfileImagePath` or the system drive's Users directory. It resolves
+junctions, reparse points and short names before the comparison. A profile
+project folder receives this error:
+
+> the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile
+
+Readable paths outside profiles, including managed roots, ProgramData,
+Program Files and ordinary project folders, continue to scan. The watcher
+skips only profile roots and reports a degraded health detail when it skips
+one; otherwise it runs normally. The old virtual-account gateway likewise
+could not read inside other users' profiles.
+
+Scanner children inherit the write-restricted gateway LocalSystem token with
+only `SeChangeNotifyPrivilege`. The gateway has no
+`SeAssignPrimaryTokenPrivilege` or `SeIncreaseQuotaPrivilege` to start a
+child as another user. For paths outside profiles, LocalSystem read access
+now applies: a caller-supplied path readable only by administrators can be
+read by the gateway. This extends W-05's early-phase limitation.
+
+### Open decision: scanner child identity
+
+May scanner and MCP-scan children keep that LocalSystem token, or must a
+broker scan as the enrolled user? The issue 1164 follow-up needs a brokered
+user-session scan for projects inside profiles, with exact user and profile
+binding and path revalidation before launching a child.
 
 ## Primary data flows
 
@@ -471,7 +501,7 @@ authority.
 | W-02 | User replaces an executable, script, config, manifest, metadata, or ledger | Fixed local NTFS roots; no reparse points; trusted owner and protected DACL on every managed path itself; content hashes/signatures. The **ancestor** chain above the managed roots is advisory since AIFW-34262 — those directories belong to the Cisco Secure Client installer (AVC), which re-ACLs them on its own schedule, so an untrusted grant there emits a `managed_trust_ancestor_advisory` warning instead of failing a load, install, or rollback; `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` restores the fatal verdict. Every walk — the managed validators and the gateway connector's own hook API token path walk — scopes that downgrade by `managed.PlatformInstallerOwnedPath`, so only ancestors inside the Cisco tree are advisory and a world-writable temp or home ancestor stays fatal. Ancestors outside the Cisco tree keep the pre-AIFW-34262 behaviour exactly: the narrower replacement mask (so stock `BUILTIN\Users` create-child grants on `C:\` and `C:\ProgramData` still pass) with fatal verdicts. An allow ACE whose layout the walk cannot decode (object, callback, or compound) is a structural failure rather than a permission verdict and is never downgraded, at any position. The **state root** is the one managed path inside that shared tree, so AVC can overwrite the canonical DACL we stamp on it: the installer retries the stamp (`Set-DefenseClawSharedPathAcl`) and the post-hardening assertion re-stamps once and re-reads (`-SelfHealKind`) before judging. Foreign access there is advisory, but a state root that still lacks the SYSTEM/Administrators/gateway rights the product needs **after** that repair is fatal — the relaxation covers others having access, never DefenseClaw lacking it | Write/delete/rename/ACL probes fail; verify catches byte or ACL drift; ancestor advisory and strict-pin tests in `internal/managed` and `internal/gateway/connector`; `managed_acl_self_heal` warnings in the install log |
 | W-03 | Elevated CLI executes a user-planted PowerShell or installer/module, or gives elevated PowerShell a shared user-writable temp/cache/home root | Resolve the system PowerShell by OS API; ignore `PATH` and poisoned known-folder environment variables; trust-check installer and adjacent module before execution; atomically create a 128-bit-random child under Windows Temp with a protected System/Administrators-only owner/DACL and pin `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `HOMEDRIVE`, and `HOMEPATH` to that exact one-shot child | Poisoned `PATH`, `SystemRoot`, known-folder env, working directory, installer, module, shared-temp-parent, protected-temp-child, PowerShell module-cache location, and cleanup tests |
 | W-04 | User downgrades enterprise mode through user config or environment | SCM-owned environment pins `managed_enterprise`; protected config must agree; runtime PATCH cannot change it | Config conflict and untrusted-config tests; service registry DACL test |
-| W-05 | Compromised gateway edits policy or authorization | Restricted virtual service SID; separate runtime/log ACLs; config and authorization read-only; guardian log and manifest inaccessible | Effective-token/privilege and ACL matrix; gateway-write attempts fail |
+| W-05 | Compromised gateway edits policy or authorization | Gateway logs on as LocalSystem with service SID type `restricted` and only `SeChangeNotifyPrivilege`, so its token is write-restricted: a write needs an ACE for the gateway service SID, Everyone, or WRITE_RESTRICTED, and only the runtime/log ACLs grant one. Config, authorization, guardian log and manifest are not writable. **Early-phase limitation:** they are readable because reads are checked against LocalSystem. The same applies to caller-supplied paths outside user profiles that only administrators could previously read. | Effective-token/privilege and ACL matrix; gateway-write attempts fail |
 | W-06 | LocalSystem follows a user junction or path race and writes outside the profile | Explicit SID/home binding; reject reparse chains; every user mutation under target impersonation; revalidate immediately before mutation; no LocalSystem fallback | Outside sentinel remains unchanged across junction, owner, and swap tests |
 | W-07 | Guardian binds the wrong session identity, or silently treats an elevated target as equivalent to the ordinary medium-integrity posture | Exact SID/session binding plus explicit elevation, integrity, and UIAccess classification; elevated targets proceed only under the documented administrator trust assumption with a rate-limited advisory | Unit tests, active medium-token certification, and an elevated-target run that records the advisory without changing SID/home binding |
 | W-08 | Failed `RevertToSelf` leaks an impersonated thread into the Go scheduler | Dedicated locked OS thread; unlock only after successful revert; terminate/discard the thread or fail-stop on revert failure | Injected revert-failure test |
@@ -513,7 +543,7 @@ authority.
 | W-44 | The standalone lifecycle launches a user-writable or lookalike PowerShell, or .NET and PowerShell loader variables hijack the elevated engine | Resolve the newest stable PowerShell 7 only from `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, require it as a strict descendant of the trusted Program Files root with an administrator-only ancestor chain and a valid Microsoft Authenticode signature on `pwsh.exe`, never consult `PATH` or App Paths, and start it with the protected environment allowlist (loader variables such as `DOTNET_*`, `CORECLR_*`, `COMPlus_*` and `PSModulePath` do not pass). A missing or untrusted engine fails with `powershell7_required` or `powershell7_untrusted`. The Secure Client profile keeps its Windows PowerShell 5.1 launch path | Version-parse, trusted-root, signer, and environment tests in `internal/cli/windows_enterprise_standalone_test.go`; a host run with PowerShell 7 absent and with a user-owned `pwsh.exe` earlier on `PATH` |
 | W-45 | An unsigned standalone payload is swapped between staging and execution, or an arbitrary signed binary is accepted as DefenseClaw | Trust comes from the lifecycle invocation, and the config can only narrow it: `--trust-mode hash_pinned` admits an unsigned installer, module and payload only when every leaf matches an administrator-owned SHA-256 manifest (`--payload-manifest`), verified by the CLI before PowerShell starts and recorded for later verification; `--trust-mode authenticode` (the CLI default) requires a valid signature and, when `--allowed-signer` thumbprints are given, one of them, so a customer can re-sign the payload with its own certificate. Setup writes `payload-trust.json` from its embedded manifest and takes signers from `ALLOWEDSIGNERS=`; the MDM wrapper passes `-TrustMode` (default `HashPinned`) and `-AllowedSigners`. `enterprise.trust.mode: authenticode` in the applied config (the supplied one, or the installed one for a mutation without `--config`) refuses a hash-pinned run and any mutation over a deployment recorded as hash-pinned with `1639`; `hash_pinned` or an unset mode admits both; `enterprise.trust.allowed_signers` pins signers like `--allowed-signer`, and a conflicting pair is refused. The marker's `TrustMode` records the deployment's own trust mode | Payload-manifest parse and mismatch tests; a tampered-leaf run that must fail before any service changes |
 | W-46 | Concurrent, retried or repeated MDM runs corrupt the deployment or report a false failure | One protected lifecycle lock; contention returns `1618` so Intune retries; invalid arguments return `1639`; `ensure` installs, upgrades or repairs only when needed and is a true no-op (no service drain) when nothing changed; uninstall on a clean host succeeds as a no-op | Exit-code mapping and no-op tests in `internal/cli/windows_enterprise_standalone_test.go`; two concurrent `ensure` runs on a host |
-| W-47 | A detection artifact is forged or deleted to hide or fake a deployment | The marker key `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` and the Add/Remove Programs entry are written only after a successful mutation and removed only after a successful uninstall; a failed run leaves them unchanged. Every elevated run, successful or not, writes a `DefenseClaw Enterprise` event and appends to `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`. HKLM and the log directory are administrator-write only (log SDDL grants users read). They are advisory: enforcement, readiness and `verify` never read them | Registration write/remove tests; a user write attempt on the marker key and log directory must be denied; deleting the marker must not change `verify` |
+| W-47 | A detection artifact is forged or deleted to hide or fake a deployment | The marker key `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` and the Add/Remove Programs entry are written only after a successful mutation and removed only after a successful uninstall; a failed run leaves them unchanged. Every elevated run, successful or not, writes a `DefenseClaw Enterprise` event and appends to `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`. HKLM and the log directory are administrator-write only (log SDDL grants read to Administrators and Event Log Readers only; events carry codes, not account names). They are advisory: enforcement, readiness and `verify` never read them | Registration write/remove tests; a user write attempt on the marker key and log directory must be denied; deleting the marker must not change `verify` |
 | W-48 | A user reads or replaces the standalone AI Defense key, or supplies one through config or the environment | Exact reader DACL on `secrets\<name>` (SYSTEM and Administrators full control, gateway service SID read-only, no other ACE) checked by the gateway before reading; bounded single-line value; inline `cisco_ai_defense.api_key` rejected; `api_key_env` cleared; no logging | `internal/managed/credentials_test.go`, `internal/gateway/standalone_inspection_test.go`; a standard-user read attempt must be denied |
 | W-49 | A user disables Codex or Claude Code hooks through user or project settings, profiles or `-c` overrides | Codex: `%ProgramData%\OpenAI\Codex\requirements.toml` always carries `allow_managed_hooks_only = true` and `[features] hooks = true`; an administrator value of `false` for either fails the transaction instead of being overridden, and `managed_hooks_only` is not read. Claude Code: the drop-in `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` carries DefenseClaw's hooks and, under the default `managed_hooks_only: enforce`, `allowManagedHooksOnly: true`. Claude Code runs managed hooks even when user or project settings set `disableAllHooks`, and with the lock it runs no user or project hooks; `managed_hooks_only: preserve` for `claudecode` leaves the lock out and turns the foreign-hook guard on for Claude Code | `internal/gateway/connector/codex_machine_requirements_test.go`, `internal/gateway/connector/claudecode_policy_test.go`; a live Codex and Claude Code tool call in the user's own session, read with `audit export` from an elevated prompt (`enterprise policy verify --live` is refused on a managed Windows host) |
 | W-50 | A user or project hook for a connector without a vendor lock (Cursor, Copilot, Devin, OpenCode, Amp, and Claude Code with `managed_hooks_only: preserve`) rewrites a tool call after DefenseClaw inspected it | Foreign-hook guard: the guardian removes non-DefenseClaw entries from user-level vendor config (with a backup and an audit event per removal), including `%APPDATA%` locations, redirects the hook recorded and the folders the user's persistent environment (`HKEY_USERS\<SID>\Environment`, while the hive is loaded) names; `defenseclaw-hook.exe` denies tool calls while an unapproved rewriting hook is present in user or project files (walking up to the repository root, or the drive root when there is none) and names the file and the allowlist (`enterprise.machine_policy.connectors.<connector>.allowed_hooks`); the Amp plugin and the per-user OpenCode plugin ask `defenseclaw-hook.exe` for the same decision at load and before each tool call; a session that started with an unapproved hook present stays denied until the agent restarts, for at most 7 days, with the record kept by the gateway per verified SID, and its stop and session-end events get the neutral allow; `foreign_hooks: remove`, `report` or `allow` per connector | `internal/enterprisepolicy/guard_test.go`, `internal/enterprisepolicy/guard_session_test.go`, `internal/gateway/foreign_hook_session_test.go`, `internal/cli/enterprise_hooks_foreign_env_windows_test.go`; hook-runtime guard tests; a live run with a project-level rewriting hook for each connector |
@@ -589,10 +619,12 @@ authority.
   requires the exact gateway pipe-client SID and live SCM PID, and the gateway
   requires a nonce-bound authenticated response from the protected broker key.
 - On each enumerator grant pass, inventory access is added only for the exact
-  gateway service SID and only at the fixed inventory-dotdir names for homes
-  represented in that manifest generation. It is an inheritable
-  Read+Execute/Traverse grant merged into an existing non-null DACL, never a
-  whole-profile or profile-root rewrite.
+  gateway service SID and only at the fixed inventory-dotdir names and the
+  enrolled connectors' skill and plugin folders for homes represented in that
+  manifest generation. It is an inheritable Read+Execute/Traverse grant merged
+  into an existing non-null DACL, never a whole-profile or profile-root
+  rewrite. The Amp and OpenCode plugin folders are the only guardian-protected
+  folders that get it; there the guardian's exact DACL admits it.
 - Application-control attestation is an optional posture signal, independent
   of managed-hook installation and reconciliation. Its absence does not make
   an otherwise healthy Codex target incomplete.

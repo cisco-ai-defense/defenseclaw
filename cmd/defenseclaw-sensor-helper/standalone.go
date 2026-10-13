@@ -29,12 +29,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Standalone managed deployments start the helper without an environment
 // file: the service account is resolved by name and the watched homes come
-// from the protected guardian manifest.
+// from the protected guardian manifest and the eligible-accounts record the
+// enumerator publishes next to it.
 
 const manifestLimit = 4 << 20
 
@@ -58,17 +60,12 @@ func resolveServiceAccount(name string) (int, int, error) {
 	return uid, gid, nil
 }
 
-type helperManifest struct {
-	Targets []struct {
-		User     string `yaml:"user"`
-		UserHome string `yaml:"user_home"`
-		Enabled  *bool  `yaml:"enabled"`
-	} `yaml:"targets"`
-}
-
-// manifestHomes returns the homes of the enabled rows of the guardian
-// manifest and a digest of its bytes. A missing manifest means "no homes
-// yet"; an untrusted one is an error.
+// manifestHomes returns the homes Plane C watches and a digest of the
+// inputs they come from: the enabled rows of the guardian manifest plus the
+// accounts the enumerator found eligible (eligibleHomes). A deployment whose
+// agents are all on machine policy has no manifest rows, and its users'
+// homes went unwatched (GAP-1470). A missing manifest means "no homes yet";
+// an untrusted manifest or eligible-accounts record is an error.
 func manifestHomes(path string) ([]string, string, error) {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, "", nil
@@ -88,15 +85,20 @@ func manifestHomes(path string) ([]string, string, error) {
 	if len(data) > manifestLimit {
 		return nil, "", fmt.Errorf("guardian manifest exceeds %d bytes", manifestLimit)
 	}
-	sum := sha256.Sum256(data)
-	digest := hex.EncodeToString(sum[:])
-	var manifest helperManifest
+	var manifest enterprisehooks.Manifest
 	if len(bytes.TrimSpace(data)) > 0 {
 		if err := yaml.Unmarshal(data, &manifest); err != nil {
 			return nil, "", fmt.Errorf("parse guardian manifest: %w", err)
 		}
 	}
 	set := map[string]bool{}
+	add := func(home string) {
+		home = strings.TrimSpace(home)
+		if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) == "/" {
+			return
+		}
+		set[filepath.Clean(home)] = true
+	}
 	for _, target := range manifest.Targets {
 		if target.Enabled != nil && !*target.Enabled {
 			continue
@@ -107,21 +109,33 @@ func manifestHomes(path string) ([]string, string, error) {
 				home = account.HomeDir
 			}
 		}
-		if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) == "/" {
-			continue
-		}
-		set[filepath.Clean(home)] = true
+		add(home)
+	}
+	eligible, err := eligibleHomes(path, manifest)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, home := range eligible {
+		add(home)
 	}
 	homes := make([]string, 0, len(set))
 	for home := range set {
 		homes = append(homes, home)
 	}
 	sort.Strings(homes)
-	return homes, digest, nil
+	// The digest covers the watched homes too, so watchManifest restarts
+	// the helper when an account becomes or stops being eligible.
+	sum := sha256.New()
+	sum.Write(data)
+	for _, home := range homes {
+		sum.Write([]byte{0})
+		sum.Write([]byte(home))
+	}
+	return homes, hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-// watchManifest cancels the returned context when the manifest bytes
-// change, so the helper exits cleanly and its service manager restarts it
+// watchManifest cancels the returned context when the manifest bytes or
+// the watched homes change, so the helper exits cleanly and its service manager restarts it
 // with the new home set.
 func watchManifest(parent context.Context, path, digest string, interval time.Duration, logger *slog.Logger) context.Context {
 	ctx, cancel := context.WithCancel(parent)

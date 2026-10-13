@@ -44,11 +44,29 @@ from typing import Any
 
 import click
 
-TUI_UNAVAILABLE_MESSAGE = (
-    "The interactive dashboard needs a UTF-8 capable terminal. "
-    "On Windows, open Windows Terminal or PowerShell 7 and run 'defenseclaw' again. "
-    "This terminal can still run 'defenseclaw status' and 'defenseclaw doctor'."
-)
+
+def tui_unavailable_message(*, stdin: object | None = None, stdout: object | None = None) -> str:
+    """Explain the failed terminal prerequisite with a platform-specific remedy."""
+
+    if not _stream_is_tty(sys.stdin if stdin is None else stdin) or not _stream_is_tty(
+        sys.stdout if stdout is None else stdout
+    ):
+        return (
+            "The interactive dashboard needs a terminal on stdin and stdout. "
+            "Run 'defenseclaw tui' directly in a terminal, without a pipe or redirect."
+        )
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return (
+            "The interactive dashboard cannot run with TERM=dumb. "
+            "Open a terminal with TERM=xterm-256color and run 'defenseclaw tui' again."
+        )
+    if sys.platform == "win32":
+        return (
+            "The interactive dashboard needs a UTF-8 capable terminal. "
+            "Open Windows Terminal or PowerShell 7 and run 'defenseclaw tui' again."
+        )
+    terminal = "Terminal.app or iTerm2" if sys.platform == "darwin" else "a UTF-8 terminal or tmux"
+    return f"The interactive dashboard needs UTF-8 output. Open {terminal} and run 'defenseclaw tui' again."
 
 # ``main()`` snapshots this before it reconfigures Python's streams to UTF-8.
 # Without the snapshot, a legacy cp1252/OEM stream would look capable after the

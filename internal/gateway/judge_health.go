@@ -35,9 +35,25 @@ type judgeHealthTracker struct {
 	count, next int
 	lastError   string
 	lastFailure time.Time
+	// unavailable says why the enabled judge could not start; the hook and
+	// proxy lanes then run on the rules only (GAP-0383).
+	unavailable string
 }
 
 var judgeHealth judgeHealthTracker
+
+// applyJudge starts a new window for the judge the gateway now runs, so the
+// calls of a replaced judge no longer read as this one working, and records
+// why an enabled judge could not start (reason, "" otherwise).
+func (t *judgeHealthTracker) applyJudge(judge *LLMJudge, reason string) {
+	t.reset()
+	if judge != nil {
+		return
+	}
+	t.mu.Lock()
+	t.unavailable = boundedJudgeHealthValue(reason, 240)
+	t.mu.Unlock()
+}
 
 func (t *judgeHealthTracker) record(failed bool, summary string, now time.Time) {
 	t.mu.Lock()
@@ -59,12 +75,19 @@ func (t *judgeHealthTracker) reset() {
 	t.outcomes = [judgeHealthWindow]bool{}
 	t.count, t.next = 0, 0
 	t.lastError, t.lastFailure = "", time.Time{}
+	t.unavailable = ""
 }
 
 // details returns the judge_* health details, or nil before the first call.
 func (t *judgeHealthTracker) details() map[string]interface{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.unavailable != "" {
+		return map[string]interface{}{
+			"judge_state":              "unavailable",
+			"judge_unavailable_reason": t.unavailable,
+		}
+	}
 	if t.count == 0 {
 		return nil
 	}

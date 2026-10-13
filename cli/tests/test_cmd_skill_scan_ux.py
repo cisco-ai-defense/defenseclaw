@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 import uuid
@@ -51,7 +52,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.config import SeverityAction
 from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
@@ -126,6 +126,17 @@ class _SkillScanUXBase(unittest.TestCase):
 
 
 class TestSingleTargetUX(_SkillScanUXBase):
+    def test_secure_client_scanner_does_not_select_default_pack(self) -> None:
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+
+        with (
+            patch("defenseclaw.commands.cmd_skill.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.scanner.skill.SkillScannerWrapper"),
+            patch("defenseclaw.scanner.rulepack.maybe_wrap") as wrap,
+        ):
+            _build_skill_scanner(self.app, use_llm=False)
+        self.assertFalse(wrap.call_args.kwargs["default_pack"])
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_preamble_lists_categories_and_source(self, mock_cls, _mock_info) -> None:
@@ -156,7 +167,11 @@ class TestSingleTargetUX(_SkillScanUXBase):
         self.assertIn("Summary: 1 skill scanned", result.output)
         self.assertIn("clean=1", result.output)
         self.assertIn("blocked=0", result.output)
-        self.assertIn("in 80ms", result.output)
+        # The summary reports the scan's 80ms plus the real time of the default
+        # rule-pack overlay (GAP-0164, GAP-2070), so only the floor is exact.
+        took = re.search(r"in (\d+)ms", result.output)
+        self.assertIsNotNone(took, result.output)
+        self.assertGreaterEqual(int(took.group(1)), 80)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -197,7 +212,6 @@ class TestSingleTargetUX(_SkillScanUXBase):
     def test_action_policy_block_uses_blocked(
         self, mock_cls, _mock_info, mock_sidecar,
     ) -> None:
-        self.app.cfg.skill_actions.high = SeverityAction(install="block")
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
@@ -238,7 +252,6 @@ class TestPathTargetUX(_SkillScanUXBase):
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_folder_target_is_adhoc_and_not_called_loaded(self, mock_cls) -> None:
-        self.app.cfg.skill_actions.high = SeverityAction(install="block")
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
@@ -472,7 +485,7 @@ class TestScanAllUX(_SkillScanUXBase):
 
         root = self._make_skills_dir(["alpha", "beta"])
         self.app.cfg.skill_dirs = lambda connector=None: [root]
-        PolicyEngine(self.app.store).block("skill", "beta", "test block")
+        PolicyEngine(self.app.store, self.app.cfg).block("skill", "beta", "test block")
         responses = {
             os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
             os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),

@@ -3,6 +3,7 @@
   "pages": [
     "aliases",
     "multi-connector",
+    "user-and-group-policies",
     "switching-connectors",
     "disabling",
     "semantic-routing",

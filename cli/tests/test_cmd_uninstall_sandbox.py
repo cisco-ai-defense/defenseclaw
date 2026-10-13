@@ -50,11 +50,20 @@ class SandboxTeardownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             os.mkdir(os.path.join(data_dir, "sandboxes"))
+            Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
             self.assertTrue(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "win32"))
         enabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": True, "wrappers": []})()})()
         with tempfile.TemporaryDirectory() as data_dir:
             self.assertTrue(cmd_uninstall._sandbox_state_present(enabled, data_dir, "darwin"))
+
+    def test_disabled_openshell_with_empty_state_directory_skips_teardown(self):
+        disabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": False, "wrappers": []})()})()
+        with tempfile.TemporaryDirectory() as data_dir:
+            os.makedirs(os.path.join(data_dir, "sandboxes", "manager"))
+            self.assertFalse(cmd_uninstall._sandbox_state_present(disabled, data_dir, "linux"))
+            Path(data_dir, "sandboxes", "manager", "kept.json").write_text("{}")
+            self.assertTrue(cmd_uninstall._sandbox_state_present(disabled, data_dir, "linux"))
 
     def test_rendered_plan_names_the_teardown(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name)
@@ -65,6 +74,28 @@ class SandboxTeardownTests(unittest.TestCase):
         # The teardown runs with --yes, so the plan warns about copy-mode work.
         self.assertIn("never pulled back is deleted with it", buf.getvalue())
         self.assertIn("sandbox teardown --dry-run", buf.getvalue())
+
+    def test_the_plan_names_live_mounted_sandboxes_and_what_stays(self):
+        # GAP-0295: nothing said a live sandbox stops, loses its undo point,
+        # and that what its agent wrote in the folder stays.
+        listed = (
+            '{"sandboxes": [{"name": "edge-ub-uninstall", "workdir_mode": "mount", "phase": "ready"},'
+            ' {"name": "copy-one", "workdir_mode": "copy", "phase": "stopped"}]}'
+        )
+        with patch("subprocess.run", return_value=_completed(stdout=listed)) as run:
+            live = cmd_uninstall._live_mounted_sandboxes(self.gateway)
+        self.assertEqual(run.call_args.args[0], [self.gateway, "sandbox", "list", "--output", "json"])
+        self.assertEqual(live, ("edge-ub-uninstall",))
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name, live_sandboxes=live)
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        self.assertIn(
+            "a live-mounted sandbox (edge-ub-uninstall) is stopped and deleted with its undo point; what its agent "
+            "already wrote in your folder stays as it is",
+            " ".join(buf.getvalue().split()),
+        )
+        with patch("subprocess.run", return_value=_completed(returncode=1)):
+            self.assertEqual(cmd_uninstall._live_mounted_sandboxes(self.gateway), ())
 
     def test_teardown_runs_before_the_sidecar_stops(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
@@ -129,6 +160,32 @@ class SandboxTeardownTests(unittest.TestCase):
                 cmd_uninstall._sandbox_teardown(plan)
         self.assertIn("--skip-sandbox-teardown", ctx.exception.message)
 
+    def test_teardown_failure_names_the_failed_step_not_the_last_one(self):
+        # GAP-0282: teardown goes on past a failed step, so the last line it
+        # printed was a success and the abort named that as the reason.
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
+
+        def fake_run(argv, **_kwargs):
+            if argv[-1] == "--help":
+                return _completed(stdout="--keep-images\n")
+            return _completed(
+                returncode=1,
+                stdout=(
+                    "  ✓ deleted provider profile dc-anthropic\n"
+                    "  ✗ remove images: docker image rm t:1: docker image exited 1: Cannot connect to the Docker daemon\n"
+                    "  ✓ openshell.enabled is off\n"
+                ),
+            )
+
+        with patch("subprocess.run", side_effect=fake_run), capture_click_output():
+            with self.assertRaises(click.ClickException) as ctx:
+                cmd_uninstall._sandbox_teardown(plan)
+        message = ctx.exception.message
+        self.assertIn("(remove images: docker image rm t:1: docker image exited 1: Cannot connect to the Docker daemon)", message)
+        self.assertNotIn("openshell.enabled is off)", message)
+        self.assertIn("2 step(s) listed above already ran", message)
+        self.assertIn("--skip-sandbox-teardown", message)
+
     def test_unsupported_sandboxes_skip_the_teardown(self):
         # A managed_enterprise deployment (or a platform without sandboxes):
         # teardown exits 3 and the uninstall goes on.
@@ -156,6 +213,7 @@ class SandboxTeardownTests(unittest.TestCase):
     def test_skip_sandbox_teardown(self):
         with tempfile.TemporaryDirectory() as data_dir:
             os.mkdir(os.path.join(data_dir, "sandboxes"))
+            Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
             with (
                 patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(data_dir)),
                 patch.object(

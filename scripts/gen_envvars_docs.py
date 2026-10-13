@@ -159,6 +159,12 @@ def _accepted_values_cell(entry: EnvVar) -> str:
     return ", ".join(bits)
 
 
+def _managed_cell(entry: EnvVar) -> str:
+    """The registry's ``managed`` policy: what a managed standalone host does
+    with the variable (``allow``, ``ignore`` or ``tighten_only``)."""
+    return f"`{entry.managed}`"
+
+
 def _mdx_default_needs_backticks(text: str) -> bool:
     """MDX interprets ``${...}`` / ``{ident}`` in table cells as JS and
     ``<token>`` as a JSX tag. Wrap such cells in a code span so literal
@@ -230,8 +236,9 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     """Render one category's MDX-safe table.
 
     Two columns keep every row inside the docs content width: the variable
-    (name, security impact, default and accepted values) and what it does
-    (purpose, security concern, and the files that read it).
+    (name, security impact, default, accepted values and its managed-host
+    policy) and what it does (purpose, security concern, and the files that
+    read it).
     """
     entries = sorted(registry.by_category(category), key=lambda e: e.name)
     if not entries:
@@ -262,6 +269,7 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
         values = _accepted_values_cell(e)
         if values != "—":
             name += f"{br}Values: {values}"
+        name += f"{br}Managed host: {_managed_cell(e)}"
         lines.append(f"| {name} | {what} |")
     return "\n".join(lines)
 

@@ -161,6 +161,20 @@ func TestEnumerateUnixReportsAgentsInAnUntrustedHomeWithoutRunningThem(t *testin
 			t.Fatalf("entry %+v must explain the untrusted home and the fix", agent)
 		}
 	}
+	// The home's mode must not cost bob his identity record, and so the
+	// profile assigned to him (GAP-0714); without an agent the account
+	// itself is reported, so status and verify name it (GAP-0646).
+	if len(report.IdentityAccounts) != 1 || report.IdentityAccounts[0].UID != uid {
+		t.Fatalf("identity accounts = %+v, want bob", report.IdentityAccounts)
+	}
+	opts.DiscoverStatic = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		return nil, nil, nil
+	}
+	if _, report, err = EnumerateUnix(context.Background(), enumeratorConfig("codex"), connector.NewDefaultRegistry(), opts); err != nil ||
+		len(report.Unprotected) != 1 || report.Unprotected[0].Code != UnprotectedCodeHomeUntrusted ||
+		!strings.Contains(report.Unprotected[0].Message(), "user bob is not enrolled: user home") {
+		t.Fatalf("no agents: err %v unprotected %+v, want bob's untrusted home reported", err, report.Unprotected)
+	}
 }
 
 // Static discovery reads package metadata and checks that the CLI exists;

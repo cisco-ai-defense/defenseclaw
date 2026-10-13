@@ -18,13 +18,42 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// DirectoryFactsFunc returns a uid's verified directory facts through NSS,
+// for LookupAccountSpelling, or nil without a trusted getent.
+func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.DirectoryFacts, bool) {
+	nss, err := NewNSSResolver(ctx)
+	if err != nil {
+		return nil
+	}
+	return func(uid int) (useridentity.DirectoryFacts, bool) {
+		facts, err := nss.DirectoryFactsWithoutGroupsForUID(uid, time.Now().UTC())
+		return facts, err == nil
+	}
+}
+
+// platformMobileAccounts finds none on Linux, whose directory accounts are
+// never copied into /etc/passwd.
+func platformMobileAccounts(context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+// platformOpenDirectoryNodeStates has no Open Directory to read on Linux.
+func platformOpenDirectoryNodeStates(context.Context) (string, error) {
+	return "", errors.New("unixidentity: no Open Directory on this platform")
+}
 
 const loginDefsPath = "/etc/login.defs"
 
 var (
 	localPasswdPath = "/etc/passwd"
+	localGroupPath  = "/etc/group"
 	nsswitchPath    = "/etc/nsswitch.conf"
+	sambaConfPath   = "/etc/samba/smb.conf"
 )
 
 // platformLocalAccounts reads /etc/passwd, the files backend itself.
@@ -34,6 +63,15 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 		return nil, err
 	}
 	return parseLocalPasswd(string(data)), nil
+}
+
+// platformLocalGroups reads /etc/group, the files backend itself.
+func platformLocalGroups(context.Context) (map[string]int, error) {
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if err != nil {
+		return nil, err
+	}
+	return parseLocalGroups(string(data)), nil
 }
 
 // platformDirectoryConfigured reads the passwd sources of nsswitch.conf. A

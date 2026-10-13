@@ -36,10 +36,8 @@ skill_actions:
 # active enforcement matrix is the union of these overrides with the
 # skill_actions defaults above.
 #
-# The two entries below mirror policies/rego/data.json — the bundled
-# data.json is what the gateway actually reads at runtime, and an
-# integrity test (see TestPolicyYAMLDataJSONParity) fails CI if this
-# section drifts from the JSON.
+# `defenseclaw policy activate` writes these entries into
+# admission.<type>.actions in config.yaml, which is what the gateway reads.
 scanner_overrides:
   mcp:
     MEDIUM:

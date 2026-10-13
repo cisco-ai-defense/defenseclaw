@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -84,16 +86,42 @@ func sandboxHookForConnector(ctx context.Context, connectorName string) bool {
 }
 
 // sandboxHookMode is the verdict mode of a hook request: hostMode for host
-// traffic, and always "action" for a request authenticated with a sandbox
-// binding minted for connectorName. DefenseClaw launched that harness
-// itself, usually with its own permission prompts off, so the host's
-// guardrail mode (observe by default) must not turn the sandbox's blocks
-// into warnings: its hooks are the only gate on every tool call.
+// traffic, and "action" for a request authenticated with a sandbox binding
+// minted for connectorName. DefenseClaw launched that harness itself,
+// usually with its own permission prompts off, so the host's guardrail mode
+// (observe by default) must not turn the sandbox's blocks into warnings: its
+// hooks are the only gate on every tool call. The one exception is a mode the
+// guardrail profile of a relayed call's verified subject sets itself
+// (sandboxProfileHookMode): an administrator who made a profile observe-only
+// gets the same verdicts in its sandboxes as on its hosts (GAP-0570).
 func sandboxHookMode(ctx context.Context, connectorName, hostMode string) string {
-	if sandboxHookForConnector(ctx, connectorName) {
-		return "action"
+	if !sandboxHookForConnector(ctx, connectorName) {
+		return hostMode
 	}
-	return hostMode
+	if mode := sandboxProfileHookMode(ctx, connectorName); mode != "" {
+		return mode
+	}
+	return "action"
+}
+
+// sandboxProfileHookMode is the hook mode the guardrail profile of a relayed
+// sandbox call sets itself for connectorName (profile.connectors[c].mode,
+// else profile.mode), or "" when the call is not relay-verified, its profile
+// was not selected by a verified subject, or the profile inherits its mode.
+// An inherited mode is the host default, which never relaxes a sandbox.
+func sandboxProfileHookMode(ctx context.Context, connectorName string) string {
+	if !isRelayVerifiedSandboxRequest(ctx) {
+		return ""
+	}
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || resolved.derived == nil || resolved.decision.SubjectSource == "" {
+		return ""
+	}
+	mode := resolved.derived.Guardrail.ProfileModeForConnector(config.NormalizeConnectorName(connectorName))
+	if mode == "" {
+		return ""
+	}
+	return normalizeAgentHookMode(mode)
 }
 
 // hookCWDForContext resolves a payload working directory: unchanged host
@@ -102,7 +130,33 @@ func hookCWDForContext(ctx context.Context, cwd string) string {
 	if view, ok := sandboxHookView(ctx); ok {
 		return sandboxHookCWD(view, cwd)
 	}
-	return sanitizeHookCWD(cwd)
+	if resolved := sanitizeHookCWD(cwd); resolved != "" {
+		return resolved
+	}
+	return serviceAccountCallerCWD(ctx, cwd)
+}
+
+// serviceAccountCallerCWD is the working directory of a caller of a managed
+// Windows gateway that the gateway service may not resolve. The service has
+// no access to an enrolled user's profile, so sanitizeHookCWD returned ""
+// for every project there and the hooks lost the project: its skill folders
+// were never registered for install admission (GAP-1356). The caller's own
+// directory is kept, lexically and unresolved, when it lies in that caller's
+// verified home; whatever reads below it still meets the profile's access
+// list, and project skill folders are verified by the hook guardian.
+func serviceAccountCallerCWD(ctx context.Context, cwd string) string {
+	if runtime.GOOS != "windows" || !serviceAccountGatewayFromContext(ctx) {
+		return ""
+	}
+	home := trustedActiveHome(ctx)
+	if home == "" || home == unresolvedCallerHome {
+		return ""
+	}
+	if !insideHome(home, cwd) && !(filepath.IsAbs(strings.TrimSpace(cwd)) && !hasParentElement(cwd) &&
+		projectRootKey(strings.TrimSpace(cwd)) == projectRootKey(home)) {
+		return ""
+	}
+	return filepath.Clean(strings.TrimSpace(cwd))
 }
 
 // hookActiveHome is the directory "~" names in a request's tool calls: the
@@ -160,15 +214,27 @@ func sandboxToolResultUntrusted(ctx context.Context) bool {
 
 // sandboxSessionStateKey is the key under which in-memory per-session state
 // for sessionID is kept: the bare ID for host traffic, and the ID qualified
-// by the binding for a sandbox request.
+// by the binding for a sandbox request (sandboxBindingScope).
 func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
-		return "sandbox\x00" + binding.ID + "\x00" + sessionID
+		return "sandbox\x00" + sandboxBindingScope(binding) + "\x00" + sessionID
 	}
 	return sessionID
+}
+
+// sandboxBindingScope names the trust domain of a sandbox's state: its
+// binding ID, or for a relayed call its registration. The binding ID of a
+// relayed call is the daemon's claim and another account's daemon could
+// claim the same one; the registration ID is minted by the managed gateway
+// and scoped to the kernel-verified caller.
+func sandboxBindingScope(binding sandboxauth.Binding) string {
+	if binding.RegistrationID != "" {
+		return "registration\x00" + binding.RegistrationID
+	}
+	return binding.ID
 }
 
 // sandboxConnectorInstanceNamespace domain-separates derived sandbox
@@ -181,7 +247,7 @@ const sandboxConnectorInstanceNamespace = "defenseclaw/openshell/sandbox-connect
 // binding's life (rotation keeps the ID) and across daemon restarts, so
 // nothing needs to be stored to find it again.
 func sandboxConnectorInstanceID(binding sandboxauth.Binding) audit.ConnectorInstanceID {
-	sum := sha256.Sum256([]byte(sandboxConnectorInstanceNamespace + "\x00" + binding.ID + "\x00" + binding.Connector))
+	sum := sha256.Sum256([]byte(sandboxConnectorInstanceNamespace + "\x00" + sandboxBindingScope(binding) + "\x00" + binding.Connector))
 	var id uuid.UUID
 	copy(id[:], sum[:16])
 	var ms uint64
@@ -309,8 +375,8 @@ func sandboxCoverageGaps(ctx context.Context) []string {
 }
 
 // sandboxHookAuditExtra is the sandbox identity stamped onto hook audit
-// envelopes, taken from the authenticated binding only, plus the request's
-// coverage gaps.
+// envelopes, taken from the authenticated binding (for a relayed call, the
+// registration it was rebuilt from) only, plus the request's coverage gaps.
 func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
@@ -327,6 +393,13 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	if binding.PolicyProfile != "" {
 		extra["sandbox_profile"] = binding.PolicyProfile
 	}
+	if binding.RegistrationID != "" {
+		extra["sandbox_registration_id"] = binding.RegistrationID
+	}
+	if relay := sandboxRelayStateFrom(ctx); relay != nil && relay.tamperTier != "" {
+		extra["sandbox_tamper_tier"] = relay.tamperTier
+	}
+	sandboxRelayProfileExtra(ctx, extra)
 	if gaps := sandboxCoverageGaps(ctx); len(gaps) > 0 {
 		extra["sandbox_coverage_gaps"] = strings.Join(gaps, ",")
 	}
@@ -337,6 +410,21 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 		extra[sandboxEgressRefusalExtra] = strings.Join(refused, ",")
 	}
 	return extra
+}
+
+// sandboxHookManagedV8 is the managed stamp a relayed or registered sandbox
+// hook's decision record carries: the registration the call was admitted
+// under, its effective sandbox policy digest and generation, the person's
+// keyed pseudonym and the user's OpenShell version and install mode, the
+// same stamps as the managed sandbox records (spec 2.10, GAP-0317). Only
+// the relay-verified registration supplies them; a local sandbox ingress
+// call or a host hook has none.
+func sandboxHookManagedV8(ctx context.Context) audit.SandboxManagedV8 {
+	reg, ok := sandboxRelayRegistrationFrom(ctx)
+	if !ok {
+		return audit.SandboxManagedV8{}
+	}
+	return sandboxRecordIdentity(reg).ManagedV8()
 }
 
 // hookRequestAuditExtra combines the contract compatibility fields with the

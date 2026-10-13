@@ -32,7 +32,6 @@ import contextlib
 import contextvars
 import functools
 import ipaddress
-import os
 import socket
 import threading
 import weakref
@@ -41,6 +40,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import idna
+
+from defenseclaw import envvars
 
 # RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
 # does NOT include this block — it predates RFC 6598 — so we have to
@@ -74,7 +75,7 @@ def _cgnat_allowed() -> bool:
     with :func:`unittest.mock.patch.dict` and so a long-running process
     picks up a config change without restart.
     """
-    return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
+    return envvars.lookup("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
 
 def _allowed_private_ips() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -82,7 +83,7 @@ def _allowed_private_ips() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Ad
 
     Read at call time so tests can mock the env var.
     """
-    raw = os.environ.get("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "")
+    raw = (envvars.lookup("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS") or "")
     if not raw:
         return frozenset()
     result = set()

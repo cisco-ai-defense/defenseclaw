@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 
+from defenseclaw import envvars
 from defenseclaw.tui.models import CommandResult, HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.first_run import decide_first_run_prompt, first_run_prompt_text
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, ThemeTokens
@@ -167,7 +168,7 @@ def _load_after_optional_first_run_prompt(config_module: object) -> tuple[object
         cfg_path = "~/.defenseclaw/config.yaml"
 
     tty_ok = sys.stdin.isatty() and sys.stdout.isatty()
-    skip = os.environ.get("DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT", "").strip().lower() in {
+    skip = (envvars.lookup("DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT") or "").strip().lower() in {
         "1",
         "true",
         "yes",

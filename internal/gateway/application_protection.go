@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -430,7 +431,7 @@ func (c *applicationProtectionController) hookContractPreflightLocked(conn conne
 		return true, "", ""
 	}
 	mode := cfg.EffectiveGuardrailModeForConnector(conn.Name())
-	if !strings.EqualFold(mode, "action") || os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
+	if !strings.EqualFold(mode, "action") || envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return true, "", ""
 	}
 	resolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)

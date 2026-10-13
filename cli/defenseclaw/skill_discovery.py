@@ -216,6 +216,22 @@ def skill_dir_is_eligible(path: str) -> bool:
     return False
 
 
+def decode_skill_text(raw: bytes) -> str:
+    """Decode a SKILL.md or README.md prefix, honouring a byte order mark.
+
+    Windows editors save these as UTF-8 with a BOM or as UTF-16 (Notepad
+    "Unicode", PowerShell 5.1 redirection); read as plain UTF-8 the BOM and
+    the NUL bytes broke the front matter and showed as the description
+    (GAP-0417).
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", errors="replace")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        body = raw[: len(raw) - (len(raw) % 2)]
+        return body.decode("utf-16", errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
 def read_skill_marker_text(
     skill_path: str,
     marker: str,
@@ -249,7 +265,7 @@ def read_skill_marker_text(
             or not _canonically_contained(marker_path, skill_path)
         ):
             return None
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        return decode_skill_text(b"".join(chunks))
     except OSError:
         return None
     finally:

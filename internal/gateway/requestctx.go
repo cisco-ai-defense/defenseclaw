@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/google/uuid"
 )
@@ -364,7 +365,7 @@ func socketClientIP(r *http.Request) string {
 }
 
 func isTrustedProxyPeer(ipStr string) bool {
-	cfg := strings.TrimSpace(os.Getenv(trustedProxyEnvVar))
+	cfg := strings.TrimSpace(envvars.Getenv(trustedProxyEnvVar))
 	if cfg == "" {
 		return false
 	}

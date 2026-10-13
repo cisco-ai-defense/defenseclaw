@@ -192,6 +192,52 @@ func TestSignalFromMCPConfigPathReadsHermesTopLevelMCPServers(t *testing.T) {
 	}
 }
 
+// GAP-0269: a ~/.claude.json that declares no MCP server (Claude Code writes
+// one either way) is no mcp_server signal; one that declares a server is.
+func TestDetectMCPPathsSkipsAConfigWithoutServers(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".claude.json")
+	sig := AISignature{ID: "claudecode", Name: "Claude Code", Vendor: "Anthropic", MCPPaths: []string{"~/.claude.json"}}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(tmp, "data"), HomeDir: tmp,
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
+	for body, want := range map[string]int{
+		`{"numStartups": 3, "projects": {"/work": {"mcpServers": {}}}}`: 0,
+		`{"mcpServers": {"dccert-mcp": {"command": "node"}}}`:           1,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := svc.detectMCPPaths(); len(got) != want {
+			t.Fatalf("%s: %d mcp_server signals, want %d", body, len(got), want)
+		}
+	}
+}
+
+// GAP-1062: `amp mcp add` writes its servers under amp.mcpServers in
+// ~/.config/amp/settings.json, which the Claude Code reader never looked at.
+func TestSignalFromMCPConfigPathReadsAmpSettingsServers(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := filepath.Join(t.TempDir(), "settings.json")
+	body := `{"amp.mcpServers": {"lma-mcp": {"command": "/usr/bin/echo", "args": ["lma-mcp-marker"]}}}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	signal := (&ContinuousDiscoveryService{}).signalFromMCPConfigPath(AISignature{ID: "amp", SupportedConnector: "amp"}, cfgPath)
+	var names []string
+	for _, ev := range signal.Evidence {
+		if ev.Type == "mcp_server" {
+			names = append(names, ev.Basename)
+		}
+	}
+	if len(names) != 1 || names[0] != "lma-mcp" || signal.Partial {
+		t.Fatalf("mcp_server evidence basenames = %v (partial %v), want [lma-mcp]", names, signal.Partial)
+	}
+}
+
 // GAP-2337: Antigravity leaves a 0-byte mcp_config.json. An empty or
 // whitespace-only config declares no server: it is complete, not a
 // parse error, so the admin view does not list it as an MCP server.
@@ -210,6 +256,35 @@ func TestSignalFromMCPConfigPathBlankConfigIsNotParseError(t *testing.T) {
 			if ev.Type == "mcp_server" {
 				t.Fatalf("%s config emitted mcp_server %q", name, ev.Basename)
 			}
+		}
+	}
+}
+
+// GAP-1062: AI discovery read every settings.json as a Claude settings file,
+// so a server added with `amp mcp add` (amp.mcpServers, JSONC) was missing;
+// OpenCode's mcp map was missing too, and OpenClaw/ZeptoClaw files were read
+// as bare maps that listed their top-level keys as servers.
+func TestMCPConfigNamesReadEachAgentsLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for rel, tc := range map[string]struct{ body, want string }{
+		".config/amp/settings.json":       {`{"amp.mcpServers": {"lma-mcp": {"command": "/usr/bin/echo"}}, "amp.dangerouslyAllowAll": false}`, "lma-mcp"},
+		".config/amp2/settings.jsonc":     {"{\n  // amp mcp add\n  \"amp.mcpServers\": {\"amp-jsonc\": {\"url\": \"https://example.test/mcp\"}},\n}", "amp-jsonc"},
+		".claude/settings.json":           {`{"mcpServers": {"claude-mcp": {"command": "x"}}, "hooks": {}}`, "claude-mcp"},
+		".config/opencode/opencode.jsonc": {"{\n  // opencode mcp add\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\"oc-mcp\": {\"type\": \"local\", \"command\": [\"x\"]}}\n}", "oc-mcp"},
+		".openclaw/openclaw.json":         {`{"agents": {"defaults": {}}, "mcp": {"servers": {"claw-mcp": {"command": "x"}}}}`, "claw-mcp"},
+		".zeptoclaw/config.json":          {`{"providers": {}, "mcp": {"servers": [{"name": "zepto-mcp", "command": "x"}]}}`, "zepto-mcp"},
+	} {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		names, err := readMCPServerNamesWithErr(path, "")
+		if err != nil || len(names) != 1 || names[0] != tc.want {
+			t.Errorf("%s: names = %v, %v; want [%s]", rel, names, err, tc.want)
 		}
 	}
 }

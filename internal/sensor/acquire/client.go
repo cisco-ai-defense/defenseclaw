@@ -84,43 +84,70 @@ func (h *Helper) dial(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// request performs one round trip and decodes the response body.
+// request performs one round trip and decodes the response body. Its
+// outcome is the helper's reachability (Describe, WideCoverage).
 func (h *Helper) request(ctx context.Context, op string, body any) error {
+	err := h.roundTrip(ctx, op, body)
+	h.note(err)
+	return err
+}
+
+// errUnsupportedOperation is what a helper answers for an op it does not
+// implement.
+const errUnsupportedOperation = "unsupported operation"
+
+func (h *Helper) roundTrip(ctx context.Context, op string, body any) error {
 	conn, err := h.dialer(ctx)
 	if err != nil {
-		h.note(err)
 		return err
 	}
 	defer conn.Close()
 
 	if err := writeFrame(conn, Request{Version: protocolVersion, Op: op}, requestDeadline); err != nil {
-		h.note(err)
 		return err
 	}
 	var response Response
 	if err := readFrame(conn, &response, responseDeadline); err != nil {
-		h.note(err)
 		return fmt.Errorf("acquire: read %s response: %w", op, err)
 	}
 	if response.Version != protocolVersion {
-		err := fmt.Errorf("%w: helper speaks %d, this build speaks %d",
+		return fmt.Errorf("%w: helper speaks %d, this build speaks %d",
 			ErrVersionMismatch, response.Version, protocolVersion)
-		h.note(err)
-		return err
 	}
 	if response.Error != "" {
-		err := fmt.Errorf("acquire: helper refused %s: %s", op, response.Error)
-		h.note(err)
-		return err
+		if response.Error == errUnsupportedOperation {
+			return fmt.Errorf("%w: %s", errHelperLacksOp, op)
+		}
+		return fmt.Errorf("acquire: helper refused %s: %s", op, response.Error)
 	}
 	if body != nil && len(response.Body) > 0 {
 		if err := json.Unmarshal(response.Body, body); err != nil {
-			h.note(err)
 			return fmt.Errorf("acquire: decode %s body: %w", op, err)
 		}
 	}
-	h.note(nil)
 	return nil
+}
+
+// errHelperLacksOp wraps a helper's refusal of an op it does not implement.
+var errHelperLacksOp = errors.New("acquire: the sensor helper does not implement")
+
+// ErrKernelStatusUnsupported is KernelStatus against a helper that predates
+// the op (a gateway upgraded before its helper).
+var ErrKernelStatusUnsupported = errors.New("acquire: the sensor helper does not report kernel policy")
+
+// KernelStatus asks the helper what its kernel-policy reconciler has
+// applied. It does not count toward the helper's reachability: a helper
+// that predates the op still brokers everything else, and a failed status
+// read must not report the broker as down.
+func (h *Helper) KernelStatus(ctx context.Context) (KernelStatus, error) {
+	var status KernelStatus
+	if err := h.roundTrip(ctx, OpKernelStatus, &status); err != nil {
+		if errors.Is(err, errHelperLacksOp) {
+			return KernelStatus{}, ErrKernelStatusUnsupported
+		}
+		return KernelStatus{}, err
+	}
+	return status, nil
 }
 
 func (h *Helper) note(err error) {

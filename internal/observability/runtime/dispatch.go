@@ -30,9 +30,12 @@ const DestinationDispatchComponentName = "destination-dispatch"
 
 const (
 	defaultDestinationAttemptTimeout = 10 * time.Second
-	defaultDestinationMaxAttempts    = 3
-	defaultDestinationInitialBackoff = 100 * time.Millisecond
-	defaultDestinationMaxBackoff     = 5 * time.Second
+	defaultDestinationMaxAttempts    = 24
+	secureClientMaxAttempts          = 3
+	secureClientInitialBackoff       = 100 * time.Millisecond
+	secureClientMaxBackoff           = 5 * time.Second
+	defaultDestinationInitialBackoff = 2 * time.Second
+	defaultDestinationMaxBackoff     = 30 * time.Second
 	defaultDestinationHealthInterval = time.Second
 	maxDestinationBatchBytes         = 64 * 1024 * 1024
 )
@@ -58,9 +61,10 @@ type DestinationAdapterFactory interface {
 }
 
 type destinationDispatchFactory struct {
-	adapters  DestinationAdapterFactory
-	resources *telemetry.V8ProviderFactory
-	observer  *safeDeliveryObserver
+	adapters     DestinationAdapterFactory
+	resources    *telemetry.V8ProviderFactory
+	observer     *safeDeliveryObserver
+	secureClient bool
 }
 
 func (*destinationDispatchFactory) Name() string { return DestinationDispatchComponentName }
@@ -120,8 +124,8 @@ func (factory *destinationDispatchFactory) Prepare(
 		if err != nil || nilInterface(adapter) {
 			return nil, &destinationDispatchError{}
 		}
-		dispatcherConfig, ok := CompiledDispatcherConfig(
-			destination, input.Generation, observability.SignalLogs, component.observer,
+		dispatcherConfig, ok := CompiledDispatcherConfigForProfile(
+			destination, input.Generation, observability.SignalLogs, component.observer, factory.secureClient,
 		)
 		if !ok {
 			return nil, &destinationDispatchError{}
@@ -158,6 +162,16 @@ func CompiledDispatcherConfig(
 	signal observability.Signal,
 	observer delivery.Observer,
 ) (delivery.Config, bool) {
+	return CompiledDispatcherConfigForProfile(destination, generation, signal, observer, false)
+}
+
+func CompiledDispatcherConfigForProfile(
+	destination config.ObservabilityV8EffectiveDestination,
+	generation uint64,
+	signal observability.Signal,
+	observer delivery.Observer,
+	secureClient bool,
+) (delivery.Config, bool) {
 	if generation == 0 || !observability.IsSignal(signal) {
 		return delivery.Config{}, false
 	}
@@ -185,16 +199,26 @@ func CompiledDispatcherConfig(
 	if destination.Transport.TimeoutMS > 0 {
 		attemptTimeout = time.Duration(destination.Transport.TimeoutMS) * time.Millisecond
 	}
+	retry := delivery.RetryPolicy{
+		MaxAttempts:    defaultDestinationMaxAttempts,
+		InitialBackoff: defaultDestinationInitialBackoff,
+		MaxBackoff:     defaultDestinationMaxBackoff,
+	}
+	if secureClient {
+		retry = delivery.RetryPolicy{
+			MaxAttempts:    secureClientMaxAttempts,
+			InitialBackoff: secureClientInitialBackoff,
+			MaxBackoff:     secureClientMaxBackoff,
+			LegacyJitter:   true,
+		}
+	}
 	return delivery.Config{
-		Destination: destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
+		LegacyCircuit: secureClient,
+		Destination:   destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
 		MaxQueueItems: batch.MaxQueueSize, MaxQueueBytes: batch.MaxQueueBytes,
 		MaxBatchItems: maxBatchItems, MaxBatchBytes: maxBatchBytes,
 		ScheduledDelay: scheduledDelay, AttemptTimeout: attemptTimeout,
-		Retry: delivery.RetryPolicy{
-			MaxAttempts:    defaultDestinationMaxAttempts,
-			InitialBackoff: defaultDestinationInitialBackoff,
-			MaxBackoff:     defaultDestinationMaxBackoff,
-		},
+		Retry:    retry,
 		Observer: observer, ObserverInterval: defaultDestinationHealthInterval,
 	}, true
 }

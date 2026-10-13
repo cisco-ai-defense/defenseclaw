@@ -21,6 +21,11 @@ The OmniGent connector uses OmniGent's documented custom Python policy API. It d
 | macOS and Linux | **Supported** | The custom-policy bridge maps all six awaited policy phases to DefenseClaw decisions. Native OTLP is an opt-in you set when you start OmniGent. |
 | Native Windows x64 | **Supported — native degraded** | Not verified live in this release. Covers OmniGent `server` and SDK-based harnesses installed with the official same-user `uv tool` layout. OmniGent's native terminal wrappers, filesystem and network sandboxing and egress proxy are not available on Windows, and DefenseClaw does not emulate them through WSL or a shell layer. |
 
+Managed terminal harnesses (including the Hermes, Claude and Codex wrappers)
+need tmux 3.3 or newer on Linux and macOS. RHEL 9 ships tmux 3.2a;
+upgrade tmux before using those wrappers. The server and SDK harnesses do not
+use managed terminals. Live OmniGent verification was skipped for this round.
+
 ## Setup
 
 <Tabs items={['macOS / Linux', 'Windows']}>

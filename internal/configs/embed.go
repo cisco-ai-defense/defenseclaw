@@ -142,13 +142,21 @@ type ProviderAzure struct {
 
 // ProvidersConfig is the top-level structure of providers.json.
 type ProvidersConfig struct {
+	// DerivedFrom marks custom-providers.json as derived from config.yaml
+	// llm_providers (the digest of what it renders). A derived file is
+	// output, never input: LoadProviders skips it, and the gateway builds
+	// the registry from config.
+	DerivedFrom string     `json:"_derived_from,omitempty"`
 	Providers   []Provider `json:"providers"`
 	OllamaPorts []int      `json:"ollama_ports"`
 }
 
 // LoadProviders parses the embedded providers.json and merges an
 // optional operator overlay at <data dir>/custom-providers.json (see
-// CustomProvidersPath).
+// CustomProvidersPath). An overlay marked _derived_from was rendered from
+// config.yaml llm_providers and is skipped: the gateway applies
+// llm_providers itself (ApplyOverlay), and a hand edit of the derived file
+// is never read back. Only a legacy, operator-authored overlay merges.
 // The overlay is "additive only": it can introduce new providers or
 // extend the ollama_ports list, but a failing parse is tolerated —
 // the built-in registry is always returned even if the overlay is
@@ -164,11 +172,21 @@ type ProvidersConfig struct {
 //   - Overlay parse errors are logged to stderr (same surface as the
 //     gateway's runtime alerts) but do not fail the load.
 func LoadProviders() (*ProvidersConfig, error) {
+	cfg, err := LoadEmbeddedProviders()
+	if err != nil {
+		return nil, err
+	}
+	mergeCustomProviders(cfg)
+	return cfg, nil
+}
+
+// LoadEmbeddedProviders returns the built-in registry without reading a
+// legacy local overlay. Managed v9 generations use config.yaml for additions.
+func LoadEmbeddedProviders() (*ProvidersConfig, error) {
 	var cfg ProvidersConfig
 	if err := json.Unmarshal(providersJSON, &cfg); err != nil {
 		return nil, err
 	}
-	mergeCustomProviders(&cfg)
 	return &cfg, nil
 }
 
@@ -241,10 +259,16 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay parse error: %v\n", err)
 		return
 	}
-	applyOverlay(cfg, overlay)
+	if overlay.DerivedFrom != "" {
+		return
+	}
+	ApplyOverlay(cfg, overlay)
 }
 
-func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
+// ApplyOverlay merges overlay into base with the overlay merge rules of
+// LoadProviders (same-name providers union their lists, scalars from the
+// overlay win, ollama ports union).
+func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 	if base == nil {
 		return
 	}

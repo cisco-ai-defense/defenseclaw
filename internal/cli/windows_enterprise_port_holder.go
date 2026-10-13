@@ -43,14 +43,14 @@ var (
 // applyWindowsEnterpriseAPIPortHolders reports api_port_held when the
 // gateway service runs but its API is not ready and processes other than the
 // gateway listen where the API binds.
-func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions, report *windowsEnterpriseInstallerReport) {
 	inspection := result.Action == "status" || result.Action == "verify"
 	gatewayRunning := strings.TrimSpace(report.GatewayService) != "" && report.GatewayServiceState == "running"
 	// A lifecycle run (a first install, for example) whose gateway never
 	// became ready: its result named only the readiness booleans, and status
 	// could not run on the rolled-back host to name the holder.
 	lifecycleFailed := !inspection && !report.GatewayReady && (len(report.Errors) > 0 || strings.TrimSpace(report.Error) != "")
-	if inspection && (!report.Installed || report.TransactionPending || report.GatewayReady || !gatewayRunning) {
+	if inspection && (!report.Installed || report.TransactionPending || !gatewayRunning) {
 		return
 	}
 	if !inspection && !lifecycleFailed {
@@ -61,8 +61,24 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if lifecycleFailed && windowsEnterpriseInstallerRefusedModule(report) {
 		return
 	}
-	address := fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
-	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", config.DefaultGatewayAPIPort)
+	// The installed config is authoritative for the hook and gateway port.
+	// If it cannot be read, a listener on the default port is not evidence
+	// that it holds the gateway's configured port.
+	portPath := ""
+	if !report.Installed && opts != nil {
+		portPath = strings.TrimSpace(opts.configPath)
+	}
+	port, err := windowsEnterpriseConfigAPIPort(portPath)
+	if err != nil && !report.Installed && portPath == "" {
+		// A failed first install may have removed its staged config. With no
+		// supplied config it used the default, so retain port-holder advice.
+		port, err = config.DefaultGatewayAPIPort, nil
+	}
+	if err != nil || port <= 0 {
+		return
+	}
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", port)
 	if err != nil || len(listeners) == 0 {
 		return
 	}
@@ -79,6 +95,19 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	gatewayPID := windowsEnterpriseServicePID(gatewayService)
 	if gatewayRunning && gatewayPID == 0 {
 		return
+	}
+	// The readiness probe asks /health on the port, which any process
+	// listening there answers: a standard user's listener answered 200, so
+	// verify printed OK while every hook failed closed (GAP-1029). A ready
+	// gateway holds its own listener; without it the port is held all the
+	// same, and the probe's answer was the other process's.
+	probeFooled := inspection && report.GatewayReady
+	if probeFooled {
+		for _, listener := range listeners {
+			if listener.PID == gatewayPID {
+				return
+			}
+		}
 	}
 	var names, perUser []string
 	for _, listener := range listeners {
@@ -102,6 +131,13 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	}
 	if len(names) == 0 {
 		return
+	}
+	if probeFooled {
+		result.Readiness.Gateway = false
+		result.Inspection.Local = "unknown"
+		if result.Inspection.AIDefense == "ok" {
+			result.Inspection.AIDefense = "unavailable:gateway_not_ready"
+		}
 	}
 	stop := "Stop that process"
 	if len(names) > 1 {

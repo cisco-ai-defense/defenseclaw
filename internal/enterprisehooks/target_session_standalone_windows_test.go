@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -225,5 +226,106 @@ func TestDeferredPendingProofForAnUntouchedProfile(t *testing.T) {
 				t.Fatalf("pending proof error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// GAP-0262: revoking a user narrowed only the primary machine policy and left
+// the user's runtime selection, so once the user was enrolled again the
+// deferred pending proof refused the row and every later Setup /ensure
+// failed. The guardian retires the selection of a SID the machine policy no
+// longer registers; a registered SID's selection and another deployment's
+// stay, and the proof still refuses them. GAP-0271: a pass reads each
+// connector's machine policy once, not once per selection. GAP-0273: the
+// selections of an uninstalled deployment (its hook executable is gone) are
+// retired too.
+func TestStandaloneGuardianRetiresTheRuntimeSelectionOfAnUnregisteredUser(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	hookExe, _ := windowsEnterpriseHookExecutable()
+	previousAncestor, previousDir, previousFile := windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck
+	previousOwner, previousMutation := windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize
+	previousRegistered := windowsMachinePolicyRegisteredSIDs
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return sid, nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	const peerSID = "S-1-5-21-1000-2000-3000-1104"
+	registered, policyReads := true, 0
+	windowsMachinePolicyRegisteredSIDs = func(string, string) (map[string]bool, error) {
+		policyReads++
+		if !registered {
+			return map[string]bool{}, nil
+		}
+		return map[string]bool{strings.ToUpper(sid.String()): true, peerSID: true}, nil
+	}
+	t.Cleanup(func() {
+		windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck = previousAncestor, previousDir, previousFile
+		windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize = previousOwner, previousMutation
+		windowsMachinePolicyRegisteredSIDs = previousRegistered
+	})
+	selectorPath, err := windowsManagedRuntimeSelectorPath("claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWindowsManagedPolicyDirectory(filepath.Dir(selectorPath)); err != nil {
+		t.Fatal(err)
+	}
+	publish := func(hook string) {
+		t.Helper()
+		var targets []windowsManagedRuntimeSelectorTarget
+		for _, entrySID := range []string{sid.String(), peerSID} {
+			targets = append(targets, windowsManagedRuntimeSelectorTarget{
+				Connector: "claudecode", SID: entrySID, DataDir: filepath.Join(target.UserHome, ".defenseclaw"),
+				HookExecutable: hook, GatewayAddr: "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+				GenerationID: strings.Repeat("a", 32), BundleSHA256: "sha256:" + strings.Repeat("b", 64),
+			})
+		}
+		sort.Slice(targets, func(i, j int) bool { return targets[i].SID < targets[j].SID })
+		if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+			SchemaVersion: windowsManagedRuntimeGenerationSchema,
+			Connector:     "claudecode",
+			Targets:       targets,
+		}); err != nil {
+			t.Fatalf("publish the selection a revocation left behind: %v", err)
+		}
+	}
+	retireAndProve := func() error {
+		t.Helper()
+		if err := RetireWindowsUnregisteredRuntimeSelections(); err != nil {
+			t.Fatalf("retire runtime selections: %v", err)
+		}
+		return RequireWindowsEnterpriseDeferredTargetPending(target)
+	}
+	publish(hookExe)
+	if err := retireAndProve(); err == nil || !strings.Contains(err.Error(), "without protected Guardian authorization") {
+		t.Fatalf("pending proof with a registered SID's selection = %v, want the refusal", err)
+	}
+	if policyReads != 1 {
+		t.Fatalf("a pass over two registered selections read the machine policy %d times, want once", policyReads)
+	}
+	registered = false
+	if err := retireAndProve(); err != nil {
+		t.Fatalf("pending proof after the unregistered SID's selection was retired: %v", err)
+	}
+	if _, err := os.Lstat(selectorPath); !os.IsNotExist(err) {
+		t.Fatalf("the emptied runtime selector stayed: %v", err)
+	}
+	other := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publish(other)
+	if err := retireAndProve(); err == nil || !strings.Contains(err.Error(), "mismatched selected runtime") {
+		t.Fatalf("pending proof with another deployment's selection = %v, want the refusal", err)
+	}
+	// GAP-0273: once that deployment is uninstalled without purge (its hook
+	// executable is gone), a reinstall into another folder retires its
+	// selections instead of failing every Setup on them.
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAndProve(); err != nil {
+		t.Fatalf("pending proof after the uninstalled deployment's selection was retired: %v", err)
 	}
 }

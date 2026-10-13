@@ -33,6 +33,11 @@ func (a *APIServer) restoreHookSessionLifecycle(ctx context.Context, meta llmEve
 	if exists && !hookLifecycleUnresolvedSelfRoot(snapshot.meta) {
 		return meta
 	}
+	if ManagedEnterpriseActive() {
+		// Secure Client records keep main's lineage after a restart: there
+		// the gateway runtime never served the history read (issue #1092).
+		return meta
+	}
 	runtime, ok := a.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
 	if !ok || runtime == nil {
 		return meta

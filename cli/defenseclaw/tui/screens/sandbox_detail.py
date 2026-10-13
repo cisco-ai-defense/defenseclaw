@@ -58,6 +58,12 @@ class SandboxDetailScreen(ModalScreen[str | None]):
         text-style: bold;
     }}
 
+    #sandbox-detail-chip {{
+        height: 1;
+        margin-bottom: 1;
+        color: {DEFAULT_TOKENS.accent_amber};
+    }}
+
     #sandbox-detail-scroll {{
         height: auto;
     }}
@@ -86,15 +92,21 @@ class SandboxDetailScreen(ModalScreen[str | None]):
         *,
         keys: Iterable[str] = (),
         keys_hint: str = "",
+        chip: str = "",
     ) -> None:
         super().__init__()
         self.model = DetailModalModel.from_pairs(title, pairs)
         self.keys = frozenset(keys)
         self.keys_hint = keys_hint
+        # A live change of the user's policy while the window was open
+        # ("policy changed: staff → contractors"), shown under the title.
+        self.chip = chip
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sandbox-detail-dialog"):
             yield Static(self.model.title, id="sandbox-detail-title", markup=False)
+            if self.chip:
+                yield Static(f"● {self.chip}", id="sandbox-detail-chip", markup=False)
             with VerticalScroll(id="sandbox-detail-scroll"):
                 yield Static(self.model.table(), id="sandbox-detail-body")
             if self.keys_hint:
@@ -112,7 +124,7 @@ class SandboxDetailScreen(ModalScreen[str | None]):
     def _fit_body(self) -> None:
         # The dialog may take 90% of the screen; the title, key line, Close
         # button, padding and border keep their rows and the body scrolls.
-        chrome = 13 if self.keys_hint else 10
+        chrome = (13 if self.keys_hint else 10) + (2 if self.chip else 0)
         room = self.app.size.height * 9 // 10 - chrome
         self.query_one("#sandbox-detail-scroll", VerticalScroll).styles.max_height = max(3, room)
 

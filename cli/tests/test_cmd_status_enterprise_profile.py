@@ -16,7 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from defenseclaw.commands import cmd_status
 
 
@@ -34,8 +33,10 @@ def config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # An unmanaged install has no profile, whatever its config says.
         ("config_version: 8\nenterprise:\n  profile: standalone\n", "", "", None, {""}),
         ("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", "managed_enterprise", "", None, {"standalone"}),
-        # The service pin wins over the config.
+        # The service pin decides when the config declares no profile.
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "Standalone", None, {"standalone"}),
+        # A pin that contradicts the declared profile does not reclassify the host (as Go).
+        ("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", "managed_enterprise", "secure_client", None, {"standalone"}),
         # Without either, the default follows the platform.
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "linux", {"standalone"}),
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "win32", {"secure_client"}),
@@ -102,3 +103,38 @@ def test_standalone_status_reports_the_profile(config_file: Path, monkeypatch: p
     document = json.loads(_invoke_status(monkeypatch, config_file, profile_text=profile, default="secure_client", json_output=True))
     assert document["enterprise_profile"] == "standalone"
     assert list(document)[:3] == ["environment", "deployment_mode", "enterprise_profile"]
+
+
+def test_secure_client_invalid_config_still_uses_live_status(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from click.testing import CliRunner
+
+    from tests.helpers import cleanup_app, make_app_context
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.config_problems = ["invalid config"]
+        config_file.write_text("config_version: 8\ndeployment_mode: managed_enterprise\n")
+        monkeypatch.setattr(cmd_status, "_default_enterprise_profile", lambda: "secure_client")
+        fetched = []
+        health = {"pid": 42}
+        monkeypatch.setattr(
+            cmd_status, "_fetch_runtime_bound_health",
+            lambda *_args, **_kwargs: fetched.append(True) or health,
+        )
+        monkeypatch.setattr(
+            "defenseclaw.commands.cmd_doctor._gateway_runs_replaced_binary", lambda _cfg: False
+        )
+        text = CliRunner().invoke(cmd_status.status, [], obj=app, catch_exceptions=False)
+        document = CliRunner().invoke(cmd_status.status, ["--json"], obj=app, catch_exceptions=False)
+        assert text.exit_code == document.exit_code == 1
+        assert len(fetched) == 2
+        assert "running" in text.output
+        assert json.loads(document.output)["sidecar"]["running"] is True
+        assert json.loads(document.output)["config_errors"] == ["invalid config"]
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

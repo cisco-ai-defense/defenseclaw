@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestNewAPIGuardrailEvaluateV8RequestFactsRejectsInvalidSourceFacts(t *testing.T) {
@@ -71,6 +73,13 @@ func TestAPIGuardrailEvaluateV8CompletionRejectsInvalidPolicyOutput(t *testing.T
 func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
 	ctx, parent := platformHealthCorrelatedContext(t)
+	// The verified caller's directory facts ride the evaluation record and
+	// its span as correlation.identity (GAP-0009).
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	ctx = withVerifiedSubject(withManagedHookPeer(ctx, managedHookPeer{UID: 1201, Name: "dcad-alice"}), VerifiedSubject{
+		UserID: "1201", Directory: useridentity.DirectoryFacts{Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory},
+	})
 	body, err := json.Marshal(guardrailEvaluateRequest{
 		EvaluationID: "eval-rich-opa", Direction: "prompt", Model: "gpt-4",
 		Mode: "action", ScannerMode: "both", ContentLength: 512, ElapsedMs: 7.25,
@@ -107,6 +116,10 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		row.Body["defenseclaw.guardrail.reason"] != "built-in fallback (no policy configured)" ||
 		row.Body["defenseclaw.guardrail.finding_count"] != float64(2) ||
 		row.Body["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
+		row.Body["defenseclaw.user.directory"] != "active_directory" ||
+		row.Body["user.id"] != "1201" ||
+		row.Body["defenseclaw.user.id_kind"] != "posix_uid" ||
+		row.Body["defenseclaw.user.name"] != "dcad-alice" ||
 		!ok || len(sources) != 1 || sources[0] != "scanner" ||
 		!rulesOK || len(rules) != 2 || rules[0] != "SEC-LOCAL" || rules[1] != "SEC-CISCO" {
 		t.Fatalf("generated OPA guardrail row=%+v", row)
@@ -155,8 +168,57 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		attributes["defenseclaw.evaluation.id"] != "eval-rich-opa" ||
 		attributes["defenseclaw.guardrail.phase"] != "policy" ||
 		attributes["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
-		attributes["defenseclaw.guardrail.mode"] != "enforce" {
+		attributes["defenseclaw.guardrail.mode"] != "enforce" ||
+		attributes["defenseclaw.user.domain"] != "dclab.test" ||
+		attributes["user.id"] != "1201" ||
+		attributes["defenseclaw.user.name"] != "dcad-alice" {
 		t.Fatalf("generated OPA span parent=%s/%t record=%v", spanParent, hasParent, attributes)
+	}
+}
+
+// A decision event must carry the profile named on its parent span.
+func TestGuardrailDecisionEventCarriesProfileName(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	correlated, _ := platformHealthCorrelatedContext(t)
+	ctx := context.WithValue(correlated, resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+		decision: profileDecision{Name: "contractors", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Match: profileMatchGroup},
+	})
+	body, err := json.Marshal(guardrailEvaluateRequest{
+		EvaluationID: "eval-profile-event", Direction: "prompt", Mode: "action",
+		LocalResult: &policy.GuardrailScanResult{Action: "block", Severity: "HIGH"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body)).WithContext(ctx)
+	response := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	spans := proxyGeneratedSpansForFamily(capture.snapshot(), observability.TelemetryFamilyGuardrailApply)
+	if len(spans) != 1 {
+		t.Fatalf("guardrail spans=%d", len(spans))
+	}
+	traceBody, ok := spans[0].Record().Body()
+	if !ok {
+		t.Fatal("span body missing")
+	}
+	object, err := traceBody.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, ok := object["events"].([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("decision events = %v", object["events"])
+	}
+	event, ok := events[0].(map[string]any)
+	if !ok {
+		t.Fatalf("decision event = %T", events[0])
+	}
+	attrs, ok := event["attributes"].(map[string]any)
+	if !ok || attrs["defenseclaw.guardrail.profile.name"] != "contractors" {
+		t.Fatalf("decision event attributes = %v", event["attributes"])
 	}
 }
 

@@ -162,7 +162,12 @@ func TestCodexHomeOverrideDoesNotTrustDefaultHomeSystemContainer(t *testing.T) {
 }
 
 func TestSignalFromDirectoryChildrenExpandsHermesNestedSkillsWithProvenance(t *testing.T) {
-	home := t.TempDir()
+	// The Hermes root must be unlinked: a macOS temp dir sits under the
+	// /var -> /private/var link, which read as a linked root (read_error).
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
 	bundled := filepath.Join(root, "productivity", "vendor-docs")
@@ -254,7 +259,12 @@ func keys(m map[string]AIEvidence) []string {
 // GAP-2379: a stock Hermes install bundles 58 skills in category folders.
 // Every one is named and the signal is complete, not cap_exceeded.
 func TestSignalFromDirectoryChildrenNamesEveryStockHermesSkill(t *testing.T) {
-	home := t.TempDir()
+	// The Hermes root must be unlinked: a macOS temp dir sits under the
+	// /var -> /private/var link, which read as a linked root (read_error).
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
 	const stock = 58

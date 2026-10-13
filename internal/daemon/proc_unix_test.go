@@ -230,7 +230,9 @@ func TestDaemonChildStartsFromTheRunningFile(t *testing.T) {
 
 // Where the child cannot start from /proc/self/exe (macOS), the launch is
 // bound to the checked file: replacing it before the child exists fails the
-// start, and a path other accounts can write is refused (#643).
+// start, and a path other accounts can write is refused (#643). Other entries
+// changing in its directories do not fail it (they did under a parallel test
+// run on macOS).
 func TestDaemonLaunchPinRefusesAReplacedExecutable(t *testing.T) {
 	trusted := launchPathTrusted
 	launchPathTrusted = func([]launchPathEntry) error { return nil }
@@ -246,6 +248,13 @@ func TestDaemonLaunchPinRefusesAReplacedExecutable(t *testing.T) {
 	defer pin.close()
 	if err := pin.check(); err != nil {
 		t.Fatalf("check on an unchanged path: %v", err)
+	}
+	// A file written next to it changes only the directory's times.
+	if err := os.WriteFile(executable+".log", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pin.check(); err != nil {
+		t.Fatalf("check after a sibling file was written: %v", err)
 	}
 	if err := os.WriteFile(executable+".new", []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)

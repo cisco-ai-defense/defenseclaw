@@ -384,7 +384,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				masterKey:    "mk",
 				setupOpts:    setupOpts,
 				health:       NewSidecarHealth(),
-				inspector:    NewGuardrailInspector("local", nil, nil, ""),
+				inspector:    NewGuardrailInspector("local", nil, nil),
 			}
 
 			p.applyRuntime(map[string]any{"connector": target})

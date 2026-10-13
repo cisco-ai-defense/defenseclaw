@@ -52,11 +52,26 @@ var localModelRuntimes = map[string]bool{
 	"vllm": true, "localai": true, "local-ai": true,
 	"gpt4all": true, "koboldcpp": true, "text-generation-server": true,
 	"mlx_lm.server": true, "lemonade": true, "lemond": true,
-	"lemonadeserver.exe": true, "jan": true, "cortex": true,
+	"lemonadeserver": true, "jan": true, "cortex": true,
+}
+
+// normalizeRuntimeName prepares a process name for the runtime allow-lists.
+// The probe's original name remains available for findings and attribution.
+func normalizeRuntimeName(name string) string {
+	if last := strings.LastIndexAny(name, `/\`); last >= 0 {
+		name = name[last+1:]
+	}
+	name = strings.ToLower(name)
+	for _, suffix := range []string{".exe", ".com", ".cmd", ".bat"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return name
 }
 
 // isKnownModelRuntime reports whether a process name is itself a model server.
-func isKnownModelRuntime(name string) bool { return localModelRuntimes[strings.ToLower(name)] }
+func isKnownModelRuntime(name string) bool { return localModelRuntimes[normalizeRuntimeName(name)] }
 
 // inferenceCPUFraction is the share of one core a process must sustain across
 // a poll interval to count as an inference heartbeat.
@@ -74,7 +89,7 @@ const modelResidentBytes int64 = 1 << 30
 
 // planeA classifies one process's compute behaviour.
 func planeA(process procprobe.Process, cpuDelta time.Duration, window time.Duration) []scoring.Signal {
-	name := strings.ToLower(process.Name)
+	name := normalizeRuntimeName(process.Name)
 	signals := make([]scoring.Signal, 0, 3)
 
 	if localModelRuntimes[name] {

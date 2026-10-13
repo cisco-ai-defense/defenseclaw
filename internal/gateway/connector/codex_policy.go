@@ -31,8 +31,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -314,7 +312,7 @@ func inspectCodexSystemRequirementsForMode(managedEnterprise bool) (codexEffecti
 	var requirements struct {
 		AllowManagedHooksOnly *bool `toml:"allow_managed_hooks_only"`
 	}
-	if err := toml.Unmarshal(raw, &requirements); err != nil {
+	if err := parseCodexTOML(raw, &requirements); err != nil {
 		return codexEffectivePolicy{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return codexEffectivePolicy{

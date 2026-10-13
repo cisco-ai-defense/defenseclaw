@@ -20,6 +20,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -232,6 +233,24 @@ func TestPerSandboxDeciders(t *testing.T) {
 	}
 }
 
+// GAP-0173: `sandbox policy block HOST` then at once `sandbox unblock HOST`
+// is decided against config.yaml as written, not the snapshot from before
+// the write that the reload watcher has not replaced yet: the unblock is
+// refused with the block list's remedy instead of reported done.
+func TestUnblockLoadsTheBlockListJustWritten(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "balbox", Profile: "balanced"})
+	e.m.opts.SyncConfig = func(context.Context) error {
+		e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"example.org"} })
+		return nil
+	}
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "example.org", Sandbox: "balbox"})
+	var se *sandboxapi.Error
+	if !errors.As(err, &se) || se.Code != sandboxapi.CodePolicyViolation || !strings.Contains(se.Detail, "policy block --remove example.org") {
+		t.Fatalf("unblock right after the block = %+v, %v; want the block list's refusal", resp, err)
+	}
+}
+
 // A sandbox whose policy stops resolving (its pack deleted) keeps no decider
 // of its last good policy: the proxy refuses it with the reason, triage leaves
 // it alone and its direct rules answer to the organization's policy alone.
@@ -289,6 +308,54 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 	}
 	e.m.triageSandbox(t.Context(), e.boxOf("teambox"))
 	e.waitChunk("teambox", waiting, "approved")
+}
+
+// TestUnresolvablePolicyRecordSaysWhatToDo (GAP-0160): the degraded record
+// of a sandbox whose pack is gone says what to do, and is an alert (HIGH)
+// only while the sandbox runs: a stopped one sends nothing under the
+// policy, and its start refuses with the reason.
+func TestUnresolvablePolicyRecordSaysWhatToDo(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.create(sandboxapi.CreateRequest{Name: "runbox", Pack: "team"})
+	e.create(sandboxapi.CreateRequest{Name: "idlebox", Pack: "team", Project: e.otherProject("idle")})
+	run, idle := e.boxOf("runbox"), e.boxOf("idlebox")
+	e.m.mu.Lock()
+	run.phase, idle.phase, idle.rec.Phase = audit.SandboxPhaseReady, audit.SandboxPhaseStopped, string(audit.SandboxPhaseStopped)
+	e.m.mu.Unlock()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.m.refreshEgress()
+	record := func(name string) audit.SandboxHealthEvent {
+		got := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool {
+			return h.Sandbox.Name == name && h.ErrorCode == "openshell_pack_invalid"
+		})
+		if len(got) != 1 || !strings.Contains(got[0].ErrorSummary, "or delete the sandbox: defenseclaw sandbox delete "+name) {
+			t.Fatalf("%s health = %+v", name, got)
+		}
+		return got[0]
+	}
+	if r, i := record("runbox"), record("idlebox"); r.Severity != "" || i.Severity != "MEDIUM" {
+		t.Fatalf("severities: running %q (want the default HIGH), stopped %q (want MEDIUM)", r.Severity, i.Severity)
+	}
+}
+
+// TestRestartSuspendsAnUnresolvableSandboxsCredential (GAP-0180): a daemon
+// that restarts while a running sandbox's pack is gone still takes its proxy
+// credential back from the sandbox, and suspends it: the proxy refuses the
+// sandbox with the reason instead of as an unknown credential, whose
+// refusals raised a second alert about a stale or revoked credential.
+func TestRestartSuspendsAnUnresolvableSandboxsCredential(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.live(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
+	e.stop()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.restartDaemon()
+	proxy := startLiveProxy(t, e)
+	if status, body := proxy.connect(t, "teambox", "example.org:443"); status != http.StatusForbidden ||
+		body.Category != egress.CategoryEgressOff || !strings.Contains(body.Reason, "cannot be resolved") {
+		t.Fatalf("CONNECT after the restart = %d %+v, want the sandbox refused with the reason", status, body)
+	}
 }
 
 // Every change to a sandbox's proxy credential reaches its open tunnels:
@@ -486,10 +553,19 @@ func TestUnblockRefusals(t *testing.T) {
 		got.Violation.Constraint == "openshell.admin.allow_unblock" || !strings.Contains(got.Violation.Detail, "defenseclaw sandbox approvals") {
 		t.Fatalf("strict sandbox = %+v", got)
 	}
+	// GAP-0508: the refusal has the managed shape of every other one: the
+	// rule in words, "You can't approve this", the contact and the Quote
+	// line, and no openshell.admin key the profile may have set.
+	want := "Blocked by your organization's DefenseClaw policy: webhook.site can't be unblocked under your profile (rule allow_unblock). " +
+		"You can't approve this.\nRequest access: your IT help desk. Quote: rule allow_unblock, host webhook.site, sandbox openbox."
 	for _, req := range []sandboxapi.UnblockRequest{{Host: "webhook.site", Sandbox: "openbox"}, {Host: "webhook.site", Always: true}} {
-		if got := unblock(req); got.Code != sandboxapi.CodeAdminViolation || !strings.Contains(got.Message, sandboxapi.AdminMessage) ||
+		got := unblock(req)
+		if got.Code != sandboxapi.CodeAdminViolation || !sandboxapi.IsPolicyRefusal(got.Message) ||
 			got.Violation == nil || got.Violation.Constraint != "openshell.admin.allow_unblock" {
 			t.Fatalf("blocklisted host with unblocks off = %+v", got)
+		}
+		if req.Sandbox != "" && got.Message != want {
+			t.Fatalf("unblock refusal under allow_unblock: false =\n%s\nwant\n%s", got.Message, want)
 		}
 	}
 	if len(e.persist.allowed()) != 0 {
@@ -799,6 +875,43 @@ func TestOCSFMapping(t *testing.T) {
 	}
 }
 
+// GAP-0377: one conversation that held a credential placeholder made a HIGH
+// alert and a feed line, in OpenShell's words only, for each request
+// OpenShell refused. Repeats of one finding within the fold window are one
+// record and one line, whose record says what the placeholder does and what
+// to do; the next one after the window names the repeats, and another
+// finding is its own.
+func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const uninspectable = `FINDING:CREATE [HIGH] "Credential-bearing traffic cannot be inspected" [type:openshell.credentials.traffic_uninspectable]`
+	for range 4 {
+		e.ocsf("findbox", uninspectable, e.m.now())
+		advance(5 * time.Second)
+	}
+	e.ocsf("findbox", `FINDING:BLOCKED [HIGH] "Binary drift detected" [confidence:0.9]`, e.m.now())
+	findings := func() []audit.SandboxFindingEvent {
+		return where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	}
+	got := findings()
+	if len(got) != 2 || got[0].Title != "Credential-bearing traffic cannot be inspected" || got[1].Title != "Binary drift detected" {
+		t.Fatalf("findings = %+v, want one per finding", got)
+	}
+	if f := got[0]; !strings.Contains(f.Description, "sandbox credential placeholder") || !strings.Contains(f.Description, "`env` output") ||
+		f.Remediation != "If the sandbox's conversation printed its environment, start a new conversation (`defenseclaw sandbox connect findbox`, without --continue)." {
+		t.Fatalf("finding = %+v, want the placeholder named with the next step", f)
+	}
+	if lines := e.events("findbox", sandboxapi.ActivityFinding, ""); len(lines) != 2 {
+		t.Fatalf("feed = %+v, want one line per finding", lines)
+	}
+	advance(findingFoldWindow)
+	e.ocsf("findbox", uninspectable, e.m.now())
+	if got = findings(); len(got) != 3 || !strings.Contains(got[2].Description, "(OpenShell raised it 3 more times after the alert of ") {
+		t.Fatalf("findings = %+v, want the next one to name the 3 folded repeats", got)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972"}}}
 	if c, ok := recoverCredential(sb, "dcx-abc"); !ok || c.Password != "secret" {
@@ -814,9 +927,11 @@ func TestRecoverCredential(t *testing.T) {
 
 // fastFlush shortens the refusal fold and the flush for a test.
 func fastFlush(t *testing.T) {
-	window, interval, held := blockCoalesceWindow, sinkFlushInterval, heldBackInterval
-	blockCoalesceWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval, heldBackInterval = window, interval, held })
+	window, lines, interval, held := blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval
+	blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() {
+		blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = window, lines, interval, held
+	})
 }
 
 func egressRecords(e *harnessEnv, sandbox string, match func(audit.SandboxEgressEvent) bool) int {
@@ -835,6 +950,11 @@ func blockedEvent(sandbox, host string) egress.Event {
 // large-upload finding and another sandbox's refusal still get through.
 func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	fastFlush(t)
+	// The 10000 refusals fold only while the window of the first is open: on
+	// a loaded runner the loop outlasted the 100 ms of fastFlush, the later
+	// repeats were paced away uncounted and the count never read 9998. Set
+	// before the sink starts; the cleanup of fastFlush restores it.
+	blockCoalesceWindow = 5 * time.Second
 	e := newEnv(t, nil)
 	e.run()
 	a := e.create(sandboxapi.CreateRequest{Name: "floodbox"})
@@ -846,13 +966,120 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	sink.EgressEvent(egress.Event{Kind: egress.EventLargeUpload, Time: time.Now(), SandboxName: a.Name, Host: "files.example.net", BytesUp: 30 << 20})
 	sink.EgressEvent(blockedEvent(b.Name, "other.example"))
 	// The folded refusal is recorded before it is published to the feed.
-	eventually(t, "the other sandbox's refusal, the finding and the folded repeats", func() bool {
+	// 10000 events take about 0.25 s here but timed out at 5 s on loaded CI
+	// runners: wait up to two minutes.
+	eventuallyWithin(t, 2*time.Minute, "the other sandbox's refusal, the finding and the folded repeats", func() bool {
 		return len(where(&e.tel.mu, &e.tel.findings, nil)) == 1 && egressRecords(e, b.Name, nil) == 1 &&
 			egressRecords(e, a.Name, func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "9998 more like it") }) == 1 &&
 			len(e.events(a.Name, sandboxapi.ActivityEgressBlocked, "")) >= 2
 	})
 	if n, feed := egressRecords(e, a.Name, nil), len(e.events(a.Name, sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 2 {
 		t.Fatalf("%d egress records and %d feed events for 10000 identical refusals, want 2 each", n, feed)
+	}
+}
+
+// GAP-0329: a retry loop's refusals of one destination fold under several
+// keys (its DNS refusals and its connections', or two programs'), whose
+// folded lines read the same: the feed shows one, counting them all.
+func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
+	fastFlush(t)
+	// A loaded runner can take longer than the 100 ms window of fastFlush to
+	// record the nine refusals: the folded line was then printed before
+	// first was read, and the wait below never saw it. Set before the sink
+	// starts; the cleanup of fastFlush restores it.
+	feedFoldWindow = time.Second
+	e := liveEnv(t, "pairbox", nil)
+	now := time.Now()
+	for range 3 {
+		e.ocsf("pairbox", "NET:REFUSE [MED] DENIED registry.npmjs.org [reason:policy_dns_ineligible]", now)
+		e.ocsf("pairbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+		e.ocsf("pairbox", "NET:OPEN [MED] DENIED /usr/bin/npm(43) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	}
+	first := len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, ""))
+	eventuallyWithin(t, 10*time.Second, "the folded lines", func() bool {
+		e.m.sink.flushOpenShell(t.Context(), time.Now())
+		return len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, "")) > first
+	})
+	time.Sleep(50 * time.Millisecond)
+	e.m.sink.flushOpenShell(t.Context(), time.Now())
+	feed := e.events("pairbox", sandboxapi.ActivityEgressBlocked, "")
+	var msgs []string
+	for _, l := range feed {
+		msgs = append(msgs, l.Message)
+	}
+	if n := len(feed) - first; n != 1 || feed[len(feed)-1].Repeats < 1 {
+		t.Fatalf("first %d lines, then %d folded: %q", first, n, msgs)
+	}
+}
+
+// GAP-0329 (round 3): a strict session's npm retry loop, refused at 0 s,
+// 10 s and 11 s, then twice at once a minute later, printed identical lines
+// in pairs and no count. The repeats of a minute are one line with their
+// count, and a single repeat adds no line.
+func TestARetryLoopsRefusalsAreOneLineAMinute(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "loopbox"})
+	refuse := func() {
+		e.ocsf("loopbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
+	}
+	refuse()
+	advance(10 * time.Second)
+	refuse()
+	advance(time.Second)
+	refuse()
+	advance(50 * time.Second)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	refuse()
+	refuse()
+	advance(time.Minute)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	var msgs []string
+	for _, l := range e.events("loopbox", sandboxapi.ActivityEgressBlocked, "") {
+		msgs = append(msgs, l.Message)
+	}
+	const line = "✗ registry.npmjs.org (no OpenShell rule allows it)"
+	if want := []string{line, line + " (and 1 more like it)", line}; !slices.Equal(msgs, want) {
+		t.Fatalf("feed %q, want %q", msgs, want)
+	}
+}
+
+// GAP-0199: a pip retry loop OpenShell refused seven times in seven seconds
+// made seven MEDIUM alerts and seven feed lines. Repeats of one refusal (the
+// destination and the program) fold into the first record, and one more
+// names their count; another program's refusal is its own record. The feed
+// line names no program, so its repeats fold by the line (GAP-0329).
+func TestRepeatedOpenShellRefusalsAreFolded(t *testing.T) {
+	fastFlush(t)
+	e := liveEnv(t, "retrybox", nil)
+	now := time.Now()
+	for range 7 {
+		e.ocsf("retrybox", "NET:OPEN [MED] DENIED /usr/bin/python3(42) -> pypi.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	}
+	e.ocsf("retrybox", "NET:OPEN [MED] DENIED /usr/bin/curl(43) -> pypi.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	refused := func(match func(audit.SandboxEgressEvent) bool) int {
+		return egressRecords(e, "retrybox", func(r audit.SandboxEgressEvent) bool {
+			return r.Blocked && r.Host == "pypi.org" && (match == nil || match(r))
+		})
+	}
+	if n, feed := refused(nil), len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 1 {
+		t.Fatalf("%d records and %d feed lines for 7 repeats and one other program, want 2 and 1", n, feed)
+	}
+	// The folded repeats are recorded before they are published to the feed.
+	eventually(t, "the folded repeats", func() bool {
+		e.m.sink.flushOpenShell(t.Context(), time.Now())
+		return refused(func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "(and 5 more like it)") }) == 1 &&
+			len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")) == 2
+	})
+	// The folded line says how many it stands for, in the words of the
+	// first (GAP-0309).
+	if n, feed := refused(nil), e.events("retrybox", sandboxapi.ActivityEgressBlocked, ""); n != 3 || len(feed) != 2 ||
+		feed[1].Message != "✗ pypi.org (no OpenShell rule allows it) (and 6 more like it)" || feed[1].Repeats != 6 ||
+		feed[0].Message != "✗ pypi.org (no OpenShell rule allows it)" || feed[0].Repeats != 0 {
+		t.Fatalf("%d records, feed %+v", n, feed)
+	}
+	if got := destinationKinds(t, e, "retrybox")["pypi.org"]; got.Refused != 8 {
+		t.Fatalf("destination = %+v, want each refusal counted", got)
 	}
 }
 
@@ -1038,7 +1265,7 @@ func TestCredentialEndpointsFollowThePolicy(t *testing.T) {
 			if got, err := e.client.GetSandbox(t.Context(), "credbox"); err != nil || slices.Contains(got.Spec.Providers, provider) {
 				t.Fatalf("providers after enforcement = %v, %v; want %s detached", got.Spec.Providers, err, provider)
 			}
-			if !e.tel.removed(provider, tc.reason) || len(e.events("credbox", sandboxapi.ActivityEgressBlocked, tc.reason)) == 0 {
+			if !e.tel.removed(provider, tc.reason) || len(e.events("credbox", sandboxapi.ActivityLifecycle, tc.reason)) == 0 {
 				t.Fatal("the detach is not recorded or not on the feed")
 			}
 			e.stopBox("credbox")
@@ -1066,6 +1293,103 @@ func TestModelProviderEndpointsFollowTheAdminLists(t *testing.T) {
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"api.anthropic.com"} })
 	_, err = e.m.Start(t.Context(), "llmbox", sandboxapi.StartRequest{})
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
+}
+
+// GAP-0466: a tightening that refuses a running sandbox's model endpoint
+// detached its provider with a blank feed line ("✗  (admin policy)"), later
+// refusals there still said the model channel stays open, and taking the
+// tightening back left the channel cut until the sandbox was created again.
+// The line now says the model channel closed and why; the refusals no
+// longer call the channel open; and the provider is attached again once the
+// policy allows its endpoint again.
+func TestTheModelChannelClosesAndReopensWithThePolicy(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mcbox", LLM: llm})
+	provider := providerName("mcbox", roleLLM, 0)
+	attached := func() bool {
+		got, err := e.client.GetSandbox(t.Context(), "mcbox")
+		return err == nil && slices.Contains(got.Spec.Providers, provider)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org"} })
+	if !e.m.enforceAll(t.Context()) || attached() {
+		t.Fatal("the model provider stayed attached under an allow-only list without its endpoint")
+	}
+	closed := e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonAdmin)
+	const closedWant = "✗ model channel closed: api.anthropic.com is not on your organization's list of allowed destinations; " +
+		"the agent can't reach its model until the policy allows api.anthropic.com again, then the channel opens again by itself"
+	if len(closed) != 1 || closed[0].Message != closedWant || closed[0].Host != "api.anthropic.com" {
+		t.Fatalf("feed = %+v, want %q", closed, closedWant)
+	}
+	e.ocsf("mcbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	for _, ev := range e.events("mcbox", sandboxapi.ActivityEgressBlocked, "") {
+		if ev.Reason == sandboxapi.ReasonModelHostSide {
+			t.Fatalf("a refusal on the detached model host says the channel stays open: %+v", ev)
+		}
+	}
+
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org", "api.anthropic.com"}
+	})
+	if !e.m.enforceAll(t.Context()) || !attached() {
+		t.Fatal("the model provider was not attached again once the policy allows its endpoint")
+	}
+	reopened := e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonRestored)
+	if len(reopened) != 1 || reopened[0].Message != "✓ model channel open again: the policy allows api.anthropic.com again" {
+		t.Fatalf("feed = %+v", reopened)
+	}
+	b := e.boxOf("mcbox")
+	e.m.mu.Lock()
+	got := b.rec.DetachedProviders
+	e.m.mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("detached providers after the reattach = %v", got)
+	}
+	if e.m.enforceAll(t.Context()); len(e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonRestored)) != 1 {
+		t.Fatal("an unchanged policy attached the provider again")
+	}
+}
+
+// GAP-0361: in a strict session one connection to the model host outside
+// its provider rule was refused, and the feed and the session summary read
+// "x bedrock-mantle... (no OpenShell rule allows this port)", as if strict
+// had cut the model off. The refusal says it was another connection.
+func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mhbox", LLM: llm})
+	e.ocsf("mhbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	feed := e.events("mhbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (a connection outside the model channel, which stays open; no OpenShell rule allows it)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason != sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "mhbox", func(r audit.SandboxEgressEvent) bool {
+		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
+	}); n != 1 {
+		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
+}
+
+// GAP-0354 with GAP-0361: OpenShell refuses a model request whose body
+// carries a credential placeholder on the sandbox's own model host. That is
+// the model channel refusing this conversation, not a connection outside
+// it: the line and the record name the placeholder.
+func TestAPlaceholderRefusalOnTheModelHostNamesThePlaceholder(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "phbox", LLM: llm})
+	e.ocsf("phbox", "NET:TRAFFIC [HIGH] DENIED api.anthropic.com:443 [reason:POST request body credential traffic denied for api.anthropic.com:443]", time.Now())
+	feed := e.events("phbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (OpenShell forwards no request whose body carries a sandbox credential placeholder)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason == sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "phbox", func(r audit.SandboxEgressEvent) bool {
+		return strings.HasPrefix(r.Reason, "a connection outside the model channel")
+	}); n != 0 {
+		t.Fatalf("%d records call the placeholder refusal a connection outside the model channel", n)
+	}
 }
 
 // privatePack is a custom pack whose allow list opens a private address.
@@ -1147,7 +1471,9 @@ func TestPolicyMovedIntoTheMountFailsClosed(t *testing.T) {
 
 // A connection OpenShell closes because the policy changed under it (every
 // reload does that) showed as a block, twice per reload; it stays in the
-// audit record only. A real denial still counts.
+// audit record only, as the end of an allowed connection, not a block: it
+// raised MEDIUM alerts and counted on the dashboards' blocked egress
+// (GAP-0138). A real denial still counts.
 func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e := liveEnv(t, "portsbox", nil)
 	cut := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:L7 tunnel closed before inspection " +
@@ -1155,7 +1481,8 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e.ocsf("portsbox", cut, time.Now())
 	e.ocsf("portsbox", cut, time.Now())
 	audited := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool {
-		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && ev.Blocked
+		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && !ev.Blocked && ev.End == audit.SandboxEgressFailed && ev.Terminated &&
+			ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED"
 	})
 	if got := e.events("portsbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 || e.get("portsbox").Egress.Blocked != 0 || len(audited) != 2 {
 		t.Fatalf("feed = %+v, blocked %d, audited %d; want the reload's cuts audited only", got, e.get("portsbox").Egress.Blocked, len(audited))
@@ -1163,6 +1490,41 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e.ocsf("portsbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> webhook.example.net:443 [reason:transparent_tcp_policy_denied]", time.Now())
 	if got := e.events("portsbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 || e.get("portsbox").Egress.Blocked != 1 {
 		t.Fatalf("feed = %+v", got)
+	}
+}
+
+// A settings reload, or a global provider profile import (another
+// sandbox's), drops the transparent mappings of the names a running sandbox
+// looked up: its harness's next model connection was denied
+// (transparent_tcp_mapping_denied) and read as DefenseClaw blocking the
+// model host, a site blocked in the session's summary, while the call was
+// retried and worked (GAP-0379). It is audited as the end of a connection
+// the client makes again; past the reload's window the denial is a block.
+func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
+	r := newReachEnv(t)
+	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:transparent_tcp_mapping_denied]"
+	blocks := func() (int, int) {
+		return len(r.events(r.name, sandboxapi.ActivityEgressBlocked, "")), r.get(r.name).Egress.Blocked
+	}
+	r.line("CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:7 new_revision:7 policy_changed:false provider_env_changed:true]")
+	r.advance(10 * time.Second)
+	r.line(denied)
+	cut := where(&r.tel.mu, &r.tel.egress, func(ev audit.SandboxEgressEvent) bool {
+		return !ev.Blocked && ev.Terminated && ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED" && strings.Contains(ev.Reason, "mapped the sandbox's names again")
+	})
+	if lines, n := blocks(); lines != 0 || n != 0 || len(cut) != 1 {
+		t.Fatalf("after a reload: feed %d, blocked %d, audited cuts %d; want the denial audited only", lines, n, len(cut))
+	}
+	r.advance(reloadMappingWindow)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("past the reload's window: feed %d, blocked %d; want a block", lines, n)
+	}
+	r.m.beforeGlobalImport(t.Context(), "defenseclaw-test-profile")
+	r.advance(time.Second)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("after a global profile import: feed %d, blocked %d; want no new block", lines, n)
 	}
 }
 

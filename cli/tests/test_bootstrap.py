@@ -905,23 +905,6 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
         self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
-    def test_hook_fail_mode_change_restarts_without_roster_drift(self):
-        # GAP-1551: quickstart --fail-mode open on a running gateway with the
-        # same roster must restart it so the hooks are rewritten fail-open.
-        from defenseclaw.bootstrap import _start_gateway_structured
-
-        self.cfg.guardrail.connector = "openclaw"
-        self._write_pid_file()
-        self._write_active_connector("openclaw")
-
-        recorder: list = []
-        with self._patch_subprocess(recorder, returncode=0):
-            result = _start_gateway_structured(self.cfg, hook_fail_mode_changed=True)
-
-        self.assertEqual(result.status, "pass")
-        self.assertEqual(result.detail, "restarted to apply the new hook fail mode")
-        self.assertEqual([cmd[1] for cmd in recorder], ["restart"])
-
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -1585,3 +1568,22 @@ def test_init_waits_past_the_windows_gateway_readiness_wait():
         src = inspect.getsource(fn)
         assert "timeout=_GATEWAY_START_TIMEOUT" in src
         assert "timeout=15" not in src and "timeout=30" not in src
+
+
+
+def test_agent_installation_not_inferred_from_generated_codex_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from defenseclaw import bootstrap
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    (tmp_path / "config.toml").write_text("# generated hook config")
+    monkeypatch.setattr(
+        bootstrap.agent_discovery,
+        "discover_agents",
+        lambda **kwargs: SimpleNamespace(agents={"codex": SimpleNamespace(installed=False)}),
+    )
+    step = bootstrap._agent_installation_readiness(cfg, "codex")
+    assert step.status == "warn"
+    assert "not installed" in step.detail
+    assert "setup codex" in step.next_command

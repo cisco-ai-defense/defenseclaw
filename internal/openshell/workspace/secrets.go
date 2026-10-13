@@ -99,6 +99,9 @@ type secretScanOptions struct {
 	maxEntries      int
 	maxScanFiles    int
 	maxTrackedReads int
+	// unmaskAsked are the run's own --unmask values (a copy names each one
+	// that matches no file it takes).
+	unmaskAsked []string
 }
 
 // trackedEntry is a path in the project's index.

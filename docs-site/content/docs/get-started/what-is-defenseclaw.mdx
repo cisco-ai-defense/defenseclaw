@@ -23,7 +23,7 @@ with `defenseclaw setup guardrail --human-approval`.
 | Mode | What it does |
 | --- | --- |
 | **Observe** | Logs everything and blocks nothing. Use it for the first week. |
-| **Action** | Blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM; `defenseclaw guardrail block-at` changes the level. |
+| **Action** | Blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM; `defenseclaw guardrail block-at` changes the level, for every path at once ([Thresholds](/docs/policies/thresholds)). |
 | **HITL** | Action mode plus human approval: a risky call pauses and the agent asks you, on agents with a native approval prompt. On other agents the call takes the connector's fallback right away, and the audit log records that approval was asked for. |
 
 ## Why a separate sidecar?
@@ -32,7 +32,7 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 - The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, the hooks in Codex's `config.toml`, Cursor's `hooks.json`, OpenCode's plugin).
 - One audit log covers every agent the operator runs.
-- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/guardrail/multi-connector).
+- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`, and it is the only place a decision lives: the hook scripts and provider files are derived from it, and the running gateway applies a change to it without a restart. See [Configuration: one source of truth](/docs/reference/source-of-truth). The admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack, thresholds) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/guardrail/multi-connector).
 
 ## Where DefenseClaw sits
 

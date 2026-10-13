@@ -213,7 +213,11 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		)
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
+		input := observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(operation.signalCtx), DefenseClawPolicyGeneration: policyGenerationV8(operation.signalCtx),
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
 			LogLevel:                            observability.Present(observability.LogLevelInfo),
 			Outcome:                             apiPolicyEvaluationOutcome(verdict),
@@ -222,6 +226,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			GenAIAgentName:                      inspectTraceV8AgentName(operation.meta.AgentName),
 			DefenseClawAgentType:                hookV8OptionalText(operation.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:          optionalJudgeMetricText(operation.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(operation.signalCtx, operation.identity)),
 			DefenseClawAgentRootID:              optionalJudgeMetricText(operation.meta.RootAgentID),
 			DefenseClawAgentParentID:            optionalJudgeMetricText(operation.meta.ParentAgentID),
 			DefenseClawAgentLineageProvenance:   hookV8OptionalLineageProvenance(operation.meta.LineageProvenance),
@@ -252,7 +257,15 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			DefenseClawSecuritySeverity:         severity,
 			DefenseClawGuardrailReason:          hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable:  severity.IsPresent(),
-		})
+		}
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }
@@ -285,7 +298,11 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		)
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
-		return builder.BuildLogGuardrailEvaluationFailed(observability.LogGuardrailEvaluationFailedInput{
+		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
+		input := observability.LogGuardrailEvaluationFailedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(operation.signalCtx), DefenseClawPolicyGeneration: policyGenerationV8(operation.signalCtx),
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityHigh),
 			LogLevel: observability.Present(observability.LogLevelError), Outcome: observability.OutcomeFailed,
 			GenAIConversationID:                optionalJudgeMetricText(operation.meta.SessionID),
@@ -293,6 +310,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			GenAIAgentName:                     inspectTraceV8AgentName(operation.meta.AgentName),
 			DefenseClawAgentType:               hookV8OptionalText(operation.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:         optionalJudgeMetricText(operation.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:         agentIdentityV8(agentIdentityIDForTraffic(operation.signalCtx, operation.identity)),
 			DefenseClawAgentRootID:             optionalJudgeMetricText(operation.meta.RootAgentID),
 			DefenseClawAgentParentID:           optionalJudgeMetricText(operation.meta.ParentAgentID),
 			DefenseClawAgentLineageProvenance:  hookV8OptionalLineageProvenance(operation.meta.LineageProvenance),
@@ -313,7 +331,15 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			DefenseClawSecuritySeverity:        severity,
 			DefenseClawGuardrailReason:         hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable: severity.IsPresent(),
-		})
+		}
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationFailed(input)
 	})
 	return err
 }
@@ -408,7 +434,11 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		decision = hookV8OptionalText(apiPolicyEvaluationDecision(verdict), 4096)
 		effectiveAction = hookV8OptionalText(verdict, 4096)
 	}
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(completedAt), Source: observability.SourceGateway,
 			Connector: operation.connector, Action: string(audit.ActionGuardrailOPAVerdict), Phase: operation.domain,
@@ -426,6 +456,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		GenAIAgentName:                    inspectTraceV8AgentName(operation.meta.AgentName),
 		DefenseClawAgentType:              hookV8OptionalText(operation.identity.AgentType, 4096),
 		DefenseClawAgentInstanceID:        optionalJudgeMetricText(operation.identity.AgentInstanceID),
+		DefenseClawAgentIdentityID:        agentIdentityV8(agentIdentityIDForTraffic(operation.signalCtx, operation.identity)),
 		DefenseClawAgentRootID:            optionalJudgeMetricText(operation.meta.RootAgentID),
 		DefenseClawAgentParentID:          optionalJudgeMetricText(operation.meta.ParentAgentID),
 		DefenseClawAgentLineageProvenance: hookV8OptionalLineageProvenance(operation.meta.LineageProvenance),
@@ -460,6 +491,13 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		ConditionOperationTerminal:          outcome != observability.OutcomeAttempted,
 		ConditionTechnicalFailure:           technicalErr != nil,
 	}
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	}
+	caller.Identity.applyTo(&input)
 	return input
 }
 

@@ -85,3 +85,28 @@ func TestEnterprisePolicyUserScanRunsAsAnAdministratorWithoutLocalSystem(t *test
 		t.Fatalf("identity failure: err=%v ran=%d, want the error and no scan", err, ran)
 	}
 }
+
+// GAP-0242: an Entra ID account resolves through the LSA and ProfileList, as
+// profile explain does; os/user failed for every one ("No mapping between
+// account names and security IDs was done").
+func TestEnterprisePolicyTargetResolvesAnEntraIDAccount(t *testing.T) {
+	const sid = "S-1-12-1-1111111111-2222222222-3333333333-4444444444"
+	previousAccount, previousHome := enterprisePolicyAccount, enterprisePolicyProfileHome
+	t.Cleanup(func() { enterprisePolicyAccount, enterprisePolicyProfileHome = previousAccount, previousHome })
+	enterprisePolicyAccount = func(name string) (string, string, error) {
+		if name != `AzureAD\EntraAlice` {
+			return "", "", errors.New("No mapping between account names and security IDs was done")
+		}
+		return sid, "EntraAlice", nil
+	}
+	homes := map[string]string{sid: `C:\Users\EntraAlice`}
+	enterprisePolicyProfileHome = func(id string) string { return homes[id] }
+	target, err := enterprisePolicyTarget(`AzureAD\EntraAlice`)
+	if err != nil || target.SID != sid || target.UserHome != `C:\Users\EntraAlice` || target.UID != -1 {
+		t.Fatalf("target = %+v, %v", target, err)
+	}
+	delete(homes, sid)
+	if _, err := enterprisePolicyTarget(`AzureAD\EntraAlice`); err == nil || !strings.Contains(err.Error(), "no profile on this computer") {
+		t.Fatalf("an account without a profile = %v", err)
+	}
+}

@@ -511,7 +511,7 @@
           "refId": "INGEST",
           "instant": true,
           "format": "table",
-          "expr": "sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) * 60"
+          "expr": "sum by (connector) (label_replace(rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m]), \"connector\", \"$1\", \"source\", \"(.*)\")) * 60"
         },
         {
           "refId": "HOOKS",
@@ -527,13 +527,6 @@
         }
       ],
       "transformations": [
-        {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
         {
           "id": "merge"
         },
@@ -552,29 +545,28 @@
               "exported_job": true,
               "defenseclaw_claw_home_dir": true,
               "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
+              "defenseclaw_device_public_key_fingerprint": true,
               "defenseclaw_gateway_host": true,
               "defenseclaw_gateway_port": true,
               "defenseclaw_instance_id": true,
               "defenseclaw_preset": true,
               "defenseclaw_preset_name": true,
-              "deployment_environment": true,
+              "deployment_environment_name": true,
               "host_arch": true,
               "host_name": true,
               "os_type": true
             },
             "renameByName": {
-              "source": "connector",
               "connector": "connector",
-              "INGEST": "records/min",
-              "HOOKS": "hooks/min",
-              "TOKENS": "tokens/min"
+              "Value #INGEST": "records/min",
+              "Value #HOOKS": "hooks/min",
+              "Value #TOKENS": "tokens/min"
             },
             "indexByName": {
               "connector": 0,
-              "records/min": 1,
-              "hooks/min": 2,
-              "tokens/min": 3
+              "Value #INGEST": 1,
+              "Value #HOOKS": 2,
+              "Value #TOKENS": 3
             }
           }
         }

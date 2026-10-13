@@ -37,7 +37,7 @@ func TestApplyOverlayMergesRequestOverrides(t *testing.T) {
 		},
 	}
 
-	applyOverlay(base, overlay)
+	ApplyOverlay(base, overlay)
 
 	if len(base.Providers) != 1 {
 		t.Fatalf("expected one merged provider, got %d", len(base.Providers))

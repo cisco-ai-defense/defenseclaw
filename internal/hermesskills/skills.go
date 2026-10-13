@@ -75,6 +75,36 @@ func IsRoot(path string) bool {
 	return root != "" && samePath(path, root)
 }
 
+// ProfileRootTails are where a Hermes skills root sits in a user profile:
+// %LOCALAPPDATA%\hermes\skills on Windows, ~/.hermes/skills elsewhere (the
+// catalog's two Hermes skill paths).
+var ProfileRootTails = []string{
+	filepath.Join("AppData", "Local", "hermes", "skills"),
+	filepath.Join(".hermes", "skills"),
+}
+
+// IsProfileRoot reports whether path is a Hermes skills root by its place in
+// a user profile (it ends in one of ProfileRootTails). A service-context
+// watcher or scan (the managed Windows gateway) sees every user's root,
+// while IsRoot resolves only this process's own Hermes home; list such a
+// root with DiscoverProfileRoot.
+func IsProfileRoot(path string) bool {
+	clean := filepath.Clean(path)
+	for _, tail := range ProfileRootTails {
+		if len(clean) <= len(tail) {
+			continue
+		}
+		head, end := clean[:len(clean)-len(tail)], clean[len(clean)-len(tail):]
+		if !strings.HasSuffix(head, string(filepath.Separator)) {
+			continue
+		}
+		if end == tail || (runtime.GOOS == "windows" && strings.EqualFold(end, tail)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Discover recursively returns actual Hermes skills and their provenance.
 // Copies are bundled only when the manifest, user copy, and matching source in
 // the exact Hermes checkout all agree; every other copy remains scanable.

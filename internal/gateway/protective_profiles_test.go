@@ -29,6 +29,8 @@ func TestEmailPIIContextSeparatesRecordsFromOperationalAddresses(t *testing.T) {
 		{"customer record", "Customer Email: lindsey51@example.net", "lindsey51@example.net", true},
 		{"contact record", "For questions, contact odiaz@example.net.", "odiaz@example.net", true},
 		{"structured record", `{"email":"ajohnson@example.org"}`, "ajohnson@example.org", true},
+		{"label record lines", "contact: alice.test@example.com\ncontact: bob.test@example.com", "alice.test@example.com", true},
+		{"label record one line", "email: carol.test@example.com phone: 555-0100", "carol.test@example.com", true},
 		{"ssh login", `Log into "ubuntu@ec2-10-0-0-1.compute.amazonaws.com" using a key`, "ubuntu@ec2-10-0-0-1.compute.amazonaws.com", false},
 		{"scp locator", `Copy files to "user@remote.machine:/tmp/newdir"`, "user@remote.machine", false},
 		{"git ssh host alias", `git clone git@github.com-cisco-aispg:cisco-aispg/augur-dsl.git`, "git@github.com", false},
@@ -36,6 +38,8 @@ func TestEmailPIIContextSeparatesRecordsFromOperationalAddresses(t *testing.T) {
 		{"email command", `Send email with attachment to "backup@email.com"`, "backup@email.com", false},
 		{"literal search", `Find files containing string literal 'spammer@spammy.com'`, "spammer@spammy.com", false},
 		{"schema example", `A common format is {"email":"user@example.com"}`, "user@example.com", false},
+		{"git identity hint", "Run\n\n  git config --global user.email \"you@example.com\"\n  git config --global user.name \"Your Name\"", "you@example.com", false},
+		{"git identity hint in tool JSON", `{"stderr":"Run\n\n  git config --global user.email \"you@example.com\"\n"}`, "you@example.com", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -103,7 +103,7 @@ Add `builtinHookContracts["<id>"]` (`hook_contract.go`) with at least one `HookC
 - `Events`: the vendor's exact spelling.
 - `AIDSurfaces`: declarative only. `HookProfileAIDSurfaceEnabled` has no runtime caller.
 - `Capabilities`: `HookCapability{CanBlock, CanAskNative, AskEvents, BlockEvents, SupportsFailClosed, Scope}`. `ApplyHookContract` **replaces** the profile's capability with this value, keeping only `ConfigPath` and `Scope`, so BlockEvents and AskEvents belong here.
-- `SupportsTraceparent`, `NativeOTLP`, `ToolCallLifecycle`, optional `ContentEnvelopeKey`, and `Notes` (cite the vendor docs and versions). No contract sets `ContentEnvelopeKey` today, Hermes included (`TestContentEnvelopeKeyDeclarations` pins every contract to empty), so setting one means changing that test.
+- `SupportsTraceparent`, `NativeOTLP`, `ToolCallLifecycle`, optional `ContentEnvelope`, and `Notes` (cite the vendor docs and versions). Only Hermes sets `ContentEnvelope` (`extra`, one field per event; `TestContentEnvelopeDeclarations` pins it), so setting one for another connector means changing that test.
 
 **Resolution** happens in `resolveHookContractForOS`:
 
@@ -187,11 +187,11 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 4. Source `_hardening.sh`, then call `defenseclaw_harden_resources` and the env hardening.
 5. `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"`.
 6. Call `defenseclaw_handle_missing_token`, then `defenseclaw_read_stdin_capped` (1 MiB).
-7. Read the scoped token.
+7. Read the scoped token into `API_TOKEN`, then `unset DEFENSECLAW_GATEWAY_TOKEN` so no child process inherits it.
 8. Define `fail_unreachable` and `fail_response`.
 9. Insert `{{.HookSocketTransportSH}}`.
 10. Send the auth, trace and identity headers. `X-DefenseClaw-User-Id` and `-User-Name` are required; `hook_user_identity_test.go` globs `hooks/*-hook.sh`.
-11. `curl --connect-timeout 2 --max-time 10 [--unix-socket]`.
+11. `defenseclaw_gateway_post "http://${API_ADDR}/api/v1/<id>/hook" 10 "$PAYLOAD" <headers> [--unix-socket "${DEFENSECLAW_HOOK_SOCKET}"]` (`_hardening.sh`). It runs `curl -q` and hands curl the `Authorization` header and the body on descriptors. Never put the token or the payload on a command line (`curl -H`/`-d`, `jq --arg`): every local account can read it. Add the connector to `hookArgvShellConnectors` and `hookArgvConnectorCase` in `hook_argv_privacy_test.go`; `TestHookArgvCasesCoverEveryShellHook` fails until you do.
 12. Map the result to connector-native stdout and exit code.
 
 **Plugins.**

@@ -73,6 +73,7 @@ func (m *Manager) startWatch(b *box) {
 
 func (m *Manager) stopWatch(b *box) {
 	m.stopGuard(b)
+	m.stopObserve(b)
 	m.mu.Lock()
 	cancel, done := b.watchCancel, b.watchDone
 	b.watchCancel, b.watchDone = nil, nil
@@ -183,16 +184,41 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 		m.triageNow(b)
 	case stream.KindGap:
 		m.mu.Lock()
-		id := b.identity()
+		id, deleted := b.identity(), b.deleted
 		m.mu.Unlock()
-		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
+		if deleted || ev.Gap == nil {
+			// A deleted sandbox's stream has nothing left to report.
+			return
+		}
+		m.tel.RecordSandboxHealth(ctx, gapHealth(id, ev.Gap.Reason, m.now()))
 	case stream.KindWarning:
 		m.streamWarning(ctx, b, ev.Warning)
 	case stream.KindConnected:
 		// A reconnect may have missed a draft notification.
 		m.triageNow(b)
 	}
+}
+
+// gapHealth is the degraded health record of events lost on a sandbox's
+// stream, in words (GAP-0137). A cursor out of range is what a gateway
+// restart (an upgrade, setup installing OpenShell) or a trimmed event log
+// leaves: MEDIUM, no alert. A cursor the gateway could not have issued (a
+// different gateway, a damaged state file) stays HIGH.
+func gapHealth(id audit.SandboxIdentity, reason string, at time.Time) audit.SandboxHealthEvent {
+	ev := audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), Timestamp: at}
+	switch reason {
+	case stream.GapCursorOutOfRange:
+		ev.Severity = "MEDIUM"
+		ev.ErrorSummary = "the OpenShell gateway restarted or trimmed its event log: this sandbox's events up to the reconnect at " +
+			at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	case stream.GapCursorRejected:
+		ev.ErrorSummary = "the OpenShell gateway does not know where this sandbox's events left off (a different gateway, " +
+			"or a damaged sandbox record): its events up to the reconnect at " + at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	default:
+		ev.ErrorSummary = "sandbox events were lost: " + reason
+	}
+	return ev
 }
 
 // streamWarning reports a warning of the sandbox's stream: OpenShell's
@@ -212,7 +238,7 @@ func (m *Manager) streamWarning(ctx context.Context, b *box, w *stream.Warning) 
 		return
 	}
 	m.logf("%s: sandbox %s: OpenShell warned on its event stream: %s", gatewaylog.ErrCodeOpenShellWatchFailed, id.Name, msg)
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode:    errorToken(gatewaylog.ErrCodeOpenShellWatchFailed),
 		ErrorSummary: truncate("OpenShell warned on the sandbox's event stream (its events may be incomplete): "+msg, 512), Timestamp: m.now()})
 }
@@ -279,6 +305,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		m.noteSyntheticAddress(b, r.Message)
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
 		host := m.namedHost(b, triage.NormalizeHost(r.Host), r.Port)
+		if r.Denied() && sandboxapi.PlaceholderRefusal(r.Reason) {
+			m.notePlaceholderRefusal(b)
+		}
 		if host == openshellHostAlias {
 			m.hostAliasEvent(ctx, b, r, at, harnessName)
 			return
@@ -298,8 +327,13 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// (ownHostName), which reaches nothing, or one OpenShell closed
 		// because the policy changed under it (policyReloadCut), which the
 		// policy still allows: the client connects again. They are
-		// audited, but neither counted nor shown on the feed.
-		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r)))
+		// audited, but neither counted nor shown on the feed. Nor is a
+		// connection OpenShell denied its transparent mapping just after it
+		// reloaded the sandbox's settings (remapped): the reload dropped the
+		// mappings of the names the sandbox looked up, and the client looks
+		// up and connects again (GAP-0379).
+		remapped := r.Denied() && mappingDenial(r) && m.reloadedRecently(b)
+		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r) || remapped))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
 			m.markWork(b, at, ofHarness, m.harnessModelCall(b, r, host, ofHarness))
@@ -311,15 +345,33 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
-			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
-			Timestamp: at,
+			Blocked: r.Denied(), Reason: truncate(openshellReason(r, host), 512), PolicyOutcome: truncate(r.Policy, 256),
+			Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+		}
+		if !quiet {
+			m.observeDestination(ctx, b, destinationSighting{host: host, port: r.Port, at: at, denied: r.Denied(), rule: r.Policy,
+				binary: r.Binary, pid: ocsfPID(r), turn: r.Allowed() && r.Class == ocsf.ClassHTTP && modelRequestOf(r) == modelTurn})
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
-			if !quiet {
-				m.mu.Lock()
-				b.noteBlocked(host)
-				m.mu.Unlock()
+			switch {
+			case fetch:
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+			case dnsRefusal(r):
+				// The connection that follows is the refusal that counts
+				// (and the alert); the lookup alone is audited at INFO.
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
+			case policyReloadCut(r), remapped:
+				// The end of a connection the policy still allows, not a
+				// refusal: no block, no alert, no blocked count (GAP-0138,
+				// GAP-0379).
+				ev.Blocked, ev.End, ev.Terminated = false, audit.SandboxEgressFailed, true
+				ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+				what := "OpenShell closed it when the sandbox policy changed"
+				if remapped {
+					what = "OpenShell refused it while it mapped the sandbox's names again after reloading its settings"
+				}
+				ev.Reason = truncate(what+"; the client connects again ("+firstNonEmpty(r.Reason, r.Message)+")", 512)
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
@@ -333,30 +385,246 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
-		_ = m.tel.RecordSandboxEgress(ctx, ev)
+		if r.Denied() && !quiet && r.Port == 22 && !replayed {
+			// The agent's git sees only "Permission denied": its next
+			// post-tool hook says to use HTTPS (GAP-0216).
+			m.refusals.noteDirect(id.BindingID, name, host, r.Port, NoteSSH, m.now())
+		}
+		var feed *sandboxapi.ActivityEvent
 		if r.Denied() && !quiet {
-			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
-				Replayed: replayed})
+			reason := r.Reason
+			if r.Port != 22 && !sandboxapi.PlaceholderRefusal(r.Reason) && m.modelEndpointHost(b, host) {
+				// A refusal on the sandbox's model host is a connection besides
+				// the model calls, which its provider rule carries: the feed, the
+				// session summary and the alert say so, and it does not read as
+				// the profile cutting the model off (GAP-0361). A placeholder
+				// refusal is the model channel refusing this conversation, and
+				// keeps its own words (GAP-0354).
+				reason = sandboxapi.ReasonModelHostSide
+				ev.Reason = sandboxapi.BlockedText(reason, host)
+				if token := firstNonEmpty(r.Reason, r.Message); token != "" {
+					ev.Reason = truncate(ev.Reason+" ("+token+")", 512)
+				}
+			}
+			feed = &sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
+				Source: sandboxapi.SourceOpenShell, Reason: reason, Message: "✗ " + host + " (" + openShellDenialText(reason, host, r.Port) + ")",
+				Replayed: replayed}
+		}
+		recordFolded, lineFolded := false, false
+		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil {
+			recordFolded, lineFolded = m.sink.foldOpenShell(name, ev, feed)
+		}
+		// A repeat of an alerted refusal is counted, then recorded once; a
+		// repeat of its feed line, by any program, likewise (GAP-0329).
+		if !recordFolded && !m.connectionRequest(b, r, host, at) {
+			m.tel.RecordSandboxEgress(ctx, ev)
+		}
+		if feed != nil && !lineFolded {
+			m.publishEgress(*feed)
 		}
 	case ocsf.ClassProcess:
 		if harnessActivity(harnessName, r.Binary) {
 			m.markActive(b, at)
 		}
+		m.processEvent(ctx, id, r, at)
+		m.observeOCSFProcess(ctx, b, r, at)
+	case ocsf.ClassSSH:
+		m.sshEvent(ctx, id, r, at)
+	case ocsf.ClassAPI:
+		m.inferenceEvent(ctx, b, id, r, at)
 	case ocsf.ClassFinding:
-		severity := ocsfSeverity(r.Severity)
-		ev := audit.SandboxFindingEvent{
-			Sandbox: id, Kind: audit.SandboxFindingOCSF, Severity: severity, Title: truncate(firstNonEmpty(r.Title, "OpenShell finding"), 256),
-			Description: truncate(r.Message, 1024), Evidence: truncate(r.Raw, 1024), TargetRef: firstNonEmpty(r.Host, r.Binary),
-			Timestamp: at,
-		}
-		if c, err := parseConfidence(r.Confidence); err == nil {
-			ev.Confidence = c
-		}
-		_ = m.tel.RecordSandboxFinding(ctx, ev)
-		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
-			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
+		m.ocsfFinding(ctx, b, id, name, r, at, replayed)
 	}
+}
+
+// ocsfFinding records and shows an OpenShell finding, once for its repeats
+// within findingFoldWindow (foldFinding).
+func (m *Manager) ocsfFinding(ctx context.Context, b *box, id audit.SandboxIdentity, name string, r ocsf.Record, at time.Time, replayed bool) {
+	target := firstNonEmpty(r.Host, r.Binary)
+	folded, repeats, since := m.foldFinding(b, firstNonEmpty(r.FindingType, r.Title)+"\x00"+target)
+	if folded {
+		return
+	}
+	severity := ocsfSeverity(r.Severity)
+	ev := audit.SandboxFindingEvent{
+		Sandbox: id, Kind: audit.SandboxFindingOCSF, Severity: severity, Title: truncate(firstNonEmpty(r.Title, "OpenShell finding"), 256),
+		Description: r.Message, Evidence: truncate(r.Raw, 1024), TargetRef: target,
+		Timestamp: at,
+	}
+	if uninspectableCredential(r) {
+		// OpenShell's words name neither the placeholder nor what to do.
+		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") + ". " + uninspectableCredentialText
+		ev.Remediation = "If the sandbox's conversation printed its environment, start a new conversation " +
+			"(`defenseclaw sandbox connect " + name + "`, without --continue)."
+	}
+	if repeats > 0 {
+		ev.Description = strings.TrimSpace(ev.Description + " (OpenShell raised it " + strconv.Itoa(repeats) +
+			" more times after the alert of " + since.UTC().Format("15:04:05") + " UTC.)")
+	}
+	ev.Description = truncate(ev.Description, 1024)
+	if c, err := parseConfidence(r.Confidence); err == nil {
+		ev.Confidence = c
+	}
+	m.tel.RecordSandboxFinding(ctx, ev)
+	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
+		Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
+}
+
+// uninspectableCredential reports OpenShell's finding that it refused
+// credential-bearing traffic it cannot inspect, such as a request whose body
+// carries a sandbox credential placeholder (sandboxapi.PlaceholderRefusal).
+func uninspectableCredential(r ocsf.Record) bool {
+	return r.FindingType == "openshell.credentials.traffic_uninspectable" ||
+		strings.EqualFold(strings.TrimSpace(r.Title), "Credential-bearing traffic cannot be inspected")
+}
+
+// uninspectableCredentialText says what an uninspectableCredential finding
+// means for a harness, which sends its whole conversation with each request.
+const uninspectableCredentialText = "OpenShell forwards no request that carries a sandbox credential placeholder where it cannot " +
+	"substitute it, such as the body. A harness whose conversation shows a placeholder (an `env` output prints them) sends it " +
+	"with every request, so OpenShell refuses them all, to the model and to DefenseClaw's hooks; the model key, the sandbox " +
+	"token and DefenseClaw are fine."
+
+// findingFold is the fold of one OpenShell finding's repeats since its last
+// record, in the session that started at started (foldFinding).
+type findingFold struct {
+	started, since time.Time
+	repeats        int
+}
+
+// maxFindingFolds bounds the findings a sandbox keeps fold windows for.
+const maxFindingFolds = 256
+
+// foldFinding reports whether OpenShell's finding key of b (its type or
+// title, and its target) repeats one recorded within findingFoldWindow in
+// the same session: then it only counts. Otherwise it is recorded, and
+// repeats and since say how many repeats the window before it folded, from
+// when. OpenShell raises a finding again for every request it refuses on the
+// same grounds: one conversation that held a credential placeholder made a
+// HIGH alert and a feed line for each refused request (GAP-0377).
+func (m *Manager) foldFinding(b *box, key string) (folded bool, repeats int, since time.Time) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f := b.findings[key]
+	if f != nil && f.started.Equal(b.started) {
+		if now.Sub(f.since) < findingFoldWindow {
+			f.repeats++
+			return true, 0, time.Time{}
+		}
+		repeats, since = f.repeats, f.since
+	}
+	if b.findings == nil {
+		b.findings = map[string]*findingFold{}
+	}
+	if f == nil && len(b.findings) >= maxFindingFolds {
+		for k, old := range b.findings {
+			if now.Sub(old.since) >= findingFoldWindow || !old.started.Equal(b.started) {
+				delete(b.findings, k)
+			}
+		}
+	}
+	if f != nil || len(b.findings) < maxFindingFolds {
+		b.findings[key] = &findingFold{started: b.started, since: now}
+	}
+	return false, repeats, since
+}
+
+// l7Window bounds how long after OpenShell allowed a connection the first
+// request it inspected on it may come; maxOpenConns bounds the connections
+// a sandbox has awaiting one.
+const (
+	l7Window     = 5 * time.Second
+	maxOpenConns = 256
+)
+
+// openConns are OpenShell's allowed connections to one host and port whose
+// first inspected request has not come yet.
+type openConns struct {
+	at      time.Time
+	pending int
+}
+
+// connectionRequest reports an allowed OpenShell HTTP record that is the
+// first request on a connection whose NET record was already recorded.
+// OpenShell reports an allowed connection (NET, naming the process) and
+// then each HTTP request it inspects on it, so recording both made one
+// plain request two egress records (GAP-0093). Each later request on the
+// connection is a record of its own, and so is every denied one. It notes
+// an allowed NET open and returns false for it.
+func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.Time) bool {
+	open := r.Class == ocsf.ClassNetwork && strings.EqualFold(r.Activity, "OPEN")
+	if !r.Allowed() || (!open && r.Class != ocsf.ClassHTTP) {
+		return false
+	}
+	key := host + ":" + strconv.Itoa(r.Port)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o := b.opens[key]
+	if !open {
+		if o == nil || o.pending == 0 || at.Sub(o.at) > l7Window {
+			return false
+		}
+		o.pending--
+		return true
+	}
+	if o == nil {
+		if len(b.opens) >= maxOpenConns {
+			for k, v := range b.opens {
+				if at.Sub(v.at) > l7Window {
+					delete(b.opens, k)
+				}
+			}
+			if len(b.opens) >= maxOpenConns {
+				return false
+			}
+		}
+		if b.opens == nil {
+			b.opens = map[string]*openConns{}
+		}
+		o = &openConns{}
+		b.opens[key] = o
+	} else if at.Sub(o.at) > l7Window {
+		o.pending = 0
+	}
+	o.at = at
+	o.pending++
+	return false
+}
+
+// openshellReason is the audit reason of an OpenShell record: for a denial
+// the words the activity feed shows for OpenShell's reason token and host
+// (a cloud metadata or link-local host by name, GAP-0147), with the token
+// after them, and for SSH what to do instead; otherwise OpenShell's reason
+// or message (GAP-0134).
+func openshellReason(r ocsf.Record, host string) string {
+	token := firstNonEmpty(r.Reason, r.Message)
+	if !r.Denied() || token == "" {
+		return token
+	}
+	if r.Port == 22 {
+		return sandboxapi.SSHBlockedText(host) + " (" + token + ")"
+	}
+	if text, ok := sandboxapi.LookupBlockedText(r.Reason, host); ok {
+		return text + " (" + token + ")"
+	}
+	return token
+}
+
+// modelEndpointHost reports whether host is one of the sandbox's model
+// endpoints (its --llm credential's) that its provider rule opens now: a
+// provider the policy detached (enforceProviderEndpoints) opens nothing,
+// and a refusal there is not "outside the model channel, which stays open"
+// (GAP-0466).
+func (m *Manager) modelEndpointHost(b *box, host string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ep := range b.rec.ProviderEndpoints {
+		if ep.Role == roleLLM && strings.EqualFold(ep.Host, host) && !slices.Contains(b.rec.DetachedProviders, ep.Provider) {
+			return true
+		}
+	}
+	return false
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …
@@ -517,6 +785,12 @@ func ownHostName(host, recorded string) bool {
 func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
+		if r.Denied() && sandboxapi.PlaceholderRefusal(r.Reason) {
+			// The conversation's hook post carried a credential placeholder:
+			// the sandbox's policy allows the ingress, and the token reaches
+			// it (notePlaceholderRefusal says what it is).
+			return
+		}
 		outcome := hookConnAllowed
 		switch {
 		case !r.Denied():
@@ -533,6 +807,14 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// its own binary made it (the proxy cannot tell); it is no model
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
+		if r.Allowed() && r.Binary != "" {
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			if n := len(b.proxyOpens); n > maxProxyOpens {
+				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
+			}
+			m.mu.Unlock()
+		}
 	case 0:
 	default:
 		ofHarness := harnessActivity(harnessName, r.Binary)
@@ -541,8 +823,11 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 			req = m.harnessRequest(b, r, openshellHostAlias, ofHarness)
 		}
 		m.markWork(b, at, ofHarness, req)
-		if r.Denied() {
+		switch {
+		case r.Denied():
 			m.hostPortDenied(ctx, b, r, at)
+		case r.Allowed():
+			m.hostPortAllowed(ctx, b, r, at)
 		}
 	}
 }
@@ -606,7 +891,11 @@ func policyReloadCut(r ocsf.Record) bool {
 // `sandbox exec` commands) is no sign that hooks are overdue, and neither
 // is a record from before the session (replayed after a watch resumed).
 func (m *Manager) markWork(b *box, at time.Time, ofHarness bool, req modelRequest) {
-	if ofHarness {
+	// A layer-7 record names no binary: one on the harness's own model
+	// connection (harnessRequest) is the harness at work too. A harness
+	// keeps that connection open for many turns, so its NET records alone
+	// are a handful a session, and hooks switched off went unnoticed.
+	if ofHarness || req != noModelCall {
 		m.markActive(b, at)
 	}
 	if req != modelTurn && req != modelConnection {
@@ -752,9 +1041,7 @@ func harnessActivity(harnessName, binary string) bool {
 
 func (m *Manager) markActive(b *box, at time.Time) {
 	m.mu.Lock()
-	if at.After(b.activeAt) {
-		b.activeAt = at
-	}
+	b.noteActiveLocked(at)
 	m.mu.Unlock()
 }
 
@@ -771,6 +1058,20 @@ func ocsfSeverity(s ocsf.Severity) string {
 	default:
 		return "INFO"
 	}
+}
+
+// openShellDenialText is why OpenShell refused a direct connection, worded
+// as `sandbox activity` and the TUI word the event: the stored message read
+// "direct connection denied by OpenShell" where they read "no OpenShell
+// rule allows it" (GAP-0309).
+func openShellDenialText(reason, host string, port int) string {
+	switch {
+	case port == 22:
+		return sandboxapi.SSHBlockedText(host)
+	case strings.TrimSpace(reason) == "":
+		return "direct connection denied by OpenShell"
+	}
+	return sandboxapi.BlockedText(reason, host)
 }
 
 func schemeOf(raw string) string {

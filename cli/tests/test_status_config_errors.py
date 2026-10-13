@@ -17,7 +17,7 @@ from defenseclaw import config_inspect, ux
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.context import AppContext
-from defenseclaw.migrations import MigrationError, migrate
+from defenseclaw.migrations import MigrationError, _pending_migration_steps, migrate
 
 from tests.test_fail_mode_runtime import _runtime_cfg
 
@@ -43,6 +43,20 @@ def test_empty_config_is_named_not_migrated(data_dir: Path, content: str) -> Non
     assert path.read_text(encoding="utf-8") == content
 
 
+def test_unversioned_config_without_final_newline_can_upgrade(data_dir: Path) -> None:
+    path = data_dir / "config.yaml"
+    content = "guardrail:\n  enabled: true"
+    path.write_text(content, encoding="utf-8")
+
+    result = migrate(str(data_dir), check=True, from_version="0.8.10")
+
+    assert result.from_config_version == 0
+    assert result.applied
+    assert path.read_text(encoding="utf-8") == content
+    with pytest.raises(dcconfig.ConfigVersionError, match="defenseclaw migrate"):
+        dcconfig.require_v8_config(path=str(path))
+
+
 def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
     # GAP-1786: previous/ only changes on a version upgrade, so say how old it is.
     path = data_dir / "config.yaml"
@@ -60,6 +74,27 @@ def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
     assert "lacks every change made since then" in message
 
 
+def test_refused_config_is_not_sent_back_to_init(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0288: a config.yaml that is there and refused (an assignment naming
+    # an undefined profile) is fixed in the file; `init` would not change it.
+    from defenseclaw.main import cli
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+    monkeypatch.setattr(dcconfig, "require_v8_config", lambda **_: None)
+
+    def refuse(**_kwargs):
+        raise ValueError("guardrail.profile_assignments[0]: unknown profile 'ihs-nope'")
+
+    monkeypatch.setattr(dcconfig, "load", refuse)
+    result = CliRunner().invoke(cli, ["guardrail", "status"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 1, text
+    assert "guardrail.profile_assignments[0]: unknown profile 'ihs-nope'" in text
+    assert "defenseclaw config validate" in text
+    assert "defenseclaw init" not in text
+
+
 def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
     path = data_dir / "config.yaml"
     path.write_text("gateway: {}\n", encoding="utf-8")
@@ -67,13 +102,21 @@ def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
         dcconfig.require_v8_config(path=str(path))
 
 
-def test_from_version_newer_than_this_release_warns(data_dir: Path) -> None:
-    # GAP-1610
-    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "999.0.0"])
-    assert result.exit_code == 0, result.output
-    assert "newer than this DefenseClaw" in result.stderr
-    older = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.0.1"])
-    assert "newer than this DefenseClaw" not in older.stderr
+def test_from_version_newer_than_this_release_warns_only_where_it_is_read(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-0348: on a downgrade the installer passes the newer release it
+    # replaces; a 1.x config never reads it, so the run prints no warning.
+    path = data_dir / "config.yaml"
+    path.write_text(f"config_version: {dcconfig.CURRENT_CONFIG_VERSION}\n", encoding="utf-8")
+    downgrade = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "999.0.0"])
+    assert downgrade.exit_code == 0, downgrade.output
+    assert "--from-version" not in downgrade.stderr + downgrade.output
+    # GAP-1610: a 0.x config without a cursor skips the steps up to it, so warn there.
+    _pending_migration_steps(7, "999.0.0", str(data_dir), str(path), dcconfig.CURRENT_CONFIG_VERSION)
+    assert "--from-version 999.0.0 is newer than this DefenseClaw" in capsys.readouterr().err
+    _pending_migration_steps(7, "0.8.4", str(data_dir), str(path), dcconfig.CURRENT_CONFIG_VERSION)
+    assert "--from-version" not in capsys.readouterr().err
 
 
 def test_helper_timeout_is_not_reported_as_invalid(monkeypatch: pytest.MonkeyPatch) -> None:

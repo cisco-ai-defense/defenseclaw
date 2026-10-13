@@ -32,7 +32,6 @@ dc_connector_config_file() {
     cursor)      printf '%s/.cursor/hooks.json' "${HOME}" ;;
     devin)       printf '%s/.config/devin/config.json' "${HOME}" ;;
     copilot)     printf '%s/.copilot/hooks/defenseclaw.json' "${HOME}" ;;
-    openhands)   printf '%s/.openhands/hooks.json' "${HOME}" ;;
     antigravity) printf '%s/.gemini/config/hooks.json' "${HOME}" ;;
     hermes)      printf '%s/.hermes/config.yaml' "${HOME}" ;;
     amp)         printf '%s/.config/amp/plugins/defenseclaw.ts' "${HOME}" ;;

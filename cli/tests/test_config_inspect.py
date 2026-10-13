@@ -405,3 +405,8 @@ def test_reference_decodes_utf8_and_never_crashes_on_missing_stdout() -> None:
         pytest.raises(config_inspect.ConfigInspectError, match="empty reference"),
     ):
         config_inspect.config_v8_reference("yaml")
+
+
+def test_helper_failure_drops_the_cobra_error_prefix() -> None:
+    # click adds its own "Error: " to a ClickException, so the helper's would print twice.
+    assert config_inspect._helper_failure("Error: config: bad rule pack\n", "migrate") == "config: bad rule pack"

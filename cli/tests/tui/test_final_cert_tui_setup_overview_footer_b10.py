@@ -119,8 +119,8 @@ def test_footer_summary_is_a_result_not_the_last_listing_line() -> None:
     # GAP-2388: it also says that none of them had a skill to scan.
     assert command_result_summary("Scan all", scan) == "3 connectors scanned · no scannable skills"
     listing = [
-        "Observability v8 destinations",
-        "-----------------------------",
+        "Observability destinations",
+        "--------------------------",
         "NAME                     KIND         STATE     SIGNALS",
         "local-sqlite             sqlite       enabled   logs",
         "grafana                  otlp         enabled   logs,traces,metrics",

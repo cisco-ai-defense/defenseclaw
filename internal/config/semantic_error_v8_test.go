@@ -5,6 +5,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -67,6 +68,10 @@ observability:
 	if semanticError.Path != "$.observability.buckets.model.io.redaction_profile" ||
 		semanticError.Line != 6 || semanticError.ReceivedClass != "string" {
 		t.Fatalf("dotted-key semantic error = %#v", semanticError)
+	}
+	if !strings.Contains(semanticError.Error(), `unknown redaction profile "missing"`) ||
+		!strings.Contains(semanticError.Error(), "content, none, sensitive, strict") {
+		t.Fatalf("restart diagnostic omits value or defined profiles: %v", semanticError)
 	}
 }
 

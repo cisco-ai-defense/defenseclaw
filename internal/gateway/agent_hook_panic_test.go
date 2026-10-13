@@ -22,19 +22,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// stubPanicLogger captures audit envelopes written via logger.LogActionCtx
-// so the panic-path assertions can verify that the synthetic
-// result="panic" row reached the audit sink.
-type stubPanicLogger struct {
-	rows []map[string]interface{}
-}
-
-func (s *stubPanicLogger) entries() []map[string]interface{} {
-	out := make([]map[string]interface{}, len(s.rows))
-	copy(out, s.rows)
-	return out
-}
-
 // TestSafeEvaluateHook_RecoversAndReturnsFailOpen exercises
 // safeEvaluateHook directly: a panicking evaluator must not propagate
 // the panic, must mark panicked=true, and must return a fail-open
@@ -80,35 +67,6 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	)
 	if len(panicMetrics) != 1 {
 		t.Fatalf("generated panic metrics=%d; recovered hook must not require a legacy Provider", len(panicMetrics))
-	}
-}
-
-// TestHandleAgentHookSynthetic_PropagatesConnector proves the
-// codex-notify bridge path carries the connector name through to the
-// fail-open response. We force a panic in the generic evaluator; the
-// fail-open response's AdditionalContext names the connector, which is
-// sourced from the connectorName parameter threaded into
-// safeEvaluateSyntheticHook, so a present name proves the synthetic
-// path propagates connector identity.
-func TestHandleAgentHookSynthetic_PropagatesConnector(t *testing.T) {
-	prev := hookEvaluatorPanicHook
-	hookEvaluatorPanicHook = func() { panic("synthetic connector-propagation test panic") }
-	defer func() { hookEvaluatorPanicHook = prev }()
-
-	api := &APIServer{}
-	req := agentHookRequest{
-		HookEventName: "Stop",
-		SessionID:     "sess-syn",
-		ToolName:      "codex-notify",
-		Direction:     "tool_result",
-		Payload:       map[string]interface{}{},
-	}
-	resp := api.handleAgentHookSynthetic(context.Background(), "codex", req, []byte(`{}`))
-	if resp.Action != "allow" || !resp.WouldBlock {
-		t.Fatalf("synthetic panic response = %+v, want fail-open allow + would_block", resp)
-	}
-	if !strings.Contains(resp.AdditionalContext, "codex") {
-		t.Errorf("AdditionalContext = %q, want it to name connector codex (synthetic connector propagation lost)", resp.AdditionalContext)
 	}
 }
 
@@ -253,8 +211,8 @@ func TestEnrichAgentHookSpanPanic_MarksErrorAndAttribute(t *testing.T) {
 
 // TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan guards the
 // defensive nil + non-recording short-circuit: callers may invoke
-// the helper from a ctx with no span (e.g. handleAgentHookSynthetic
-// running outside an HTTP wrapper), and panicking inside a panic-
+// the helper from a ctx with no span (a handler running outside an
+// HTTP wrapper), and panicking inside a panic-
 // recovery code path would defeat the whole fail-open contract.
 func TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan(t *testing.T) {
 	// No tracer provider installed → SpanFromContext returns a

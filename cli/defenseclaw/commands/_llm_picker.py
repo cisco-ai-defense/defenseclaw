@@ -23,8 +23,7 @@ Design rules:
   parity test (``internal/tui/cli_parity_test.go``) relies on this so
   the TUI's batch invocations never block on stdin.
 * The model catalog is a packaged JSON; custom-provider instances
-  contribute ``available_models`` discovered at runtime from
-  ``~/.defenseclaw/custom-providers.json``.
+  contribute ``available_models`` from config.yaml ``llm_providers``.
 * No new state is introduced — helpers mutate :class:`LLMConfig`
   instances in place to match the existing wizard contract.
 """
@@ -48,11 +47,7 @@ import click
 from defenseclaw import terminal_checkbox, ux
 from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
-    AzureKeyConfig,
-    BedrockKeyConfig,
     LLMConfig,
-    LLMTLSConfig,
-    VertexKeyConfig,
 )
 from defenseclaw.llm_keys import looks_like_key_shape
 
@@ -107,22 +102,31 @@ def _overlay_path(data_dir: str) -> str:
     return os.path.join(data_dir or os.path.expanduser("~/.defenseclaw"), "custom-providers.json")
 
 
-def list_custom_instances(data_dir: str) -> list[dict[str, Any]]:
-    """Return the custom-providers.json provider entries.
+def list_custom_instances(data_dir: str, cfg: Any = None) -> list[dict[str, Any]]:
+    """Return the custom provider entries, in the overlay shape.
 
-    Returns an empty list when the file is missing or malformed —
-    overlay errors are surfaced by ``defenseclaw doctor``, not the
-    wizard helpers.
+    With the loaded config they come from ``llm_providers``, as
+    ``resolve_llm`` reads them (``derived_providers.configured_providers``):
+    the derived custom-providers.json is never read back, so a migration
+    that folded the overlay into config loses no instance. Without a config
+    the overlay at ``data_dir`` is read. Returns an empty list when nothing
+    is declared or the file is missing or malformed — overlay errors are
+    surfaced by ``defenseclaw doctor``, not the wizard helpers.
     """
     path = _overlay_path(data_dir)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = _json.load(f)
-    except (FileNotFoundError, ValueError, PermissionError, OSError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    providers = data.get("providers") or []
+    if cfg is not None and hasattr(cfg, "llm_providers"):
+        from defenseclaw import derived_providers  # noqa: PLC0415
+
+        providers: Any = derived_providers.configured_providers(cfg, path)
+    else:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _json.load(f)
+        except (FileNotFoundError, ValueError, PermissionError, OSError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        providers = data.get("providers") or []
     if not isinstance(providers, list):
         return []
     out: list[dict[str, Any]] = []
@@ -132,11 +136,11 @@ def list_custom_instances(data_dir: str) -> list[dict[str, Any]]:
     return out
 
 
-def custom_instance(data_dir: str, name: str) -> dict[str, Any] | None:
+def custom_instance(data_dir: str, name: str, cfg: Any = None) -> dict[str, Any] | None:
     target = (name or "").strip().lower()
     if not target:
         return None
-    for entry in list_custom_instances(data_dir):
+    for entry in list_custom_instances(data_dir, cfg):
         if str(entry.get("name", "")).strip().lower() == target:
             return entry
     return None
@@ -673,40 +677,6 @@ def pick_key_env(
     return name
 
 
-def pick_instance_name(
-    *,
-    data_dir: str,
-    current: str,
-    flag_value: str | None,
-    non_interactive: bool,
-    flag_name: str = "--instance-name",
-) -> str:
-    """Pick a custom-provider instance by name. Returns empty when no
-    custom instances are configured / the operator skipped.
-    """
-    if flag_value is not None:
-        return flag_value.strip()
-    if non_interactive:
-        return current or ""
-    instances = list_custom_instances(data_dir)
-    if not instances:
-        return ""
-    names = [str(i.get("name", "")) for i in instances if i.get("name")]
-    click.echo()
-    ux.subhead("Configured custom-provider instances:")
-    for n in names:
-        click.echo(f"    - {n}")
-    click.echo("    (blank skips and uses a stock provider)")
-    choice = click.prompt(
-        "  Use a custom-provider instance? (name or blank)",
-        default=current or "",
-        show_default=bool(current),
-    ).strip()
-    if choice and choice not in names:
-        ux.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
-    return choice
-
-
 # ---------------------------------------------------------------------------
 # Inherit-preflight: detect sibling components that already have a usable
 # LLM config, so the wizard can offer "reuse this" instead of prompting
@@ -883,30 +853,6 @@ def preflight_inherit(
 # ---------------------------------------------------------------------------
 # Apply structured selections back onto LLMConfig
 # ---------------------------------------------------------------------------
-
-
-def ensure_bedrock(llm: LLMConfig) -> BedrockKeyConfig:
-    if llm.bedrock is None:
-        llm.bedrock = BedrockKeyConfig()
-    return llm.bedrock
-
-
-def ensure_vertex(llm: LLMConfig) -> VertexKeyConfig:
-    if llm.vertex is None:
-        llm.vertex = VertexKeyConfig()
-    return llm.vertex
-
-
-def ensure_azure(llm: LLMConfig) -> AzureKeyConfig:
-    if llm.azure is None:
-        llm.azure = AzureKeyConfig()
-    return llm.azure
-
-
-def ensure_tls(llm: LLMConfig) -> LLMTLSConfig:
-    if llm.tls is None:
-        llm.tls = LLMTLSConfig()
-    return llm.tls
 
 
 # ---------------------------------------------------------------------------

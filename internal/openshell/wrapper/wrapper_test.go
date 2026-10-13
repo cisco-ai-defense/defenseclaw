@@ -336,3 +336,21 @@ func writeScript(t *testing.T, path, body string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+// TestBypassTextsSayTheyOnlyMakeAHostRun: the bypass is a host run, which
+// a managed host whose organization requires a sandbox refuses; the texts
+// that offer it say so.
+func TestBypassTextsSayTheyOnlyMakeAHostRun(t *testing.T) {
+	for _, sh := range Shells {
+		text, err := Render(sh, Block{Binary: "/usr/bin/defenseclaw", Wraps: []Wrap{{Command: "claude", Harness: "claude"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(text, "# "+EnvBypass+"=1 runs the harness directly, without a sandbox, where your organization allows it.\n") {
+			t.Errorf("%s: the bypass comment lacks its scope:\n%s", sh, text)
+		}
+		if !strings.Contains(text, "starts claude without a sandbox, where your organization allows it") {
+			t.Errorf("%s: the missing-launcher text lacks the bypass scope:\n%s", sh, text)
+		}
+	}
+}

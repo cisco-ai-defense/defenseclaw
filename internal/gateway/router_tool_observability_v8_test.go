@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -232,9 +233,9 @@ func TestEventRouterToolV8MissingCallIDIsTruthfulResultOnly(t *testing.T) {
 
 func TestEventRouterToolV8BlockedCallIsTerminalWithoutPendingState(t *testing.T) {
 	router, capture, databasePath := bindEventRouterToolV8Runtime(t, true, true)
-	if err := router.policy.BlockToolForConnector("shell", "", "test policy"); err != nil {
-		t.Fatal(err)
-	}
+	cfg := &config.Config{}
+	denyTool(cfg, "shell", "", "test policy")
+	router.policy = router.policy.WithConfig(func() *config.Config { return cfg })
 	routeEventRouterToolCall(t, router, ToolCallPayload{
 		Tool: "shell", ID: "call-blocked", Args: json.RawMessage(`{"command":"private-blocked"}`),
 	})

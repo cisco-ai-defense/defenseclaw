@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -430,6 +431,7 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		if !hasNativeMCPReader(connectorName) {
 			continue
 		}
+		// Native readers check each file at its open, including links.
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
 			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		}
@@ -485,6 +487,17 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
+// discoveryUserEmail is the connector account address of a discovery
+// signal's owner, read from that owner's own profile, while
+// ai_discovery.include_user_email is on. A signal without an owner never
+// carries one: the address would then name nobody on this endpoint.
+func discoveryUserEmail(signal inventory.AISignal) string {
+	if signal.UserID == "" || !UserEmailCollectionEnabled() {
+		return ""
+	}
+	return signal.UserEmail
+}
+
 // discoveryUserIDKind is the id namespace of the account a signal belongs
 // to: a uid from a Unix per-user scan, or the profile's SID from a managed
 // Windows scan.
@@ -496,6 +509,22 @@ func discoveryUserIDKind(userID string) string {
 		return useridentity.KindWindowsSID
 	}
 	return useridentity.KindPOSIXUID
+}
+
+// inventoryIdentity is the directory attribution of the account an inventory
+// record names. The gateway resolved that account itself (the scan's process
+// owner or a profile directory's owner), never from anything a client sent,
+// so its directory facts are reported as verified.
+func inventoryIdentity(userID string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	facts, _ := verifiedIdentityDirectory(userID, true)
+	if facts.Empty() {
+		return nil
+	}
+	facts.Assurance = useridentity.AssuranceVerified
+	return &llmEventIdentity{Directory: facts}
 }
 
 // daemonHomeForInventoryAttribution returns the profile the sidecar itself
@@ -530,6 +559,7 @@ func hasNativeMCPReader(connectorName string) bool {
 		"zeptoclaw",
 		"hermes",
 		"cursor",
+		"kiro",
 		"devin",
 		"copilot",
 		"openhands",
@@ -556,11 +586,17 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 	var results [][]config.MCPServerEntry
 	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
 		full := filepath.Join(home, relPath)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(full) != nil {
+			return
+		}
 		if entries, err := reader(full); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
 	}
 	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
+			return
+		}
 		if entries, err := reader(home); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
@@ -576,17 +612,21 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		// their servers. `.mcp.json` at the project root is unaffected because
 		// it's the workspace-scope file the CLI reads regardless.
 		if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
-			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 			// ~/.claude.json holds both user-scope (top-level `mcpServers`)
 			// and per-project local-scope (`projects.<path>.mcpServers`)
 			// entries. Read the file once and take the union instead of
 			// decoding the (often multi-megabyte) conversation-state file
-			// twice.
+			// twice. It comes before the settings.json block DefenseClaw
+			// 0.8.x wrote: the first source wins a name, and Claude Code
+			// reads ~/.claude.json (GAP-1340).
 			tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 		}
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
+	case "kiro":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".kiro/settings/mcp.json")
 	case "devin":
 		if strings.EqualFold(strings.TrimSpace(goos), "windows") {
 			tryFile(config.ReadMCPFromDevinConfig, "AppData/Roaming/devin/mcp_config.json")
@@ -650,7 +690,11 @@ func makeEndpointInventoryEmitter(
 			// A broken plugin directory must not hide built-in connectors or
 			// masquerade as an authoritative complete inventory. The bounded
 			// partial summary carries no path or loader error.
-			partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(cfg.PluginDir) != nil {
+				partial = true
+			} else {
+				partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
+			}
 		}
 		var report *inventory.AIDiscoveryReport
 		if snapshotFn != nil {
@@ -706,6 +750,8 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 	if cfg == nil {
 		return nil, true
 	}
+	// ReadMCPServers guards each native config file, so an unreadable
+	// profile file does not hide a separate outside-profile source.
 	servers, err := cfg.ReadMCPServers()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -1075,7 +1121,7 @@ func emitEndpointInventoryComponent(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
+		input := observability.LogAIComponentObservedInput{
 			Envelope:                                        endpointInventoryEmitEnvelope(ctx, snapshot, recordSource, action, phase),
 			Severity:                                        observability.Present(observability.SeverityInfo),
 			LogLevel:                                        observability.Present(observability.LogLevelInfo),
@@ -1091,7 +1137,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             aiDiscoveryV8OptionalText(component.userName),
+			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
@@ -1112,7 +1158,10 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryVersion:                aiDiscoveryV8OptionalText(component.agentVersion),
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
-		})
+			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
+		}
+		inventoryIdentity(component.userID).applyTo(&input)
+		return builder.BuildLogAIComponentObserved(input)
 	})
 }
 
@@ -1395,6 +1444,7 @@ func discoveredEntriesFromReport(
 				userID:          signal.UserID,
 				userIDKind:      discoveryUserIDKind(signal.UserID),
 				userName:        signal.UserName,
+				userEmail:       discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -1447,6 +1497,7 @@ func discoveredMCPEntriesFromReport(
 				userID:         signal.UserID,
 				userIDKind:     discoveryUserIDKind(signal.UserID),
 				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 			})
 		}
 	}

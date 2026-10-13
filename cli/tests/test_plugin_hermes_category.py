@@ -54,7 +54,7 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         _write_plugin(
             os.path.join(self.app.cfg.quarantine_dir, tree, "hermes", *listed_id.split("/")), listed_id.split("/")[-1]
         )
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine("plugin", listed_id, "auto-block: watch detected HIGH findings")
         pe.set_source_path("plugin", listed_id, source)
         return source
@@ -70,7 +70,7 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         self.assertTrue(os.path.isfile(os.path.join(web, "plugin.yaml")))
         self.assertFalse(os.path.exists(memx))
         self.assertFalse(os.path.exists(flat))
-        self.assertFalse(PolicyEngine(self.app.store).is_quarantined("plugin", "web/dup"))
+        self.assertFalse(PolicyEngine(self.app.store, self.app.cfg).is_quarantined("plugin", "web/dup"))
 
         result = self.invoke(["restore", "dup"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -98,7 +98,7 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isfile(os.path.join(flat, "plugin.yaml")))
         self.assertFalse(os.path.exists(inner))
-        self.assertTrue(PolicyEngine(self.app.store).is_quarantined("plugin", "coll/inner"))
+        self.assertTrue(PolicyEngine(self.app.store, self.app.cfg).is_quarantined("plugin", "coll/inner"))
 
         result = self.invoke(["restore", "coll/inner"])
         self.assertEqual(result.exit_code, 0, result.output)

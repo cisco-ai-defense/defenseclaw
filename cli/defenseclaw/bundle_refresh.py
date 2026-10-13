@@ -191,6 +191,40 @@ _SPLUNK_BRIDGE_PRESERVE: tuple[str, ...] = (
 _SPLUNK_BRIDGE_DEST_REL: str = "splunk-bridge"
 
 
+def ensure_splunk_bridge_container_access(dest: str) -> list[str]:
+    """Make the bridge's bind-mounted Splunk assets readable by the container.
+
+    docker-compose.local.yml mounts ``splunk/`` (``default.yml``, the
+    ansible plays and the app the bridge packages from it) read-only, and
+    the container reads it as non-root users. A package extracted under a
+    private umask leaves those files 0600, so the container could not read
+    ``default.yml`` and restarted without end (GAP-0341; the app tarball
+    keeps the source modes too). As for the local observability stack, the
+    enclosing data directory stays 0700; ``splunk/`` holds no secret (the
+    HEC token and password come from ``env/.env``, which this never
+    touches): directories 0755, files in a ``bin`` folder and ``*.sh``
+    0755, other files 0644. Links are left alone.
+    """
+    errors: list[str] = []
+    root = os.path.join(dest, "splunk")
+    if os.name == "nt" or os.path.islink(root) or not os.path.isdir(root):
+        return errors
+    for current, _dirs, files in os.walk(root, followlinks=False):
+        targets = [(current, 0o755)]
+        for name in files:
+            path = os.path.join(current, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            executable = name.endswith(".sh") or os.path.basename(current) == "bin"
+            targets.append((path, 0o755 if executable else 0o644))
+        for path, mode in targets:
+            try:
+                os.chmod(path, mode)
+            except OSError as exc:
+                errors.append(f"chmod {os.path.relpath(path, dest)}: {exc}")
+    return errors
+
+
 def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
     """Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundled source.
 
@@ -225,6 +259,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
                 os.chmod(bridge_bin, 0o755)
             except OSError as exc:
                 result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+        result.errors.extend(ensure_splunk_bridge_container_access(dest))
         result.refreshed = True
         result.refreshed_paths.append("(initial seed)")
         return result
@@ -245,6 +280,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
             os.chmod(bridge_bin, 0o755)
         except OSError as exc:
             result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+    result.errors.extend(ensure_splunk_bridge_container_access(dest))
 
     return result
 
@@ -336,9 +372,11 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-connectors",
     "defenseclaw-findings",
     "defenseclaw-hitl",
+    "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",
+    "defenseclaw-sandboxes",
     "defenseclaw-scanners",
     "defenseclaw-security",
     "defenseclaw-traffic",
@@ -1278,120 +1316,6 @@ def _activate_local_observability_manifest(
     )
 
 
-def _restore_local_observability_activation_backup(
-    destination: Path,
-    backup_managed: Path,
-    managed_paths: set[str],
-    existing_paths: set[str],
-    old_digests: dict[str, str],
-    old_modes: dict[str, int],
-) -> None:
-    """Restore the transaction's exact managed-file inventory."""
-
-    if os.name != "posix":
-        _restore_local_observability_activation_backup_by_path(
-            destination,
-            backup_managed,
-            managed_paths,
-            existing_paths,
-            old_digests,
-            old_modes,
-        )
-        return
-
-    root_descriptor = _open_rollback_root_descriptor(destination)
-    try:
-        backup_root_descriptor = _open_rollback_root_descriptor(backup_managed)
-        try:
-            for relative in sorted(managed_paths):
-                parts = _rollback_path_parts(relative)
-                parent_descriptor = _open_rollback_parent(
-                    root_descriptor,
-                    parts[:-1],
-                    create=relative in existing_paths,
-                )
-                if parent_descriptor is None:
-                    continue
-                try:
-                    if relative in existing_paths:
-                        backup_parent_descriptor = _open_rollback_parent(
-                            backup_root_descriptor,
-                            parts[:-1],
-                            create=False,
-                        )
-                        if backup_parent_descriptor is None:
-                            raise OSError("backup member missing")
-                        try:
-                            _restore_rollback_file_at(
-                                backup_parent_descriptor,
-                                parts[-1],
-                                parent_descriptor,
-                                parts[-1],
-                                old_modes[relative],
-                                old_digests[relative],
-                            )
-                        finally:
-                            os.close(backup_parent_descriptor)
-                    else:
-                        _remove_rollback_file_at(parent_descriptor, parts[-1])
-                finally:
-                    os.close(parent_descriptor)
-        finally:
-            os.close(backup_root_descriptor)
-    finally:
-        os.close(root_descriptor)
-
-
-def _restore_local_observability_activation_backup_by_path(
-    destination: Path,
-    backup_managed: Path,
-    managed_paths: set[str],
-    existing_paths: set[str],
-    old_digests: dict[str, str],
-    old_modes: dict[str, int],
-) -> None:
-    """Fail closed around symlinks and reparse points without POSIX dirfds."""
-
-    root_chain = [(destination, _rollback_directory_info(destination))]
-    backup_root_chain = [(backup_managed, _rollback_directory_info(backup_managed))]
-    for relative in sorted(managed_paths):
-        parts = _rollback_path_parts(relative)
-        parent_chain = _open_rollback_parent_by_path(
-            root_chain,
-            parts[:-1],
-            create=relative in existing_paths,
-        )
-        if parent_chain is None:
-            continue
-        destination_path = parent_chain[-1][0] / parts[-1]
-        if relative in existing_paths:
-            backup_parent_chain = _open_rollback_parent_by_path(
-                backup_root_chain,
-                parts[:-1],
-                create=False,
-            )
-            if backup_parent_chain is None:
-                raise OSError("backup member missing")
-            _restore_rollback_file_by_path(
-                backup_parent_chain[-1][0] / parts[-1],
-                backup_parent_chain,
-                destination_path,
-                parent_chain,
-                old_modes[relative],
-                old_digests[relative],
-            )
-        else:
-            destination_info = _rollback_file_info(destination_path, missing_ok=True)
-            if destination_info is None:
-                continue
-            _revalidate_rollback_directory_chain(parent_chain)
-            _revalidate_rollback_file(destination_path, destination_info)
-            destination_path.unlink()
-            _revalidate_rollback_directory_chain(parent_chain)
-            if _rollback_file_info(destination_path, missing_ok=True) is not None:
-                raise OSError("local observability rollback managed file reappeared")
-
-
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_ROLLBACK_MEMBER_MAX_BYTES = 256 * 1024 * 1024
 
@@ -1949,19 +1873,6 @@ def _restore_windows_rollback_file_by_path(
                 _fsync_directory(temporary_path.parent)
             except OSError:
                 pass
-
-
-def _remove_rollback_file_at(parent_descriptor: int, destination_name: str) -> None:
-    """Durably unlink one target-created managed entry without following it."""
-
-    try:
-        info = os.stat(destination_name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if stat.S_ISDIR(info.st_mode):
-        raise OSError("unexpected directory at managed file path")
-    os.unlink(destination_name, dir_fd=parent_descriptor)
-    os.fsync(parent_descriptor)
 
 
 def _sha256_descriptor(descriptor: int) -> str:

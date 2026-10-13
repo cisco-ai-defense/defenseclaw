@@ -49,6 +49,15 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 	result.Enrollment.Pending = 4
 
+	// GAP-0223: a deployment that enrolled nobody for Codex, Claude Code or
+	// Cursor names that, not a guardian log that names no cause.
+	empty := &enterprisestatus.Result{Readiness: enterprisestatus.Readiness{Guardian: true}}
+	addEnterpriseSecurityIncompleteReasons(empty, false)
+	if message := empty.Warnings[0].Message; !strings.Contains(message, "no account is enrolled for Codex, Claude Code or Cursor") ||
+		strings.Contains(message, "guardian log") {
+		t.Fatalf("no enabled target, message = %q", message)
+	}
+
 	result.SecurityComplete = true
 	result.Warnings = nil
 	addEnterpriseSecurityIncompleteReasons(result, false)
@@ -72,6 +81,16 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
 		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
 		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+
+	// GAP-0536: the sandbox policy notes Windows now prints do not hide why
+	// security is incomplete.
+	result.Warnings = nil
+	result.AddWarning(enterprisestatus.CodeSandboxDefaultProfile, "default_profile lacks required_for [claudecode] from contractors")
+	result.AddWarning(enterprisestatus.CodeSandboxAdvisory, "openshell.admin.request_access is empty")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" {
+		t.Fatalf("sandbox notes suppressed the reason: %+v", result.Warnings)
 	}
 
 	result.Warnings = nil

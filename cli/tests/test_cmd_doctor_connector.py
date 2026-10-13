@@ -441,7 +441,11 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
 
     @patch(
         "defenseclaw.fail_mode.connector_fail_mode_report",
-        return_value={"effective": "open", "provenance": "process-env"},
+        return_value={
+            "effective": "open",
+            "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
+        },
     )
     def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
         cfg = self._cfg()
@@ -454,7 +458,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(len(mode_rows), 1)
         self.assertEqual(
             mode_rows[0]["detail"],
-            "action; fail-mode=open; provenance=process-env",
+            "action; fail-mode=open (observe mode keeps hooks fail-open; "
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -604,6 +609,9 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="observe",
                 fail_closed=False,
             )
+            # Cursor has no approval prompt: an inherited human_approval is
+            # the Human approval row's warning, not an inconsistent posture.
+            cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True)
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,
@@ -744,6 +752,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 tmp,
                 mode="action",
                 fail_closed=True,
+            )
+            from defenseclaw.config import GuardrailConfig, PerConnectorGuardrailConfig
+
+            # An upgraded v8 action-mode config may still store open.
+            cfg.guardrail = GuardrailConfig(
+                mode="action",
+                hook_fail_mode="open",
+                connectors={"cursor": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open")},
             )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
@@ -1627,7 +1643,10 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "local_pattern_count": 6,
             "suppression_count": 3,
             "sensitive_tool_count": 5,
+            "stale_rule_count": 0,
+            "alert_only_rule_count": 0,
             "digest": "a" * 64,
+            "files_digest": "b" * 64,
         }
         summary.update(overrides)
         return RulePackValidationResult(
@@ -1674,6 +1693,56 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertEqual(rp["status"], "pass")
         self.assertIn("11/12 rules enabled", rp["detail"])
         validate.assert_called_once_with(os.getcwd())
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_custom_pack_edited_after_pinning_fails_and_names_the_v9_key(self, validate):
+        validate.return_value = self._valid()  # files_digest is "b" * 64
+        cfg = self._cfg(rule_pack_dir="/packs/mine")
+        cfg.guardrail.effective_rule_pack.return_value = "mine"
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "c" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn('configured rule pack "mine"', rp["detail"])
+        self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
+        self.assertNotIn("rule_pack_dir", rp["detail"])
+        # Re-pin in place, keeping per-connector pack choices (GAP-0332).
+        self.assertEqual(
+            rp["remediation"], "defenseclaw config set guardrail.custom_packs.mine.digest sha256:" + "b" * 64
+        )
+
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_pack_whose_action_rules_cannot_block_warns(self, validate):
+        # GAP-0360: a 0.8.x copy of the default pack showed PASS and blocked nothing.
+        validate.return_value = self._valid(stale_rule_count=26, alert_only_rule_count=1)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("26 are 0.8.x copies of built-in", rp["detail"])
+        self.assertIn("never block", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
+
+        # GAP-1225: a pack whose only gap is the operator's own pattern rules
+        # (any category) warns too, and says how to make them block again.
+        validate.return_value = self._valid(alert_only_rule_count=2)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("2 are custom rules of yours", rp["detail"])
+        self.assertIn("detection-only for tool calls", rp["detail"])
+        self.assertIn("expression", rp["remediation"])
 
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
@@ -1983,14 +2052,33 @@ class TestCheckHookHealth(unittest.TestCase):
             # GAP-1804: arguments of another Python program are its own.
             ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
             ("python3 -c import --connector hermes", False),
+            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", True),
             ("python3 -u /u/.local/bin/hermes chat", True),
             ("python3 -Wignore -m hermes_cli", None),
             ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
-            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done):
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done), patch(
+                "defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=None
+            ):
                 self.assertIs(cmd_doctor._hermes_host_running(), want, args)
+
+    def test_hermes_multiline_python_launcher_uses_proc_argv(self) -> None:
+        from defenseclaw.commands import cmd_setup
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        python = "/home/u/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3"
+        listing = f"4242 {os.getuid()} {python} -I -c import os, re, sys\nimport hermes_bootstrap\n"
+        done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+        argv = (python, "-I", "-c", "import os, re, sys\nimport hermes_bootstrap\nfrom hermes_cli.main import main")
+        with (
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done),
+            patch("defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=argv) as proc,
+        ):
+            self.assertFalse(cmd_setup._hermes_hosts_idle())
+        proc.assert_called_once_with("4242")
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2925,7 +3013,20 @@ class TestCheckHookHealth(unittest.TestCase):
                 return_value=("pass", f"live effective config verified through --config={config}"),
             ):
                 _check_omnigent_policy_health(cfg, r)
-        self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+                    return_value=("fail", "live server policy does not match"),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_tmux_requirement",
+                    return_value="; managed terminals require tmux 3.3 or newer",
+                ),
+            ):
+                _check_omnigent_policy_health(cfg, r)
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn("tmux 3.3", r.checks[-1]["detail"])
 
     def test_omnigent_repair_command_preserves_action_closed_hilt_posture(self) -> None:
         cfg = MagicMock()
@@ -3470,6 +3571,17 @@ class TestDetectionStrategyRow(unittest.TestCase):
         _check_connector_inventory(cfg, connector, r)
         return next(c for c in r.checks if c["label"] == "Detection")
 
+    def test_failing_runtime_judge_is_not_reported_active(self):
+        cfg = self._cfg(judge_enabled=True, hook_connectors=["codex"])
+        result = _DoctorResult()
+        _check_connector_inventory(
+            cfg, "codex", result,
+            live_health={"guardrail": {"details": {"judge_state": "failing", "judge_recent_calls": 7}}},
+        )
+        row = next(check for check in result.checks if check["label"] == "Detection")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("judge failing", row["detail"])
+
     def test_strategy_surfaced(self):
         row = self._detection_row(self._cfg(strategy="judge_first"), "codex")
         self.assertIn("strategy=judge_first", row["detail"])
@@ -3780,3 +3892,14 @@ class TestConnectorSkippedAtStart(unittest.TestCase):
         self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
         self.assertIn("OpenHands was skipped", row["detail"])
         self.assertEqual(row["remediation"], "defenseclaw setup openhands")
+
+
+
+def test_omnigent_tmux_requirement_reports_old_managed_terminal_runtime() -> None:
+    from defenseclaw.commands import cmd_doctor
+    with (
+        patch.object(cmd_doctor.os, "name", "posix"),
+        patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/tmux"),
+        patch.object(cmd_doctor.subprocess, "run", return_value=SimpleNamespace(stdout="tmux 3.2a")),
+    ):
+        assert "tmux 3.3" in cmd_doctor._omnigent_tmux_requirement()

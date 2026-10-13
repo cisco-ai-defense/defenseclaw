@@ -220,7 +220,7 @@ func newProxyGeneratedRuntimeWithPolicies(
 func TestHandleChatCompletionGeneratedTraceRejectsEmptyModelBeforeConstruction(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	provider := &mockProvider{}
-	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.SetDefaultAgentName("openclaw")
 	proxy.bindObservabilityV8Trace(runtime)
 	recorder := postChat(t, proxy, mustJSON(t, map[string]any{
@@ -234,7 +234,7 @@ func TestHandleChatCompletionGeneratedTraceRejectsEmptyModelBeforeConstruction(t
 func TestHandleChatCompletionGeneratedTraceDoesNotDuplicateLegacySpans(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 
-	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.SetDefaultAgentName("openclaw")
 	proxy.bindObservabilityV8Trace(runtime)
 	recorder := postChat(t, proxy, mustJSON(t, map[string]any{
@@ -338,7 +338,7 @@ func TestHandleChatCompletionGeneratedInspectorTraceRecordsAppliedBlock(t *testi
 			FinishReason: strPtr("stop"),
 		}},
 	}}
-	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.SetDefaultAgentName("openclaw")
 	proxy.store = capture.store
 	// Runtime finding persistence is owned by the canonical audit logger, not
@@ -570,7 +570,7 @@ func TestGeneratedInspectorTracePhaseEndFailureAbortsRemainingHierarchy(t *testi
 
 func TestGeneratedInspectorPanicMetricDoesNotRequireLegacyProvider(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
-	inspector := NewGuardrailInspector("local", nil, nil, "")
+	inspector := NewGuardrailInspector("local", nil, nil)
 	proxy := newTestProxy(t, &mockProvider{}, inspector, "action")
 	proxy.bindObservabilityV8Trace(runtime)
 	inspector.recordRecoveredPanic(t.Context())
@@ -591,7 +591,7 @@ func TestHandleChatCompletionGeneratedModelMetricsSurviveTraceSamplingDrop(t *te
 		}},
 		Usage: &ChatUsage{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18},
 	}, delay: 20 * time.Millisecond}
-	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, provider, NewGuardrailInspector("local", nil, nil), "action")
 	proxy.SetDefaultAgentName("openclaw")
 	proxy.bindObservabilityV8Trace(runtime)
 	recorder := postChat(t, proxy, mustJSON(t, map[string]any{
@@ -650,7 +650,7 @@ func TestHandleChatCompletionGeneratedModelMetricsSurviveTraceSamplingDrop(t *te
 
 func TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
-	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil, ""), "action")
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil), "action")
 	request := &ChatRequest{
 		Model:    "gpt-4",
 		Messages: []ChatMessage{{Role: "user", Content: "hello"}},

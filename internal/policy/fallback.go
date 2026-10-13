@@ -1,229 +1,153 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package policy
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-type fallbackAction struct {
-	Runtime string `json:"runtime"`
-	File    string `json:"file"`
-	Install string `json:"install"`
-}
+// EvaluateAdmissionFallback is the Go twin of admission.rego, used only when
+// OPA evaluation fails. It reads the same input (input.Admission, the
+// asset_policy block/allow lists, the scan result) and returns the same
+// verdict, reason and actions, so a Rego outage never changes a decision.
+func EvaluateAdmissionFallback(input AdmissionInput) *AdmissionOutput {
+	adm := input.Admission
+	noScan := &AdmissionOutput{FileAction: "none", InstallAction: "none", RuntimeAction: "allow"}
 
-type firstPartyEntry struct {
-	Reason             string
-	SourcePathContains []string
-}
-
-type FallbackProfile struct {
-	AllowListBypassScan bool
-	ScanOnInstall       bool
-	Actions             map[string]fallbackAction
-	ScannerOverrides    map[string]map[string]fallbackAction
-	FirstPartyAllow     map[string]firstPartyEntry
-}
-
-func defaultFallbackProfile() *FallbackProfile {
-	return &FallbackProfile{
-		AllowListBypassScan: true,
-		ScanOnInstall:       true,
-		Actions: map[string]fallbackAction{
-			"CRITICAL": {Runtime: "block", File: "quarantine", Install: "block"},
-			"HIGH":     {Runtime: "block", File: "quarantine", Install: "block"},
-			"MEDIUM":   {Runtime: "allow", File: "none", Install: "none"},
-			"LOW":      {Runtime: "allow", File: "none", Install: "none"},
-			"INFO":     {Runtime: "allow", File: "none", Install: "none"},
-		},
-		ScannerOverrides: map[string]map[string]fallbackAction{
-			"mcp": {
-				"MEDIUM": {Runtime: "block", File: "quarantine", Install: "block"},
-				"LOW":    {Runtime: "block", File: "none", Install: "none"},
-			},
-			"plugin": {
-				"HIGH":   {Runtime: "block", File: "quarantine", Install: "block"},
-				"MEDIUM": {Runtime: "allow", File: "none", Install: "none"},
-			},
-		},
-		FirstPartyAllow: map[string]firstPartyEntry{
-			firstPartyKey("plugin", "defenseclaw"): {
-				Reason:             "first-party DefenseClaw plugin",
-				SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw", ".config/amp/plugins/defenseclaw.ts"},
-			},
-			firstPartyKey("skill", "codeguard"): {
-				Reason:             "first-party DefenseClaw skill",
-				SourcePathContains: []string{".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"},
-			},
-		},
+	if listMatches(input.BlockList, input) {
+		noScan.Verdict = "blocked"
+		noScan.Reason = fmt.Sprintf("%s '%s' is on the block list", input.TargetType, input.TargetName)
+		return noScan
 	}
-}
-
-func LoadFallbackProfile(regoDir string) *FallbackProfile {
-	profile := defaultFallbackProfile()
-	if regoDir == "" {
-		return profile
+	allowListed := listMatches(input.AllowList, input)
+	firstPartyReason, firstPartyListed := "", false
+	if adm != nil && adm.AllowListBypassScan {
+		firstPartyReason, firstPartyListed = firstPartyMatch(adm.FirstPartyAllowList, input)
 	}
-
-	raw, err := readDataJSON(regoDir)
-	if err != nil {
-		return profile
-	}
-
-	var payload struct {
-		Config struct {
-			AllowListBypassScan *bool `json:"allow_list_bypass_scan"`
-			ScanOnInstall       *bool `json:"scan_on_install"`
-		} `json:"config"`
-		Actions          map[string]fallbackAction            `json:"actions"`
-		ScannerOverrides map[string]map[string]fallbackAction `json:"scanner_overrides"`
-		FirstPartyAllow  []struct {
-			TargetType         string   `json:"target_type"`
-			TargetName         string   `json:"target_name"`
-			Reason             string   `json:"reason"`
-			SourcePathContains []string `json:"source_path_contains"`
-		} `json:"first_party_allow_list"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return profile
-	}
-
-	if payload.Config.AllowListBypassScan != nil {
-		profile.AllowListBypassScan = *payload.Config.AllowListBypassScan
-	}
-	if payload.Config.ScanOnInstall != nil {
-		profile.ScanOnInstall = *payload.Config.ScanOnInstall
-	}
-	for sev, action := range payload.Actions {
-		profile.Actions[strings.ToUpper(sev)] = action
-	}
-	for targetType, overrides := range payload.ScannerOverrides {
-		target := map[string]fallbackAction{}
-		for sev, action := range overrides {
-			target[strings.ToUpper(sev)] = action
+	if allowListed || firstPartyListed {
+		noScan.Verdict = "allowed"
+		noScan.Reason = fmt.Sprintf("%s '%s' is on the allow list — scan skipped", input.TargetType, input.TargetName)
+		if !allowListed && firstPartyReason != "" {
+			noScan.Reason = firstPartyReason
 		}
-		profile.ScannerOverrides[targetType] = target
-	}
-	for _, entry := range payload.FirstPartyAllow {
-		if entry.TargetType == "" || entry.TargetName == "" {
-			continue
-		}
-		profile.FirstPartyAllow[firstPartyKey(entry.TargetType, entry.TargetName)] = firstPartyEntry{
-			Reason:             entry.Reason,
-			SourcePathContains: entry.SourcePathContains,
-		}
-	}
-	return profile
-}
-
-func EvaluateAdmissionFallback(input AdmissionInput, profile *FallbackProfile) *AdmissionOutput {
-	if profile == nil {
-		profile = defaultFallbackProfile()
+		return noScan
 	}
 
-	if blocked, reason := fallbackListEntryReason(input.BlockList, input.TargetType, input.TargetName); blocked {
-		return &AdmissionOutput{Verdict: "blocked", Reason: reason}
-	}
-	if allowed, reason := fallbackListEntryReason(input.AllowList, input.TargetType, input.TargetName); allowed {
-		return &AdmissionOutput{Verdict: "allowed", Reason: reason}
-	}
-
-	if profile.AllowListBypassScan {
-		if entry, ok := profile.FirstPartyAllow[firstPartyKey(input.TargetType, input.TargetName)]; ok {
-			if matchesProvenance(entry.SourcePathContains, input.Path) {
-				reason := entry.Reason
-				if reason == "" {
-					reason = fmt.Sprintf("%s '%s' is on the allow list — scan skipped", input.TargetType, input.TargetName)
-				}
-				return &AdmissionOutput{Verdict: "allowed", Reason: reason}
-			}
+	scan := input.ScanResult
+	if scan == nil {
+		if adm != nil && !adm.ScanOnInstall {
+			noScan.Verdict = "allowed"
+			noScan.Reason = "scan_on_install disabled — allowed without scan"
+			return noScan
 		}
+		noScan.Verdict = "scan"
+		noScan.Reason = "awaiting scan"
+		return noScan
 	}
 
-	if input.ScanResult == nil {
-		if !profile.ScanOnInstall {
-			return &AdmissionOutput{
-				Verdict: "allowed",
-				Reason:  "scan_on_install disabled — allowed without scan",
-			}
-		}
-		return &AdmissionOutput{Verdict: "scan", Reason: "scan required"}
-	}
-
-	// hardening (S2.scanners): fail closed on any scanner
-	// failure even when the parsed findings list is empty. Previously
-	// a non-zero scanner exit with `{"findings":[]}` evaluated as a
-	// clean scan because we only branched on TotalFindings/MaxSeverity.
-	// Now we additionally reject any input whose ExitCode != 0 or
-	// ScanError is set; the corresponding scanner Scan() functions
-	// also return a non-nil Go error so callers normally don't even
-	// reach this gate, but we keep the policy-side defence so a
-	// future caller that ignores err can never accidentally admit a
-	// failed scan.
-	if input.ScanResult.ExitCode != 0 || strings.TrimSpace(input.ScanResult.ScanError) != "" {
-		reason := "scanner failed"
-		if input.ScanResult.ScanError != "" {
-			reason = fmt.Sprintf("scanner failed: %s", input.ScanResult.ScanError)
-		}
-		if input.ScanResult.ExitCode != 0 {
-			reason = fmt.Sprintf("%s (exit_code=%d)", reason, input.ScanResult.ExitCode)
-		}
+	// hardening (S2.scanners): a scanner failure is fail closed even when
+	// the parsed findings list is empty.
+	if scan.ExitCode != 0 || scan.ScanError != "" {
 		return &AdmissionOutput{
 			Verdict:       "rejected",
-			Reason:        reason,
+			Reason:        "scanner failed: " + scan.ScanError,
 			FileAction:    "quarantine",
 			InstallAction: "block",
 			RuntimeAction: "block",
 		}
 	}
-
-	severity := strings.ToUpper(input.ScanResult.MaxSeverity)
-	if severity == "" {
-		severity = "INFO"
+	if scan.TotalFindings == 0 {
+		noScan.Verdict = "clean"
+		noScan.Reason = "scan clean"
+		return noScan
 	}
-	action := effectiveFallbackAction(profile, input.TargetType, severity)
-	out := &AdmissionOutput{
-		FileAction:    coalesceAction(action.File, "none"),
-		InstallAction: coalesceAction(action.Install, "none"),
-		RuntimeAction: coalesceAction(action.Runtime, "allow"),
-	}
-
-	if input.ScanResult.TotalFindings <= 0 {
-		out.Verdict = "clean"
-		out.Reason = "scan clean"
-		return out
+	if scan.TotalFindings < 0 {
+		// admission.rego matches neither 0 nor > 0, so it stays "scan".
+		noScan.Verdict = "scan"
+		noScan.Reason = "awaiting scan"
+		return noScan
 	}
 
-	if action.Runtime == "block" || action.Install == "block" {
+	action := effectiveAction(adm, scan)
+	out := &AdmissionOutput{FileAction: action.File, InstallAction: action.Install, RuntimeAction: action.Runtime}
+	switch {
+	case action.Runtime == "block" || action.Install == "block" || action.File == "quarantine":
 		out.Verdict = "rejected"
-		out.Reason = fmt.Sprintf("max severity %s triggers block per policy", severity)
-		return out
+		out.Reason = fmt.Sprintf("max severity %s triggers block per policy", scan.MaxSeverity)
+	case action.Verdict == "allowed":
+		out.Verdict = "allowed"
+		out.Reason = fmt.Sprintf("findings present (max %s) — allowed by policy", scan.MaxSeverity)
+	default:
+		out.Verdict = "warning"
+		out.Reason = fmt.Sprintf("findings present (max %s) — allowed with warning", scan.MaxSeverity)
 	}
-
-	out.Verdict = "warning"
-	out.Reason = fmt.Sprintf("findings present (max %s) — allowed with warning", severity)
 	return out
 }
 
-func effectiveFallbackAction(profile *FallbackProfile, targetType, severity string) fallbackAction {
-	if profile == nil {
-		return fallbackAction{}
-	}
-	if overrides, ok := profile.ScannerOverrides[targetType]; ok {
-		if action, ok := overrides[strings.ToUpper(severity)]; ok {
-			return action
+// effectiveAction mirrors admission.rego _effective_action: the scanner
+// override, then the severity action, then fail closed.
+func effectiveAction(adm *CompiledAdmission, scan *ScanResultInput) CompiledAction {
+	sev := strings.ToUpper(scan.MaxSeverity)
+	if adm != nil {
+		if a, ok := adm.ScannerOverrides[scan.ScannerName][sev]; ok {
+			return a
+		}
+		if a, ok := adm.Actions[sev]; ok {
+			return a
 		}
 	}
-	if action, ok := profile.Actions[strings.ToUpper(severity)]; ok {
-		return action
-	}
-	return fallbackAction{}
+	return CompiledAction{Install: "block", File: "none", Runtime: "block"}
 }
 
-func firstPartyKey(targetType, targetName string) string {
-	return targetType + "\x00" + targetName
+// BlockListed reports whether the block list names this asset
+// (admission.rego _is_blocked).
+func (in AdmissionInput) BlockListed() bool { return listMatches(in.BlockList, in) }
+
+// AllowListed reports whether the allow list names this asset at this path
+// (admission.rego _is_explicit_allow_listed).
+func (in AdmissionInput) AllowListed() bool { return listMatches(in.AllowList, in) }
+
+func listMatches(entries []ListEntry, input AdmissionInput) bool {
+	for _, entry := range entries {
+		if entry.TargetType != input.TargetType || entry.TargetName != input.TargetName {
+			continue
+		}
+		if entry.SourcePath == "" || config.PathHasComponents(input.Path, entry.SourcePath) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstPartyMatch(entries []CompiledFirstParty, input AdmissionInput) (string, bool) {
+	for _, entry := range entries {
+		if entry.Name != input.TargetName {
+			continue
+		}
+		for _, marker := range entry.SourcePathContains {
+			if config.PathHasComponents(input.Path, marker) {
+				return entry.Reason, true
+			}
+		}
+	}
+	return "", false
 }
 
 func coalesceAction(value, fallback string) string {
@@ -231,47 +155,4 @@ func coalesceAction(value, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-// matchesProvenance returns true when no provenance constraints exist or
-// when at least one constraint substring is found in the normalised path.
-func matchesProvenance(constraints []string, path string) bool {
-	if len(constraints) == 0 {
-		return true
-	}
-	if path == "" {
-		return false
-	}
-	normalised := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
-	for _, c := range constraints {
-		if strings.Contains(normalised, strings.ToLower(c)) {
-			return true
-		}
-	}
-	return false
-}
-
-// readDataJSON tries <dir>/rego/data.json first, then <dir>/data.json.
-// The rego/ subdirectory is where _seed_rego_policies writes the active
-// policy and is the canonical location. The root fallback covers the case
-// where the caller already points directly at the rego/ directory.
-func readDataJSON(dir string) ([]byte, error) {
-	regoPath := filepath.Join(dir, "rego", "data.json")
-	raw, err := os.ReadFile(regoPath)
-	if err == nil {
-		return raw, nil
-	}
-	return os.ReadFile(filepath.Join(dir, "data.json"))
-}
-
-func fallbackListEntryReason(entries []ListEntry, targetType, targetName string) (bool, string) {
-	for _, entry := range entries {
-		if entry.TargetType == targetType && entry.TargetName == targetName {
-			if entry.Reason != "" {
-				return true, entry.Reason
-			}
-			return true, fmt.Sprintf("%s '%s' is on the allow/block list", targetType, targetName)
-		}
-	}
-	return false, ""
 }

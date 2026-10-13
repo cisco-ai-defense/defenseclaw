@@ -177,3 +177,20 @@ func windowsRelaxTestDACL(t *testing.T, path string) string {
 	}
 	return sd.String()
 }
+
+func TestTeardownKeepsAgentFoldersOwnerPrivate(t *testing.T) {
+	// GAP-1243: a completed teardown hardened %APPDATA%\devin again, so the
+	// account could not protect it after the uninstall.
+	dataDir := `C:\Users\u\.defenseclaw`
+	agent := `C:\Users\u\AppData\Roaming\devin`
+	backups := filepath.Join(dataDir, "connector_backups", "devin")
+	relaxed := []string{backups, agent, dataDir}
+
+	got := windowsRelaxedPathsToRestoreAfterTeardown(dataDir, relaxed, true)
+	if len(got) != 2 || got[0] != backups || got[1] != dataDir {
+		t.Fatalf("after a completed teardown restore = %v, want only the data directory paths", got)
+	}
+	if got := windowsRelaxedPathsToRestoreAfterTeardown(dataDir, relaxed, false); len(got) != len(relaxed) {
+		t.Fatalf("after a failed teardown restore = %v, want every relaxed path", got)
+	}
+}

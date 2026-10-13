@@ -6,7 +6,7 @@ import (
 )
 
 func TestInspectCompletionScopesToAssistantOutput(t *testing.T) {
-	g := NewGuardrailInspector("balanced", nil, nil, "")
+	g := NewGuardrailInspector("balanced", nil, nil)
 
 	v := g.Inspect(
 		context.Background(),

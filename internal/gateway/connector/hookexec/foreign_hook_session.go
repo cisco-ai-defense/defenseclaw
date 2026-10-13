@@ -68,7 +68,7 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	setUserIdentityHeaders(req)
+	setUserIdentityHeaders(req, opts)
 	response, err := client.Do(req)
 	if err != nil {
 		return nil, err

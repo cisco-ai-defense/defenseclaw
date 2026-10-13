@@ -23,8 +23,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
+	"strings"
 
 	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
@@ -72,7 +74,7 @@ type SetupOpts struct {
 	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; baked into hook curl -H
+	APIToken             string // gateway bearer token; written to the hook token file, never into a script
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -120,6 +122,13 @@ type SetupOpts struct {
 	// plugins call the gateway directly and never run `defenseclaw hook`.
 	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
 	ForeignHookGuardBinary string
+	// ManagedHookBinary is the administrator-owned hook binary of a
+	// standalone managed Unix install. A connector shell hook with a hook
+	// socket runs it as `hook session-facts` for what a shell cannot read,
+	// the user's Kerberos credential cache, because a managed user has no
+	// per-user gateway binary to ask (GAP-0194). Empty (per-user installs,
+	// Secure Client, Windows) keeps every hook unchanged.
+	ManagedHookBinary string
 	// ManagedInstallMarker is an administrator-owned directory that exists
 	// exactly while the managed deployment rendering an in-agent plugin
 	// (OpenCode, Amp) is installed; the Windows standalone guardian passes
@@ -243,6 +252,12 @@ type SetupOpts struct {
 	// without one), and setup never launches the user's agent executable
 	// from the guardian process. Empty everywhere else.
 	ManagedTargetSID string
+
+	// FailedSetupFailClosed is set on the Teardown that rolls back a Setup
+	// the gateway could not finish for a fail-closed connector. The connector
+	// is still configured, so a cached hook path keeps blocking and names the
+	// failed start instead of exiting 0 unguarded (GAP-0367).
+	FailedSetupFailClosed bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
@@ -506,6 +521,32 @@ type HookCapabilityProvider interface {
 	HookCapabilities(opts SetupOpts) HookCapability
 }
 
+// ContentEnvelope is the one nested payload object a connector puts hook
+// content in, with the field inside it that holds each event's content.
+type ContentEnvelope struct {
+	// Key is the payload key of the nested object, "" for none.
+	Key string
+	// Fields maps a hook event name, as the agent sends it, to the one
+	// field inside Key that holds the event's content.
+	Fields map[string]string
+}
+
+// Field returns the envelope field holding event's content, "" when the
+// envelope declares none for it.
+func (e ContentEnvelope) Field(event string) string {
+	if e.Key == "" {
+		return ""
+	}
+	return e.Fields[strings.TrimSpace(event)]
+}
+
+func (e ContentEnvelope) clone() ContentEnvelope {
+	if e.Key == "" {
+		return ContentEnvelope{}
+	}
+	return ContentEnvelope{Key: e.Key, Fields: maps.Clone(e.Fields)}
+}
+
 // HookProfile is the declarative description a connector returns to
 // the unified hook collector. handleAgentHook is the sole entry point
 // for every connector hook route; connector-specific differences live
@@ -568,18 +609,16 @@ type HookProfile struct {
 	// events. A zero value means the experimental stateful path is disabled.
 	ToolCallLifecycle ToolCallLifecycleContract
 
-	// ContentEnvelopeKey names the single nested payload object this
-	// connector hides inspectable content in (hermes nests prompt /
-	// result text under "extra"). When set, the generic decoder —
-	// after every top-level content lookup misses — opens exactly
-	// this one declared sub-object and re-runs the expected
-	// content-key search inside it. Empty for flat-payload
-	// connectors, which therefore never take that path. Deliberately
-	// a single declared key, not a recursive scan: tool inputs /
-	// results carry attacker-influenced nested JSON, so the only
-	// sub-object ever opened is the one declared in the audited
-	// contract.
-	ContentEnvelopeKey string
+	// ContentEnvelope names the one nested payload object this connector
+	// puts inspectable content in (Hermes: the prompt, tool result and
+	// model response under "extra"). When every top-level content lookup
+	// misses, the generic decoder reads exactly the one field the
+	// envelope declares for the event, never a recursive scan or a
+	// shared key list: tool inputs and results carry attacker-influenced
+	// nested JSON, and one Hermes event carries several text fields
+	// (post_llm_call has both user_message and assistant_response). Zero
+	// for flat-payload connectors, which never take that path.
+	ContentEnvelope ContentEnvelope
 
 	// DecodeToolArgs extracts the exact structured tool-argument value from
 	// the original request body when a connector nests it outside the shared
@@ -915,6 +954,16 @@ type HookScriptOwner interface {
 // pretending the connector owns a shell script.
 type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// HookRollbackConverter is implemented by a connector whose hook entries have
+// a shape that an earlier release's teardown does not own. The installers run
+// it through 'defenseclaw-gateway connector prepare-rollback' before a
+// rollback restores an older install, so that release's uninstall still
+// removes them. It returns how many entries it rewrote. See the hook-shape
+// compatibility rule next to the Claude Code launcher guard (GAP-1284).
+type HookRollbackConverter interface {
+	ConvertHooksForRollback(opts SetupOpts) (int, error)
 }
 
 // ScopedHookTokenRequirement is implemented by connector runtimes that depend

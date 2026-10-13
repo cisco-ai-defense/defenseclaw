@@ -1142,16 +1142,16 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/health", "/status", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
 		"/plugin/disable", "/plugin/enable", "/config/patch", "/scan/result", "/enforce/block",
 		"/enforce/allow", "/enforce/blocked", "/enforce/allowed", "/alerts", "/audit/event",
-		"/policy/evaluate", "/policy/evaluate/firewall", "/policy/evaluate/audit",
-		"/policy/evaluate/skill-actions", "/policy/reload", "/skills", "/mcps", "/tools/catalog",
+		"/policy/evaluate", "/policy/reload", "/skills", "/mcps", "/tools/catalog",
 		"/v1/skill/scan", "/v1/plugin/scan", "/v1/mcp/scan", "/v1/skill/fetch", "/v1/guardrail/event",
-		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/acp/challenge", "/api/v1/acp/evaluate",
+		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/guardrail/profiles/resolve",
+		"/api/v1/acp/challenge", "/api/v1/acp/evaluate",
 		"/v1/acp/catalog", "/v1/acp/profiles", "/api/v1/inspect/tool", "/api/v1/inspect/request",
 		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code",
 		"/api/v1/network-egress", "/api/v1/telemetry/canary", "/api/v1/watchdog/recovery",
 		destinationtest.EndpointPath, cliObservabilityV8Path, alertAcknowledgementV8Path,
-		"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/agents/discovery", "/api/v1/ai-usage",
-		"/api/v1/ai-usage/scan", "/api/v1/ai-usage/discovery", "/api/v1/ai-usage/components",
+		"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/agents/discovery", "/api/v1/agents/identities", "/api/v1/ai-usage",
+		"/api/v1/ai-usage/scan", "/api/v1/ai-usage/discovery", "/api/v1/ai-usage/components", "/api/v1/ai-usage/ide-plugins",
 		"/api/v1/ai-usage/runtime", "/api/v1/ai-usage/runtime/scan", "/api/v1/correlation/graph",
 		"/api/v1/correlation/explain", "/api/v1/correlation/timeline", "/api/v1/correlation/conflicts",
 		"/api/v1/ai-usage/confidence/policy", "/api/v1/ai-usage/confidence/policy/validate",
@@ -1693,5 +1693,32 @@ func TestSandboxIngressCopyModeNeverTouchesHostFS(t *testing.T) {
 	if fmt.Sprint(readable.extras) != fmt.Sprint(unreadable.extras) {
 		t.Fatalf("copy-mode hook audit rows depend on host files:\n readable:   %v\n unreadable: %v",
 			readable.extras, unreadable.extras)
+	}
+}
+
+// TestSandboxModelErrorKeepsTheClassAndStatus (GAP-0271): a StopFailure
+// hook hands the manager the error class and HTTP status of the model API
+// failure, never the message; other events hand it nothing.
+func TestSandboxModelErrorKeepsTheClassAndStatus(t *testing.T) {
+	for _, c := range []struct {
+		event   string
+		payload map[string]interface{}
+		class   string
+		status  int
+	}{
+		{"StopFailure", map[string]interface{}{"error": "authentication_failed",
+			"last_assistant_message": "Please run /login · API Error: 401 Invalid bearer token"}, "authentication_failed", 401},
+		{"StopFailure", map[string]interface{}{"error": "Bad class!", "error_details": `API Error: 403 {"Message":"denied"}`}, "unknown", 403},
+		{"StopFailure", map[string]interface{}{"error": "server_error"}, "server_error", 0},
+		// GAP-0354: OpenShell's refusal of a conversation that carries a
+		// credential placeholder is no rejected key.
+		{"StopFailure", map[string]interface{}{"error": "authentication_failed", "last_assistant_message": "Please run /login · API Error: 403 " +
+			"A credential placeholder in the request body cannot be forwarded. Remove the reference from conversation history"}, "credential_placeholder", 403},
+		{"Stop", map[string]interface{}{"error": "authentication_failed", "last_assistant_message": "API Error: 401"}, "", 0},
+	} {
+		class, status := sandboxModelError(agentHookRequest{HookEventName: c.event, Payload: c.payload})
+		if class != c.class || status != c.status {
+			t.Errorf("%s %v = %q, %d; want %q, %d", c.event, c.payload, class, status, c.class, c.status)
+		}
 	}
 }

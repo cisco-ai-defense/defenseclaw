@@ -2265,17 +2265,20 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "TokenIntegrityLevel" in harness
     assert "TokenRestrictedSids" in harness
     assert "IsTokenRestricted" in harness
-    assert "'S-1-16-12288'" in token_probe
-    assert "'S-1-16-16384'" in token_probe
+    # Every service, the gateway included, runs as LocalSystem at System
+    # integrity and must carry its own service SID as a group.
+    assert "$expectedUserSID = 'S-1-5-18'" in token_probe
+    assert "$expectedIntegritySID = 'S-1-16-16384'" in token_probe
+    assert "'S-1-16-12288'" not in token_probe
     assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
     assert "$sensorHelper = $serviceName -eq $script:SensorHelperServiceName" in token_probe
     assert "$expectedPrivileges = if ($gateway -or $broker -or $sensorHelper)" in token_probe
-    assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
-    assert "if (-not $gateway -and" in token_probe
     assert "if (-not $gateway -and -not $broker -and -not $sensorHelper)" in token_probe
-    assert "service_sid_group_required = -not $gateway" in token_probe
+    assert "-not [bool]$serviceGroups[0].Enabled -or" in token_probe
+    assert "[bool]$serviceGroups[0].DenyOnly) {" in token_probe
+    assert "service_sid_group_required = $true" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
     assert "restricted SID list lacks one exact service-logon SID" in token_probe
@@ -2293,7 +2296,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System service integrity" in harness
+    assert "LocalSystem TokenUser, System integrity for every service" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -3741,6 +3744,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Write-DefenseClawJsonAtomic"
         )
     ]
+    # The replacement helpers branch on the enterprise profile (Standalone
+    # retires stale replacement backups); run the probe under both profiles.
+    profile_check = module[
+        module.index("function Test-DefenseClawStandaloneProfile") : module.index(
+            "function Get-DefenseClawClaudeMinimumClientVersion"
+        )
+    ]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -3762,8 +3772,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        + profile_check
         + atomic_install
         + r'''
+foreach ($profileName in @('SecureClient', 'Standalone')) {
+$script:DefenseClawEnterpriseProfile = $profileName
 $root = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-AtomicFile-$([Guid]::NewGuid().ToString('N'))"
@@ -3808,15 +3821,16 @@ try {
     }
     if (@([IO.Directory]::GetFiles($root, '*.new.*')).Count -ne 0 -or
         @([IO.Directory]::GetFiles($root, '*.backup.*')).Count -ne 0) {
-        throw 'atomic replacement left a staging or backup file behind'
+        throw "$profileName atomic replacement left a staging or backup file behind"
     }
-    'ok'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
         [IO.Directory]::Delete($root, $true)
     }
 }
+}
+'ok'
 ''',
         encoding="utf-8",
     )
@@ -5622,16 +5636,19 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
-    # A standalone purge then removes the Claude Code folders Setup created
-    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # A standalone purge then removes the runtime selector state (GAP-0262)
+    # and the Claude Code folders Setup created once they are empty
+    # (GAP-0100), and stale protected PowerShell temp
     # folders (GAP-1734), and reports what it kept (behaviour in
     # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
     assert (
         "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
-        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+        "        $machineStateRemaining = [string[]]@(\n"
+        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
     ) in module
+    assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
     assert (
         "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
@@ -5708,6 +5725,12 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     )
     assert quiesce < validate_only < ipc_revoke < destructive_root_cleanup
     assert destructive_root_cleanup < service_delete
+    # GAP-0250: standalone removes its own IPC directory and OpenCode plugin,
+    # which the native validator does not adopt, once the services are
+    # stopped and before the root is validated.
+    standalone_ipc = fallback.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout")
+    assert quiesce < standalone_ipc < validate_only
+    assert "Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout" in fallback[standalone_ipc:validate_only]
     quiesce_body = fallback[quiesce:ipc_revoke]
     assert "Set-DefenseClawServiceStartMode" in quiesce_body
     assert "Stop-DefenseClawService -Name $name" in quiesce_body
@@ -5856,3 +5879,153 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert "'contract-cleanup-after-native'" in smoke
     assert "'legacy-schema1-before-state-delete'" in smoke
     assert 'HarnessRealManagedContractCleanup' in smoke
+
+
+def test_uninstall_tombstone_names_the_removed_release() -> None:
+    """GAP-1074: installed_version after an uninstall is the removed release."""
+    module = read(MODULE)
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") :
+        module.index("Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath")
+    ]
+    tombstone = uninstall[uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata") :]
+    assert "$tombstone.Contains('product_version')" in tombstone
+    assert "$metadata.PSObject.Properties['product_version']" in tombstone
+    assert "$tombstone['product_version'] = [string]$removedVersion.Value" in tombstone
+    assert "$tombstone.Remove('product_version')" in tombstone
+
+
+def test_install_after_cli_purge_does_not_return_the_purge_result() -> None:
+    """GAP-1079: only Uninstall reports a finished self-uninstall purge."""
+    module = read(MODULE)
+    recovery = module[
+        module.index("function Invoke-DefenseClawSelfUninstallRecovery") :
+        module.index("function Complete-DefenseClawSelfUninstallRetirement")
+    ]
+    tail = recovery[recovery.rindex("Remove-DefenseClawSelfUninstallEvidence") :]
+    assert "if ($Action -eq 'Uninstall' -and\n        [bool]$receipt.purge_requested" in tail
+
+
+def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
+    # The helper is an expandable here-string, where a backtick before a
+    # newline is an escape, not a continuation. A split call ran
+    # Complete-DefenseClawSelfUninstallRetirement without -ReceiptPath, so
+    # the finalizer exited and left the ARP entry, HKLM key and retired
+    # install root behind (GAP-1373).
+    module = read(MODULE)
+    builder = module[
+        module.index("function Get-DefenseClawSelfUninstallHelperContent") :
+        module.index("function Assert-DefenseClawSelfUninstallHelper")
+    ]
+    helper = builder[builder.index('return @"') : builder.index('\n"@')]
+    assert not [line for line in helper.splitlines() if line.rstrip().endswith("`")]
+    call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
+    assert "-ReceiptPath `$ProtectedReceiptPath" in call
+    assert "-WaitForCallerExit" in call
+
+
+def test_only_the_lifecycle_transaction_records_the_installed_config() -> None:
+    # validate-service-config migrates and records the config only when the
+    # install-like lifecycle asks, after its snapshot; verify is read-only.
+    module = read(MODULE)
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    start = module.index("function Assert-DefenseClawEnterpriseDeployment {")
+    deployment = module[start : module.index("\nfunction ", start + 1)]
+    after_snapshot = install_like[install_like.index("$snapshot = New-DefenseClawTransaction `") :]
+    assert "-GatewayServiceName $GatewayServiceName `" in after_snapshot
+    # Secure Client keeps its validate-only check (GAP-0136, issue #1092).
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in after_snapshot
+    assert "Assert-DefenseClawInstalledConfig" in deployment and "-RecordLifecycle" not in deployment
+
+
+def _module_function(module: str, name: str) -> str:
+    start = module.index(f"function {name} {{")
+    end = module.find("\nfunction ", start + 1)
+    return module[start : end if end != -1 else len(module)]
+
+
+def test_gateway_service_logs_on_as_local_system() -> None:
+    """Spec 007: the gateway runs as LocalSystem, keeping its restricted
+    service SID and single required privilege."""
+    module = read(MODULE)
+    assert "function Get-DefenseClawGatewayServiceAccount {\n    return 'LocalSystem'\n}" in module
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "Get-DefenseClawGatewayServiceAccount" in setter
+    assert setter.count("'obj=', $gatewayAccount,") == 2  # sc config and sc create
+    assert '$gatewayAccount = "NT SERVICE\\$GatewayServiceName"' not in setter
+    # The writer proves the account it configured.
+    assert "gateway service account is $writtenGatewayAccount after configuration" in setter
+
+    configurations = _module_function(module, "Assert-DefenseClawManagedServiceConfigurations")
+    deployment = _module_function(module, "Assert-DefenseClawEnterpriseDeployment")
+    for body in (configurations, deployment):
+        assert "-ExpectedAccount $ExpectedGatewayAccount" in body
+        assert '-ExpectedAccount "NT SERVICE\\$GatewayServiceName"' not in body
+        # Restricted service SID and least privilege are unchanged.
+        assert "-ExpectedSidType 3" in body
+        assert "-ExpectedPrivileges @('SeChangeNotifyPrivilege')" in body
+
+    metadata_writer = _module_function(module, "New-DefenseClawDeploymentMetadata")
+    assert "gateway_account = (Get-DefenseClawGatewayServiceAccount)" in metadata_writer
+    # The service SID remains the gateway's ACL and trust identity.
+    assert '"DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\\$GatewayServiceName"' in module
+
+
+def test_gateway_needs_no_service_logon_right() -> None:
+    """Spec 007: no code grants or asserts SeServiceLogonRight."""
+    sources = [MODULE, INSTALLER, ROOT / "scripts" / "test-windows-enterprise-hardening.ps1"]
+    sources += sorted((ROOT / "internal").rglob("*.go"))
+    sources += sorted((ROOT / "cmd").rglob("*.go"))
+    for path in sources:
+        text = read(path)
+        for needle in ("SeServiceLogonRight", "LsaAddAccountRights"):
+            assert needle not in text, f"{path.relative_to(ROOT)} references {needle}"
+
+
+def test_existing_virtual_account_gateway_migrates_in_place() -> None:
+    """Spec 007: installs whose gateway logs on as the virtual account are
+    upgraded, repaired, reinstalled, rolled back and uninstalled in place."""
+    module = read(MODULE)
+
+    accepted = _module_function(module, "Get-DefenseClawAcceptedGatewayServiceAccounts")
+    assert "Get-DefenseClawGatewayServiceAccount" in accepted
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in accepted
+    legacy = _module_function(module, "Get-DefenseClawLegacyGatewayServiceAccount")
+    assert 'return "NT SERVICE\\$GatewayServiceName"' in legacy
+
+    # Ownership: the old account is this deployment's own gateway, not foreign.
+    owned = _module_function(module, "Assert-DefenseClawOwnedServiceOrAbsent")
+    assert "Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name" in owned
+
+    # Verification and teardown accept both accounts unless narrowed.
+    for name in ("Assert-DefenseClawManagedServiceConfigurations", "Assert-DefenseClawEnterpriseDeployment"):
+        body = _module_function(module, name)
+        assert "[string[]]$ExpectedGatewayAccount" in body
+        assert "Get-DefenseClawAcceptedGatewayServiceAccounts" in body
+    configuration = _module_function(module, "Assert-DefenseClawServiceConfiguration")
+    assert "[Parameter(Mandatory)][string[]]$ExpectedAccount" in configuration
+
+    # The transaction preimage records each service account.
+    transaction = _module_function(module, "New-DefenseClawTransaction")
+    assert "account = $account" in transaction
+    assert "-Name ObjectName" in transaction
+
+    # Rollback restores the recorded account and verifies exactly that one.
+    reader = _module_function(module, "Get-DefenseClawTransactionGatewayAccount")
+    assert "PSObject.Properties['account']" in reader
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in reader  # preimages from earlier releases
+    assert "transaction records an unsupported gateway service account" in reader
+    restore = _module_function(module, "Restore-DefenseClawTransaction")
+    assert "-RestoreGatewayAccount (\n                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot\n            )" in restore
+    ready = _module_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "-ExpectedGatewayAccount @(\n            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot\n        )" in ready
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "[string]$RestoreGatewayAccount" in setter
+    assert "a recorded gateway account can be restored only while transaction services remain disabled" in setter
+    assert "refusing to restore unsupported gateway service account" in setter

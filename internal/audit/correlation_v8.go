@@ -388,6 +388,11 @@ type CorrelationRelationship struct {
 	Status         CorrelationRelationshipStatus `json:"status"`
 	CreatedAt      time.Time                     `json:"created_at"`
 	LastSeenAt     time.Time                     `json:"last_seen_at"`
+	// Unchanged is set by PutRelationship when the relationship already
+	// existed with the same status: the occurrence only added evidence.
+	// Confidence follows from the method, which is part of the ID, so it
+	// cannot change without a new relationship (GAP-0423).
+	Unchanged bool `json:"-"`
 }
 
 type CorrelationRelationshipInput struct {
@@ -1470,6 +1475,14 @@ func (tx *CorrelationTx) PutRelationship(
 	id := deterministicCorrelationID("rel_", string(input.FromKind), input.FromID,
 		string(input.ToKind), input.ToID, string(input.Type), string(input.Method), input.RuleID,
 		input.RuleVersion)
+	var previous string
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_relationships
+		WHERE relationship_id = ?`, id).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		previous = ""
+	case err != nil:
+		return CorrelationRelationship{}, fmt.Errorf("audit: read correlation relationship: %w", err)
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_relationship_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationships (
 			relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
@@ -1490,6 +1503,7 @@ func (tx *CorrelationTx) PutRelationship(
 		ToKind: input.ToKind, ToID: input.ToID, Type: input.Type, Method: input.Method,
 		Confidence: confidence, RuleID: input.RuleID, RuleVersion: input.RuleVersion,
 		Status: input.Status, CreatedAt: input.ObservedAt, LastSeenAt: input.ObservedAt,
+		Unchanged: previous == string(input.Status),
 	}, nil
 }
 

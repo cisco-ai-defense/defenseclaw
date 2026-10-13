@@ -29,7 +29,11 @@ local destination's v8 profile upstream; do not rely on panel queries.
 <Callout type="warn" title="Review the effective plan before enabling export">
 An enabled destination with no `send` or `routes` receives every signal it supports,
 from every bucket, with profile `none`. Run `defenseclaw observability plan` and
-`defenseclaw doctor` to find unredacted legs.
+`defenseclaw doctor` to find unredacted legs. On a managed install, where those
+per-user commands are not available, run `defenseclaw enterprise <os> status`
+(`linux`, `macos` or `windows`) as an administrator: it lists each destination
+with its kind, signals and effective redaction profile (`destinations[]` in
+`--json`).
 </Callout>
 
 ## Guided CLI workflow
@@ -166,8 +170,9 @@ defenseclaw setup redaction route move splunk-production critical-findings \
 defenseclaw setup redaction route remove splunk-production critical-findings --yes
 ```
 
-Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`.
-Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
+Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`
+(the default is no restart: a running gateway applies a verified change by
+itself, and `--restart` also restarts it). Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
 means “leave that field unchanged”; reset/inherit verbs remove the corresponding
 source override explicitly. JSON dry-runs report `applied: false`; confirmed
 writes emit their result only after verification and include `backup_path`,
@@ -180,7 +185,7 @@ writes emit their result only after verification and include `backup_path`,
 | `none` | Preserves every registered field and supplied content. | Trusted local lab or tightly controlled forensic backend. |
 | `sensitive` | Detects PII, credentials, and secrets inside content-like fields while retaining useful surrounding structure. | Internal operations and SOC investigation. |
 | `content` | Redacts whole prompt, response, tool, document, evidence, and other content bodies while preserving safe metadata/correlation. | Shared production observability. |
-| `strict` | Removes or transforms content, credentials, paths, reasons, evidence, and error detail aggressively. | Least-data external export. |
+| `strict` | Removes or transforms content, credentials, paths, reasons, evidence, and error detail aggressively, and removes the personal identifiers (user principal, Kerberos principal, client address, tenant ID and email). | Least-data external export. |
 
 There is no v7 compatibility built-in. Upgrading a redacting v7 installation
 writes an ordinary custom profile named `v7-compatible` into
@@ -192,19 +197,34 @@ else.
 
 One class differs from v7, and it is a property of the v8 model rather than of
 the migration: **identifiers are preserved**. v7 whole-replaced them; no v8
-profile redacts them, and a custom profile that tries is rejected at load.
+profile redacts the class, and a custom profile that tries is rejected at load.
 Identifiers are what joins one record to another, so the model reserves that
-decision rather than letting a profile sever correlation silently. Nothing v7
-redacted as content, reason, evidence, error, path, or credential is revealed
-by upgrading.
+decision rather than letting a profile sever correlation silently. The one
+exception is `strict`: it also removes the five identifiers that name a person
+and not a join key (see below). Nothing v7 redacted as content, reason,
+evidence, error, path, or credential is revealed by upgrading.
 
-<Callout type="warn" title="User identifiers are not redacted">
-This preserved class includes `user.id`, `defenseclaw.user.id_kind`,
-`defenseclaw.user.name`, and `defenseclaw.user.email`. In particular, enabling
-`ai_discovery.include_user_email` can export a sensitive cross-system personal
-identifier as plaintext; no built-in or custom v8 profile can remove it. Keep
-email collection disabled unless every selected destination and your privacy
-policy allow it. See [End-user identity](/docs/observability/end-user-identity).
+<Callout type="warn" title="Only strict removes personal identifiers">
+The preserved class includes `user.id`, `defenseclaw.user.id_kind`,
+`defenseclaw.user.name`, and the identifiers that name a person:
+`defenseclaw.user.principal`, `defenseclaw.session.kerberos_principal`,
+`client.address`, `defenseclaw.user.tenant_id` and `defenseclaw.user.email`. The
+telemetry registry marks these five sensitive, and nothing joins on them. The
+`strict` profile, and a custom profile that extends it, removes them from every
+log and trace it delivers, Galileo and the local audit export included; `none`,
+`sensitive` and `content` keep them as plaintext. `user.id`, the account name and
+the agent and session ids stay in every profile, so records still join. On the
+Secure Client profile every profile keeps all five, as before 1.0.
+
+`ai_discovery.include_user_principal` and `ai_discovery.include_user_email` decide
+whether the gateway attaches the principals and available email at all, for every
+destination at once. Email comes from the inventory of a managed host (each
+enrolled account's own Claude Code and Codex files), or from Cursor hook payloads.
+The client address and the tenant ID have no switch. To send
+a principal to a trusted local Loki but not to Galileo or another SaaS destination,
+turn the option on and give the destinations that must not receive it the
+`strict` profile (or a custom profile that extends it). See
+[End-user identity](/docs/observability/end-user-identity).
 </Callout>
 
 ## Resolution order
@@ -223,7 +243,7 @@ This example keeps the fresh default for local SQLite, removes whole model conte
 on general routes, and applies substring detection to one SOC destination:
 
 ```yaml
-config_version: 8
+config_version: 9
 observability:
   defaults:
     redaction_profile: content
@@ -352,6 +372,40 @@ with a redacted placeholder, or replace an unparseable URL with a safe placehold
 These transformations apply only to logs, telemetry, and audit projections; they
 do not rewrite an upstream request.
 
+## Process command lines
+
+A process's command line is content. Before it leaves the process that read it,
+DefenseClaw removes the secrets from it, and the destination's profile then
+applies to the result as it does to every other content field. One
+implementation does this for the sandbox process tree, for the managed Linux
+sensor helper (every command line it reads from Tetragon or from the `cn_proc`
+fallback) and for the sandbox kernel feed. Running it again over a line that
+was already redacted changes nothing.
+
+It replaces the value, and keeps the flag or key, in these shapes:
+
+- an argument that names a secret and carries it (`--token=...`,
+  `api_key=...`, `--password value`), where the name contains `token`,
+  `secret`, `password`, `api key`, `auth`, `credential` or `private key`;
+- a header: the value after `Authorization:` (the scheme word, such as
+  `Bearer` or `Basic`, stays) or after a header whose name is one of those, whether it is a
+  separate argument, joined by `=` (`--header=X-Api-Key: ...`) or quoted;
+- the password of `user:password` after `curl -u`, `--user` and
+  `--proxy-user`, and a MySQL client's attached `-pPASSWORD`;
+- the password in a URL (`scheme://user:password@host`);
+- a bare argument shaped like a key: 32 or more letters, digits and key
+  punctuation, with both letters and digits, and no slash;
+- the words of a script or `eval` argument, checked the same way, including a
+  script nested in another one and quoted values that contain spaces.
+
+A Codex notify program keeps only its program words: its last argument is the
+agent turn's JSON, the user's prompt and the agent's reply, and it is replaced
+by `[argv withheld: agent turn payload]`.
+
+Redaction placeholders look like `<redacted len=23 prefix="d" sha=5f84a2a8>`.
+Text next to a placeholder in the same word goes through the same rules, so a
+placeholder-shaped string cannot carry a secret past them.
+
 ## Multiple destinations
 
 Redaction is resolved independently for each matching destination. It never mutates
@@ -389,18 +443,24 @@ profile or error path falls back from a configured redacting profile to raw outp
 Local mandatory records are minimal and content-safe by construction. Disabling
 normal log collection cannot disable this SQLite-only compliance floor.
 
-## V7 compatibility (upgrades only)
+## Importing an old install (upgrades only)
 
 <Accordions>
 
 <Accordion title="What happens to v7 redaction settings">
 
-The v7 `privacy` block's `disable_redaction` field and
-`DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
-They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
-materializes their effective behavior into the `none` built-in or a generated
-`v7-compatible` custom profile before retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
-with an actionable upgrade message.
+Only an install older than 0.8.5 has v7 redaction settings. When the 1.0
+installer imports one (see
+[Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)),
+its converter materializes the effective behavior of the old controls into the
+`none` built-in or a generated `v7-compatible` custom profile, and then retires
+the old inputs. Nothing in the running product reads them afterwards: a gateway
+rejects legacy observability and redaction blocks with an actionable upgrade
+message. This section stays for as long as the installer imports 0.x installs
+older than 0.8.5.
+
+A `privacy` section left in `config.yaml` is not a `config_version` 9 key. The upgrade
+drops it and records it in `migration-v9.json`, noting there when it had turned redaction off.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
@@ -411,7 +471,10 @@ does not alter the v8 destination route graph or a persistent-sink projection.
 
 ## Write and activation safety
 
-The CLI is the preferred redaction editor. Each mutation runs the strict Python
+The CLI is the preferred redaction editor. It writes through the same config
+writer as `defenseclaw config set`: the shared `config.yaml.lock`, a refusal on
+a managed standalone device, and a new entry in
+`config.generation.json`. Each mutation runs the strict Python
 source validator and the canonical Go compiler before writing. For a changed,
 non-dry-run write, it compares the live file with the preview digest, installs a
 private backup, atomically replaces `config.yaml`, verifies the installed
@@ -428,16 +491,16 @@ target but drops the setup row details, which then read
 
 Comments and unrelated source formatting are retained outside the exact policy
 span being edited. `--restart` restarts the gateway after verification; without
-it, the gateway uses its configured hot-reload behavior.
+it, which is the default, a running gateway applies the change by itself.
 
-When `--no-restart` explicitly stages a change while the gateway is unavailable,
-the CLI still verifies the installed effective-plan digest but warns on stderr
+When the gateway is not running while you change policy, the CLI still verifies the installed effective-plan digest but warns on stderr
 that the canonical setup audit event could not be recorded. Start the gateway
 before the next policy change when canonical audit admission is required. JSON
 mutation output remains machine-readable on stdout.
 
 For manual changes outside the CLI-owned redaction surface, edit only
-`~/.defenseclaw/config.yaml` and stop before restart if validation fails:
+`~/.defenseclaw/config.yaml`, check it, and stop if validation fails. A running
+gateway applies a valid edit by itself:
 
 ```bash
 umask 077
@@ -447,7 +510,6 @@ cp "$HOME/.defenseclaw/config.yaml" \
 defenseclaw config validate && \
 defenseclaw config show --effective --section observability && \
 defenseclaw observability plan && \
-defenseclaw-gateway restart && \
 defenseclaw doctor
 ```
 
@@ -464,6 +526,9 @@ defenseclaw config show --effective --section observability
 defenseclaw observability plan
 defenseclaw doctor
 ```
+
+On a managed install, `defenseclaw enterprise <os> status` run as an
+administrator lists the same destinations and resolved profiles.
 
 The source view shows deliberate choices. The effective/plan views show generated
 local SQLite policy, capability-default routes, resolved profiles, and warnings.

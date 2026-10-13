@@ -16,13 +16,9 @@
 
 """defenseclaw alerts — View and manage security alerts.
 
-P3-#20 collapsed the legacy Textual TUI here in favour of the Go-based
-panel shipped with ``defenseclaw tui`` (internal/tui/alerts.go). This
-module now renders a plain, pipe-friendly table by default and supports
-``--show N`` for scripted deep dives. The ``--tui`` flag is retained as
-a no-op for backward compatibility with muscle memory and older docs;
-it prints a deprecation notice and falls through to the table so
-existing aliases/scripts keep working.
+The interactive Alerts panel lives in ``defenseclaw tui``. This module
+renders a plain, pipe-friendly table by default and supports
+``--show N`` for scripted deep dives.
 """
 
 from __future__ import annotations
@@ -32,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -221,21 +218,27 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import detection_only_hook_label  # noqa: PLC0415
+    from defenseclaw.hook_metrics import (  # noqa: PLC0415
+        POST_TOOL_DECISION,
+        detection_only_hook_label,
+        would_block_hook_label,
+    )
 
     decision = ""
     for raw in hook_details:
         kv = _kv(_strip_details_json(raw))
         action = kv.get("action", "").lower()
         if action == "block":
-            return "blocked"
+            # A block on PostToolUse held the result back; the call had run (GAP-1344).
+            return POST_TOOL_DECISION if detection_only_hook_label(hook_event) == POST_TOOL_DECISION else "blocked"
         # Observe mode records action=allow raw_action=block, with or without
         # would_block=true; both are "would block" (GAP-1213).
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
         if kv.get("would_block", "").lower() == "true" or observed_block:
             # A post-tool or MessageDisplay finding cannot block, whatever
-            # the connector's mode (GAP-1303, GAP-1531).
-            decision = detection_only_hook_label(hook_event) or "would block (observe mode)"
+            # the connector's mode (GAP-1303, GAP-1531); a Hermes or Amp prompt
+            # in action mode got a notice instead (GAP-0898).
+            decision = would_block_hook_label(hook_event, kv.get("mode", ""))
         elif not decision and action:
             decision = action
     return decision
@@ -265,9 +268,9 @@ def _rule_pack_dirs() -> list[Path]:
         from defenseclaw import config as config_module  # noqa: PLC0415
 
         cfg = config_module.load()
-        gc = cfg.guardrail
-        if str(getattr(gc, "rule_pack_dir", "") or "").strip():
-            dirs.append(Path(gc.rule_pack_dir).expanduser())
+        configured = cfg.guardrail.effective_rule_pack_dir()
+        if configured:
+            dirs.append(Path(configured))
         policy_dir = str(getattr(cfg, "policy_dir", "") or "").strip()
         if policy_dir:
             seeded = Path(policy_dir).expanduser() / "guardrail"
@@ -380,6 +383,10 @@ def _finding_facts(
             "connector": _event_connector(e),
             "rule": f"{rule_id}: {title}" if title else rule_id,
             "sandbox": sandbox if sandbox != (target or sandbox) else "",
+            # GAP-0377: what the finding means and what to do, which the
+            # daemon writes and the title (often OpenShell's) does not say.
+            "description": str(structured.get("defenseclaw.finding.description") or "").strip(),
+            "next_step": str(structured.get("defenseclaw.finding.remediation") or "").strip(),
         }
     target = copilot_hook_target(target)
     facts = {
@@ -392,6 +399,8 @@ def _finding_facts(
         "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
         "route": _acp_route(hook_details.get(e.id, [])),
         "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
+        # GAP-0232: a finding raised in a sandbox session names the sandbox.
+        "sandbox": next((s for raw in hook_details.get(e.id, []) if (s := _kv(raw).get("sandbox", ""))), ""),
     }
     return facts
 
@@ -472,6 +481,38 @@ def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
     return result if isinstance(result, dict) else {}
 
 
+# Control and bidi formatting characters an agent can put in the text it
+# reports (a session id), so the detail cannot render other than it reads.
+_DISPLAY_UNSAFE = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+
+
+def alert_agent_facts(store, alert_ids: list[str]) -> dict[str, list[tuple[str, str]]]:
+    """Labelled facts of who an alert is about: user, agent identity,
+    instance, session and sub-agent depth (GAP-0381)."""
+    lookup = getattr(store, "agent_facts_for_alerts", None)
+    ids = [alert_id for alert_id in alert_ids if alert_id and not alert_id.startswith("gw:")]
+    if lookup is None or not ids:
+        return {}
+    try:
+        found = lookup(ids)
+    except Exception:  # an older or locked audit DB only loses these facts
+        return {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    for alert_id, facts in (found or {}).items():
+        rows = [
+            (label, _DISPLAY_UNSAFE.sub(" ", str(facts[key])).strip()[:200])
+            for key, label in (("user", "User"), ("agent_identity", "Agent"), ("agent_instance", "Instance"),
+                               ("session", "Session"))
+            if facts.get(key)
+        ]
+        depth = str(facts.get("depth") or "")
+        if depth.isdigit():
+            rows.append(("Depth", f"{depth} (sub-agent)" if int(depth) > 0 else "0 (main agent)"))
+        if rows:
+            out[alert_id] = rows
+    return out
+
+
 def _connector_needle(connector: str | None) -> str:
     """The --connector value as a stored connector name: ``claude-code`` (the
     name 'defenseclaw setup claude-code' takes) matches ``claudecode`` (GAP-2130)."""
@@ -516,11 +557,8 @@ def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None
     raise SystemExit(1)
 
 
-def _render_table(alert_list: list, store, connector: str | None = None) -> None:
-    """Plain Rich table — the single renderer since the Textual TUI
-    was retired in P3-#20. Kept in a helper so the deprecated
-    ``--tui`` flag can fall through here without duplicating the
-    column/width logic."""
+def _render_table(alert_list: list, store, connector: str | None = None, *, secure_client: bool = False) -> None:
+    """Plain Rich table: the single renderer for ``defenseclaw alerts``."""
     from rich import box
     from rich.console import Console
     from rich.markup import escape
@@ -530,7 +568,10 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     term_width = console.size.width
     # A wide terminal shows the whole hook event (UserPromptSubmit,
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
-    w_target = _W_TARGET if term_width < 100 else 18
+    w_target = (
+        _W_TARGET if term_width < 100 else
+        18 if secure_client else min(40, max(20, (term_width - 60) // 2))
+    )
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
@@ -565,14 +606,19 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(copilot_hook_target(e.target or "", _event_connector(e)), w_target)
+        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        shown_target = _short_hook_target(hook_target, _event_connector(e)) if secure_client else hook_target
+        target = _trunc_path(shown_target, w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
         quarantined = _quarantine_facts(e, targets)
         if facts is not None:
-            short = _path_name(_short_hook_target(facts["target"], facts.get("connector", "")))
-            target = _trunc_path(short, w_target)
+            shown_target = (
+                _short_hook_target(facts["target"], facts.get("connector", ""))
+                if secure_client else facts["target"]
+            )
+            target = _trunc_path(_path_name(shown_target), w_target)
             raw_details = _finding_details(facts)
         elif quarantined is not None:
             target = _trunc_path(quarantined["target"], w_target)
@@ -609,12 +655,6 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         "A name that matches no connector exits 1 and lists the active connectors."
     ),
 )
-@click.option(
-    "--tui/--no-tui",
-    default=False,
-    hidden=True,
-    help="Retired: use 'defenseclaw tui' (Alerts panel). Prints a notice and shows the table.",
-)
 @click.option("--json", "as_json", is_flag=True, help="Print the alerts as a JSON list.")
 @click.pass_context
 def alerts(
@@ -622,7 +662,6 @@ def alerts(
     limit: int,
     show_idx: int | None,
     connector: str | None,
-    tui: bool,
     as_json: bool,
 ) -> None:
     """View and manage security alerts."""
@@ -634,7 +673,7 @@ def alerts(
     if as_json:
         _alerts_json(app, limit, connector)
         return
-    _alerts_default(app, limit, show_idx, tui, connector)
+    _alerts_default(app, limit, show_idx, connector)
 
 
 # Delivery failure codes (internal/observability/delivery) in plain words.
@@ -651,6 +690,8 @@ _DELIVERY_FAILURE_REASONS = {
     "request_canceled": "the export was canceled (usually a gateway restart)",
     "acknowledgement_lost": "the export was sent but no reply arrived",
     "transport_failed": "a network error interrupted the export",
+    "file_write_failed": "the destination file could not be written",
+    "no_space": "the destination disk is full",
     "endpoint_prohibited": "the endpoint is blocked by the egress policy",
     "queue_full": "the export queue was full, so records were dropped",
 }
@@ -700,6 +741,12 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         alert_list = app.store.list_alerts(limit)
     hook_details = _hook_details_for(app.store, alert_list)
     targets = _alert_targets_for(app.store, alert_list)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    agents = ({} if _enterprise_profile(app.cfg) == "secure_client"
+              else alert_agent_facts(app.store, [e.id for e in alert_list]))
+    json_keys = {"User": "user", "Agent": "agent_identity_id", "Instance": "agent_instance_id",
+                 "Session": "session_id", "Depth": "agent_depth"}
     rows = []
     for e in alert_list:
         row = {
@@ -717,11 +764,16 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
             row["target"] = facts["target"]
-        for key in ("decision", "route", "rule", "scanner", "location", "sandbox", "path", "moved_to"):
+        for key in (
+            "decision", "route", "rule", "scanner", "location",
+            "sandbox", "path", "moved_to", "description", "next_step",
+        ):
             if facts.get(key):
                 row[key] = facts[key]
         if "moved_to" in facts:
             row.setdefault("decision", "quarantined")
+        for label, value in agents.get(e.id, []):
+            row[json_keys[label]] = int(value.split(" ", 1)[0]) if label == "Depth" else value
         rows.append(row)
     click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
@@ -730,7 +782,6 @@ def _alerts_default(
     app: AppContext,
     limit: int,
     show_idx: int | None,
-    tui: bool,
     connector: str | None = None,
 ) -> None:
     """View security alerts as a table (legacy ``defenseclaw alerts``)."""
@@ -765,12 +816,19 @@ def _alerts_default(
     else:
         alert_list = app.store.list_alerts(limit)
 
+    # Detection-only findings are not alerts (#693); say how many the list
+    # leaves out, or "All clear" hides rules that matched calls that ran
+    # (GAP-0176).
+    unlisted = "" if needle or show_idx is not None else _detection_only_note(app.store)
     if not alert_list:
         if needle:
             ux.ok(
                 f"No alerts from connector '{needle}' in the last "
                 f"{max(limit, _CONNECTOR_SCAN_POOL)} events."
             )
+        elif unlisted:
+            ux.ok("No alerts.")
+            click.echo(ux.dim(unlisted))
         else:
             ux.ok("No alerts. All clear.")
         return
@@ -807,7 +865,8 @@ def _alerts_default(
         if facts:
             for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
                               ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
-                              ("sandbox", "Sandbox"), ("path", "Path")):
+                              ("sandbox", "Sandbox"), ("path", "Path"), ("description", "Details"),
+                              ("next_step", "Next step")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
         elif quarantined:
@@ -822,6 +881,14 @@ def _alerts_default(
             human = _humanize_details(e.details)
             if human:
                 click.echo(f"  {label('Details')} {human}")
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        agent = ([] if _enterprise_profile(app.cfg) == "secure_client"
+                 else alert_agent_facts(app.store, [e.id]).get(e.id, []))
+        for name, value in agent:
+            click.echo(f"  {label(name)} {value}")
+        agent_user = next((value for name, value in agent if name == "User"), "")
+        agent_connector = (facts or {}).get("connector") or _event_connector(e)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
@@ -841,19 +908,39 @@ def _alerts_default(
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
         hint = _alert_next_step(e)
+        if not hint and agent_user and agent_connector:
+            hint = f"defenseclaw agent identities --user {shlex.quote(agent_user)} --connector {agent_connector}"
         if hint:
             click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
         if e.id:
             click.echo(ux.dim(f"  Acknowledge: defenseclaw alerts acknowledge --id {e.id}"))
         return
 
-    if tui:
-        ux.warn(
-            "`defenseclaw alerts --tui` has been retired. "
-            "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
-        )
+    from defenseclaw.commands.cmd_status import _enterprise_profile
 
-    _render_table(alert_list, app.store, connector=needle)
+    _render_table(
+        alert_list, app.store, connector=needle,
+        secure_client=_enterprise_profile(app.cfg) == "secure_client",
+    )
+    if unlisted:
+        click.echo(ux.dim(unlisted))
+
+
+def _detection_only_note(store) -> str:
+    """The line naming the detection-only findings of the last 24 hours, or ""."""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    try:
+        n = store.count_detection_only_findings(datetime.now(timezone.utc) - timedelta(hours=24))
+    except Exception:  # noqa: BLE001 - an older or busy audit DB only loses the note
+        return ""
+    if not n:
+        return ""
+    what = "1 detection-only finding" if n == 1 else f"{n} detection-only findings"
+    return (
+        f"  {what} of the last 24 hours not listed: a rule matched but could not decide the call. "
+        "`defenseclaw audit export --since 24h` lists them."
+    )
 
 
 @alerts.command("acknowledge")
@@ -1062,8 +1149,13 @@ def _set_alert_disposition(
     dry_run: bool = False,
     yes: bool = False,
 ) -> int | None:
-    if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+    from defenseclaw.config import is_current_schema
+
+    if app.cfg is None or not is_current_schema(getattr(app.cfg, "_source_config_version", None)):
+        raise click.ClickException(
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
+        )
 
     selector = _alert_selector(
         alert_ids=alert_ids,
@@ -1076,7 +1168,7 @@ def _set_alert_disposition(
     audit_db_identity = _alert_audit_db_identity(app.cfg.audit_db)
     token = app.cfg.gateway.resolved_token()
     if not token:
-        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
+        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the gateway.")
     exact_ids = selector.get("ids")
     id_count = len(exact_ids) if isinstance(exact_ids, list) else 0
     client = OrchestratorClient(

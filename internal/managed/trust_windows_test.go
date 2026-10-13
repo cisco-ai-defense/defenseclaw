@@ -13,7 +13,10 @@
 package managed
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -519,4 +522,292 @@ func unusedManagedTestDriveLetter() (string, bool) {
 		return "", false
 	}
 	return `O:`, true
+}
+
+// GAP-0672: the rule-pack check walks into the pack: the manifest and a file
+// in the rules folder are checked, not only the pack folder and its parents,
+// and the first refusal stops the walk.
+func TestWalkWindowsRulePackTreeChecksEveryFileInThePack(t *testing.T) {
+	pack := t.TempDir()
+	rules := filepath.Join(pack, "rules")
+	if err := os.MkdirAll(rules, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Join(pack, "defenseclaw-pack.json"), filepath.Join(rules, "markers.yaml")} {
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var checked []string
+	err := walkWindowsRulePackTree(pack, func(path string, isDir bool) error {
+		checked = append(checked, path)
+		if path == filepath.Join(rules, "markers.yaml") {
+			return &UntrustedPrincipalError{Path: path, SID: "S-1-5-11"}
+		}
+		return nil
+	})
+	var principal *UntrustedPrincipalError
+	if !errors.As(err, &principal) || principal.Path != filepath.Join(rules, "markers.yaml") {
+		t.Fatalf("walk = %v, want the refusal of the rules file", err)
+	}
+	for _, want := range []string{filepath.Join(pack, "defenseclaw-pack.json"), rules} {
+		found := false
+		for _, path := range checked {
+			found = found || path == want
+		}
+		if !found {
+			t.Fatalf("checked %q, want %s among them", checked, want)
+		}
+	}
+}
+
+// GAP-0953: the fix Setup prints for a refused config runs as printed in
+// PowerShell and leaves the folder and the config to SYSTEM and
+// Administrators. A new folder under C:\ on a Windows client edition holds
+// Authenticated Users Modify as its own entry, which /inheritance:r keeps;
+// the old fix failed to parse in PowerShell, kept that entry and, with /T,
+// left the config with an empty DACL.
+func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is readable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	root := t.TempDir()
+	folder := filepath.Join(root, "Staging")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daclOf := func(path string) *windows.ACL {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil || dacl == nil {
+			t.Fatalf("DACL of %s: %v", path, err)
+		}
+		return dacl
+	}
+	clientEdition, err := windows.SecurityDescriptorFromString(
+		"D:P(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _, err := clientEdition.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(folder, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, own, nil); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(folder, "config.yaml")
+	if err := os.WriteFile(config, []byte("deployment_mode: managed_enterprise\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := rejectUntrustedWindowsWriteACEs(config, daclOf(config))
+	text, ok := DescribeUntrustedSource("config", config, refused)
+	if !ok {
+		t.Fatalf("refusal %v is not described", refused)
+	}
+	runPrintedFix(t, powershell, root, text)
+	for _, path := range []string{folder, config} {
+		dacl := daclOf(path)
+		if dacl.AceCount == 0 {
+			t.Fatalf("the printed fix left %s with an empty DACL", path)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
+		}
+	}
+}
+
+// runPrintedFix runs, one by one in Windows PowerShell, the commands of a
+// refusal's "From an elevated prompt run ..." fix.
+func runPrintedFix(t *testing.T, powershell, root, text string) {
+	t.Helper()
+	_, commands, found := strings.Cut(text, "From an elevated prompt run ")
+	if !found {
+		t.Fatalf("no fix to run in %q", text)
+	}
+	commands, _, _ = strings.Cut(commands, ", and run it again")
+	for i, command := range strings.Split(commands, ", then ") {
+		script := filepath.Join(root, fmt.Sprintf("fix%d.ps1", i))
+		body := "$ErrorActionPreference = 'Stop'\r\n" + command + "\r\nexit $LASTEXITCODE\r\n"
+		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("printed fix %q failed in PowerShell: %v\n%s", command, err, out)
+		}
+	}
+}
+
+// GAP-1326, GAP-0386: a rule pack that Users can modify is refused with a fix
+// that removes the Users grants by name and leaves the gateway service
+// account able to read the pack. The fix once gave Users the read grant the
+// service read through and took it away again, so the service could not read
+// the pack after the operator ran it; the read grant is now the service
+// account's own (a standard user may see only their own policy), which the
+// Users removal does not touch.
+func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
+	// Derived like the fix derives it: the gateway service need not exist.
+	gateway, err := windows.StringToSid(WindowsServiceSIDString("DefenseClawGateway"))
+	if err != nil {
+		t.Fatalf("gateway service SID: %v", err)
+	}
+	refused := &UntrustedPrincipalError{Path: `C:\Packs\pack`, SID: "S-1-5-32-545"}
+	text, ok := DescribeUntrustedRulePack("guardrail.rule_pack_dir", `C:\Packs\pack`, DefaultGatewayServiceAccount, refused)
+	if !ok || !strings.Contains(text, `/remove:g "*S-1-5-32-545"`) ||
+		!strings.Contains(text, `"*`+gateway.String()+`:(OI)(CI)RX"`) || strings.Contains(text, `"*S-1-5-32-545:(OI)(CI)RX"`) {
+		t.Fatalf("the fix does not remove the Users grants and keep the gateway's read: %s", text)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is writable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	// icacls grants only a SID that maps to an account, and a service SID
+	// maps once its service is installed. A test host has no DefenseClawGateway
+	// service, so the printed fix runs for a service every Windows host has.
+	const installedService = `NT SERVICE\TrustedInstaller`
+	installed, err := windows.StringToSid(WindowsServiceSIDString("TrustedInstaller"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modify, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := modify.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(pack, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules := filepath.Join(pack, "rules.yaml")
+	if err := os.WriteFile(rules, []byte("rules: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused.Path = pack
+	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, installedService, refused)
+	if !ok {
+		t.Fatal("refusal is not described")
+	}
+	runPrintedFix(t, powershell, root, text)
+	for _, path := range []string{pack, rules} {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
+		}
+		if !serviceHasAccess(path, []*windows.SID{installed}, serviceTreeAccess) {
+			t.Fatalf("after the printed fix the service cannot read %s", path)
+		}
+		if readers, err := StandardUserReadersOf(path); err != nil || len(readers) != 0 {
+			t.Fatalf("after the printed fix standard users can read %s: %q (%v)", path, readers, err)
+		}
+	}
+}
+
+type fakeServiceToken struct {
+	user   *windows.SID
+	groups []windows.SIDAndAttributes
+}
+
+func (token fakeServiceToken) GetTokenUser() (*windows.Tokenuser, error) {
+	return &windows.Tokenuser{User: windows.SIDAndAttributes{Sid: token.user}}, nil
+}
+
+func (token fakeServiceToken) GetTokenGroups() (*windows.Tokengroups, error) {
+	if len(token.groups) == 0 {
+		return &windows.Tokengroups{}, nil
+	}
+	if len(token.groups) != 1 {
+		panic("fakeServiceToken models at most one group")
+	}
+	return &windows.Tokengroups{GroupCount: 1, Groups: [1]windows.SIDAndAttributes{token.groups[0]}}, nil
+}
+
+func TestWindowsTokenRunsAsService(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherServiceSID, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
+	for _, test := range []struct {
+		name  string
+		token fakeServiceToken
+		want  bool
+	}{
+		{"legacy virtual account user", fakeServiceToken{user: serviceSID}, true},
+		{"localsystem with enabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, true},
+		{"localsystem without service group", fakeServiceToken{user: localSystem}, false},
+		{"localsystem with another service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: otherServiceSID, Attributes: enabled}},
+		}, false},
+		{"localsystem with disabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: windows.SE_GROUP_MANDATORY}},
+		}, false},
+		{"localsystem with deny-only service group", fakeServiceToken{
+			user: localSystem,
+			groups: []windows.SIDAndAttributes{{
+				Sid: serviceSID, Attributes: enabled | windows.SE_GROUP_USE_FOR_DENY_ONLY,
+			}},
+		}, false},
+		{"interactive user with service group", fakeServiceToken{
+			user:   user,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := windowsTokenRunsAsService(test.token, serviceSID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("windowsTokenRunsAsService = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if _, err := windowsTokenRunsAsService(fakeServiceToken{user: localSystem}, nil); err == nil {
+		t.Fatal("nil service SID was accepted")
+	}
 }

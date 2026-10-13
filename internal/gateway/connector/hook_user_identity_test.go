@@ -5,7 +5,11 @@
 package connector
 
 import (
+	"encoding/json"
+	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -101,9 +106,11 @@ func TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell(t *testing.T) {
 	shell := systemBashForTest(t)
 	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
 
-	out, err := exec.Command(
+	command := exec.Command(
 		shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath,
-	).CombinedOutput()
+	)
+	command.Env = withoutSessionFactsEnv(os.Environ())
+	out, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("helper failed under %s: %v\n%s", shell, err, out)
 	}
@@ -181,7 +188,12 @@ source "$1"
 printf '%s\n' "${#IDENTITY_HEADER_ARGS[@]}"
 printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 `
-			out, err := exec.Command(shell, "-c", program, shell, helperPath).CombinedOutput()
+			command := exec.Command(shell, "-c", program, shell, helperPath)
+			// The session facts header depends on the SSH and logind
+			// variables of whoever runs the test; count only the user
+			// identity arguments.
+			command.Env = withoutSessionFactsEnv(os.Environ())
+			out, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
 			}
@@ -273,4 +285,184 @@ func materializeHookAssetForTest(t *testing.T, name string) string {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
+}
+
+func withoutSessionFactsEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "SSH_CONNECTION="), strings.HasPrefix(entry, "SSH_TTY="),
+			strings.HasPrefix(entry, "XDG_SESSION_ID="):
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// A Secure Client shell hook sends no session facts (GAP-0148, issue #1092);
+// a per-user hook in the same SSH session sends them.
+func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	shell := systemBashForTest(t)
+	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	hookDir := filepath.Join(t.TempDir(), ".defenseclaw", "hooks")
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir,
+		SetupOpts{DataDir: filepath.Dir(hookDir), APIAddr: "127.0.0.1:18970", ManagedEnterprise: true},
+		NewClaudeCodeConnector()); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(hookDir, "claude-code-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "_DC_SECURE_CLIENT_HOOK=1") {
+		t.Fatal("Secure Client render did not pin its profile")
+	}
+	run := func(extra ...string) string {
+		command := exec.Command(shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath)
+		command.Env = append(withoutSessionFactsEnv(os.Environ()),
+			"SSH_CONNECTION=192.0.2.10 50000 192.0.2.20 22", "SSH_TTY=/dev/pts/9", "HOME="+t.TempDir())
+		command.Env = append(command.Env, extra...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	if out := run("DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1", "DEFENSECLAW_HOME="+filepath.Join(t.TempDir(), ".defenseclaw")); strings.Contains(out, "Session-Facts") {
+		t.Fatalf("Secure Client hook sent session facts:\n%s", out)
+	}
+	if out := run(); !strings.Contains(out, "X-DefenseClaw-Session-Facts: v1;k=ssh") {
+		t.Fatalf("per-user hook sent no session facts:\n%s", out)
+	}
+}
+
+// A standalone managed shell hook has no per-user gateway binary, so it takes
+// the whole session facts, Kerberos principal included, from the
+// administrator-owned hook binary its rendered transport names; without that
+// binary it falls back to the SSH variables alone (GAP-0194).
+func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	shell := systemBashForTest(t)
+	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	binary := filepath.Join(t.TempDir(), "defenseclaw-hook")
+	script := "#!/bin/sh\n[ \"$1 $2\" = \"hook session-facts\" ] || exit 1\nprintf 'v1;k=ssh;ca=192.0.2.10;krb=carol@EXAMPLE.TEST'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(extra ...string) string {
+		command := exec.Command(shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath)
+		command.Env = append(withoutSessionFactsEnv(os.Environ()),
+			"SSH_CONNECTION=192.0.2.10 50000 192.0.2.20 22", "KRB5CCNAME=FILE:/nonexistent", "HOME="+t.TempDir(), "DEFENSECLAW_MANAGED_HOOK=1")
+		command.Env = append(command.Env, extra...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	if out := run("DEFENSECLAW_SESSION_FACTS_BIN=" + binary); !strings.Contains(out, "X-DefenseClaw-Session-Facts: v1;k=ssh;ca=192.0.2.10;krb=carol@EXAMPLE.TEST") {
+		t.Fatalf("managed hook did not send the Kerberos principal:\n%s", out)
+	}
+	if out := run(); strings.Contains(out, "krb=") {
+		t.Fatalf("managed hook without the binary sent a principal:\n%s", out)
+	}
+}
+
+// Every connector shell hook of a standalone install names the
+// administrator-owned hook binary for the session facts, not only the Hermes
+// and Devin hooks that run the foreign-hook guard: OpenHands, Kiro,
+// Antigravity and Cursor were rendered without it, so their records lost the
+// Kerberos principal that Claude Code's carried in the same login (GAP-0194).
+// A socketless managed render (Secure Client) and a per-user render name none.
+func TestStandaloneShellHooksNameTheAdministratorHookBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	const hookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
+	standalone := SetupOpts{
+		APIAddr: "127.0.0.1:18970", APIToken: "tok", HookFailMode: "closed", ManagedEnterprise: true,
+		ManagedHookSocket: "/var/run/defenseclaw/hook.sock", ManagedServiceUID: 461, ManagedHookBinary: hookBinary,
+	}
+	render := func(opts SetupOpts, conn Connector, script string) string {
+		t.Helper()
+		opts.DataDir = filepath.Join(t.TempDir(), ".defenseclaw")
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(hookDir, script))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	line := "DEFENSECLAW_SESSION_FACTS_BIN='" + hookBinary + "'\n"
+	secureClient, perUser := standalone, standalone
+	secureClient.ManagedHookSocket, secureClient.ManagedHookBinary = "", ""
+	perUser.ManagedEnterprise, perUser.ManagedHookSocket, perUser.ManagedHookBinary = false, "", ""
+	for script, conn := range map[string]Connector{
+		"openhands-hook.sh": NewOpenHandsConnector(), "hermes-hook.sh": NewHermesConnector(),
+		"cursor-hook.sh": NewCursorConnector(), "antigravity-hook.sh": NewAntigravityConnector(),
+	} {
+		if !strings.Contains(render(standalone, conn, script), line) {
+			t.Errorf("%s of a standalone install does not name the administrator hook binary", script)
+		}
+		for name, opts := range map[string]SetupOpts{"secure client": secureClient, "per-user": perUser} {
+			if strings.Contains(render(opts, conn, script), "DEFENSECLAW_SESSION_FACTS_BIN") {
+				t.Errorf("%s of a %s install names a session facts binary", script, name)
+			}
+		}
+	}
+}
+
+// The in-agent plugins cannot read a Kerberos credential cache, so a
+// per-user plugin asks the user's gateway binary (hook session-facts), as the
+// shell hooks do, and sends the whole value: the OpenCode plugin used to send
+// the SSH and logind variables alone, so its records carried no
+// defenseclaw.session.kerberos_principal (GAP-0125).
+func TestOpenCodePluginSendsTheKerberosPrincipal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in gateway binary is a shell script")
+	}
+	home := t.TempDir()
+	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n[ \"$1 $2\" = \"hook session-facts\" ] || exit 1\nprintf 'v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("KRB5CCNAME", "FILE:/nonexistent")
+	var mu sync.Mutex
+	var facts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		if payload.Event == "tool.execute.before" {
+			mu.Lock()
+			facts = append(facts, r.Header.Get("X-DefenseClaw-Session-Facts"))
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"action"}`)
+	}))
+	t.Cleanup(server.Close)
+	runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(facts) != 1 || facts[0] != "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST" {
+		t.Fatalf("session facts sent by the plugin = %q", facts)
+	}
 }

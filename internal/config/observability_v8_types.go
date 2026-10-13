@@ -68,8 +68,15 @@ const (
 // MaxSupportedConfigVersion is the newest config_version this build loads. A
 // newer file was written by a newer DefenseClaw and is refused instead of
 // being decoded without its new semantics. Raise it together with the CLI
-// migration that writes the new version.
-const MaxSupportedConfigVersion = 8
+// migration that writes the new version (MigrateV9 writes 9).
+const MaxSupportedConfigVersion = ConfigVersionV9
+
+// CurrentSchemaVersion reports whether config_version is one this build
+// loads through the v8 entrypoint (8, or 9 after the single-source
+// migration). The v8 runtime, observability and reload paths accept both.
+func CurrentSchemaVersion(version int) bool {
+	return version >= ObservabilityV8ConfigVersion && version <= MaxSupportedConfigVersion
+}
 
 // ObservabilityV8Source is the typed source form of the v8 observability block.
 // A nil *ObservabilityV8Source and an empty value compile identically.
@@ -93,9 +100,13 @@ type ObservabilityV8ResourceSource struct {
 }
 
 type ObservabilityV8TracePolicySource struct {
-	Sampler              string                           `json:"sampler,omitempty" mapstructure:"sampler" yaml:"sampler,omitempty"`
-	SamplerArg           string                           `json:"sampler_arg,omitempty" mapstructure:"sampler_arg" yaml:"sampler_arg,omitempty"`
-	SemanticProfile      string                           `json:"semantic_profile,omitempty" mapstructure:"semantic_profile" yaml:"semantic_profile,omitempty"`
+	Sampler         string `json:"sampler,omitempty" mapstructure:"sampler" yaml:"sampler,omitempty"`
+	SamplerArg      string `json:"sampler_arg,omitempty" mapstructure:"sampler_arg" yaml:"sampler_arg,omitempty"`
+	SemanticProfile string `json:"semantic_profile,omitempty" mapstructure:"semantic_profile" yaml:"semantic_profile,omitempty"`
+	// CompatibilityAliases is the legacy Secure Client alias switch. A
+	// config_version 8 source may still hold it, and only a Secure Client
+	// plan retains it for the main-compatible digest and resource aliases.
+	// A config_version 9 source may not hold it (the schema forbids it).
 	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty" mapstructure:"compatibility_aliases" yaml:"compatibility_aliases,omitempty"`
 	Limits               ObservabilityV8TraceLimitsSource `json:"limits,omitempty" mapstructure:"limits" yaml:"limits,omitempty"`
 }

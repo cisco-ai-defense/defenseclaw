@@ -77,5 +77,52 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	}
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
 		t.Fatal("changed client configuration was accepted")
+	} else if !strings.Contains(err.Error(), "editor settings file") || strings.Contains(err.Error(), "executable") {
+		// The settings file is not an executable (GAP-0391).
+		t.Fatalf("changed client configuration error = %v", err)
+	}
+	// A managed lock pins the guarded entry: the editor rewriting the file
+	// around it (a theme change) keeps it valid, an edit of the entry does
+	// not (GAP-0708).
+	entry := `"DefenseClaw · Kiro":{"command":"guard","args":["--agent","kiro"]}`
+	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{`+entry+`}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entryDigest, err := ClientEntrySHA256(clientConfig, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock["client"] = map[string]any{"id": "zed", "config_path": clientConfig, "config_sha256": EntryDigestPrefix + entryDigest}
+	body, _ = json.Marshal(lock)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := "// edited by the editor\n{\n  \"theme\": \"Gruvbox Dark\",\n  \"agent_servers\": {\n    " + entry + ",\n  },\n}\n"
+	if err := os.WriteFile(clientConfig, []byte(rewritten), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("a rewrite of the settings around the guarded entry was refused: %v", err)
+	}
+	// A mode picked in Zed's agent panel is stored in the entry and keeps
+	// it valid; an edit of what the editor launches does not (GAP-0900).
+	uiChoice := strings.Replace(rewritten, `"command":"guard"`, `"default_mode":"accept_edits","command":"guard"`, 1)
+	if err := os.WriteFile(clientConfig, []byte(uiChoice), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("a mode chosen in the editor UI was refused: %v", err)
+	}
+	for _, edit := range []string{
+		strings.Replace(uiChoice, `"kiro"]`, `"kiro","--x"]`, 1),
+		strings.Replace(uiChoice, `"command":"guard"`, `"command":"other"`, 1),
+	} {
+		if err := os.WriteFile(clientConfig, []byte(edit), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil ||
+			!strings.Contains(err.Error(), "DefenseClaw · Kiro entry") {
+			t.Fatalf("an edited guarded entry: err = %v", err)
+		}
 	}
 }

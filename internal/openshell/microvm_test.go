@@ -135,6 +135,17 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	}
 }
 
+// TestDoctorNamesTheMacLoginSession (GAP-0193): on a Mac the row Linux
+// calls systemd linger is named for what keeps the gateway running there.
+func TestDoctorNamesTheMacLoginSession(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onMicroVMs()
+	c := expectCheck(t, f.run(), openshell.CheckIDLinger, openshell.StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in")
+	if c.Title != "Login session" {
+		t.Fatalf("title = %q, want Login session", c.Title)
+	}
+}
+
 // TestDoctorOnAMacWithoutBuildx: DefenseClaw builds a MicroVM's images in
 // Docker too, so on a Mac whose docker does not find its buildx plugin (a
 // HOME without Docker Desktop's ~/.docker/cli-plugins) the BuildKit check
@@ -181,6 +192,44 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			_ = os.Remove(filepath.Join(f.e2fsprogs, "mke2fs"))
 			touchExecutable(f.t, filepath.Join(f.e2fsprogs, "mkfs.ext4"))
 		}, want: checkWant{"vm-driver", pass, "e2fsprogs in "}},
+		// GAP-0112: the driver searches only the kegs under /opt/homebrew
+		// and /usr/local, so an e2fsprogs installed by a Homebrew of your
+		// own is never found: the doctor says so instead of offering a
+		// build that cannot help.
+		{name: "e2fsprogs missing under a Homebrew of your own", setup: func(f *doctorFixture) {
+			f.doctor.E2fsprogsDirs = []string{filepath.Join(f.home, "kegs", "e2fsprogs", "sbin")}
+		}, want: checkWant{"vm-driver", fail, "; it does not look in your Homebrew at "},
+			fix: &fixWant{text: "have an administrator install it with a Homebrew there (brew install e2fsprogs)", manual: true}},
+		// A managed computer has no Homebrew for its users (spec D4, D5): the
+		// fix names the administrator and no brew command, and offers none to
+		// apply.
+		{name: "managed host: e2fsprogs missing", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			_ = os.RemoveAll(f.e2fsprogs)
+		}, want: checkWant{"vm-driver", fail, "e2fsprogs is not installed where the MicroVM driver looks for it"},
+			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir", manual: true}},
+		// GAP-0004: on a managed host a keg other accounts can change (the
+		// Cellar of whoever ran brew, writable by the admin group) is
+		// refused, not used silently; the user's own build is taken.
+		{name: "managed host: another account's e2fsprogs keg", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			if err := os.Chmod(f.e2fsprogs, 0o777); err != nil {
+				f.t.Fatal(err)
+			}
+		}, want: checkWant{"vm-driver", fail, "which another account can change"},
+			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer", manual: true}},
+		{name: "managed host: the user's own e2fsprogs build", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			_ = os.RemoveAll(f.e2fsprogs)
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				touchExecutable(f.t, filepath.Join(f.home, ".local", "opt", "e2fsprogs", "sbin", tool))
+			}
+		}, want: checkWant{"vm-driver", pass, filepath.Join(".local", "opt", "e2fsprogs", "sbin") + "; "}},
+		{name: "managed host: driver not signed", setup: func(f *doctorFixture) {
+			f.doctor.Gateway.Managed = true
+			f.runner.On(codesign, f.vmDriverPath()+": code object is not signed at all", errors.New("exit status 1"))
+		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not signed for Apple's Hypervisor"},
+			fix: &fixWant{text: "ask your administrator for an OpenShell whose MicroVM driver is signed", manual: true}},
 		// The driver runs under launchd, whose PATH is not the shell's.
 		{name: "e2fsprogs only on PATH", setup: func(f *doctorFixture) {
 			_ = os.RemoveAll(f.e2fsprogs)
@@ -393,7 +442,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
-			"DefenseClaw changes it on Linux only; the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with")
+			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -575,7 +624,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		// The user starts it: setup stops here, where it would have to.
 		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
 		// Not `brew services start` of the formula that is not installed.
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not running"), startYourself)
 		if r.OK() {
 			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
 		}
@@ -858,21 +907,6 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		f.doctor.GOARCH = "amd64"
 		expectCheck(t, f.run(), openshell.CheckIDPlatform, openshell.StatusFail, "darwin/amd64: the OpenShell MicroVM driver runs on Apple silicon only")
 	})
-}
-
-// TestDoctorOnLinuxWithTheVMDriver: DefenseClaw certifies the MicroVM
-// driver on macOS only; on Linux doctor says so, and offers no bind mounts
-// on it.
-func TestDoctorOnLinuxWithTheVMDriver(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.fake = openshelltest.New(openshelltest.WithDriver(openshell.DriverVM))
-	r := f.run()
-	expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusWarn, "not certified by DefenseClaw off macOS")
-	expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusSkip, "mounts no host folders")
-	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
-	if r.Get(openshell.CheckIDVMDriver) != nil || r.MicroVM != nil {
-		t.Fatalf("Linux got the macOS MicroVM checks:\n%s", r)
-	}
 }
 
 // On the MicroVM driver the file sharing check is of the temp directory

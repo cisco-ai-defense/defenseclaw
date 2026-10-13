@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -41,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -216,7 +218,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	mode := sandboxHookMode(ctx, "codex", a.codexMode())
+	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
@@ -224,10 +226,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
+		a.noteProjectSkillFolders(ctx, "codex", req.CWD)
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -239,9 +243,20 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
+		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+		}
+		// Secure Client keeps the prompt of main, so AI Defense is sent the
+		// text it was sent before (issue #1092).
+		prompt := req.Prompt
+		if !a.managedAIDOnly() {
+			prompt = codexPromptForInspection(prompt)
+		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:         "message",
-			Content:      req.Prompt,
+			Content:      prompt,
 			Direction:    "prompt",
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
@@ -263,23 +278,35 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Args:          toolArgs,
 			Direction:     "tool_call",
 			Connector:     "codex",
-			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
+			MCPServerName: a.codexMCPServerName(ctx, req),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		if command == nil {
+			command, commandTool = codexPowerShellCommand(toolName, toolArgs)
+		}
+		actionInput := actionfacts.Input{
+			Tool:                     actionTool,
+			Args:                     toolArgs,
+			CWD:                      req.CWD,
+			ActiveHome:               hookActiveHome(ctx),
+			ToolResourceIdentity:     resourceIdentity,
+			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+		}
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			actionInput.DialectHint = selectWindowsShellDialect(
+				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
+			)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                     actionTool,
-				Args:                     toolArgs,
-				CWD:                      req.CWD,
-				ActiveHome:               hookActiveHome(ctx),
-				ToolResourceIdentity:     resourceIdentity,
-				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
-			},
-			LegacyText:                string(toolArgs),
-			Connector:                 "codex",
-			EnforcementCapable:        true,
-			DowngradeReadOnlyDataArgs: mode != "action",
-			record:                    toolChainRecorderFromContext(ctx),
+			Input:                         actionInput,
+			LegacyText:                    string(toolArgs),
+			Connector:                     "codex",
+			EnforcementCapable:            true,
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			DowngradeReadOnlyDataArgs:     mode != "action",
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -296,7 +323,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "Stop":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
 	}
@@ -363,10 +390,22 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// HTTP response body.
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
-	resp := codexResponseFor(
-		req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
-	)
+	// A configured block message replaces the agent-facing reason on blocks,
+	// as on the generic hook path. Secure Client keeps the verdict reason
+	// (issue #1092).
+	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if !a.managedAIDOnly() {
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
+	}
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext += sqlAlertOnlyHookNotice
+			resp.CodexOutput = codexOutput(req.HookEventName, action, rawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
+	resp.SourceReason = verdict.Reason
 	if mode != "action" && resp.AdditionalContext != "" {
 		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)
 		if !eligible || !a.codexAdditionalContextFirstInWindow(req, rawAction, verdict, time.Now()) {
@@ -382,15 +421,40 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	return resp
 }
 
+// codexTitleHelperPreamble is the fixed instruction Codex puts in front of its
+// task-title helper request, which reaches the UserPromptSubmit hook like a
+// prompt. It tells the model to name the task and "Do not answer the request",
+// so the injection judge read it, next to the user prompt after it, as an
+// instruction override and blocked a benign prompt (GAP-0230).
+var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
+	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
+		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+
+		" Preserve ticket references exactly. Write in the user's language."+
+		" Do not use quotes, markdown, or trailing punctuation. Do not answer the request.") +
+	`(?:\s*` + regexp.QuoteMeta("Prioritize the current task and latest substantive user request.") + `)?` +
+	`(?:\s*` + regexp.QuoteMeta("Recent conversation messages:") + `)?`)
+
+// codexPromptForInspection drops Codex's own title-helper instruction from the
+// front of a prompt. Only that exact text goes: the conversation and the user
+// prompt after it are inspected as usual, and a prompt that merely resembles
+// the instruction is inspected whole.
+func codexPromptForInspection(prompt string) string {
+	if loc := codexTitleHelperPreamble.FindStringIndex(prompt); loc != nil {
+		return strings.TrimSpace(prompt[loc[1]:])
+	}
+	return prompt
+}
+
 // dispatchCodexHookNotification mirrors the Claude Code path —
 // see dispatchClaudeCodeHookNotification for the routing contract,
 // including the redaction.ForSinkReason scrub on the reason string.
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchCodexHookNotification(ctx context.Context, req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
@@ -473,16 +537,10 @@ func (a *APIServer) codexEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
 }
 
-func (a *APIServer) codexMode() string {
-	mode := "observe"
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
-		mode = strings.TrimSpace(cfg.ConnectorHookConfig("codex").Mode)
-		if mode == "" || mode == "inherit" {
-			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("codex"))
-		}
-	}
-	return normalizeAgentHookMode(mode)
+func (a *APIServer) codexMode(ctx context.Context) string {
+	// The request's guardrail profile, when one applies, replaces the live
+	// configuration (see guardrail_profile.go).
+	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "codex")
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {
@@ -604,19 +662,26 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
+	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""
 	}
 	return connector.BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
 }
 
+// codexObserveContextMinSeverity is the lowest severity whose Observe-mode
+// verdict reaches the Codex chat. Claude Code shows every observed alert, so
+// a MEDIUM finding that Codex ran silently looked like a missed detection to
+// the user while the audit row recorded it (GAP-0316, GAP-0320, GAP-0368).
+// LOW stays audit-only to keep the alert-fatigue gate for routine reads.
+const codexObserveContextMinSeverity = severityMedium
+
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning
 // coupled to a finding that could actually influence enforcement. Opaque
-// managed/judge verdicts may not carry DetailedFindings, so a HIGH/CRITICAL
+// managed/judge verdicts may not carry DetailedFindings, so a MEDIUM-or-higher
 // non-allow verdict with no details remains visible; explicit detection-only
 // details do not.
 func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
-	if verdict == nil || guardrailSeverityRank(verdict.Severity) < severityHigh {
+	if verdict == nil || guardrailSeverityRank(verdict.Severity) < codexObserveContextMinSeverity {
 		return false
 	}
 	if len(verdict.DetailedFindings) == 0 {
@@ -624,7 +689,7 @@ func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
 	}
 	for _, finding := range verdict.DetailedFindings {
 		if finding.contributesToEnforcement() &&
-			guardrailSeverityRank(finding.Severity) >= severityHigh {
+			guardrailSeverityRank(finding.Severity) >= codexObserveContextMinSeverity {
 			return true
 		}
 	}
@@ -1905,6 +1970,31 @@ func codexExactMapString(values map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// codexShellRunsPowerShell reports whether Codex runs its shell tool's
+// commands in PowerShell on this host, as it does on Windows. A variable so
+// tests can pin either host.
+var codexShellRunsPowerShell = runtime.GOOS == "windows"
+
+// codexPowerShellCommand returns a Codex shell tool call's command to judge
+// again as PowerShell, on a host where Codex runs it there (GAP-0175).
+// Codex names its shell tool Bash on every OS, so the call's own parse reads
+// a command as POSIX unless it carries PowerShell syntax. A cmdlet first
+// (Set-Content, Add-Content, Out-File) has no POSIX operand grammar there:
+// the parse was partial, and a CEL block rule on the command could only
+// report a detection-only match while the write ran.
+// inspectSandboxShellToolPolicyCtx judges the command as PowerShell only
+// when the call's own parse is not complete, and that verdict only ever adds
+// to the call's.
+func codexPowerShellCommand(toolName string, args json.RawMessage) (json.RawMessage, string) {
+	if !codexShellRunsPowerShell {
+		return nil, ""
+	}
+	if command, ok := connector.ShellCommandArgs("codex", toolName, args); ok {
+		return command, "powershell"
+	}
+	return nil, ""
 }
 
 func codexShellExecutionTool(tool string) bool {
@@ -3500,8 +3590,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -3550,8 +3640,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("codex").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -3573,8 +3663,8 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("codex").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("codex").ScanPaths {
 			add(p)
 		}
 	}
@@ -3628,15 +3718,31 @@ func sanitizeHookCWD(cwd string) string {
 	if !filepath.IsAbs(s) {
 		return ""
 	}
-	resolved, err := filepath.EvalSymlinks(s)
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(s) != nil {
+		return ""
+	}
+	resolved, err := resolveHookCWD(s)
 	if err != nil {
 		return ""
 	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
 	return resolved
+}
+
+// resolveHookCWD resolves a hook working directory to the real directory
+// it names; tests stand in for a service account that may not stat it.
+var resolveHookCWD = func(cwd string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return resolved, nil
 }
 
 // validateGitCwd resolves symlinks and ensures the cwd is a real directory.
@@ -3713,6 +3819,9 @@ func safeGitEnv() []string {
 }
 
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	cmd.Env = safeGitEnv()
@@ -3772,7 +3881,7 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.codexComponentScanDue() {
+	if !req.ScanComponents && !a.codexComponentScanDue(ctx) {
 		return 0
 	}
 	targets := codexComponentTargets(req.CWD)
@@ -3782,6 +3891,9 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 			paths = codexMCPEntryScanTargets(paths)
 		}
 		for _, p := range paths {
+			if component != "mcp" && managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+				continue
+			}
 			if component != "mcp" {
 				if _, err := os.Stat(p); err != nil {
 					continue
@@ -3806,6 +3918,9 @@ func codexMCPEntryScanTargets(configPaths []string) []string {
 	userConfig := filepath.Join(connector.CodexHomeDir(), "config.toml")
 	var targets []string
 	for _, configPath := range configPaths {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(configPath) != nil {
+			continue
+		}
 		var (
 			entries []config.MCPServerEntry
 			err     error
@@ -3843,10 +3958,10 @@ func codexMCPEntryScanTargets(configPaths []string) []string {
 	return out
 }
 
-func (a *APIServer) codexComponentScanDue() bool {
+func (a *APIServer) codexComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.codexMu.Lock()
 	defer a.codexMu.Unlock()
@@ -3889,8 +4004,12 @@ func codexComponentTargets(cwd string) map[string][]string {
 		targets["skill"] = append(targets["skill"], childDirs(filepath.FromSlash("/etc/codex/skills"))...)
 	}
 
-	targets["plugin"] = append(targets["plugin"], connector.CodexPluginSourceDirs(cwd)...)
-	for _, root := range connector.CodexProjectLayerDirs(cwd) {
+	var projectLayers []string
+	if cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil {
+		targets["plugin"] = append(targets["plugin"], connector.CodexPluginSourceDirs(cwd)...)
+		projectLayers = connector.CodexProjectLayerDirs(cwd)
+	}
+	for _, root := range projectLayers {
 		targets["skill"] = append(targets["skill"],
 			childDirs(filepath.Join(root, ".agents", "skills"))...)
 		targets["mcp"] = append(targets["mcp"],
@@ -3963,6 +4082,9 @@ func sameCleanPath(left, right string) bool {
 }
 
 func gitRootForCWD(cwd string) string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) != nil {
+		return ""
+	}
 	safeCwd, err := validateGitCwd(cwd)
 	if err != nil {
 		return ""
@@ -3980,6 +4102,9 @@ func gitRootForCWD(cwd string) string {
 }
 
 func childDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -3987,13 +4112,19 @@ func childDirs(root string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
-			out = append(out, filepath.Join(root, entry.Name()))
+			path := filepath.Join(root, entry.Name())
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) == nil {
+				out = append(out, path)
+			}
 		}
 	}
 	return out
 }
 
 func childFilesWithExtension(root, extension string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -4001,7 +4132,10 @@ func childFilesWithExtension(root, extension string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), extension) {
-			out = append(out, filepath.Join(root, entry.Name()))
+			path := filepath.Join(root, entry.Name())
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) == nil {
+				out = append(out, path)
+			}
 		}
 	}
 	return out
@@ -4010,6 +4144,9 @@ func childFilesWithExtension(root, extension string) []string {
 func existingFiles(paths ...string) []string {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+			continue
+		}
 		if _, err := os.Stat(p); err == nil {
 			out = append(out, p)
 		}
@@ -4023,6 +4160,9 @@ func uniqueExistingDirs(paths []string) []string {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
+			continue
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
 			continue
 		}
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
@@ -4039,6 +4179,9 @@ func uniqueExistingPaths(paths []string) []string {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
+			continue
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
 			continue
 		}
 		if _, err := os.Stat(p); err == nil {
@@ -4060,25 +4203,31 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
 	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
-			a.scannerCfg.Scanners.SkillScanner,
-			a.scannerCfg.ResolveLLM("scanners.skill"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
-		ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		ps.Connector = "codex"
+		ps.LLM = cfg.ResolveLLM("scanners.plugin")
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(
-			a.scannerCfg.Scanners.MCPScanner,
-			a.scannerCfg.ResolveLLM("scanners.mcp"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "codex")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		// Agent, rule, and memory targets participate in inventory/discovery,

@@ -51,7 +51,7 @@ type StandaloneLayout struct {
 	SecretsDir      string // AI Defense / judge credentials
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
-	LifecycleDir    string // transaction state, snapshots, preimages, lock
+	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -172,6 +172,19 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		APIAddr:         StandaloneAPIAddr,
 	}, nil
 }
+
+// StandaloneWindowsScannerRuntimeDirForRoot is where the standalone Windows
+// lifecycle installs the scanner runtime (defenseclaw-scanners.exe and the
+// Python runtime it unpacks): its own administrator-owned root beside the
+// state root, so the lifecycle's retained-runtime and install-tree checks
+// never walk its thousands of files. Only LocalSystem and Administrators
+// write it; the gateway service reads and runs it.
+func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+}
+
+// StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
+const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"
 
 // StandaloneSecretsDirForConfig derives the protected secrets directory from
 // the trusted managed config path, so certification roots and production

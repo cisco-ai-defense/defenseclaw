@@ -82,10 +82,9 @@ func (r *recordingSender) WaitFor(t *testing.T, n int) []notify.Notification {
 }
 
 // fullyEnabledNotificationsConfig builds a NotificationsConfig that
-// won't suppress anything, so a wiring test sees every emit. We
-// deliberately do NOT call config.DefaultNotificationsConfig() here
-// because that returns a platform-conditional Enabled — and on a
-// linux CI runner that would silently disable the dispatcher.
+// won't suppress anything, so a wiring test sees every emit. The loader
+// default for Enabled is platform-conditional, and on a linux CI runner
+// it would silently disable the dispatcher.
 func fullyEnabledNotificationsConfig() config.NotificationsConfig {
 	return config.NotificationsConfig{
 		Enabled:         true,
@@ -127,7 +126,7 @@ func TestClaudeHookDispatch_BlockFiresOnBlock(t *testing.T) {
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 	}
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		req, "block", "block", "HIGH",
 		"matched policy: deny-rm-rf", false,
 		hookEvaluationContext{},
@@ -166,7 +165,7 @@ func TestClaudeHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"allow", "block", "MEDIUM", "observe-mode trial", true,
 		hookEvaluationContext{},
@@ -190,7 +189,7 @@ func TestClaudeHookDispatch_ConfirmFiresOnApprovalPending(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Edit"},
 		"confirm", "confirm", "LOW",
 		"approval needed for write outside workspace", false,
@@ -222,7 +221,7 @@ func TestClaudeHookDispatch_RedactsReason(t *testing.T) {
 	api.SetNotifier(d)
 
 	rawSecret := "matched on user message: my-aws-key=AKIAIOSFODNN7EXAMPLE"
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", rawSecret, false,
 		hookEvaluationContext{},
@@ -243,7 +242,7 @@ func TestCodexHookDispatch_BlockFiresOnBlock(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchCodexHookNotification(
+	api.dispatchCodexHookNotification(context.Background(),
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH", "matched: blocked-shell", false,
 		hookEvaluationContext{},
@@ -262,7 +261,7 @@ func TestCodexHookDispatch_RedactsReason(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchCodexHookNotification(
+	api.dispatchCodexHookNotification(context.Background(),
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH",
 		"prompt contained AKIAIOSFODNN7EXAMPLE", false,
@@ -342,12 +341,12 @@ func TestNotifierDisabled_NoEmit(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", "any reason", false,
 		hookEvaluationContext{},
 	)
-	api.dispatchCodexHookNotification(
+	api.dispatchCodexHookNotification(context.Background(),
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH", "any reason", false,
 		hookEvaluationContext{},
@@ -525,7 +524,7 @@ func TestNotifierSourceFilter_AssetPolicyOff(t *testing.T) {
 		},
 		"skill", "claudecode", "PreToolUse",
 	)
-	api.dispatchClaudeCodeHookNotification(
+	api.dispatchClaudeCodeHookNotification(context.Background(),
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", "hook block", false,
 		hookEvaluationContext{},

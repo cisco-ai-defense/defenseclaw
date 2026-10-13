@@ -214,7 +214,7 @@ class _StrictSafeLoader(yaml.SafeLoader):
             mark = event.start_mark
             raise V8YAMLMutationError(
                 "yaml_alias_forbidden",
-                "YAML aliases are not allowed in v8 configuration",
+                "YAML aliases are not allowed in config.yaml",
                 source=getattr(self, "_v8_source_name", "config.yaml"),
                 line=mark.line + 1,
                 column=mark.column + 1,
@@ -235,6 +235,7 @@ def prepare_v8_yaml_write(
     mutations: Iterable[V8YAMLMutation],
     *,
     source_name: str = "config.yaml",
+    any_path: bool = False,
 ) -> PreparedV8YAMLWrite:
     """Validate and prepare a comment-preserving v8 YAML candidate.
 
@@ -242,6 +243,10 @@ def prepare_v8_yaml_write(
     lock, compare the current file digest with ``expected_sha256``, preserve
     permissions, write ``candidate`` to a sibling temporary file, validate it,
     and atomically replace the original.
+
+    ``any_path`` lifts the observability path allowlist for the single
+    config writer (``config_writer``), which validates the whole candidate
+    with the canonical validator before it writes.
     """
 
     original = _source_bytes(source, source_name)
@@ -252,10 +257,10 @@ def prepare_v8_yaml_write(
     candidate = text
     for mutation in mutations:
         path = tuple(mutation.path)
-        if not _supported_path(path):
+        if not any_path and not _supported_path(path):
             raise V8YAMLMutationError(
                 "unsupported_mutation_path",
-                "the requested path is not an exact supported v8 observability mutation",
+                "the requested path is not a supported observability change",
                 source=source_name,
                 path=path,
             )
@@ -265,7 +270,7 @@ def prepare_v8_yaml_write(
         if len(candidate.encode("utf-8")) > _MAX_SOURCE_BYTES:
             raise V8YAMLMutationError(
                 "source_too_large",
-                "v8 configuration exceeds the 4 MiB source limit after mutation",
+                "config.yaml exceeds the 4 MiB source limit after the change",
                 source=source_name,
                 path=path,
             )
@@ -295,7 +300,7 @@ def _source_bytes(source: bytes | str, source_name: str) -> bytes:
     if len(raw) > _MAX_SOURCE_BYTES:
         raise V8YAMLMutationError(
             "source_too_large",
-            "v8 configuration exceeds the 4 MiB source limit",
+            "config.yaml exceeds the 4 MiB source limit",
             source=source_name,
         )
     return raw
@@ -307,7 +312,7 @@ def _decode_source(raw: bytes, source_name: str) -> str:
     except UnicodeDecodeError as error:
         raise V8YAMLMutationError(
             "invalid_utf8",
-            "v8 configuration must be valid UTF-8",
+            "config.yaml must be valid UTF-8",
             source=source_name,
             line=error.start + 1,
         ) from None
@@ -338,7 +343,7 @@ def _parse_v8(text: str, source_name: str) -> _ParsedYAML:
         if root is None:
             raise V8YAMLMutationError(
                 "empty_document",
-                "v8 configuration must contain one mapping document",
+                "config.yaml must contain one mapping document",
                 source=source_name,
             )
         _validate_syntax_tree(root, source_name)
@@ -366,16 +371,16 @@ def _parse_v8(text: str, source_name: str) -> _ParsedYAML:
     if not isinstance(root, MappingNode) or not isinstance(value, dict):
         raise V8YAMLMutationError(
             "invalid_root",
-            "v8 configuration root must be a mapping",
+            "config.yaml root must be a mapping",
             source=source_name,
             line=root.start_mark.line + 1,
             column=root.start_mark.column + 1,
         )
     version = value.get("config_version", _MISSING)
-    if type(version) is not int or version != 8:
+    if type(version) is not int or version not in (8, 9):
         raise V8YAMLMutationError(
             "not_v8_configuration",
-            "comment-preserving observability mutations require config_version 8",
+            "comment-preserving config mutations require config_version 8 or 9",
             source=source_name,
             path=("config_version",),
         )
@@ -390,15 +395,15 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
         nonlocal count
         count += 1
         if count > _MAX_NODES:
-            raise _node_error("too_many_nodes", "v8 configuration exceeds the YAML node limit", source_name, node, path)
+            raise _node_error("too_many_nodes", "config.yaml exceeds the YAML node limit", source_name, node, path)
         is_container = isinstance(node, (MappingNode, SequenceNode))
         if is_container and depth > _MAX_DEPTH:
-            raise _node_error("yaml_too_deep", "v8 configuration exceeds the YAML depth limit", source_name, node, path)
+            raise _node_error("yaml_too_deep", "config.yaml exceeds the YAML depth limit", source_name, node, path)
         if isinstance(node, MappingNode):
             if len(node.value) > _MAX_MAPPING_ENTRIES:
                 raise _node_error(
                     "mapping_too_large",
-                    "a YAML mapping exceeds the v8 entry limit",
+                    "a YAML mapping exceeds the entry limit",
                     source_name,
                     node,
                     path,
@@ -408,7 +413,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if isinstance(key, ScalarNode) and (key.value == "<<" or key.tag == "tag:yaml.org,2002:merge"):
                     raise _node_error(
                         "yaml_merge_forbidden",
-                        "YAML merge keys are not allowed in v8 configuration",
+                        "YAML merge keys are not allowed in config.yaml",
                         source_name,
                         key,
                         path + ("<<",),
@@ -416,7 +421,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if not isinstance(key, ScalarNode) or key.tag != "tag:yaml.org,2002:str":
                     raise _node_error(
                         "non_string_mapping_key",
-                        "v8 mapping keys must be strings",
+                        "mapping keys must be strings",
                         source_name,
                         key,
                         path,
@@ -425,7 +430,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if key.value in seen:
                     raise _node_error(
                         "duplicate_mapping_key",
-                        "duplicate YAML mapping keys are not allowed in v8 configuration",
+                        "duplicate YAML mapping keys are not allowed in config.yaml",
                         source_name,
                         key,
                         child_path,
@@ -515,7 +520,7 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
         if nodes > _MAX_NODES or depth > _MAX_DEPTH:
             raise V8YAMLMutationError(
                 "replacement_too_complex",
-                "replacement exceeds v8 structural limits",
+                "replacement exceeds the structural limits",
                 source=source,
                 path=path,
             )
@@ -558,7 +563,7 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
             return
         raise V8YAMLMutationError(
             "invalid_replacement_type",
-            "replacement contains a value type unsupported by v8 YAML",
+            "replacement contains a value type config.yaml does not support",
             source=source,
             path=path,
         )
@@ -1102,7 +1107,7 @@ def _supported_path(path: YAMLPath) -> bool:
         return len(path) == 4 and path[2] == "attributes" and isinstance(path[3], str) and bool(path[3])
     if section == "trace_policy":
         if len(path) == 3:
-            return path[2] in {"sampler", "sampler_arg", "semantic_profile", "compatibility_aliases"}
+            return path[2] in {"sampler", "sampler_arg", "semantic_profile"}
         return len(path) == 4 and path[2] == "limits" and path[3] in _TRACE_LIMITS
     if section == "metric_policy":
         return len(path) == 3 and path[2] in {"export_interval_seconds", "temporality"}

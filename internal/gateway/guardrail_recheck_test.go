@@ -14,7 +14,7 @@ import (
 // evaluation with one apply_guardrail span, so a blocked prompt is traced
 // and counted once, and the stricter raw verdict is still kept.
 func TestInspectWithRawRecheckIsOneEvaluation(t *testing.T) {
-	g := NewGuardrailInspector("local", nil, nil, "")
+	g := NewGuardrailInspector("local", nil, nil)
 	starts, ends := 0, 0
 	g.SetTracerFunc(func(ctx context.Context, _, _, _, _ string) (context.Context, func(*ScanVerdict, time.Duration)) {
 		starts++

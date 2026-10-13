@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -36,6 +37,12 @@ func TestLocalJudgeGeneratedSpanCarriesCallerIdentity(t *testing.T) {
 	})
 	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
 		UserID: "501", UserIDKind: useridentity.KindPOSIXUID, UserName: "dcm-std1",
+		IdentityID: "agt-0123456789abcdef",
+	})
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	ctx = context.WithValue(ctx, claimedSessionContextKey{}, useridentity.ClaimedSessionHeader{
+		UPN: "dcuser@dclab.test", Session: useridentity.SessionFacts{Kind: useridentity.SessionSSH},
 	})
 	judge.runPIIJudge(ctx, strings.Repeat("p", 40), "prompt", "")
 
@@ -52,6 +59,11 @@ func TestLocalJudgeGeneratedSpanCarriesCallerIdentity(t *testing.T) {
 		"defenseclaw.request.id":       "request-2641",
 		"gen_ai.conversation.id":       "session-2641",
 		"defenseclaw.connector.source": "claudecode",
+		// GAP-0066: correlation.identity joins judge spans to the agent
+		// and the directory facts.
+		"defenseclaw.agent.identity.id": "agt-0123456789abcdef",
+		"defenseclaw.user.domain":       "dclab.test",
+		"defenseclaw.session.kind":      "ssh",
 	} {
 		if got := attributes[key]; got != want {
 			t.Errorf("%s=%v, want %q", key, got, want)

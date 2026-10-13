@@ -123,6 +123,14 @@ func TestFailedAdoptionRestoresTheLegacyDeployment(t *testing.T) {
 func packageHost(t *testing.T, version string) *testHost {
 	t.Helper()
 	h := newTestHost(t, "linux")
+	stagePackage(t, h, version)
+	return h
+}
+
+// stagePackage puts the files the Linux package installs onto h: the
+// binaries and the system units.
+func stagePackage(t *testing.T, h *testHost, version string) {
+	t.Helper()
 	bin := h.env.P(h.env.Layout.BinDir)
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -140,7 +148,6 @@ func packageHost(t *testing.T, version string) *testHost {
 		}
 		writeHostFile(t, h, h.services.DefinitionPath(unit, ChannelPackage), string(data))
 	}
-	return h
 }
 
 // systemd prefers /etc/systemd/system over the packaged /usr/lib units. A

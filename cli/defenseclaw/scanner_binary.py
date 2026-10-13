@@ -21,6 +21,11 @@ from __future__ import annotations
 import shutil
 import sysconfig
 
+# The managed launchers. config_version 9 has no ``binary`` key: both
+# runtimes resolve these names from the managed environment.
+SKILL_SCANNER_BINARY = "skill-scanner"
+MCP_SCANNER_BINARY = "mcp-scanner"
+
 
 def resolve_scanner_binary(binary: str) -> str | None:
     """Return a scanner executable path, preferring this Python environment.

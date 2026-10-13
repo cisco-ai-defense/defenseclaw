@@ -223,16 +223,8 @@ func judgeBodyPlatformPathNeedsHardening(path string) (bool, error) {
 	if gatewayServiceSID == nil {
 		return false, nil
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return false, fmt.Errorf("judge_body: resolve current Windows user for managed DACL validation: %w", err)
-	}
-	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-		return false, fmt.Errorf(
-			"judge_body: managed gateway token SID %s does not match pinned service SID %s",
-			judgeBodyWindowsSID(currentUser.User.Sid),
-			judgeBodyWindowsSID(gatewayServiceSID),
-		)
+	if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
+		return false, fmt.Errorf("judge_body: %w", err)
 	}
 	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
 	if err != nil {
@@ -341,8 +333,10 @@ func judgeBodyWindowsTrustedPrincipal(sid *windows.SID) bool {
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return true
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {
+	// The process's own owner identity: the token user, or the gateway service
+	// SID for the LocalSystem gateway, which writes these files as that SID.
+	current, err := auditDBWindowsCurrentProcessOwnerSID()
+	if err == nil && current != nil && sid.Equals(current) {
 		return true
 	}
 	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")

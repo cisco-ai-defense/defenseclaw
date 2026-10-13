@@ -28,19 +28,26 @@ import (
 // process is one of the user's processes as ps(1) lists it.
 type process struct {
 	pid, ppid int
-	// path is the executable: macOS's ps prints its full path.
+	// path is the executable's full path.
 	path string
 }
 
-// processes are this user's processes, listed once, when a Mac's checks
-// need them: what runs a gateway Homebrew's service does not run, and
+// processes are this user's processes, listed once, when the checks need
+// them: what runs a gateway Homebrew's service does not run (a Mac), and
 // which MicroVM driver it runs. They are empty when ps cannot list them.
 func (r *doctorRun) processes(ctx context.Context) []process {
 	if r.procsDone {
 		return r.procs
 	}
 	r.procsDone = true
-	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-axww", "-o", "pid=,ppid=,uid=,comm="}, Timeout: 10 * time.Second})
+	// macOS's ps prints an executable's full path as comm; procps prints
+	// only a name there, so on Linux the path is the first word of the
+	// command line.
+	column, linux := "comm=", r.GOOS == "linux"
+	if linux {
+		column = "args="
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-axww", "-o", "pid=,ppid=,uid=," + column}, Timeout: 10 * time.Second})
 	if err != nil {
 		return nil
 	}
@@ -55,6 +62,9 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 		owner, err3 := strconv.Atoi(f[2])
 		// An executable path may hold spaces.
 		path := strings.Join(f[3:], " ")
+		if linux {
+			path = f[3]
+		}
 		if err1 != nil || err2 != nil || err3 != nil || owner != uid || !filepath.IsAbs(path) {
 			continue
 		}

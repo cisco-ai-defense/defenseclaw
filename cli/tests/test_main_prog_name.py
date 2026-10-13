@@ -9,10 +9,12 @@ import os
 import subprocess
 import sys
 
+from tests.environment import source_package_env
+
 
 def test_module_run_usage_error_names_the_defenseclaw_command(tmp_path):
     # The TUI executor runs (sys.executable, "-m", "defenseclaw.main", ...).
-    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    env = source_package_env({**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)})
     result = subprocess.run(
         [sys.executable, "-m", "defenseclaw.main", "--no-such-option"],
         capture_output=True,

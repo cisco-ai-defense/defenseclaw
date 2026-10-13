@@ -128,6 +128,7 @@ def test_current_security_producers_have_lossless_authored_contracts() -> None:
         "correlation.agent",
         "correlation.tool.identity",
         "security.network.egress",
+        "correlation.policy.effective",
         "correlation.sandbox",
     }
     assert attributes["defenseclaw.network.source"].normalization.effective_constraints["enum"] == (

@@ -90,9 +90,24 @@ func testConfig(endpoint string) Config {
 			Values: map[string]string{
 				"service.name": "defenseclaw", "service.instance.id": "managed-generation",
 				"defenseclaw.device.public_key_fingerprint": "sha256:managed-device",
-				"host.name": "managed-host",
+				"deployment.environment.name":               "managed-env",
+				"defenseclaw.deployment.mode":               "managed_enterprise",
+				"host.name":                                 "managed-host",
 			},
 		},
+		DeploymentAliases: true,
+	}
+}
+
+// deployment.environment and deployment.mode follow the retired
+// compatibility_aliases switch as on main; defenseclaw.device.id does not.
+func TestManagedResourceDeploymentAliasesFollowTheSwitch(t *testing.T) {
+	for aliases, want := range map[bool][2]string{true: {"managed-env", "managed_enterprise"}, false: {"", ""}} {
+		values, _, _, ok := managedResourceSnapshot(testConfig("").Resource.Values, aliases)
+		if !ok || values["defenseclaw.device.id"] != "sha256:managed-device" ||
+			values["deployment.environment"] != want[0] || values["deployment.mode"] != want[1] {
+			t.Fatalf("aliases=%t: managed resource = %#v", aliases, values)
+		}
 	}
 }
 
@@ -354,6 +369,8 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 		resource := managedGoldenAttributeValues(envelope.Payload.ResourceLogs[0].Resource.Attributes)
 		if resource["defenseclaw.device.public_key_fingerprint"] != "sha256:managed-device" ||
 			resource["defenseclaw.device.id"] != "sha256:managed-device" ||
+			resource["deployment.environment"] != "managed-env" ||
+			resource["deployment.mode"] != "managed_enterprise" ||
 			resource["host.name"] != "managed-host" {
 			t.Fatalf("managed resource anchor = %#v", resource)
 		}
@@ -795,7 +812,7 @@ func TestAdapterUnavailableProviderFailsClosedWithDispatcherHealth(t *testing.T)
 	}
 	health := dispatcher.DeliveryHealthSnapshot()
 	if health.State != delivery.HealthFailing || health.Counters.Delivered != 0 ||
-		health.Counters.Rejected != 1 || health.Counters.Failed != 1 {
+		health.Counters.Dropped != 1 || health.Counters.Failed != 1 {
 		t.Fatalf("unavailable managed sink health = %+v", health)
 	}
 	if resolver.calls.Load() != 1 {
@@ -877,7 +894,7 @@ func TestAdapterRetriesCredentialFetchErrors(t *testing.T) {
 				}
 				flushAndClose(t, dispatcher)
 				counters := dispatcher.Counters()
-				if counters.Retried != 1 || counters.Rejected != 1 || counters.Failed != 2 {
+				if counters.Retried != 1 || counters.Dropped != 1 || counters.Failed != 2 {
 					t.Fatalf("credential fetch counters = %+v, want one retry", counters)
 				}
 				if resolver.calls.Load() != 2 {
@@ -965,7 +982,7 @@ func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := dispatcher.DeliveryHealthSnapshot()
-	if health.Counters.Delivered != 0 || health.Counters.Rejected != 1 || health.Counters.Failed != 1 {
+	if health.Counters.Delivered != 0 || health.Counters.Dropped != 1 || health.Counters.Failed != 1 {
 		t.Fatalf("oversized acknowledgement health = %+v", health)
 	}
 	if err := dispatcher.Close(ctx); err != nil {

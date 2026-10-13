@@ -22,10 +22,13 @@ to the skill-scanner CLI.  Maps SDK ScanResult/Finding → DefenseClaw models.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
 import sys
+import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -36,6 +39,7 @@ from defenseclaw.config import (
     SkillScannerConfig,
 )
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
     inject_llm_env,
     litellm_model,
@@ -46,46 +50,6 @@ if TYPE_CHECKING:
     pass
 
 _log = logging.getLogger(__name__)
-
-
-def _frontmatter_yara_analyzers(analyzers: list) -> list:
-    """YARA-scan the SKILL.md frontmatter description too (GAP-1376).
-
-    The SDK's static analyzer runs YARA on the SKILL.md body only, but the
-    description is the text an agent always loads, so an instruction-override
-    phrase there must be found like the same phrase in the body.
-    """
-    try:
-        from skill_scanner.core.analyzers.base import BaseAnalyzer
-        from skill_scanner.core.analyzers.static import StaticAnalyzer
-    except ImportError:
-        return []
-    static = next(
-        (
-            a for a in analyzers
-            if isinstance(a, StaticAnalyzer) and getattr(a, "yara_scanner", None) is not None
-        ),
-        None,
-    )
-    if static is None:
-        return []
-
-    class _FrontmatterYaraAnalyzer(BaseAnalyzer):
-        def __init__(self) -> None:
-            super().__init__("static_frontmatter", policy=static.policy)
-
-        def analyze(self, skill):  # type: ignore[no-untyped-def]
-            text = getattr(skill, "description", "") or ""
-            if not text.strip():
-                return []
-            findings = []
-            for match in static.yara_scanner.scan_content(text, "SKILL.md"):
-                if not static._is_rule_enabled(match.get("rule_name", "")):
-                    continue
-                findings.extend(static._create_findings_from_yara_match(match, skill))
-            return findings
-
-    return [_FrontmatterYaraAnalyzer()]
 
 
 # Skip warnings already printed in this process, so `skill scan --all` says
@@ -143,6 +107,92 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
+# Bounds on the copy _utf8_skill_copy makes (Go stageUTF16Skill).
+_UTF16_STAGE_MAX_BYTES = 64 << 20
+_UTF16_STAGE_MAX_FILES = 2000
+
+
+@contextlib.contextmanager
+def _utf8_skill_copy(target: str) -> Iterator[str]:
+    """Yield a copy of the skill whose UTF-16 SKILL.md is re-encoded as UTF-8.
+
+    skill-scanner refuses a SKILL.md with NUL bytes, which is how Windows
+    editors save "Unicode" text (GAP-0417); the install watcher scans the
+    same copy (internal/scanner stageUTF16Skill). Any other skill is scanned
+    in place, and the skill's own files are never changed.
+    """
+    manifest = ""
+    for name in ("SKILL.md", "skill.md"):
+        candidate = os.path.join(target, name)
+        if os.path.isfile(candidate) and not os.path.islink(candidate):
+            manifest = name
+            break
+    if not manifest:
+        yield target
+        return
+    with open(os.path.join(target, manifest), "rb") as fh:
+        head = fh.read(2)
+    if head not in (b"\xff\xfe", b"\xfe\xff"):
+        yield target
+        return
+    from defenseclaw.skill_discovery import decode_skill_text
+
+    with tempfile.TemporaryDirectory(prefix="dc-skill-utf8-") as tmp:
+        stage = os.path.join(tmp, os.path.basename(os.path.normpath(target)))
+        total = files = 0
+        for root, dirs, names in os.walk(target):
+            rel_root = os.path.relpath(root, target)
+            os.makedirs(os.path.join(stage, rel_root), exist_ok=True)
+            for name in dirs + names:
+                if os.path.islink(os.path.join(root, name)):
+                    raise RuntimeError(f"{manifest} is saved as UTF-16 and the skill holds a link; save it as UTF-8")
+            for name in names:
+                source = os.path.join(root, name)
+                files += 1
+                total += os.path.getsize(source)
+                if files > _UTF16_STAGE_MAX_FILES or total > _UTF16_STAGE_MAX_BYTES:
+                    raise RuntimeError(
+                        f"{manifest} is saved as UTF-16 and the skill is too large to re-encode; save it as UTF-8"
+                    )
+                with open(source, "rb") as fh:
+                    data = fh.read()
+                if rel_root == "." and name == manifest:
+                    data = decode_skill_text(data).encode("utf-8")
+                with open(os.path.join(stage, rel_root, name), "wb") as fh:
+                    fh.write(data)
+        yield stage
+
+
+# The INFO finding skill-scanner reports when its LLM judge started but did
+# not answer; the scan then ran the deterministic analyzers only.
+LLM_ANALYSIS_FAILED = "LLM_ANALYSIS_FAILED"
+
+
+class JudgeUnavailableError(RuntimeError):
+    """The LLM judge did not run, so the scan is incomplete (GAP-0376)."""
+
+
+def _raise_on_judge_failure(result: ScanResult) -> None:
+    """Fail a scan whose judge did not run, as skill-scanner.mdx promises.
+
+    The scanner reports the outage as an INFO finding and exits 0, so the
+    scan read as clean or MEDIUM while every judge-only detection was lost.
+    The install watcher blocks such a skill; the CLI exits non-zero.
+    """
+    for finding in result.findings:
+        if finding.rule_id != LLM_ANALYSIS_FAILED:
+            continue
+        detail = " ".join(str(finding.description or "").split())
+        if len(detail) > 240:
+            detail = detail[:240] + "..."
+        raise JudgeUnavailableError(
+            "the LLM judge did not run, so the scan is incomplete (static analysis only)"
+            + (f": {detail}" if detail else "")
+            + ". Check the judge model, its key and the network, or pass --no-use-llm "
+            "to scan with the static rules alone."
+        )
+
+
 class SkillScannerWrapper:
     """Wraps the cisco-ai-skill-scanner SDK.
 
@@ -159,8 +209,10 @@ class SkillScannerWrapper:
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
         *,
         llm: LLMConfig | None = None,
+        secure_client: bool = False,
     ) -> None:
         self.config = config
+        self.secure_client = secure_client
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
@@ -195,140 +247,115 @@ class SkillScannerWrapper:
             raise SystemExit(1)
 
         cfg = self.config
-        llm = self._llm
-        self._inject_env()
-
-        policy = ScanPolicy.default()
-        if cfg.policy:
-            try:
-                policy = ScanPolicy.from_file(cfg.policy)
-            except Exception:
-                presets = {"strict", "balanced", "permissive"}
-                if cfg.policy in presets:
-                    policy = ScanPolicy.from_preset(cfg.policy)
+        policy = _scan_policy(ScanPolicy, cfg)
 
         build_kwargs: dict = {"policy": policy}
+        env: dict[str, str] = {}
+        judge: dict = {}
         if cfg.use_behavioral:
             build_kwargs["use_behavioral"] = True
         if cfg.use_llm:
-            # The upstream skill-scanner SDK auto-detects the provider
-            # from a LiteLLM-shaped ``provider/model`` string via its
-            # ``ProviderConfig`` (Bedrock, Gemini, Vertex, Azure,
-            # Ollama, OpenRouter, …). We deliberately do NOT pass
-            # ``llm_provider`` here because:
-            #   1. The factory ignores it whenever ``llm_model`` is
-            #      set (skill_scanner/core/analyzer_factory.py).
-            #   2. Our internal short names ("bedrock", "vertex_ai")
-            #      don't match the upstream ``LLMProvider`` enum
-            #      ("aws-bedrock", "gcp-vertex"), so passing them
-            #      would only matter on the model-less path and
-            #      would error out there.
-            # Letting the model string carry the provider keeps every
-            # LiteLLM-supported provider working end-to-end.
-            #
-            # Guard ``use_llm`` on a resolved model: without it, the
-            # upstream factory falls back to a hard-coded Anthropic
-            # default (``claude-3-5-sonnet-20241022``) and then crashes
-            # on operators whose unified key isn't an Anthropic key.
-            # Skipping the LLM analyzer with a clear log line is
-            # strictly better than emitting an upstream warning that
-            # operators can't action.
-            model = litellm_model(llm)
-            env_model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "")
-            effective_model = model or env_model
-            api_key = llm.resolved_api_key() or os.environ.get(
-                "SKILL_SCANNER_LLM_API_KEY", ""
-            )
-            ready = bool(effective_model) and llm_analyzer_ready(
-                llm,
-                model=effective_model,
-                api_key=api_key,
-            )
-            if (
-                ready
-                and "bedrock/" in effective_model.lower()
-                and not api_key
-                and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-                and not _aws_credentials_found()
-            ):
-                # Keyless Bedrock signs with the AWS credential chain; say
-                # once why the LLM lane is off instead of failing every call.
-                mode = llm.keyless_auth_mode() or "aws credentials"
-                _warn_llm_skipped_once(
-                    f"no AWS credentials found for Bedrock (auth_mode={mode}); "
-                    "check the instance profile or the AWS credential chain"
-                )
-            elif ready:
+            judge = self._judge()
+            if judge:
+                build_kwargs.update(judge)
                 build_kwargs["use_llm"] = True
-                if model:
-                    build_kwargs["llm_model"] = model
-                elif env_model:
-                    build_kwargs["llm_model"] = env_model
-                if api_key:
-                    build_kwargs["llm_api_key"] = api_key
-                if llm.base_url:
-                    build_kwargs["llm_base_url"] = llm.base_url
                 if cfg.llm_consensus_runs > 0:
                     build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
-            elif effective_model:
-                key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
-                print(
-                    "warning: LLM analyzer skipped: "
-                    f"{key_name} is not configured; continuing with local analyzers",
-                    file=sys.stderr,
-                )
-            else:
-                _log.info(
-                    "skill-scanner: use_llm requested but no model resolved "
-                    "from llm.model / SKILL_SCANNER_LLM_MODEL — skipping LLM "
-                    "analyzer to avoid upstream's Anthropic fallback default. "
-                    "Set llm.model (e.g. 'bedrock/anthropic.claude-3-5-haiku') "
-                    "or SKILL_SCANNER_LLM_MODEL to enable.",
-                )
+                env.update({
+                    "SKILL_SCANNER_LLM_MODEL": judge["llm_model"],
+                    "SKILL_SCANNER_LLM_API_KEY": judge.get("llm_api_key", ""),
+                    "SKILL_SCANNER_LLM_BASE_URL": judge.get("llm_base_url", ""),
+                    "SKILL_SCANNER_LLM_PROVIDER": judge.get("llm_provider", ""),
+                })
         if cfg.use_trigger:
             build_kwargs["use_trigger"] = True
-        if cfg.use_virustotal:
+        if settings.virustotal_enabled(cfg):
             build_kwargs["use_virustotal"] = True
-        if cfg.use_aidefense:
+            build_kwargs["vt_upload_files"] = bool(cfg.analyzers.virustotal.upload_files)
+            env["VIRUSTOTAL_API_KEY"] = cfg.resolved_virustotal_api_key()
+        if settings.aidefense_enabled(cfg):
             build_kwargs["use_aidefense"] = True
+            env["AI_DEFENSE_API_KEY"] = self.cisco_ai_defense.resolved_api_key()
+            env["AI_DEFENSE_API_URL"] = self.cisco_ai_defense.endpoint or ""
+        if settings.osv_enabled(cfg):
+            build_kwargs["use_osv"] = True
 
-        analyzers = build_analyzers(**build_kwargs)
-        analyzers.extend(_frontmatter_yara_analyzers(analyzers))
-        scanner = SkillScanner(analyzers=analyzers, policy=policy)
+        with settings.scanner_env(env, secure_client=self.secure_client):
+            self._inject_env()
+            analyzers = build_analyzers(**build_kwargs)
+            scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
-        start = time.monotonic()
-        sdk_result = scanner.scan_skill(str(target), lenient=cfg.lenient)
-        elapsed = time.monotonic() - start
+            start = time.monotonic()
+            with _utf8_skill_copy(str(target)) as scan_target:
+                sdk_result = scanner.scan_skill(scan_target, lenient=cfg.lenient)
+                if cfg.enable_meta and judge and len(analyzers) > 1:
+                    _apply_meta_analysis(scanner, sdk_result, scan_target, cfg.lenient, judge, policy)
+                elapsed = time.monotonic() - start
+                result = self._convert(sdk_result, scan_target, elapsed)
+        result.target = target
+        if judge:
+            _raise_on_judge_failure(result)
+        # The scan says which policy and judge model it ran with (GAP-0047).
+        result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
+        return result
 
-        return self._convert(sdk_result, target, elapsed)
+    def _judge(self) -> dict:
+        """The judge's ``build_analyzers`` arguments, or ``{}`` when none can run.
+
+        The judge is the resolved ``llm:`` block. A model is required, and so
+        is a key unless the provider is keyless (local servers, Bedrock with
+        its AWS credential chain). Without the guard the upstream factory
+        falls back to its own default model, or refuses to start.
+        """
+        llm = self._llm
+        model = litellm_model(llm)
+        if self.secure_client and not model:
+            model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "")
+        if not model:
+            _log.info("skill-scanner: no judge model resolved from llm.model; running the static rules")
+            return {}
+        api_key = llm.resolved_api_key()
+        if self.secure_client and not api_key:
+            api_key = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "")
+        if not llm_analyzer_ready(llm, model=model, api_key=api_key):
+            key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
+            _warn_llm_skipped_once(f"{key_name} is not configured")
+            return {}
+        if (
+            "bedrock/" in model.lower()
+            and not api_key
+            and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+            and not _aws_credentials_found()
+        ):
+            # Keyless Bedrock signs with the AWS credential chain; say
+            # once why the LLM lane is off instead of failing every call.
+            mode = llm.keyless_auth_mode() or "aws credentials"
+            _warn_llm_skipped_once(
+                f"no AWS credentials found for Bedrock (auth_mode={mode}); "
+                "check the instance profile or the AWS credential chain"
+            )
+            return {}
+        provider, model = settings.judge_route(llm, model)
+        if not api_key and llm.is_local_provider():
+            # The openai-compatible route needs a key; local servers ignore it.
+            api_key = "local-no-key"
+        judge = {"llm_model": model}
+        if provider:
+            judge["llm_provider"] = provider
+        if api_key:
+            judge["llm_api_key"] = api_key
+        if llm.base_url:
+            judge["llm_base_url"] = llm.request_base_url()
+        return judge
 
     def _inject_env(self) -> None:
-        """Inject API keys and the skill-scanner-specific env vars.
+        """Provider-native LiteLLM variables and the Bedrock region.
 
-        Two layers:
-
-        1. Provider-specific env vars for LiteLLM (via the shared
-           helper). This is how the analyzer eventually reaches the
-           model regardless of provider.
-        2. skill-scanner's bespoke env vars (``SKILL_SCANNER_LLM_*``,
-           ``VIRUSTOTAL_API_KEY``, ``AI_DEFENSE_API_KEY``) that the SDK
-           reads directly. Kept here until skill-scanner switches to the
-           provider-native env vars.
+        The ``SKILL_SCANNER_*`` / VirusTotal / AI Defense variables are set
+        by :func:`settings.scanner_env` from config, never from the shell.
         """
-        cfg = self.config
         llm = self._llm
-        aid = self.cisco_ai_defense
         inject_llm_env(llm)
-
-        mappings = [
-            ("SKILL_SCANNER_LLM_API_KEY", llm.resolved_api_key()),
-            ("SKILL_SCANNER_LLM_MODEL", litellm_model(llm)),
-            ("VIRUSTOTAL_API_KEY", cfg.resolved_virustotal_api_key()),
-            ("AI_DEFENSE_API_KEY", aid.resolved_api_key()),
-        ]
-        for env_var, value in mappings:
-            if value and env_var not in os.environ:
-                os.environ[env_var] = value
 
         if litellm_model(llm).lower().startswith("bedrock/"):
             # The SDK reads the Bedrock region from AWS_REGION only (default
@@ -336,7 +363,8 @@ class SkillScannerWrapper:
             # instance-metadata credentials once with a 1 s timeout; retry a
             # slow answer like the gateway's Go SDK does (GAP-2628).
             region = _bedrock_region(llm)
-            if region and not os.environ.get("AWS_REGION"):
+            # Config wins over the shell, as in the gateway scanner env.
+            if region:
                 os.environ["AWS_REGION"] = region
             if llm.keyless_auth_mode() == "instance_role":
                 os.environ.setdefault("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "3")
@@ -414,3 +442,63 @@ def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) 
         if first in text:
             return idx
     return line
+
+
+def _scan_policy(policy_cls: type, cfg: SkillScannerConfig) -> object:
+    """The scan policy from config: a preset, or a custom file by digest.
+
+    A custom policy loads only from bytes that match ``policy_file.digest``;
+    a mismatch fails the scan. A v8 config may still hold a policy file path
+    in ``policy`` (migration input); any other unknown name fails the scan,
+    as it does on the gateway.
+    """
+    name = settings.effective_policy(cfg)
+    if name in settings.POLICY_PRESETS:
+        return policy_cls.from_preset(name)
+    if name == settings.POLICY_CUSTOM:
+        ref = cfg.policy_file
+        data = settings.verified_asset_bytes(ref.path, ref.digest)
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="dc-skill-policy-") as tmp:
+            path = os.path.join(tmp, "policy.yaml")
+            with open(path, "wb") as fh:
+                fh.write(data)
+            return policy_cls.from_yaml(path)
+    if os.path.isfile(name):
+        return policy_cls.from_yaml(name)
+    presets = ", ".join(settings.POLICY_PRESETS)
+    raise ValueError(f"unknown skill-scanner policy {name!r}; use one of {presets} or custom")
+
+
+def _apply_meta_analysis(
+    scanner: object, result: object, target: str, lenient: bool, judge: dict, policy: object
+) -> None:
+    """Filter *result* with the meta-analyzer (scanners.skill_scanner.enable_meta).
+
+    Mirrors the upstream CLI's --enable-meta. The meta-analyzer only removes
+    likely false positives, so when it cannot run the findings stay as they are.
+    """
+    if not getattr(result, "findings", None):
+        return
+    try:
+        import asyncio
+
+        from skill_scanner.core.analyzers.meta_analyzer import MetaAnalyzer, apply_meta_analysis_to_results
+
+        meta = MetaAnalyzer(
+            model=judge["llm_model"],
+            api_key=judge.get("llm_api_key"),
+            base_url=judge.get("llm_base_url"),
+            provider=judge.get("llm_provider"),
+            policy=policy,
+        )
+        skill = scanner.loader.load_skill(target, lenient=lenient)
+        meta_result = asyncio.run(
+            meta.analyze_with_findings(skill=skill, findings=result.findings, analyzers_used=result.analyzers_used)
+        )
+        result.findings = apply_meta_analysis_to_results(
+            original_findings=result.findings, meta_result=meta_result, skill=skill
+        )
+    except Exception as exc:  # noqa: BLE001 - meta-analysis is a filter, never a gate
+        print(f"warning: meta-analysis skipped: {exc}; keeping every finding", file=sys.stderr)

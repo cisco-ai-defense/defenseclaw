@@ -74,12 +74,13 @@ case "$DEFENSECLAW_GUARD_EVENT" in
                 # audit row yet: send it to the session route, which writes one.
                 DEFENSECLAW_GUARD_REASON="enterprise_foreign_hook_check_failed: DefenseClaw could not check the Hermes hooks of this account: $DEFENSECLAW_GUARD_CAUSE"
                 DEFENSECLAW_GUARD_SESSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.session_id // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_SESSION=""
-                curl -s -o /dev/null -X POST "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" \
+                # The body names the session: it goes to curl on a descriptor
+                # (defenseclaw_gateway_post), never on its command line.
+                DEFENSECLAW_GUARD_BODY='{"key":{"Connector":"hermes","Session":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_SESSION")"'"},"session_start":false,"decision":{"deny":true,"reason":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_REASON")"'"}}'
+                defenseclaw_gateway_post "http://${API_ADDR}/api/v1/foreign-hook-session/hermes" 5 "$DEFENSECLAW_GUARD_BODY" \
                   -H "Content-Type: application/json" \
                   -H "X-DefenseClaw-Client: hermes-hook/1.0" \
-                  --connect-timeout 2 --max-time 5 --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" \
-                  -d '{"key":{"Connector":"hermes","Session":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_SESSION")"'"},"session_start":false,"decision":{"deny":true,"reason":"'"$(defenseclaw_json_escape "$DEFENSECLAW_GUARD_REASON")"'"}}' \
-                  2>/dev/null || :
+                  --unix-socket "${DEFENSECLAW_HOOK_SOCKET}" >/dev/null 2>&1 || :
               fi
               ;;
           esac

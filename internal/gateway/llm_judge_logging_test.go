@@ -19,6 +19,8 @@ package gateway
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // These tests pin the opt-in semantics of Phase 2.3 (retain judge raw
@@ -26,7 +28,7 @@ import (
 // and ONLY return the truncated raw body when one of three controls is
 // explicitly enabled:
 //
-//  1. DEFENSECLAW_JUDGE_TRACE=1 (ephemeral, session-only)
+//  1. guardrail.judge.trace = true (config; the env var only under Secure Client)
 //  2. DEFENSECLAW_REVEAL_PII=1  (ephemeral, local triage)
 //  3. guardrail.retain_judge_bodies = true (durable, via SetRetainJudgeBodies)
 //
@@ -58,20 +60,6 @@ func TestJudgeRawForEmit_DefaultOffReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestJudgeRawForEmit_EnvTraceEnables(t *testing.T) {
-	restoreRetainJudgeBodies(t)
-	retainJudgeBodies.Store(false)
-
-	for _, v := range []string{"1", "true", "yes", "on", "TRUE", "Yes", " 1 "} {
-		t.Run("env="+v, func(t *testing.T) {
-			t.Setenv("DEFENSECLAW_JUDGE_TRACE", v)
-			if got := judgeRawForEmit(judgePayload); !strings.Contains(got, "phone") {
-				t.Fatalf("env %q did not enable retention: %q", v, got)
-			}
-		})
-	}
-}
-
 // TestJudgeRawForEmit_RevealPIIEnables pins the Task-4 invariant:
 // operators debugging with DEFENSECLAW_REVEAL_PII=1 must see judge
 // raw bodies without also flipping DEFENSECLAW_JUDGE_TRACE. The live
@@ -89,19 +77,6 @@ func TestJudgeRawForEmit_RevealPIIEnables(t *testing.T) {
 			t.Setenv("DEFENSECLAW_REVEAL_PII", v)
 			if got := judgeRawForEmit(judgePayload); !strings.Contains(got, "phone") {
 				t.Fatalf("REVEAL_PII=%q did not enable retention: %q", v, got)
-			}
-		})
-	}
-}
-
-func TestJudgeRawForEmit_EnvFalsyKeepsOff(t *testing.T) {
-	restoreRetainJudgeBodies(t)
-	retainJudgeBodies.Store(false)
-	for _, v := range []string{"0", "false", "no", "off", ""} {
-		t.Run("env="+v, func(t *testing.T) {
-			t.Setenv("DEFENSECLAW_JUDGE_TRACE", v)
-			if got := judgeRawForEmit(judgePayload); got != "" {
-				t.Fatalf("falsy env %q leaked body: %q", v, got)
 			}
 		})
 	}
@@ -138,22 +113,24 @@ func TestJudgeRawForEmit_TruncatesLongBodies(t *testing.T) {
 	}
 }
 
-func TestJudgeLogTrace_DefaultsFalse(t *testing.T) {
-	t.Setenv("DEFENSECLAW_JUDGE_TRACE", "")
-	if judgeLogTrace() {
-		t.Fatal("judgeLogTrace must default to false when env unset")
-	}
-}
+// TestJudgeLogTrace_FollowsConfig pins guardrail.judge.trace as the switch:
+// the live generation's key turns tracing on, and DEFENSECLAW_JUDGE_TRACE
+// no longer does outside the Secure Client integration.
+func TestJudgeLogTrace_FollowsConfig(t *testing.T) {
+	restoreRetainJudgeBodies(t)
+	retainJudgeBodies.Store(false)
+	prev := liveGeneration.Load()
+	t.Cleanup(func() { liveGeneration.Store(prev) })
+	t.Setenv("DEFENSECLAW_JUDGE_TRACE", "1")
 
-func TestJudgeLogTrace_UnknownValueIsFalse(t *testing.T) {
-	// Unknown strings (including numeric "2") must not enable tracing —
-	// operators occasionally set this to the wrong value and we don't
-	// want silent PII retention as a consequence.
-	for _, v := range []string{"2", "enabled", "maybe", "Y"} {
-		t.Setenv("DEFENSECLAW_JUDGE_TRACE", v)
-		if judgeLogTrace() {
-			t.Fatalf("judgeLogTrace(%q)=true; must be false for unknown values", v)
-		}
+	cfg := &config.Config{}
+	liveGeneration.Store(&Generation{Config: cfg})
+	if judgeLogTrace() || judgeRawForEmit(judgePayload) != "" {
+		t.Fatal("DEFENSECLAW_JUDGE_TRACE enabled tracing; guardrail.judge.trace is the switch")
+	}
+	cfg.Guardrail.Judge.Trace = true
+	if !judgeLogTrace() || !strings.Contains(judgeRawForEmit(judgePayload), "phone") {
+		t.Fatal("guardrail.judge.trace did not enable tracing")
 	}
 }
 

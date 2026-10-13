@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -116,14 +118,18 @@ guardrail:
 `, layout.DataDir, layout.PolicyDir))
 }
 
-// ensure keeps working on a host whose config an earlier build wrote.
+// ensure keeps working on a host whose config an earlier build wrote: the
+// config_version 8 file is installed as its v9 migration, with the v8 bytes,
+// migration-v9.json and a lifecycle config generation next to it, and an
+// inline VirusTotal key moves to the service .env.
 func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireNoHostInstall(t, h.env.Layout)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			previous := previousDefaultConfig(h.env.Layout)
+			previous := append(previousDefaultConfig(h.env.Layout),
+				"scanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: vt-test-value\n"...)
 			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), previous, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -136,10 +142,65 @@ func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if record.ConfigSHA256 != sha256Bytes(previous) {
-				t.Fatal("record does not reflect the previous default config")
+			installed := h.read(h.env.Layout.ConfigPath)
+			if config.NeedsMigrationV9([]byte(installed)) || !strings.Contains(installed, "config_version: 9") {
+				t.Fatalf("installed config is not config_version 9:\n%s", installed)
+			}
+			if record.ConfigSHA256 != sha256Bytes([]byte(installed)) {
+				t.Fatal("record does not reflect the installed config")
+			}
+			if got := h.read(h.env.Layout.ConfigPath + config.ConfigV8BackupSuffix); got != string(previous) {
+				t.Fatal("config.yaml.v8.bak does not hold the previous config")
+			}
+			if _, err := os.Stat(h.env.P(config.MigrationRecordPath(h.env.Layout.ConfigPath))); err != nil {
+				t.Fatalf("migration-v9.json: %v", err)
+			}
+			if env := h.read(serviceDotEnvPath(h.env)); !strings.Contains(env, "VIRUSTOTAL_API_KEY=vt-test-value") {
+				t.Fatal("the inline VirusTotal key is not in the service .env")
+			}
+			state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+			if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != record.ConfigSHA256 {
+				t.Fatalf("config generation = %+v (%v), want the lifecycle's record of the installed config", state, err)
 			}
 		})
+	}
+}
+
+// After a rollback an earlier release records its own version and the v8
+// config it was given. Upgrading again migrates that config again, instead of
+// treating it as a v8 file configuration management put back and leaving the
+// old migration-v9.json as the only record (GAP-0113).
+func TestReUpgradeAfterARollbackMigratesTheConfigAgain(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireNoHostInstall(t, h.env.Layout)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	previous := previousDefaultConfig(h.env.Layout)
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	if err := os.WriteFile(configPath, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if config.NeedsMigrationV9([]byte(h.read(h.env.Layout.ConfigPath))) {
+		t.Fatal("premise: the first upgrade migrates the v8 config")
+	}
+	// The rollback put the v8 bytes back and recorded the older release.
+	if err := os.WriteFile(configPath, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.ProductVersion, record.ConfigSHA256 = "0.9.0", sha256Bytes(previous)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if installed := h.read(h.env.Layout.ConfigPath); config.NeedsMigrationV9([]byte(installed)) {
+		t.Fatalf("the re-upgrade left the config at config_version 8:\n%s", installed)
+	}
+	if h.read(h.env.Layout.ConfigPath+config.ConfigV8BackupSuffix) != string(previous) {
+		t.Fatal("config.yaml.v8.bak does not hold the config the re-upgrade migrated")
 	}
 }
 

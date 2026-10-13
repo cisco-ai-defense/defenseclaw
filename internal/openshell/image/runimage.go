@@ -505,8 +505,27 @@ type VMDisk struct {
 	// gateway's sandbox_uid and sandbox_gid), -1 for the image's own
 	// account.
 	UID, GID int
+	// OpenShell is the release whose vm driver prepared it, from its name
+	// (...-openshell-0.1.1-...); "" when the name does not say. The driver
+	// of another release prepares its own disk from the image and never
+	// boots this one (PreparedBy).
+	OpenShell string
 	// Bytes is the space it takes on disk.
 	Bytes int64
+	// Changed is when a staging directory's contents last changed
+	// (VMStaging; zero for a prepared disk).
+	Changed time.Time
+}
+
+// PreparedBy reports whether the vm driver of release boots d: true unless
+// both releases are known and differ.
+func (d VMDisk) PreparedBy(release string) bool {
+	was, err := openshell.ParseVersion(d.OpenShell)
+	if err != nil {
+		return true
+	}
+	now, err := openshell.ParseVersion(release)
+	return err != nil || was.Compare(now) == 0
 }
 
 // VMDisks lists the root disks under cacheDir the vm driver prepared from
@@ -518,26 +537,35 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	if !ok || !hashRE.MatchString(id) || cacheDir == "" {
 		return nil
 	}
+	return listVMDisks(cacheDir, func(_ VMDisk, of string) bool { return of == id })
+}
+
+// StaleVMDisks lists the root disks under cacheDir that the vm driver of
+// another release than release prepared, which the driver of release never
+// boots: after an in-place upgrade those of the release before stay behind.
+// None when release is not known.
+func StaleVMDisks(cacheDir, release string) []VMDisk {
+	if _, err := openshell.ParseVersion(release); err != nil || cacheDir == "" {
+		return nil
+	}
+	return listVMDisks(cacheDir, func(d VMDisk, _ string) bool { return !d.PreparedBy(release) })
+}
+
+// listVMDisks lists the root disks under cacheDir that keep takes, with the
+// image ID (hex) each was prepared from.
+func listVMDisks(cacheDir string, keep func(d VMDisk, imageID string) bool) []VMDisk {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return nil
 	}
-	suffix := "-sha256-" + id
 	var out []VMDisk
 	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
+		if !e.IsDir() {
 			continue
 		}
-		d := VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
-		rest := strings.TrimSuffix(name, suffix)
-		if i := strings.LastIndex(rest, "-configured-"); i >= 0 {
-			uid, gid, _ := strings.Cut(rest[i+len("-configured-"):], "-")
-			u, uerr := strconv.Atoi(uid)
-			g, gerr := strconv.Atoi(gid)
-			if uerr == nil && gerr == nil {
-				d.UID, d.GID = u, g
-			}
+		d, id, ok := vmDisk(cacheDir, e.Name())
+		if !ok || !keep(d, id) {
+			continue
 		}
 		d.Bytes = treeBytes(d.Path)
 		out = append(out, d)
@@ -545,14 +573,36 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	return out
 }
 
+// vmDisk is the root disk in the directory name under cacheDir, and the
+// image ID (hex) it was prepared from; ok is false unless name is
+// openshell.PreparedDiskPrefix...-sha256-<an image ID>.
+func vmDisk(cacheDir, name string) (d VMDisk, imageID string, ok bool) {
+	i := strings.LastIndex(name, "-sha256-")
+	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+		return VMDisk{}, "", false
+	}
+	d = VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
+	rest := name[:i]
+	if j := strings.LastIndex(rest, "-configured-"); j >= 0 {
+		uid, gid, _ := strings.Cut(rest[j+len("-configured-"):], "-")
+		u, uerr := strconv.Atoi(uid)
+		g, gerr := strconv.Atoi(gid)
+		if uerr == nil && gerr == nil {
+			d.UID, d.GID = u, g
+		}
+	}
+	if _, after, found := strings.Cut(rest, "-openshell-"); found {
+		d.OpenShell, _, _ = strings.Cut(after, "-")
+	}
+	return d, name[i+len("-sha256-"):], true
+}
+
 // RemoveVMDisk removes a root disk VMDisks listed, which must still be a
 // directory (not a link) named as the vm driver names its prepared disks.
 // The driver prepares it again from its image when a sandbox boots one
 // that has none. Nothing else of the driver's state is touched.
 func RemoveVMDisk(d VMDisk) error {
-	name := filepath.Base(d.Path)
-	i := strings.LastIndex(name, "-sha256-")
-	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+	if _, _, ok := vmDisk(filepath.Dir(d.Path), filepath.Base(d.Path)); !ok {
 		return fmt.Errorf("openshell image: %s is not a MicroVM disk the vm driver prepared", d.Path)
 	}
 	info, err := os.Lstat(d.Path)
@@ -563,6 +613,105 @@ func RemoveVMDisk(d VMDisk) error {
 		return fmt.Errorf("openshell image: %s is not a directory", d.Path)
 	}
 	return os.RemoveAll(d.Path)
+}
+
+// VMStagingIdle is how long a staging directory of the vm driver (VMStaging)
+// stays unchanged before it counts as left behind: a preparation writes to
+// it for about a minute, and OpenShell gives up on a provisioning after 300
+// seconds.
+const VMStagingIdle = 15 * time.Minute
+
+// VMStaging lists the directories under cacheDir where the vm driver
+// prepares a root disk, "<a VMDisks name>.staging-<epoch>-<n>", with the
+// space each takes and when anything under it last changed (Changed). A
+// first start that failed or was cancelled (a full volume, a Ctrl-C) leaves
+// its own behind, which the driver never resumes (GAP-0218).
+func VMStaging(cacheDir string) []VMDisk {
+	if cacheDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return nil
+	}
+	var out []VMDisk
+	for _, e := range entries {
+		base, _, staging := strings.Cut(e.Name(), ".staging")
+		if !staging || !e.IsDir() {
+			continue
+		}
+		d, _, ok := vmDisk(cacheDir, base)
+		if !ok {
+			continue
+		}
+		d.Path = filepath.Join(cacheDir, e.Name())
+		d.Bytes, d.Changed = treeBytes(d.Path), treeChanged(d.Path)
+		out = append(out, d)
+	}
+	return out
+}
+
+// RemoveVMStaging removes a staging directory VMStaging listed, which must
+// still be a directory (not a link) named as the vm driver names them.
+func RemoveVMStaging(d VMDisk) error {
+	base, _, staging := strings.Cut(filepath.Base(d.Path), ".staging")
+	if _, _, ok := vmDisk(filepath.Dir(d.Path), base); !ok || !staging {
+		return fmt.Errorf("openshell image: %s is not a staging directory of the vm driver", d.Path)
+	}
+	info, err := os.Lstat(d.Path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("openshell image: %s is not a directory", d.Path)
+	}
+	return os.RemoveAll(d.Path)
+}
+
+// FreeAfterStaging is free less what the vm driver's preparations under
+// way in cacheDir (VMStaging changed within VMStagingIdle of now) still
+// write, each up to a disk of an image of imageBytes (0: unknown), and how
+// many there are: three first starts at once each saw room for its own
+// disk and filled the volume together (GAP-0219).
+func FreeAfterStaging(cacheDir string, free, imageBytes uint64, now time.Time) (uint64, int) {
+	need, _, _ := openshell.VMDiskRoom(imageBytes)
+	n := 0
+	for _, d := range VMStaging(cacheDir) {
+		if now.Sub(d.Changed) >= VMStagingIdle {
+			continue
+		}
+		n++
+		left := need - min(need, uint64(max(d.Bytes, 0)))
+		free -= min(free, left)
+	}
+	return free, n
+}
+
+// UnderWay is what a disk-room message adds for inFlight preparations
+// under way (FreeAfterStaging): "" for none.
+func UnderWay(inFlight int) string {
+	switch inFlight {
+	case 0:
+		return ""
+	case 1:
+		return ", after the MicroVM disk preparation under way"
+	}
+	return fmt.Sprintf(", after the %d MicroVM disk preparations under way", inFlight)
+}
+
+// treeChanged is when anything under root last changed.
+func treeChanged(root string) time.Time {
+	var last time.Time
+	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.ModTime().After(last) {
+			last = info.ModTime()
+		}
+		return nil
+	})
+	return last
 }
 
 // treeBytes is the space the files under root take on disk (sparse root

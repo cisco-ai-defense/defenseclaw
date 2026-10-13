@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 func TestRunMountSessionKeepsChanges(t *testing.T) {
@@ -73,6 +74,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     sonnet · ANTHROPIC_API_KEY → api.anthropic.com only",
+		"          "+modelChannelNote,
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
@@ -308,6 +310,13 @@ func TestRunRefusals(t *testing.T) {
 				Message: "blocked by your organization's DefenseClaw policy: harness", Detail: "your organization allows only claudecode"}}
 		}, want: []string{"blocked by your organization's DefenseClaw policy: harness — your organization allows only claude " +
 			"(openshell.admin.allowed_harnesses); ask your administrator if you need it"}, not: "there is none"},
+		// A repository policy that would loosen names every key, one per line.
+		{name: "a repository policy that loosens", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			ta.daemon.explain.Violations = []sandboxapi.Violation{
+				{Key: "harness.yolo", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: harness.yolo true"},
+				{Key: "egress.allow", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"},
+			}
+		}, want: []string{"harness.yolo true\nthe repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"}},
 		{name: "daemon down", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") },
 			want: []string{"daemon is not running"}},
 		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
@@ -330,7 +339,6 @@ func TestRunRefusals(t *testing.T) {
 			want: []string{"use at most 19 lowercase letters, digits and '-'"}},
 		{name: "a trailing dash", opts: RunOptions{Harness: "claude", Copy: true, Name: "trailing-"}, offline: true,
 			want: []string{"starting and ending with a letter or digit"}},
-		{name: "a reserved name", opts: RunOptions{Harness: "claude", Copy: true, Name: "git"}, offline: true, want: []string{`--name "git" is reserved`}},
 		{name: "an existing name, headless copy", opts: RunOptions{Harness: "codex", Copy: true, Name: "m2-a", Detach: true, Prompt: "x"},
 			setup: existing("m2-a", "stopped", false), want: []string{"a sandbox named m2-a already exists",
 				"resume it with `defenseclaw sandbox connect m2-a --prompt TEXT`", "delete it with `defenseclaw sandbox delete m2-a`"}},
@@ -350,6 +358,18 @@ func TestRunRefusals(t *testing.T) {
 			ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "pack", Value: "strict", Source: "admin",
 				Origin: "openshell.admin.required_pack"})
 		}, want: []string{"--host-port 38790: not allowed by the strict sandbox pack your organization requires (openshell.admin.required_pack)"}},
+		// GAP-0558, GAP-0580, GAP-0628: on a managed computer a flag the
+		// caller's profile forbids is refused before the copy and the
+		// create, naming the profile and the rule, not the organization's
+		// key.
+		{name: "a managed profile that opens no host port", opts: RunOptions{Harness: "claude", HostPorts: []int{8080}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--host-port 8080 isn't allowed: your profile doesn't let sandboxes reach ports on this computer", "(profile contractors)",
+			"(quote rule allow_host_ports)", "it@example.invalid"}, not: "openshell.admin"},
+		{name: "a managed --context", opts: RunOptions{Harness: "claude", Context: []string{"/tmp/x"}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--context mounts a folder into the sandbox", "work on a copy of the project only", "(profile contractors)",
+			"(quote rule allow_mount)"}, not: "openshell.admin"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -378,6 +398,77 @@ func TestRunRefusals(t *testing.T) {
 		Violation: &sandboxapi.Violation{Key: "yolo", Admin: true, Message: "skip-permissions mode is not allowed"}}
 	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: yolo (skip-permissions mode is not allowed)" {
 		t.Fatalf("Run = %v", err)
+	}
+}
+
+// GAP-0595: a managed run during a directory outage says so once, at its
+// start, in the text of the managed gateway's own refusal, before the project
+// is copied; an upload that fails on the lookup says the same instead of
+// advising a change to the ssh configuration.
+func TestRunSaysTheDirectoryIsDownBeforeCopying(t *testing.T) {
+	outage := &openshell.AccountLookupError{Err: errors.New("ssh -G: No user exists for uid 94404076")}
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
+	ta.AccountCheck = func() error { return outage }
+	err := ta.Run(bg, RunOptions{Harness: "claude", Copy: true})
+	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.", "Need an exception? Contact it@example.invalid")
+	if strings.Contains(err.Error(), "ssh") || ta.creates() != 0 || len(ta.copy.steps) != 0 {
+		t.Fatalf("err = %v, creates %d, copy steps %v; want a refusal before any copy", err, ta.creates(), ta.copy.steps)
+	}
+	// An unmanaged computer is not asked.
+	ta = newTestApp(t, "s\n")
+	ta.AccountCheck = func() error { return outage }
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true}))
+	// The same lookup failure at the upload reads the same.
+	ta = newTestApp(t, "")
+	ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true}
+	ta.copy.uploadErr = fmt.Errorf("openshell upload: %w", outage)
+	err = ta.Run(bg, RunOptions{Harness: "claude", Copy: true})
+	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.")
+	if strings.Contains(err.Error(), "ssh configuration") || strings.Contains(err.Error(), "upload the project copy") {
+		t.Fatalf("upload err = %v", err)
+	}
+}
+
+// GAP-0669: a label that fills the banner column still needs a separator.
+func TestBannerSeparatesRepositoryLabelFromPolicyText(t *testing.T) {
+	sb := sampleSandbox("box")
+	ta := newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{managed: &sandboxapi.ManagedStatus{Profile: "contractors"},
+		repo: &sandboxapi.RepoPolicy{Tightened: []string{"network.mode"}}})
+	has(t, ta.output(), "Repository  repo policy", "Policy    contractors")
+	out := strings.Join(strings.Fields(ta.output()), " ")
+	has(t, out, "Repository repo policy .defenseclaw/sandbox.yaml: tightened 1 setting (network.mode)")
+	lacks(t, out, "Repositoryrepo")
+}
+
+// GAP-0590: the launch banner answers asks with the sandbox commands only on
+// a managed computer, where `defenseclaw tui` exits saying it is unavailable.
+func TestBannerOffersNoTUIOnAManagedComputer(t *testing.T) {
+	sb := sampleSandbox("m1")
+	ta := newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{})
+	has(t, ta.output(), "defenseclaw sandbox approvals", "`defenseclaw tui`: 7, then t")
+	ta = newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{managed: &sandboxapi.ManagedStatus{Profile: "contractors"}})
+	has(t, ta.output(), "defenseclaw sandbox approvals")
+	lacks(t, ta.output(), "defenseclaw tui")
+}
+
+// GAP-0628: a limit or refusal that comes from the caller's profile names
+// the profile and the rule on a managed computer, not the organization's
+// openshell.admin key the user has no file for.
+func TestViolationTextNamesTheProfileOnAManagedComputer(t *testing.T) {
+	ta := newTestApp(t, "")
+	v := &sandboxapi.Violation{Key: "mcp.host_ports", Admin: true, Constraint: "openshell.admin.allow_host_ports",
+		Detail: "host ports cannot be opened to sandboxes", Attempted: "8080", Enforced: "(none)"}
+	if got := ta.violationText(v, "", "", true); !strings.Contains(got, "(openshell.admin.allow_host_ports)") {
+		t.Fatalf("unmanaged text = %q", got)
+	}
+	ta.managedSeen = &sandboxapi.ManagedStatus{Profile: "contractors"}
+	got := ta.violationText(v, "", "", true)
+	if !strings.Contains(got, "(profile contractors, rule allow_host_ports)") || strings.Contains(got, "openshell.admin") {
+		t.Fatalf("managed text = %q", got)
 	}
 }
 
@@ -482,6 +573,25 @@ func TestRunNestedRunsNatively(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Args: []string{"-c"}}))
 	if len(ta.execs) != 1 || !slices.Equal(ta.execs[0], []string{"/usr/bin/claude", "claude", "-c"}) {
 		t.Fatalf("execs = %v", ta.execs)
+	}
+}
+
+// --process-tree reaches the daemon with the create; a resume of a sandbox
+// created without it names it among the flags it ignores.
+func TestRunProcessTreeReachesTheDaemon(t *testing.T) {
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", ProcessTree: true}))
+	if req := createRequest(t, ta.daemon); !req.ProcessTree {
+		t.Fatal("--process-tree did not reach the daemon")
+	}
+	sb := sampleSandbox("box")
+	if got := resumeIgnores(RunOptions{ProcessTree: true}, &sb, nil); !slices.Equal(got, []string{"--process-tree"}) {
+		t.Fatalf("a resume of a sandbox without the tree ignores %v", got)
+	}
+	sb.ProcessTree = true
+	if got := resumeIgnores(RunOptions{ProcessTree: true}, &sb, nil); len(got) != 0 {
+		t.Fatalf("a resume of a sandbox with the tree ignores %v", got)
 	}
 }
 
@@ -787,6 +897,56 @@ func TestRunCopyCleansItsStageWhenTheCreateFails(t *testing.T) {
 	}
 }
 
+// GAP-0360: a create the daemon rolls back (a Ctrl-C cut it off) reads as
+// creating for a moment: the stage is removed once the sandbox is gone,
+// not left as leftover data.
+func TestRunCopyCleansItsStageAfterARolledBackCreate(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		sb := sampleSandbox(req.Name)
+		sb.Phase = "creating"
+		ta.daemon.sandboxes[req.Name] = &sb // the fake holds its lock here
+		return &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: create sandbox " + req.Name + " failed", Detail: "context canceled"}
+	}
+	ta.Sleep = func(_ context.Context, d time.Duration) error {
+		if d == discardInterval {
+			ta.daemon.mu.Lock()
+			delete(ta.daemon.sandboxes, "copybox")
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}), "create sandbox copybox failed")
+	has(t, ta.output(), "waiting for the daemon to undo the create of copybox before removing its staged copy")
+	if !slices.Equal(ta.copy.steps, []string{"stage copybox", "discard copybox"}) {
+		t.Fatalf("copy steps = %v", ta.copy.steps)
+	}
+}
+
+// stoppingCopy is a fakeCopy whose pull runs stop first: another terminal
+// stops the sandbox while the session's end reads its work.
+type stoppingCopy struct {
+	*fakeCopy
+	stop func()
+}
+
+func (s *stoppingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	s.stop()
+	return s.fakeCopy.Pull(ctx, o)
+}
+
+// GAP-0366: a sandbox the session found running and another terminal
+// stopped while it ended reads as stopped at the end, not as one that keeps
+// running and needs a stop.
+func TestConnectedSessionEndReadsThePhaseAgain(t *testing.T) {
+	ta := newTestApp(t, "s\n", copySandbox("copybox"))
+	ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+	ta.Workspace = &stoppingCopy{fakeCopy: ta.copy, stop: func() { ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" }) }}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox"}))
+	has(t, ta.output(), "Sandbox copybox is stopped now (stopped from outside this session) → resume: defenseclaw sandbox connect copybox")
+	lacks(t, ta.output(), "keeps running")
+}
+
 // Resuming a copy-mode sandbox with --refresh probes outside the workdir
 // (a failed refresh may have left none), then refreshes, then attaches; a
 // plain resume probes the workdir.
@@ -978,6 +1138,16 @@ func TestBanner(t *testing.T) {
 		}, nil,
 			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
 			nil},
+		// The line says what silent hooks lead to, as the daemon resolved
+		// the pack's hooks.on_silence and hooks.silence_after.
+		{"silent hooks stop", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "stop", "10m"
+		}, nil, []string{"(DefenseClaw stops the sandbox when the harness works for 10m without its hooks)"}, []string{"hook silence is detected"}},
+		{"silent hooks alert", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "alert", "5m"
+		}, nil, []string{"(DefenseClaw alerts when the harness works for 5m without its hooks)"}, nil},
 		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -988,6 +1158,17 @@ func TestBanner(t *testing.T) {
 			has(t, ta.output(), c.want...)
 			lacks(t, ta.output(), c.not...)
 		})
+	}
+	// GAP-0247: the project's own warning, which the sandbox's warnings
+	// repeat, is shown once, with the Project lines.
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("box")
+	w := "/p/web is inside the git repository at /p; the sandbox sees it as a plain folder (launch from /p to give the agent git)"
+	sb.Workspace = &sandboxapi.WorkspaceSummary{Project: sb.Project, Warnings: []string{w}}
+	sb.Warnings = []string{w}
+	ta.banner(&sb, bannerInfo{})
+	if n := strings.Count(ta.output(), "inside the git repository at /p"); n != 1 {
+		t.Fatalf("the project warning shows %d times:\n%s", n, ta.output())
 	}
 	for name, want := range map[string]string{"OpenHands": "an OpenHands", "OmniGent": "an OmniGent", "Codex": "a Codex"} {
 		if got := withArticle(name); got != want {
@@ -1317,7 +1498,12 @@ func TestRunAsksAboutTheFirstBootOfItsOwnRunFiles(t *testing.T) {
 		}
 		return ta
 	}
-	explains := func(ta *testApp) []call { return ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain) }
+	// The explains of the run (the end-of-session pull asks for the
+	// sandbox's own, for the review globs of its repository policy).
+	explains := func(ta *testApp) []call {
+		return slices.DeleteFunc(ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain),
+			func(c call) bool { return strings.HasPrefix(c.Query, "sandbox=") })
+	}
 
 	ta := setup(t, "vm")
 	ta.ok(t, ta.Run(bg, run))
@@ -1395,10 +1581,18 @@ func TestCopyUploadThatDidNotArrive(t *testing.T) {
 		"; `defenseclaw sandbox doctor` checks the ssh connection sharing that can carry an upload into another sandbox")
 }
 
-// failingCopy is a fakeCopy whose stage or upload fails with the error set.
+// failingCopy is a fakeCopy whose stage, upload or pull fails with the
+// error set.
 type failingCopy struct {
 	*fakeCopy
-	stageErr, uploadErr error
+	stageErr, uploadErr, pullErr error
+}
+
+func (f *failingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	if f.pullErr != nil {
+		return nil, f.pullErr
+	}
+	return f.fakeCopy.Pull(ctx, o)
 }
 
 func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
@@ -1507,5 +1701,22 @@ func TestOpenCodeLauncherRefusalNamesTheSandboxCommands(t *testing.T) {
 		if !strings.Contains(script, CommandName+" "+verb+" $dc_sandbox") {
 			t.Errorf("the OpenCode launcher's refusal does not name `%s %s`", CommandName, verb)
 		}
+	}
+}
+
+// TestVMDiskHintOnlyForStartFailures pins GAP-0496: a run the gateway
+// refused (a conflict with the running sandboxes, a policy refusal) does not
+// end with the MicroVM first-start disk hint, which a create that failed to
+// start keeps.
+func TestVMDiskHintOnlyForStartFailures(t *testing.T) {
+	hint := func(err error) bool { return !policyRefusal(err) && firstStartFailure(err) }
+	if hint(&sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "differs"}) {
+		t.Fatal("a conflict refusal got the disk hint")
+	}
+	if hint(&sandboxapi.Error{Code: sandboxapi.CodeUpstream, Detail: sandboxrelay.ReasonPolicyUnloadable}) {
+		t.Fatal("an unloadable policy got the disk hint")
+	}
+	if !hint(&sandboxapi.Error{Code: sandboxapi.CodeUpstream}) || !hint(errors.New("timeout")) {
+		t.Fatal("a start failure lost the disk hint")
 	}
 }

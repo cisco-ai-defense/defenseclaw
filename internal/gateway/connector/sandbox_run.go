@@ -277,13 +277,3 @@ func validateSandboxModelProvider(p *SandboxModelProvider) error {
 	}
 	return nil
 }
-
-// sandboxArtifactFile returns the artifact at path.
-func sandboxArtifactFile(arts SandboxArtifacts, path string) ([]byte, error) {
-	for _, f := range arts.Files {
-		if f.Path == path {
-			return f.Data, nil
-		}
-	}
-	return nil, fmt.Errorf("the %s overlay has no %s", arts.Connector, path)
-}

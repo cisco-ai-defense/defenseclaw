@@ -7,7 +7,7 @@ pre_judge_strips:
     applies_to: [pii]
 
   - id: STRIP-MESSAGING-BRIDGE-STATUS
-    pattern: '(?im)^[ \t]*System:[ \t]*\[[^\]\n]+\][ \t]+[^\n]*?\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline|online|offline)\b[^\n]*$'
+    pattern: '(?im)^[ \t]*System:[ \t]*\[[^\]\n]+\][ \t]+[^\n]*?\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline)\b[^\n]*$'
     context: "Messaging bridge status banners (WhatsApp/Telegram/Slack/Discord gateway connect/disconnect lines) embed channel IDs or phone numbers that are transport metadata, not user-provided PII"
     applies_to: [pii]
 

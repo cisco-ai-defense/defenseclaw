@@ -39,18 +39,6 @@ func (reporter *retentionTestHealthReporter) ReportRetentionHealth(transition Re
 		reporter.store.db.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&count))
 }
 
-type retentionScriptScheduler struct {
-	wait func(context.Context, time.Duration, <-chan struct{}) (RetentionScheduleWake, error)
-}
-
-func (scheduler retentionScriptScheduler) Wait(
-	ctx context.Context,
-	interval time.Duration,
-	reload <-chan struct{},
-) (RetentionScheduleWake, error) {
-	return scheduler.wait(ctx, interval, reload)
-}
-
 func (reporter *retentionTestReporter) ReportRetentionRun(report RetentionRunReport) {
 	reporter.mu.Lock()
 	defer reporter.mu.Unlock()
@@ -124,9 +112,6 @@ func TestRetentionPolicyValidationAndZeroDisablesScheduleAndDeletion(t *testing.
 		checkpointCalls++
 		return nil
 	}})
-	if interval, enabled := reaper.ScheduleInterval(); enabled || interval != 0 {
-		t.Fatalf("zero-day schedule=(%s,%t), want disabled", interval, enabled)
-	}
 	result, err := reaper.Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -157,9 +142,6 @@ func TestRetentionReapsEveryHistoryClassAtStrictUTCBoundaryAndPreservesState(t *
 
 	reporter := &retentionTestReporter{}
 	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{Reporter: reporter}, retentionHooks{})
-	if interval, enabled := reaper.ScheduleInterval(); !enabled || interval != 6*time.Hour {
-		t.Fatalf("schedule=(%s,%t)", interval, enabled)
-	}
 	result, err := reaper.Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +245,7 @@ func TestRetentionUsesTwoBatchesFor1001RowsAndYieldsForInteractiveWrite(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 1001; i++ {
+	for i := 0; i < RetentionBatchSize+1; i++ {
 		if _, err := statement.Exec(fmt.Sprintf("batch-%04d", i), old, now.Add(-91*24*time.Hour).UnixNano()); err != nil {
 			t.Fatal(err)
 		}
@@ -299,8 +281,8 @@ func TestRetentionUsesTwoBatchesFor1001RowsAndYieldsForInteractiveWrite(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.RowsDeleted[RetentionActivityEvents]; got != 1001 {
-		t.Fatalf("deleted activity rows=%d want 1001", got)
+	if got := result.RowsDeleted[RetentionActivityEvents]; got != RetentionBatchSize+1 {
+		t.Fatalf("deleted activity rows=%d want %d", got, RetentionBatchSize+1)
 	}
 	if result.BatchCount != 2 || yields != 2 {
 		t.Fatalf("batches=%d yields=%d want 2,2", result.BatchCount, yields)
@@ -324,7 +306,7 @@ func TestRetentionACKMaterializationUsesTheSameBoundedCandidateBatch(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 1001; index++ {
+	for index := 0; index < RetentionBatchSize+1; index++ {
 		if _, err := statement.Exec(fmt.Sprintf("bounded-ack-%04d", index), old, string(ActionAlert)); err != nil {
 			t.Fatal(err)
 		}
@@ -338,11 +320,11 @@ func TestRetentionACKMaterializationUsesTheSameBoundedCandidateBatch(t *testing.
 		yield: func(ctx context.Context) error {
 			yields++
 			if yields == 1 {
-				if got := countRetentionRows(t, store.db, "alert_acknowledgement_baselines"); got != 1000 {
-					t.Fatalf("first ACK baseline batch=%d want 1000", got)
+				if got := countRetentionRows(t, store.db, "alert_acknowledgement_baselines"); got != RetentionBatchSize {
+					t.Fatalf("first ACK baseline batch=%d want %d", got, RetentionBatchSize)
 				}
-				if got := countRetentionRows(t, store.db, "alert_acknowledgement_projection"); got != 1000 {
-					t.Fatalf("first ACK projection batch=%d want 1000", got)
+				if got := countRetentionRows(t, store.db, "alert_acknowledgement_projection"); got != RetentionBatchSize {
+					t.Fatalf("first ACK projection batch=%d want %d", got, RetentionBatchSize)
 				}
 				if got := countRetentionLike(t, store.db, "audit_events", "bounded-ack-%"); got != 1 {
 					t.Fatalf("first ACK delete left %d candidates want 1", got)
@@ -355,12 +337,12 @@ func TestRetentionACKMaterializationUsesTheSameBoundedCandidateBatch(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RowsDeleted[RetentionAuditEvents] != 1001 || result.BatchCount != 2 || yields != 2 {
+	if result.RowsDeleted[RetentionAuditEvents] != RetentionBatchSize+1 || result.BatchCount != 2 || yields != 2 {
 		t.Fatalf("bounded ACK result=%#v batches=%d yields=%d",
 			result.RowsDeleted, result.BatchCount, yields)
 	}
-	if countRetentionRows(t, store.db, "alert_acknowledgement_baselines") != 1001 ||
-		countRetentionRows(t, store.db, "alert_acknowledgement_projection") != 1001 {
+	if countRetentionRows(t, store.db, "alert_acknowledgement_baselines") != RetentionBatchSize+1 ||
+		countRetentionRows(t, store.db, "alert_acknowledgement_projection") != RetentionBatchSize+1 {
 		t.Fatal("bounded ACK materialization did not preserve every candidate baseline/projection")
 	}
 }
@@ -467,7 +449,7 @@ func TestRetentionReclaimsFreedPagesWhenIncrementalAutoVacuumIsEnabled(t *testin
 	if err := store.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelist); err != nil {
 		t.Fatal(err)
 	}
-	if pagesAfter >= pagesBefore {
+	if pagesAfter >= pagesBefore || freelist > pagesAfter/retentionVacuumReserveDivisor {
 		t.Fatalf("page_count after reclaim=%d before=%d freelist=%d", pagesAfter, pagesBefore, freelist)
 	}
 	if got := countRetentionRows(t, store.db, "activity_events"); got != 0 {
@@ -598,15 +580,35 @@ func TestRetentionCancellationStopsBetweenCommittedBatches(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error=%v", err)
 	}
-	if result.RowsDeleted[RetentionActivityEvents] != 1000 || result.BatchCount != 1 {
+	if result.RowsDeleted[RetentionActivityEvents] != RetentionBatchSize || result.BatchCount != 1 {
 		t.Fatalf("partial result=%#v", result)
 	}
-	if got := countRetentionRows(t, store.db, "activity_events"); got != 500 {
-		t.Fatalf("rows after cancellation=%d want 500", got)
+	if got := countRetentionRows(t, store.db, "activity_events"); got != 1500-RetentionBatchSize {
+		t.Fatalf("rows after cancellation=%d want %d", got, 1500-RetentionBatchSize)
 	}
 	reports := reporter.snapshot()
 	if len(reports) != 1 || reports[0].Success || reports[0].FailureClass != RetentionFailureCancelled {
 		t.Fatalf("cancellation report=%#v", reports)
+	}
+}
+
+func TestSecureClientRetentionKeepsMainBatchSize(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	seedRetentionActivityRows(t, store, 1500, now.Add(-91*24*time.Hour))
+	ctx, cancel := context.WithCancel(t.Context())
+	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{SecureClient: true}, retentionHooks{
+		yield: func(context.Context) error {
+			cancel()
+			return context.Canceled
+		},
+	})
+	result, err := reaper.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error=%v", err)
+	}
+	if result.RowsDeleted[RetentionActivityEvents] != 1000 || result.BatchCount != 1 {
+		t.Fatalf("secure client first batch=%#v, want 1000 rows", result)
 	}
 }
 
@@ -1206,7 +1208,7 @@ func TestRetentionScanParentGuardPreventsOrphansAcrossBatchInterleave(t *testing
 	}
 }
 
-func TestRetentionSchedulerReloadAndHealthTransitionCoalescing(t *testing.T) {
+func TestRetentionReloadAndHealthTransitionCoalescing(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	rowTime := now.Add(-60 * 24 * time.Hour)
@@ -1217,28 +1219,14 @@ func TestRetentionSchedulerReloadAndHealthTransitionCoalescing(t *testing.T) {
 		t.Fatal(err)
 	}
 	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{}, retentionHooks{})
-	stop := errors.New("script complete")
-	waits := 0
-	scheduler := retentionScriptScheduler{wait: func(
-		_ context.Context, interval time.Duration, _ <-chan struct{},
-	) (RetentionScheduleWake, error) {
-		waits++
-		if interval != 6*time.Hour {
-			t.Fatalf("scheduler interval=%s", interval)
-		}
-		if waits == 1 {
-			if err := reaper.UpdateRetentionDays(30); err != nil {
-				t.Fatal(err)
-			}
-			return RetentionScheduleReload, nil
-		}
-		return 0, stop
-	}}
-	if err := reaper.RunScheduled(t.Context(), scheduler); !errors.Is(err, stop) {
-		t.Fatalf("scheduler error=%v", err)
+	if _, err := reaper.Run(t.Context()); err != nil || countRetentionLike(t, store.db, "activity_events", "reload-row") != 1 {
+		t.Fatalf("a 60-day-old row went under a 90-day policy (err %v)", err)
 	}
-	if countRetentionLike(t, store.db, "activity_events", "reload-row") != 0 {
-		t.Fatal("90-to-30 reload did not trigger prompt run with new age")
+	if err := reaper.UpdateRetentionDays(30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reaper.Run(t.Context()); err != nil || countRetentionLike(t, store.db, "activity_events", "reload-row") != 0 {
+		t.Fatalf("the next run after a 90-to-30 reload kept the row (err %v)", err)
 	}
 	if err := reaper.UpdateRetentionDays(-1); err == nil || reaper.RetentionDays() != 30 {
 		t.Fatalf("invalid reload changed active days to %d, err=%v", reaper.RetentionDays(), err)
@@ -1471,6 +1459,38 @@ func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) 
 	}})
 }
 
+// A run that stopped at its time budget with work left reports a backlog, on
+// which the runtime's retention controller runs again a minute later; a run
+// that finished reports none.
+func TestRetentionRunsAgainSoonWhileWorkIsLeft(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	seedRetentionCorrelationHistory(t, store, now.Add(-91*24*time.Hour))
+	budgetExpired, limited := false, true
+	reaper, err := newRetentionReaperWithHooks(store, judge, 90, RetentionOptions{}, retentionHooks{
+		now: func() time.Time {
+			if budgetExpired {
+				return now.Add(RetentionCorrelationRunBudget)
+			}
+			return now
+		},
+		yield: func(ctx context.Context) error {
+			budgetExpired = limited
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := reaper.Run(t.Context()); err != nil || !result.Backlog {
+		t.Fatalf("budget-limited run backlog=%t err=%v, want a backlog", result.Backlog, err)
+	}
+	limited, budgetExpired = false, false // the next run has the time it needs
+	if result, err := reaper.Run(t.Context()); err != nil || result.Backlog {
+		t.Fatalf("unlimited run backlog=%t err=%v, want none", result.Backlog, err)
+	}
+}
+
 func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -1504,6 +1524,9 @@ func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
 		result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
 		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
 			t.Fatal(err)
+		}
+		if !result.Backlog {
+			t.Fatal("a run that stopped at its budget with graph rows left did not report a backlog")
 		}
 	}
 	want := []RetentionTableClass{
@@ -1798,12 +1821,27 @@ func TestRetentionVacuumPageLimitUsesByteBudget(t *testing.T) {
 		pageSize int
 		want     int
 	}{
-		{pageSize: 4 << 10, want: 16_384},
-		{pageSize: 64 << 10, want: 1_024},
+		{pageSize: 4 << 10, want: 4_096},
+		{pageSize: 64 << 10, want: 256},
 		{pageSize: 0, want: 1},
 	} {
 		if got := retentionVacuumPageLimit(test.pageSize); got != test.want {
 			t.Fatalf("retentionVacuumPageLimit(%d)=%d, want %d", test.pageSize, got, test.want)
+		}
+	}
+}
+
+// A prune returns free pages in steps until a tenth of the file is left free
+// for the next inserts, instead of one step of a fixed size per run.
+func TestRetentionVacuumStepStopsAtTheReserve(t *testing.T) {
+	for _, test := range []struct{ freelist, pageCount, want int }{
+		{freelist: 400_000, pageCount: 800_000, want: 4_096}, // a big prune: a full step
+		{freelist: 80_500, pageCount: 800_000, want: 500},    // just past the reserve: the rest
+		{freelist: 80_000, pageCount: 800_000, want: 0},      // at the reserve: nothing
+		{freelist: 0, pageCount: 800_000, want: 0},
+	} {
+		if got := retentionVacuumStep(test.freelist, test.pageCount, 4<<10); got != test.want {
+			t.Fatalf("retentionVacuumStep(%d,%d)=%d, want %d", test.freelist, test.pageCount, got, test.want)
 		}
 	}
 }

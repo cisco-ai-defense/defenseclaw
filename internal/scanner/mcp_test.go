@@ -38,7 +38,9 @@ func TestMCPScanner_BuildArgs_Default(t *testing.T) {
 
 func TestMCPScanner_BuildArgs_AllKnobs(t *testing.T) {
 	cfg := config.MCPScannerConfig{
-		Analyzers:        "yara,llm",
+		// "auto" inside a list stands for YARA (the v8 wizard wrote
+		// "auto,llm", which used to drop YARA).
+		Analyzers:        []string{"auto", "llm"},
 		ScanPrompts:      true,
 		ScanResources:    true,
 		ScanInstructions: true,
@@ -183,6 +185,17 @@ func TestValidateMCPScanTargetURL_Default(t *testing.T) {
 				t.Errorf("validateMCPScanTargetURL(%q) err = %q, want substring %q", tc.target, err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// GAP-0663: the refusal of a local or internal server says it was not
+// scanned and names the administrator routes that admit one.
+func TestValidateMCPScanTargetURL_NamesTheAdminRoutes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS", "")
+	err := validateMCPScanTargetURL("http://127.0.0.1:28561/mcp")
+	if err == nil || !strings.Contains(err.Error(), "not scanned") ||
+		!strings.Contains(err.Error(), "asset_policy.mcp.allowed") || !strings.Contains(err.Error(), "admission.mcp.scan_on_install") {
+		t.Fatalf("err = %v, want the refusal to say the server was not scanned and how to admit it", err)
 	}
 }
 

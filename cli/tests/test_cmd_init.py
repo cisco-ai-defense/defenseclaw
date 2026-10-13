@@ -65,6 +65,22 @@ class TestInitCommand(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    def test_invalid_existing_config_stops_before_init_runs(self):
+        from defenseclaw import config as config_module
+
+        source = Path(self.tmp_dir) / "config.yaml"
+        source.write_text("config_version: 9\nguardrail:\n  block_at: BOGUS\n", encoding="utf-8")
+        with (
+            patch.object(config_module, "config_path", return_value=source),
+            patch.object(config_module, "load", side_effect=ValueError("guardrail.block_at is invalid")),
+            patch("defenseclaw.commands.cmd_init._run_first_run_cmd") as run,
+        ):
+            result = self.runner.invoke(init_cmd, ["--non-interactive"], obj=AppContext())
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_at is invalid", result.output)
+        self.assertIn("last good configuration", result.output)
+        run.assert_not_called()
+
     def test_help(self):
         result = self.runner.invoke(init_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)
@@ -169,6 +185,17 @@ class TestInitFirstRunBackend(unittest.TestCase):
             },
             cache_hit=False,
         )
+
+    def test_repeated_connector_flag_is_refused_not_silently_dropped(self):
+        # GAP-0392: --connector claudecode --connector codex kept only codex.
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--connector", "claudecode", "--connector", "codex",
+            "--skip-install", "--no-start-gateway", "--no-verify",
+        ])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--action-connectors claudecode,codex", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
 
     def test_json_summary_codex_does_not_default_to_openclaw(self):
         result = self._invoke([
@@ -658,6 +685,31 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_scripted_connector_leaves_the_discovery_cache_the_gateway_reads(self):
+        # GAP-0185: --connector skipped discovery, so no agent_discovery.json
+        # recorded that ZeptoClaw is absent and the gateway dialled a fleet
+        # uplink nothing listens on, every 15 s.
+        from defenseclaw.commands import cmd_init
+
+        def absent(name, **_kwargs):
+            return AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+
+        with patch.object(agent_discovery, "_scan_agent", side_effect=absent):
+            cmd_init._build_noninteractive_connector_settings(
+                connector="zeptoclaw",
+                profile=None,
+                observe_all=False,
+                action_connectors="",
+                fail_mode=None,
+                human_approval=None,
+                hilt_min_severity=None,
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        cache = json.loads(Path(self.tmp_dir, "agent_discovery.json").read_text(encoding="utf-8"))
+        self.assertIs(cache["agents"]["zeptoclaw"]["installed"], False)
+
     def test_windows_opencode_is_provisional_in_noninteractive_action_filter(self):
         from defenseclaw.commands import cmd_init
 
@@ -1103,41 +1155,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ):
             self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
-    def test_sandbox_flag_is_a_deprecated_no_op(self):
-        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
-            result = self._invoke([
-                "--non-interactive",
-                "--yes",
-                "--connector",
-                "openclaw",
-                "--profile",
-                "observe",
-                "--scanner-mode",
-                "local",
-                "--skip-install",
-                "--sandbox",
-                "--no-start-gateway",
-                "--no-verify",
-                "--json-summary",
-            ])
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-
-        summary = json.loads(result.output)
-        sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
-        self.assertEqual(len(sandbox_steps), 1, summary["setup"])
-        self.assertEqual(sandbox_steps[0]["status"], "warn")
-        self.assertIn("deprecated and ignored", sandbox_steps[0]["detail"])
-        self.assertIn("defenseclaw sandbox legacy-cleanup", sandbox_steps[0]["detail"])
-        # OpenShell 0.1 sandboxes ship: the notice points at their setup.
-        self.assertIn("run 'defenseclaw sandbox setup'", sandbox_steps[0]["detail"])
-        self.assertNotIn("being rebuilt", sandbox_steps[0]["detail"])
-        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox legacy-cleanup --dry-run")
-
-    def test_sandbox_flag_is_hidden_from_help(self):
-        result = self._invoke(["--help"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("--sandbox", result.output)
-
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
             "--non-interactive",
@@ -1311,10 +1328,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         config_step = next(step for step in summary["setup"] if step["name"] == "Config")
         self.assertEqual(config_step["status"], "fail")
-        self.assertEqual(config_step["next_command"], "defenseclaw upgrade")
+        self.assertEqual(config_step["next_command"], "defenseclaw migrate")
 
         persisted = Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8")
         self.assertNotIn("config_version: 8", persisted)
@@ -1334,7 +1351,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         activate.assert_not_called()
         self.assertEqual(Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8"), source)
 
@@ -1509,8 +1526,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["connector"], "claudecode")
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_explicit_connector_wins_without_discovery(self, mock_discover):
-        mock_discover.side_effect = AssertionError("explicit connector should not discover")
+    def test_explicit_connector_wins_over_discovery(self, mock_discover):
+        # Discovery runs to leave the cache the gateway reads (GAP-0185) but
+        # never decides the connector.
+        mock_discover.return_value = self._discovery({"claudecode"})
 
         result = self._invoke([
             "--non-interactive",
@@ -1530,7 +1549,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        mock_discover.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_rescan_agents_passes_refresh_to_discovery(self, mock_discover):
@@ -1754,7 +1772,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("skill-scanner:", result.output)
-        self.assertIn("policy=permissive", result.output)
+        self.assertIn("policy=quiet", result.output)
         self.assertIn("lenient=True", result.output)
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
@@ -1812,9 +1830,9 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         self.assertNotIn("scanners", raw)
 
         effective = load().scanners
-        self.assertEqual(effective.skill_scanner.policy, "permissive")
+        self.assertEqual(effective.skill_scanner.policy, "quiet")
         self.assertTrue(effective.skill_scanner.lenient)
-        self.assertFalse(effective.skill_scanner.use_llm)
+        self.assertTrue(effective.skill_scanner.use_llm)
         self.assertEqual(effective.mcp_scanner.analyzers, "auto")
         self.assertFalse(effective.mcp_scanner.scan_prompts)
 
@@ -1879,7 +1897,10 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         mock_path.return_value = Path(self.tmp_dir)
 
         app = AppContext()
-        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        # A gateway already on the host's default API port moved init to the
+        # next free port, which then appeared in the written config.
+        with patch("defenseclaw.bootstrap._api_port_free", return_value=True):
+            result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
 
         config_file = os.path.join(self.tmp_dir, "config.yaml")
@@ -2864,7 +2885,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("enable llm traffic inspection", result.output.lower())
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2874,7 +2894,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_calls_interactive_setup(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2895,7 +2915,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         mock_exec.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.commands.cmd_setup._interactive_guardrail_setup")
@@ -2903,7 +2922,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_declined_shows_hint(
         self, mock_path, _mock_env, mock_interactive,
-        _mock_scanners, _mock_which, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2920,7 +2939,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("defenseclaw setup guardrail", result.output)
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2930,7 +2948,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_shows_warnings(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -3531,8 +3549,8 @@ class TestMultiConnectorInit(unittest.TestCase):
             cfg.guardrail.enabled = True
             cfg.save()
             before = {
-                "claudecode": PerConnectorGuardrailConfig(mode="action", rule_pack_dir="/p/strict", block_at="HIGH"),
-                "codex": PerConnectorGuardrailConfig(rule_pack_dir="/p/custom"),
+                "claudecode": PerConnectorGuardrailConfig(mode="action", rule_pack="strict", block_at="HIGH"),
+                "codex": PerConnectorGuardrailConfig(rule_pack="permissive"),
             }
             none = {"fail_mode": None, "human_approval": None, "hilt_min_severity": None}
             _activate_additional_connectors(
@@ -3542,9 +3560,9 @@ class TestMultiConnectorInit(unittest.TestCase):
                 overrides_before=before,
             )
             gc = cfg_mod.load().guardrail
-            self.assertEqual(gc.effective_rule_pack_dir("claudecode"), "/p/strict")
+            self.assertEqual(gc.effective_rule_pack("claudecode"), "strict")
             self.assertEqual(gc.connectors["claudecode"].block_at, "HIGH")
-            self.assertEqual(gc.effective_rule_pack_dir("codex"), "/p/custom")
+            self.assertEqual(gc.effective_rule_pack("codex"), "permissive")
             # The mode is the answer given in this init run, not the old override.
             self.assertEqual(gc.connectors["claudecode"].mode, "")
 
@@ -4262,6 +4280,22 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(discover.call_args.kwargs["refresh"])
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode", "opencode"])
 
+    def test_connector_selection_rescans_a_cache_that_found_no_hook_connector(self):
+        # GAP-0092: a cache written before the agents were on PATH kept init
+        # saying "No hook connectors were detected" on the next run.
+        from defenseclaw.commands import cmd_init
+
+        cached = self._disc(set())
+        cached.cache_hit = True
+        fresh = self._disc({"claudecode", "codex"})
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, fresh]) as discover, \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=lambda found, _data_dir: found), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["codex"]) as selector:
+            cmd_init._prompt_connector_selection(None, False)
+        self.assertTrue(discover.call_args.kwargs["refresh"])
+        self.assertEqual(set(selector.call_args.kwargs["default_selected"]), {"claudecode", "codex"})
+
     def _select_after_unchecking_hermes(self, confirm: bool):
         from defenseclaw.commands import cmd_init
 
@@ -4690,27 +4724,6 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         # be recomputed away now that the gateway is actually running.
         self.assertNotIn("defenseclaw-gateway start", summary["next_commands"])
 
-    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
-    @patch("defenseclaw.bootstrap._start_gateway_structured")
-    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_multi_connector_fail_mode_only_change_restarts_gateway(self, mock_discover, mock_start, _gate):
-        # GAP-1656: a re-init that changes only the fail mode of the same
-        # roster must ask the running gateway to restart and rewrite the hooks.
-        from defenseclaw.bootstrap import StepResult
-
-        mock_discover.return_value = self._disc({"codex", "claudecode"})
-        mock_start.return_value = StepResult("Sidecar", "pass", "already running")
-        changed = []
-        for fail_mode in ("closed", "open", "open"):
-            result = self._invoke([
-                "--non-interactive", "--yes", "--action-connectors", "claudecode,codex",
-                "--fail-mode", fail_mode, "--start-gateway",
-                "--scanner-mode", "local", "--skip-install", "--no-verify", "--json-summary",
-            ])
-            self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-            changed.append(mock_start.call_args.kwargs.get("hook_fail_mode_changed"))
-        self.assertEqual(changed, [True, True, False])
-
     @patch("defenseclaw.bootstrap._start_gateway_structured")
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_deferred_gateway_warn_marks_report_partial(self, mock_discover, mock_start):
@@ -4895,3 +4908,21 @@ def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
     assert report.setup[-1].next_command == "defenseclaw setup amp"
     assert "cannot select amp executable" in report.setup[-1].detail
 
+
+def test_fail_mode_prompt_keeps_the_new_install_default(tmp_path):
+    # GAP-0047: Enter at "Fail mode" saved open, while quickstart and
+    # `guardrail fail-mode` help call closed the new-install default.
+    from defenseclaw.commands import cmd_init
+
+    def ask(data_dir):
+        with (
+            patch.object(cmd_init.click, "prompt", side_effect=lambda *_a, **kw: kw["default"]),
+            patch.object(cmd_init.click, "confirm", return_value=False),
+        ):
+            return cmd_init._prompt_action_policy(
+                fail_mode=None, human_approval=None, hilt_min_severity=None, data_dir=data_dir
+            )[0]
+
+    assert ask(str(tmp_path)) == "closed"
+    (tmp_path / "config.yaml").write_text("guardrail:\n  hook_fail_mode: open\n", encoding="utf-8")
+    assert ask(str(tmp_path)) == "open"

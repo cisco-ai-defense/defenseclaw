@@ -34,11 +34,12 @@ Open the TUI and press `7`:
 defenseclaw tui
 ```
 
-![DefenseClaw TUI Sandboxes panel: READY header with the OpenShell gateway, a blocked-destination line, the action bar and one running sandbox](/images/sandboxes/screens/tui-sandboxes.png)
+![DefenseClaw TUI Sandboxes panel on a Mac: READY header with the OpenShell gateway and its MicroVM driver, a blocked-destination line, the action bar and one running sandbox with its pack, mode, sites, blocked sites and tool calls](/images/sandboxes/screens/tui-sandboxes.png)
 
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
 `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway
-with its compute driver: `docker` on Linux, `MicroVM` on a Mac. `OFF` points
+with its compute driver: `docker` or `MicroVM` (a Mac always shows `MicroVM`).
+`OFF` points
 to the setup wizard, and `UNAVAILABLE` gives the daemon's reason and
 suggests `defenseclaw sandbox doctor`.
 
@@ -52,6 +53,13 @@ suggests `defenseclaw sandbox doctor`.
 
 `Enter` opens the selected row's details, and `Esc` closes them.
 
+The **Activity** view on Linux, for a Claude Code sandbox whose agent reached
+two AI services it does not use, a paste site and a blocked tool call:
+
+![DefenseClaw TUI Activity view on Linux: the feed of one sandbox, newest first, with allowed sites, two shadow AI warnings, a paste site refused with the key that unblocks it, a blocked tool call and the sandbox's lifecycle lines](/images/sandboxes/screens/tui-sandboxes-activity.png)
+
+![DefenseClaw TUI Asks view on Linux: one ask waiting, with its sandbox, the kind (a port on this machine), the destination host.openshell.internal:9418, the program that asked (/usr/bin/git), the risk and the reason, and the keys to approve, reject and refresh](/images/sandboxes/screens/tui-sandboxes-asks.png)
+
 ### Keys
 
 | Key | Action |
@@ -62,7 +70,7 @@ suggests `defenseclaw sandbox doctor`.
 | `s` | Stop the sandbox (asks first). It is kept, so `c` resumes it. |
 | `d` | Delete the sandbox (asks first). Undo is no longer possible. |
 | `R` | Review the changed files that can run code on your machine (a live mount) |
-| `P` | Pull the work of a sandbox on a copy: show it, apply it, or put it on a branch |
+| `P` | Pull the work of a sandbox on a copy: show it, apply it, or put it on a branch (`dc/NAME`, or a name you type) |
 | `U` | Undo: restore the pre-session snapshot, or revert the last pull on a copy |
 | `u` | Unblock a blocked site: **Only in** this sandbox, or **In every sandbox (always)** |
 | `a` / `A` / `x` | Approve an ask once, always approve it, or reject it |
@@ -81,11 +89,38 @@ Confirmations for delete, undo and the "always" choices start on
 of private networks, metadata addresses and your organization's block lists
 cannot be lifted here.
 
+### Sandbox details
+
+`Enter` on a sandbox opens its details: the harness, phase, pack, the
+repository policy when the project has one (`.defenseclaw/sandbox.yaml:
+tightened 2 settings (network.mode, egress.block)`, as the launch banner
+says), project and
+the counts of sites and tool calls, how a stopped sandbox's last detached run
+ended (`finished: exited with status 0` or `did not finish: the sandbox stopped
+while it ran`, with its `sandbox logs` command), the hook events DefenseClaw
+received, the last blocked tool call, the image the sandbox runs, and the
+process tree when
+it is on (see
+[see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
+The dialog scrolls.
+
+![DefenseClaw TUI details of one sandbox on a Mac, started with the process tree on: name, harness, phase, uptime, pack, the project copy, sites contacted and blocked with the AI summary, tool calls, the hook events, the last blocked tool call, the run image, the process tree with a running curl, the pull and undo notes, and a Destination row for each site](/images/sandboxes/screens/tui-sandbox-processes.png)
+
+Each **Destination** row further down is one line of
+`defenseclaw sandbox destinations NAME`: the site, what it is, its requests and
+the program that connected, with its parents when the process tree is on.
+This one is from a Linux host, for a running sandbox started with
+`--process-tree`. The shadow AI service has no program next to it (its
+connection was too short for the tree), and the package registry shows `curl`
+under `bash` under `claude`:
+
+![DefenseClaw TUI details of one running sandbox on Linux: harness, phase, pack, the live project, sites contacted and blocked with the AI summary, tool calls, hook events, the last blocked tool call, the image, the process tree with a running curl, and a Destination row for each site with its kind, requests and the program that connected with its parents](/images/sandboxes/screens/tui-sandbox-destinations.png)
+
 ### Start a run from the TUI
 
 Press `n` for **New sandboxed run**.
 
-![DefenseClaw TUI New sandboxed run dialog: harness, project folder, name, network profile, work on a copy, keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
+![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy (ticked and locked), keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
 
 | Field | Meaning |
 | --- | --- |
@@ -114,8 +149,11 @@ first, then shows setup's questions as fields:
   its value.
 - **Install OpenShell**: on Linux with NVIDIA's installer, on a Mac from the
   `nvidia/openshell` Homebrew formula.
-- **Mount project folder** and **Disable OpenShell telemetry**: Linux only.
-  On a Mac a **MicroVMs** section says that every run works on a copy.
+- **Mount project folder**: Linux only. On a Mac a **MicroVMs** section says
+  that every run works on a copy.
+- **OpenShell telemetry off**: on a Mac it names
+  `~/.config/openshell/gateway.env`, which the Homebrew service reads, and it
+  is not shown for a gateway no Homebrew service runs.
 - **Shell wrappers** and **Build images now**.
 
 Your answers are the consent: the wizard runs
@@ -123,7 +161,14 @@ Your answers are the consent: the wizard runs
 only `sudo` may still ask for your password. On Windows the wizard says that
 OpenShell sandboxes run on Linux and macOS only.
 
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard: the command it will run, the harness choices, credentials, this machine's checks and the Install OpenShell option](/images/sandboxes/screens/tui-setup.png)
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on a Mac: the command it will run, the harness choices, credentials, this machine's checks, the Install OpenShell option, the MicroVMs note and the OpenShell telemetry option](/images/sandboxes/screens/tui-setup.png)
+
+On Linux the wizard has a MicroVMs section only where the host has KVM. Its
+**This machine** checks name the Docker driver's needs (Docker, Landlock, OpenShell, bind mounts), and it asks
+**Mount Project Folder** and **OpenShell Telemetry Off**, each with what
+changing the answer restarts:
+
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on Linux: the command it will run, the harness choices, credentials, this machine's checks for Docker, Landlock, OpenShell 0.1.2 and bind mounts, and the Install OpenShell, Mount Project Folder and OpenShell Telemetry Off options](/images/sandboxes/screens/tui-setup-linux.png)
 
 The full reference for the panel is in the [TUI guide](/docs/tui#sandboxes-panel).
 
@@ -207,7 +252,9 @@ Open **Setup** and choose **Sandbox**. Pick **setup** or **doctor**, tick
 
 The app never installs OpenShell. If it is missing, run
 `defenseclaw sandbox setup --install-openshell` in Terminal first. See
-[sandboxes on macOS](/docs/sandboxes/macos#set-up).
+[sandboxes on macOS](/docs/sandboxes/macos#set-up). On OpenShell 0.1.1 that
+command also upgrades OpenShell to 0.1.2 in place, which restarts the gateway
+(see [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 
 When sandboxes are off, the Sandboxes view says so and offers **Open
 Setup**. When they are unavailable, it offers **Run sandbox doctor**.

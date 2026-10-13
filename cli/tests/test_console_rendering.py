@@ -244,6 +244,31 @@ def test_alerts_table_stays_aligned_when_piped_through_ascii_stream() -> None:
     assert "..." in text and not any(glyph in out.getvalue() for glyph in "…└┏┃")
 
 
+def test_secure_client_alert_table_keeps_main_target_width() -> None:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        id="scan-1",
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="scan",
+        target="/var/tmp/secure-client/suspect-tool-package.bin",
+        details="",
+        connector="",
+    )
+    from rich.console import Console
+
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out), mock.patch(
+        "rich.console.Console", return_value=Console(width=120)
+    ):
+        cmd_alerts._render_table([event], store=None, secure_client=True)
+    assert "...ool-package.bin" in out.getvalue()
+
+
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
     events: list[str] = []
     with (
@@ -278,8 +303,12 @@ def test_implicit_tui_refuses_legacy_terminal_with_actionable_message() -> None:
         assert main_mod._try_launch_tui() is True
 
     run_tui.assert_not_called()
-    assert "Windows Terminal or PowerShell 7" in stderr.getvalue()
-    assert "defenseclaw status" in stderr.getvalue()
+    if sys.platform == "win32":
+        assert "needs a UTF-8 capable terminal" in stderr.getvalue()
+        assert "Windows Terminal" in stderr.getvalue()
+    else:
+        assert "needs UTF-8 output" in stderr.getvalue()
+        assert "terminal or tmux" in stderr.getvalue() or "Terminal.app" in stderr.getvalue()
 
 
 def test_implicit_tui_launches_on_capable_terminal() -> None:
@@ -345,7 +374,7 @@ def test_explicit_tui_uses_the_same_capability_guard() -> None:
     with mock.patch.object(ux, "terminal_supports_tui", return_value=False):
         rejected = runner.invoke(tui, catch_exceptions=False)
     assert rejected.exit_code != 0
-    assert "Windows Terminal or PowerShell 7" in rejected.output
+    assert "terminal on stdin and stdout" in rejected.output
 
     with (
         mock.patch.object(ux, "terminal_supports_tui", return_value=True),
@@ -411,3 +440,44 @@ def test_redirected_click_help_is_ascii() -> None:
     assert root.output.isascii(), [line for line in root.output.splitlines() if not line.isascii()]
     assert aibom.output.isascii(), [line for line in aibom.output.splitlines() if not line.isascii()]
     assert "Manage MCP servers - " in root.output
+
+
+def test_prompt_ends_its_line_when_stdout_is_relayed_line_by_line(monkeypatch) -> None:
+    """GAP-1575: behind a line relay (PowerShell with a transcript) a prompt
+    without a newline stayed hidden until Enter. It must end its line before
+    the answer is read, and a terminal stdout keeps the inline prompt."""
+
+    import click
+    from click import termui
+    from defenseclaw import terminal_checkbox
+
+    class _Keyboard(io.StringIO):
+        def __init__(self, out: io.StringIO) -> None:
+            super().__init__("both\n")
+            self.out = out
+            self.seen = ""
+
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self, *args: object) -> str:
+            self.seen = self.out.getvalue()
+            return super().readline(*args)
+
+    out = io.StringIO()
+    keyboard = _Keyboard(out)
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(sys, "stdin", keyboard)
+    monkeypatch.setattr(sys, "stdout", out)
+    terminal_checkbox.keep_prompts_visible()
+    terminal_checkbox.keep_prompts_visible()  # idempotent
+
+    answer = click.prompt("  Scanner mode", type=click.Choice(["local", "remote", "both"]), default="local")
+
+    assert answer == "both"
+    assert keyboard.seen == "  Scanner mode (local, remote, both) [local]:\n"
+
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(out, "isatty", lambda: True, raising=False)
+    terminal_checkbox.keep_prompts_visible()
+    assert termui.visible_prompt_func is input

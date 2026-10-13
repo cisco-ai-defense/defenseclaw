@@ -334,39 +334,6 @@ func emitErrorConnector(ctx context.Context, subsystem, code, connector, message
 		sanitizeAlertField(subsystem), sanitizeAlertField(code), sanitizeAlertField(message), causeClass)
 }
 
-// emitDiagnostic records a structured debug-level event. Use this
-// for request-scoped state transitions that operators may want to
-// replay (e.g. "regex produced N signals, routing to judge") — not
-// for noisy per-byte traces.
-//
-// The gatewaylog.DiagnosticPayload schema uses {Component, Fields}
-// (Fields is an open typed bag). Callers pass a simple string map
-// for ergonomics; we widen it to interface{} here.
-func emitDiagnostic(ctx context.Context, component, message string, details map[string]string) {
-	_ = ctx
-	_ = message
-	_ = details
-	fmt.Fprintf(os.Stderr, "[gateway] diagnostic component=%s\n", sanitizeAlertField(component))
-}
-
-// emitEgress records a classified outbound request observed by the
-// guardrail proxy's passthrough path (Layer 1) or reported back from
-// the TypeScript fetch-interceptor (Layer 3). Severity follows the
-// branch × decision matrix:
-//
-//	branch=shape       decision=block  → HIGH     (silent-bypass attempt)
-//	branch=passthrough decision=block  → MEDIUM   (SSRF defense in depth)
-//	branch=shape       decision=allow  → MEDIUM   (operator opted into unknown hosts)
-//	branch=known                        → INFO
-//
-// source is "go" for gateway-observed events and "ts" for
-// fetch-interceptor-reported events. Callers MUST pass the exact
-// enum values defined in EgressPayload — the schema validator will
-// drop misspelled branches/decisions.
-func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
-	emitEgressWithRuntime(ctx, p, nil, false)
-}
-
 func (p *GuardrailProxy) emitEgress(ctx context.Context, payload gatewaylog.EgressPayload) {
 	runtime, authoritative := p.observabilityV8EgressRuntime()
 	emitEgressWithRuntime(ctx, payload, runtime, authoritative)

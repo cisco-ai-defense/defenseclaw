@@ -17,7 +17,7 @@
 package cli
 
 import (
-	"encoding/json"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -31,7 +31,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
+
+func TestManagedWindowsPolicyEvaluatePinsAdministratorConfig(t *testing.T) {
+	withAuditExportManagedSeams(t, true, true)
+	restore := managedHostWindowsStandalone
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	// The Linux test process cannot open a Windows installation path. The
+	// pre-run still has to pin that path before the attempted load.
+	_ = policyEvaluateCmd.PersistentPreRunE(policyEvaluateCmd, nil)
+	if got := os.Getenv(managed.ConfigPathEnv); got != `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` {
+		t.Fatalf("managed policy evaluate read %q, want the administrator config", got)
+	}
+}
 
 const policyPathTestModule = `package defenseclaw
 
@@ -39,15 +54,10 @@ import rego.v1
 
 admission := {
 	"verdict": "allowed",
-	"reason": data.marker,
+	"reason": "fixture",
 	"file_action": "allow",
 	"install_action": "allow",
 	"runtime_action": "allow",
-}
-
-firewall := {
-	"action": "allow",
-	"rule_name": data.marker,
 }
 `
 
@@ -55,53 +65,57 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	t.Run("canonical preferred", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
-		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
+		writePolicyPathTestLayout(t, canonical)
+		writePolicyPathTestLayout(t, root)
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		paths, err := resolvePolicyPaths()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths.rootDir != root || paths.regoDir != canonical || paths.dataPath != filepath.Join(canonical, "data.json") {
+		if paths.rootDir != root || paths.regoDir != canonical {
 			t.Fatalf("resolved paths = %#v", paths)
 		}
 	})
 
-	t.Run("legacy flat", func(t *testing.T) {
-		root := t.TempDir()
-		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
-		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if paths.regoDir != root || paths.dataPath != filepath.Join(root, "data.json") {
-			t.Fatalf("resolved paths = %#v", paths)
-		}
-	})
-
-	t.Run("canonical data-only evidence", func(t *testing.T) {
+	t.Run("Secure Client canonical data beats flat modules", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), false)
-		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
-		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+		if err := os.MkdirAll(canonical, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(canonical, "data.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writePolicyPathTestLayout(t, root)
+		client := &config.Config{PolicyDir: root, DeploymentMode: "managed_enterprise"}
+		client.Enterprise.Profile = "secure_client"
+		setPolicyPathTestConfig(t, client)
 		paths, err := resolvePolicyPaths()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if paths.regoDir != canonical {
-			t.Fatalf("regoDir = %q, want %q", paths.regoDir, canonical)
+			t.Fatalf("Secure Client regoDir = %q, want %q", paths.regoDir, canonical)
 		}
-		if err := policyValidateCmd.RunE(policyValidateCmd, nil); err == nil || !strings.Contains(err.Error(), "no .rego files") {
-			t.Fatalf("validate error = %v", err)
+	})
+
+	t.Run("legacy flat", func(t *testing.T) {
+		root := t.TempDir()
+		writePolicyPathTestLayout(t, root)
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths.regoDir != root {
+			t.Fatalf("resolved paths = %#v", paths)
 		}
 	})
 
 	t.Run("configured data directory", func(t *testing.T) {
 		dataDir := t.TempDir()
 		root := filepath.Join(dataDir, "policies")
-		writePolicyPathTestLayout(t, filepath.Join(root, "rego"), policyPathTestData(t, "configured"), true)
+		writePolicyPathTestLayout(t, filepath.Join(root, "rego"))
 		setPolicyPathTestConfig(t, &config.Config{DataDir: dataDir})
 		paths, err := resolvePolicyPaths()
 		if err != nil || paths.rootDir != root {
@@ -113,7 +127,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("DEFENSECLAW_HOME", home)
 		root := filepath.Join(home, "policies")
-		writePolicyPathTestLayout(t, filepath.Join(root, "rego"), policyPathTestData(t, "default"), true)
+		writePolicyPathTestLayout(t, filepath.Join(root, "rego"))
 		setPolicyPathTestConfig(t, nil)
 		paths, err := resolvePolicyPaths()
 		if err != nil || paths.rootDir != root {
@@ -126,7 +140,7 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 	t.Run("working directory ignored", func(t *testing.T) {
 		trustedRoot := filepath.Join(t.TempDir(), "missing-policies")
 		untrusted := t.TempDir()
-		writePolicyPathTestLayout(t, filepath.Join(untrusted, "policies", "rego"), policyPathTestData(t, "untrusted"), true)
+		writePolicyPathTestLayout(t, filepath.Join(untrusted, "policies", "rego"))
 		previous, err := os.Getwd()
 		if err != nil {
 			t.Fatal(err)
@@ -140,11 +154,8 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths.dataPath != filepath.Join(trustedRoot, "rego", "data.json") {
-			t.Fatalf("dataPath = %q", paths.dataPath)
-		}
-		if err := policyShowCmd.RunE(policyShowCmd, nil); err == nil || !strings.Contains(err.Error(), "data.json") {
-			t.Fatalf("show error = %v", err)
+		if paths.regoDir != filepath.Join(trustedRoot, "rego") {
+			t.Fatalf("regoDir = %q", paths.regoDir)
 		}
 	})
 
@@ -167,10 +178,10 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 
 	t.Run("sibling prefix containment", func(t *testing.T) {
 		root := t.TempDir()
-		if !policyPathContained(root, filepath.Join(root, "rego", "data.json")) {
+		if !policyPathContained(root, filepath.Join(root, "rego", "policy.rego")) {
 			t.Fatal("contained path rejected")
 		}
-		if policyPathContained(root, root+"-sibling"+string(filepath.Separator)+"data.json") {
+		if policyPathContained(root, root+"-sibling"+string(filepath.Separator)+"policy.rego") {
 			t.Fatal("sibling prefix accepted")
 		}
 	})
@@ -178,27 +189,10 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 	t.Run("deeper generation", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
-		writePolicyPathTestLayout(t, filepath.Join(canonical, "rego"), policyPathTestData(t, "deeper"), true)
+		writePolicyPathTestLayout(t, canonical)
+		writePolicyPathTestLayout(t, filepath.Join(canonical, "rego"))
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		if _, err := resolvePolicyPaths(); err == nil || !strings.Contains(err.Error(), "unsupported nested") {
-			t.Fatalf("error = %v", err)
-		}
-	})
-
-	t.Run("redirected supplemental data", func(t *testing.T) {
-		root := t.TempDir()
-		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
-		target := filepath.Join(t.TempDir(), "data-sandbox.json")
-		if err := os.WriteFile(target, []byte(`{"outside":true}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, filepath.Join(canonical, "data-sandbox.json")); err != nil {
-			t.Skipf("symbolic links unavailable: %v", err)
-		}
-		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
-		if _, err := resolvePolicyPaths(); err == nil || !strings.Contains(err.Error(), "supplemental") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -208,7 +202,7 @@ func TestResolvePolicyPathsIgnoresUnusedFlatResidue(t *testing.T) {
 	t.Run("nonregular custom module", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
+		writePolicyPathTestLayout(t, canonical)
 		if err := os.Mkdir(filepath.Join(root, "custom.rego"), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -217,26 +211,12 @@ func TestResolvePolicyPathsIgnoresUnusedFlatResidue(t *testing.T) {
 			t.Fatalf("paths = %#v, error = %v", paths, err)
 		}
 	})
-
-	t.Run("legacy data alias", func(t *testing.T) {
-		root := t.TempDir()
-		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
-		if err := os.Symlink(filepath.Join(canonical, "data.json"), filepath.Join(root, "data.json")); err != nil {
-			t.Skipf("symbolic links unavailable: %v", err)
-		}
-		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
-		if paths, err := resolvePolicyPaths(); err != nil || paths.regoDir != canonical {
-			t.Fatalf("paths = %#v, error = %v", paths, err)
-		}
-	})
 }
 
-func TestPolicyCommandsUseSelectedAndEffectiveData(t *testing.T) {
+func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 	t.Run("canonical", func(t *testing.T) {
 		root := t.TempDir()
-		writePolicyPathTestLayout(t, filepath.Join(root, "rego"), policyPathTestData(t, "canonical"), true)
-		writePolicyPathTestLayout(t, root, []byte("{"), false)
+		writePolicyPathTestLayout(t, filepath.Join(root, "rego"))
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		setPolicyPathTestFlags(t)
 		requirePolicyPathCommandsSucceed(t)
@@ -244,90 +224,117 @@ func TestPolicyCommandsUseSelectedAndEffectiveData(t *testing.T) {
 
 	t.Run("legacy", func(t *testing.T) {
 		root := t.TempDir()
-		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
+		writePolicyPathTestLayout(t, root)
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		setPolicyPathTestFlags(t)
 		requirePolicyPathCommandsSucceed(t)
 	})
 
-	t.Run("supplemental", func(t *testing.T) {
+	// The managed packages ship no Rego: validate has nothing to compile and
+	// still prints where each admission policy comes from (GAP-0067).
+	t.Run("no Rego directory", func(t *testing.T) {
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: t.TempDir()})
+		output, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+		if err != nil || !strings.Contains(output, "compiled from config.yaml alone") || !strings.Contains(output, "admission.skill: actions from") {
+			t.Fatalf("output = %q, error = %v", output, err)
+		}
+		setPolicyPathTestFlags(t)
+		output, err = capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil || !strings.Contains(output, `"verdict"`) {
+			t.Fatalf("evaluate without Rego = %q, error = %v", output, err)
+		}
+	})
+
+	// An existing but empty canonical directory is also config-only mode.
+	t.Run("empty Rego directory", func(t *testing.T) {
 		root := t.TempDir()
-		canonical := filepath.Join(root, "rego")
-		base, err := json.Marshal(map[string]interface{}{
-			"marker": "base", "config": map[string]interface{}{}, "actions": map[string]interface{}{}, "severity_ranking": map[string]interface{}{},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		writePolicyPathTestLayout(t, canonical, base, true)
-		supplemental, err := json.Marshal(map[string]interface{}{
-			"marker": "supplemental",
-			"firewall": map[string]interface{}{
-				"default_action": "allow", "blocked_destinations": []string{}, "allowed_domains": []string{"supplemental.example.invalid"}, "allowed_ports": []int{443},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(canonical, "data-sandbox.json"), supplemental, 0o600); err != nil {
+		if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		setPolicyPathTestFlags(t)
-		if err := policyValidateCmd.RunE(policyValidateCmd, nil); err != nil {
+		output, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+		if err != nil || !strings.Contains(output, "compiled from config.yaml alone") {
+			t.Fatalf("output = %q, error = %v", output, err)
+		}
+	})
+
+	// A Secure Client host keeps policy show, validate and evaluate of main
+	// (GAP-0114, issue #1092): each needs the data.json that no Secure
+	// Client layout ships, and there is no policy digest.
+	t.Run("Secure Client", func(t *testing.T) {
+		setPolicyPathTestConfig(t, &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()})
+		setPolicyPathTestFlags(t)
+		for _, command := range policyPathTestCommands() {
+			_, err := capturePolicyPathTestOutput(t, func() error { return command.cmd.RunE(command.cmd, nil) })
+			if err == nil || !strings.Contains(err.Error(), "policy: read data.json: open ") ||
+				!strings.Contains(err.Error(), filepath.Join("rego", "data.json")) {
+				t.Fatalf("%s error = %v", command.name, err)
+			}
+		}
+		if err := policyDigestCmd.RunE(policyDigestCmd, nil); err == nil || !strings.Contains(err.Error(), `unknown command "digest" for`) {
+			t.Fatalf("digest error = %v", err)
+		}
+	})
+
+	// An upgraded 0.8 install can still hold the firewall and audit modules
+	// and the firewall data file (an edited copy is kept): the gateway's load
+	// and every policy command work around them.
+	t.Run("leftover 0.8 policies", func(t *testing.T) {
+		root := t.TempDir()
+		canonical := filepath.Join(root, "rego")
+		if err := os.MkdirAll(canonical, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for _, test := range []struct {
-			name string
-			cmd  *cobra.Command
-			want string
-		}{
-			{name: "show", cmd: policyShowCmd, want: `"marker": "supplemental"`},
-			{name: "evaluate", cmd: policyEvaluateCmd, want: `"reason": "supplemental"`},
-			{name: "firewall", cmd: policyEvaluateFirewallCmd, want: `"rule_name": "supplemental"`},
-			{name: "domains", cmd: policyDomainsCmd, want: "supplemental.example.invalid"},
-		} {
-			t.Run(test.name, func(t *testing.T) {
-				output, err := capturePolicyPathTestOutput(t, func() error { return test.cmd.RunE(test.cmd, nil) })
-				if err != nil || !strings.Contains(output, test.want) {
-					t.Fatalf("output = %q, error = %v, want %q", output, err, test.want)
-				}
-			})
+		copyPolicyPathTestFiles(t, filepath.Join("..", "..", "policies", "rego"), canonical, "admission.rego", "guardrail.rego")
+		copyPolicyPathTestFiles(t, filepath.Join("..", "config", "testdata", "rego_0_8_10"), canonical,
+			"firewall.rego", "audit.rego", "data-sandbox.json")
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+		setPolicyPathTestFlags(t)
+		requirePolicyPathCommandsSucceed(t)
+		if _, err := policy.Prepare(context.Background(), root); err != nil {
+			t.Fatalf("the gateway load failed around the leftover 0.8 policies: %v", err)
 		}
 	})
 }
 
-func TestPolicyCommandsFailClosedOnCanonicalData(t *testing.T) {
-	for _, test := range []struct {
-		name         string
-		base         []byte
-		supplemental []byte
-	}{
-		{name: "missing", base: nil},
-		{name: "malformed", base: []byte("{")},
-		{name: "null", base: []byte("null")},
-		{name: "malformed supplemental", base: policyPathTestData(t, "canonical"), supplemental: []byte("{")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			canonical := filepath.Join(root, "rego")
-			writePolicyPathTestLayout(t, canonical, test.base, true)
-			writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
-			if test.supplemental != nil {
-				if err := os.WriteFile(filepath.Join(canonical, "data-sandbox.json"), test.supplemental, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
-			setPolicyPathTestFlags(t)
-			for _, command := range policyPathTestCommands() {
-				t.Run(command.name, func(t *testing.T) {
-					if err := command.cmd.RunE(command.cmd, nil); err == nil {
-						t.Fatalf("%s accepted %s canonical data", command.name, test.name)
-					}
-				})
-			}
-		})
+func TestSecureClientPolicyCommandsLoadLegacyData(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "rego")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	module := `package defenseclaw.admission
+import rego.v1
+verdict := data.guardrail.verdict
+reason := "legacy data"
+file_action := "allow"
+install_action := "allow"
+runtime_action := "allow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "admission.rego"), []byte(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"guardrail":{"verdict":"allowed"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setPolicyPathTestConfig(t, &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: root})
+	setPolicyPathTestFlags(t)
+	if _, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) }); err != nil {
+		t.Fatalf("validate legacy bundle: %v", err)
+	}
+	out, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+	if err != nil || !strings.Contains(out, `"verdict": "allowed"`) {
+		t.Fatalf("evaluate legacy bundle: output %q, error %v", out, err)
+	}
+}
+
+func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "deleted-policies")
+	setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+	_, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+	if err == nil || !strings.Contains(err.Error(), "read rego directory") {
+		t.Fatalf("validate missing directory error = %v", err)
 	}
 }
 
@@ -362,6 +369,68 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	}
 }
 
+// A Secure Client host keeps the policy reload output of main (issue #1092):
+// the HTTP status and body of a refused reload, not the GAP-0160 sentence.
+func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
+	ownGatewayListener(t)
+	const token = "reload-fixture-value"
+	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	setPolicyPathTestConfig(t, &config.Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     config.EnterpriseConfig{Profile: "secure_client"},
+		Gateway:        config.GatewayConfig{APIBind: host, APIPort: port, Token: token},
+	})
+	err = policyReloadCmd.RunE(policyReloadCmd, nil)
+	if want := "reload failed (HTTP 500): " + body; err == nil || err.Error() != want {
+		t.Fatalf("Secure Client reload error = %v, want %q", err, want)
+	}
+}
+
+// TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
+// the HTTP status, the JSON body or the internal stage names. GAP-0183: so does a
+// successful one.
+func TestPolicyReloadErrorIsPlain(t *testing.T) {
+	ok := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p","generation":7,"digest":"sha256:ab"}`))
+	if ok != "Policy reloaded (generation 7, digest sha256:ab)." {
+		t.Fatalf("success sentence = %q", ok)
+	}
+	if got := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p"}`)); got != "Policy reloaded." {
+		t.Fatalf("success without a generation = %q", got)
+	}
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	pin := `{"error":"reload failed: config reload rule pack preflight: global rule pack \"p0m\": digest ` + digest +
+		` does not match guardrail.custom_packs.p0m.digest","status":"failed"}`
+	want := "policy reload failed: rule pack p0m no longer matches its pin (guardrail.custom_packs.p0m.digest). " +
+		"The previous policy is still enforcing. Review the pack, then pin it with: " +
+		"defenseclaw config set guardrail.custom_packs.p0m.digest " + digest
+	if got := policyReloadError(http.StatusInternalServerError, []byte(pin)).Error(); got != want {
+		t.Fatalf("pin mismatch:\n got %q\nwant %q", got, want)
+	}
+	other := policyReloadError(http.StatusInternalServerError, []byte(`{"error":"reload failed: opa: bad rule","status":"failed"}`)).Error()
+	if other != "policy reload failed: opa: bad rule. The previous policy is still enforcing" {
+		t.Fatalf("other rebuild failure = %q", other)
+	}
+	if got := policyReloadError(http.StatusServiceUnavailable, []byte(`{"error":"policy_dir not configured"}`)).Error(); got != "policy reload failed: policy_dir not configured" {
+		t.Fatalf("unavailable = %q", got)
+	}
+}
+
 func policyPathTestCommands() []struct {
 	name string
 	cmd  *cobra.Command
@@ -373,8 +442,6 @@ func policyPathTestCommands() []struct {
 		{name: "validate", cmd: policyValidateCmd},
 		{name: "show", cmd: policyShowCmd},
 		{name: "evaluate", cmd: policyEvaluateCmd},
-		{name: "evaluate-firewall", cmd: policyEvaluateFirewallCmd},
-		{name: "domains", cmd: policyDomainsCmd},
 	}
 }
 
@@ -388,7 +455,6 @@ func setPolicyPathTestConfig(t *testing.T, value *config.Config) {
 func setPolicyPathTestFlags(t *testing.T) {
 	t.Helper()
 	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-name", "fixture")
-	setPolicyPathTestFlag(t, policyEvaluateFirewallCmd, "destination", "example.invalid")
 }
 
 func setPolicyPathTestFlag(t *testing.T, command *cobra.Command, name, value string) {
@@ -417,32 +483,24 @@ func requirePolicyPathCommandsSucceed(t *testing.T) {
 	}
 }
 
-func policyPathTestData(t *testing.T, marker string) []byte {
-	t.Helper()
-	data, err := json.Marshal(map[string]interface{}{
-		"marker": marker, "config": map[string]interface{}{}, "actions": map[string]interface{}{}, "severity_ranking": map[string]interface{}{},
-		"firewall": map[string]interface{}{
-			"default_action": "allow", "blocked_destinations": []string{}, "allowed_domains": []string{marker + ".example.invalid"}, "allowed_ports": []int{443},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
-}
-
-func writePolicyPathTestLayout(t *testing.T, dir string, data []byte, withModule bool) {
+func writePolicyPathTestLayout(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if withModule {
-		if err := os.WriteFile(filepath.Join(dir, "policy.rego"), []byte(policyPathTestModule), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "policy.rego"), []byte(policyPathTestModule), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyPolicyPathTestFiles(t *testing.T, from, to string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		raw, err := os.ReadFile(filepath.Join(from, name))
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if data != nil {
-		if err := os.WriteFile(filepath.Join(dir, "data.json"), data, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(to, name), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

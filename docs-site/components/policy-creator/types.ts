@@ -48,6 +48,7 @@ export interface GuardrailHilt {
 }
 
 export interface GuardrailConfig {
+  mode?: 'observe' | 'action';
   block_threshold: 1 | 2 | 3 | 4;
   alert_threshold: 1 | 2 | 3 | 4;
   cisco_trust_level: 'full' | 'advisory' | 'none';
@@ -423,7 +424,7 @@ export interface RecipesFile {
 export interface Scenario {
   id: string;
   title: string;
-  domain: 'admission' | 'guardrail' | 'firewall' | 'audit' | 'skill_actions';
+  domain: 'admission' | 'guardrail';
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;

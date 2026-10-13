@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,5 +54,33 @@ func TestHandlePluginScanRejectsExactManagedOpenCodeBridge(t *testing.T) {
 	api.handlePluginScan(w, req)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "lifecycle-owned") {
 		t.Fatalf("managed bridge response = %d %q", w.Code, w.Body.String())
+	}
+}
+
+// A hot scanner config edit must be used by the plugin scan endpoint.
+func TestHandlePluginScanUsesLiveConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scanner fixture")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "plugin-scanner")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	live := &config.Config{}
+	live.Scanners.PluginScanner = binary
+	startup := &config.Config{}
+	startup.Scanners.PluginScanner = filepath.Join(dir, "missing-startup-scanner")
+	api := &APIServer{scannerCfg: startup}
+	api.SetConfigRuntime(nil, func() *config.Config { return live })
+
+	body, err := json.Marshal(skillScanRequest{Target: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	api.handlePluginScan(w, httptest.NewRequest(http.MethodPost, "/v1/plugin/scan", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("hot plugin scan = %d %s", w.Code, w.Body.String())
 	}
 }

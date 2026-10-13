@@ -386,6 +386,189 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         payload = json.loads(listed.output)
         self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
 
+    def test_signature_install_merges_a_pack_added_after_config_load(self):
+        from defenseclaw.config import load
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "signature-race")
+        Path(app.cfg.data_dir).mkdir()
+        app.cfg.save()
+        stale_cfg = load(data_dir=app.cfg.data_dir)
+        packs = []
+        for name in ("first", "second"):
+            pack = Path(tmp_dir) / f"{name}.json"
+            pack.write_text(json.dumps({
+                "version": 1, "id": name,
+                "signatures": [{
+                    "id": f"{name}-ai", "name": name, "vendor": "Example",
+                    "category": "ai_cli",
+                }],
+            }), encoding="utf-8")
+            packs.append(pack)
+
+        try:
+            first = self.runner.invoke(
+                agent, ["signatures", "install", str(packs[0])], obj=app, catch_exceptions=False
+            )
+            self.assertEqual(first.exit_code, 0, first.output)
+            app.cfg = stale_cfg
+            second = self.runner.invoke(
+                agent, ["signatures", "install", str(packs[1])], obj=app, catch_exceptions=False
+            )
+            self.assertEqual(second.exit_code, 0, second.output)
+            saved = load(data_dir=app.cfg.data_dir)
+            self.assertEqual(
+                {Path(path).name for path in saved.ai_discovery.signature_packs},
+                {"first.json", "second.json"},
+            )
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+    def test_managed_signature_replace_refuses_before_overwrite(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "managed")
+        data_dir = Path(app.cfg.data_dir)
+        data_dir.mkdir()
+        (data_dir / "config.yaml").write_text(
+            "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n",
+            encoding="utf-8",
+        )
+        dest = data_dir / "signature-packs" / "custom-pack.json"
+        dest.parent.mkdir()
+        previous = b'{"version":1,"id":"custom-pack","signatures":[{"id":"old-ai","name":"Old","vendor":"Example","category":"ai_cli"}]}'
+        dest.write_bytes(previous)
+        app.cfg.ai_discovery.signature_packs = [str(dest)]
+        source = Path(tmp_dir) / "replacement.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "custom-pack", "signatures": [
+                {"id": "new-ai", "name": "New", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            result = self.runner.invoke(agent, ["signatures", "install", "--replace", str(source)], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("managed", str(result.exception).lower())
+            self.assertEqual(dest.read_bytes(), previous)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+    def test_secure_client_signature_list_includes_legacy_directory(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        pack = Path(app.cfg.data_dir) / "signature-packs" / "legacy.json"
+        pack.parent.mkdir(parents=True)
+        pack.write_text(
+            json.dumps({"version": 1, "signatures": [
+                {"id": "legacy-ai", "name": "Legacy", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                result = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertIn("legacy-ai", {item["id"] for item in json.loads(result.stdout)})
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+    def test_secure_client_installs_pack_with_pre_1_0_catalog_id(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        source = Path(tmp_dir) / "operator.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "operator", "signatures": [
+                {"id": "jetbrains-ai", "name": "Operator JetBrains", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                result = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertTrue((Path(app.cfg.data_dir) / "signature-packs" / "operator.json").exists())
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+    def test_secure_client_signature_install_keeps_v8_config(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        data_dir = Path(app.cfg.data_dir)
+        data_dir.mkdir()
+        config = data_dir / "config.yaml"
+        original = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"
+        config.write_text(original, encoding="utf-8")
+        source = Path(tmp_dir) / "pack.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "legacy", "signatures": [
+                {"id": "legacy-ai", "name": "Legacy", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch.object(app.cfg, "save", side_effect=RuntimeError("save refused")) as save_mock:
+                with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                    result = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+            save_mock.assert_not_called()
+            self.assertTrue((data_dir / "signature-packs" / "legacy.json").exists())
+
+            # On a standalone user install, a refused config save must undo
+            # the copied pack as well.
+            app.cfg.data_dir = str(Path(tmp_dir) / "per-user")
+            with patch.object(app.cfg, "save", side_effect=RuntimeError("save refused")):
+                with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value=""):
+                    refused = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertNotEqual(refused.exit_code, 0)
+            self.assertFalse((Path(app.cfg.data_dir) / "signature-packs" / "legacy.json").exists())
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+    def test_a_pack_that_fails_its_pin_is_reported_where_it_is_read(self):
+        """GAP-0177: a refused pack is named with both digests by list and discovery status."""
+        import hashlib
+
+        app, tmp_dir, db_path = make_app_context()
+        packs = []
+        for name in ("pinned", "tampered"):
+            pack = Path(tmp_dir) / f"{name}.json"
+            pack.write_text(
+                json.dumps({
+                    "version": 1,
+                    "signatures": [{
+                        "id": f"{name}-ai", "name": name, "vendor": "Example", "category": "ai_cli",
+                        "confidence": 0.7,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            packs.append(pack)
+        good = "sha256:" + hashlib.sha256(packs[0].read_bytes()).hexdigest()
+        bad = "sha256:" + "0" * 64
+        gone = Path(tmp_dir) / "gone.json"  # GAP-0220: configured, but the file is missing
+        app.cfg.ai_discovery.signature_packs = [str(path) for path in packs] + [str(gone)]
+        app.cfg.ai_discovery.signature_pack_digests = {str(packs[0]): good, str(packs[1]): bad}
+        try:
+            listed = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
+            status = self.runner.invoke(agent, ["discovery", "status", "--json"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        ids = {sig["id"] for sig in json.loads(listed.stdout)}
+        self.assertIn("pinned-ai", ids)
+        self.assertNotIn("tampered-ai", ids)
+        self.assertIn(f"Not loaded: {packs[1].resolve()}", listed.stderr)
+        self.assertIn(f"does not match the pinned {bad}", listed.stderr)
+        self.assertIn(f"Not loaded: {gone}: file not found", listed.stderr)
+        packs_status = json.loads(status.stdout)["signature_packs"]
+        self.assertEqual(packs_status["configured"], 3)
+        [missing, refused] = packs_status["not_loaded"]
+        self.assertEqual((missing["path"], missing["reason"]), (str(gone), "file not found"))
+        self.assertEqual((refused["path"], refused["pinned"]), (str(packs[1].resolve()), bad))
+        self.assertTrue(refused["digest"].startswith("sha256:") and refused["digest"] != bad)
+
     def test_signatures_disable_updates_config(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.data_dir = str(Path(tmp_dir) / ".defenseclaw-signatures")
@@ -477,9 +660,21 @@ def _wide_payload() -> dict:
     }
 
 
+def _pin_terminal_width(case: unittest.TestCase, columns: int = 120) -> None:
+    """The renderer sizes its table from the real terminal; pin it so a
+    narrow runner terminal (or a pytest-xdist worker) cannot pick the
+    compact view (GAP-0153)."""
+    pin = patch.dict(os.environ, {"COLUMNS": str(columns)})
+    pin.start()
+    case.addCleanup(pin.stop)
+
+
 class AiUsageRendererTests(unittest.TestCase):
     """Cover the grouped/detail/filter behavior added to fix the
     "488 identical package_dependency rows" report."""
+
+    def setUp(self):
+        _pin_terminal_width(self)
 
     def test_summary_collapses_wide_groups_into_one_row_with_count(self):
         from defenseclaw.commands import cmd_agent
@@ -526,6 +721,59 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertIn("Codex", out)
         self.assertNotIn("Cursor", out)
         self.assertNotIn("AI SDKs", out)
+
+    def test_sandbox_filter_keeps_that_sandbox_and_tags_its_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        found = _ai_signal(
+            state="new", category="mcp_server", product="Codex", vendor="OpenAI", detector="mcp",
+            basenames=["dccert-marker"],
+        )
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        only = cmd_agent._filter_ai_usage_signals(
+            payload["signals"], states=(), categories=(), products=(), show_gone=False, sandboxes=("MYAPP-7F3A",),
+        )
+        self.assertEqual([sig["product"] for sig in only], ["Codex"])
+        tagged = cmd_agent._tag_sandbox_signals(payload["signals"])
+        self.assertIn("Codex (sandbox myapp-7f3a)", [sig["product"] for sig in tagged])
+        # The host's own Codex row stays apart from the sandbox's.
+        self.assertIn("Codex", [sig["product"] for sig in tagged])
+        self.assertEqual(found["product"], "Codex", "tagging must not change the payload")
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("myapp-7f3a", out)
+        self.assertNotIn("Cursor", out)
+
+    def test_sandbox_process_uptime_counts_from_its_start(self):
+        # GAP-0392: a sandbox process read 7 minutes ago showed up=4m59s (its
+        # uptime at that read) beside a Last active of its start.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands import cmd_agent
+
+        started = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=5)).isoformat()
+        runtime = {"pid": 466, "uptime_sec": 299, "started_at": started}
+        self.assertTrue(cmd_agent._format_runtime(runtime, live=True).startswith("pid=466 up=2h"))
+        self.assertEqual(cmd_agent._format_runtime(runtime), "pid=466 up=4m59s")
+        found = _ai_signal(state="seen", category="active_process", product="Claude Code", vendor="Anthropic",
+                           detector="process")
+        found.update({"sandbox_name": "incident-um", "source": "sandbox", "runtime": runtime})
+        out = cmd_agent._render_ai_usage_table({"signals": [found]}, detail=True)
+        self.assertIn("pid=466 up=2h", out)
+
+    def test_sandbox_filter_counts_that_sandbox_in_the_header(self):
+        # GAP-0269: the header counted the whole machine above one sandbox's rows.
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        payload["summary"] = {"active_signals": 32, "new_signals": 4, "changed_signals": 2, "gone_signals": 1}
+        found = _ai_signal(state="new", category="skill", product="Claude Code", vendor="Anthropic", detector="skill")
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("active=1 new=1 changed=0 gone=0", out)
+        self.assertIn("active=32 new=4", cmd_agent._render_ai_usage_table(payload))
 
     def test_category_filter_is_exact_and_case_insensitive(self):
         from defenseclaw.commands import cmd_agent
@@ -1131,6 +1379,7 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
 
     def setUp(self):
         self.runner = CliRunner()
+        _pin_terminal_width(self)
 
     def _invoke(self, app, args):
         class FakeClient:
@@ -1199,6 +1448,43 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
             cleanup_app(app, db_path, tmp_dir)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit", result.output)
+
+    # GAP-0386: an unknown --sandbox name was an empty table and exit 0, also
+    # on Windows, where no sandbox can exist.
+    def test_unknown_sandbox_is_an_error_and_windows_refuses(self):
+        from defenseclaw.gateway import SandboxAPIError
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return _wide_payload()
+
+            def get_sandbox(self, name):
+                if name == "nope":
+                    raise SandboxAPIError("not_found", f'sandbox "{name}" not found', status=404)
+                return {"name": name}
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+                # The first two run as a Linux host: on a Windows runner the
+                # real host refuses --sandbox before any lookup.
+                with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                    missing = self.runner.invoke(agent, ["usage", "--sandbox", "nope"], obj=app)
+                    fresh = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+                with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+                    windows = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(missing.exit_code, 1, missing.output)
+        self.assertIn("no sandbox nope: `defenseclaw sandbox list` shows your sandboxes", missing.output)
+        self.assertEqual(fresh.exit_code, 0, fresh.output)
+        self.assertIn("AI discovery has found nothing in sandbox fresh yet: `defenseclaw sandbox discover fresh`", fresh.output)
+        self.assertEqual(windows.exit_code, 3, windows.output)
+        self.assertIn("Linux and macOS only", windows.output)
 
 
 if __name__ == "__main__":

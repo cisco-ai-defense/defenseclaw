@@ -14,7 +14,7 @@ A short numbered list (the current value marked, weaker choices flagged) with
 a preview of what the highlighted choice means at each severity. The screen
 only returns the chosen value; the app confirms and runs the command. The
 same screen serves a scope's tool-call levels (:func:`tool_level_choices`,
-``guardrail block-at`` / ``alert-at``), a policy's levels for LLM traffic
+``guardrail block-at`` / ``alert-at``), a named policy's levels
 (:func:`threshold_choices`) and human approval (:func:`approval_choices`).
 """
 

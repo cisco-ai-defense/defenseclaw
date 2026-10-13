@@ -188,7 +188,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := effectiveWindowsHookConnectors(tc.cfg)
+			got := EffectiveWindowsHookConnectors(tc.cfg)
 			if len(got) != len(tc.want) {
 				t.Fatalf("length mismatch: got %v (len=%d), want %v (len=%d)", got, len(got), tc.want, len(tc.want))
 			}
@@ -1041,4 +1041,68 @@ func TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift(t *testing.T) {
 			t.Fatalf("no-op repair: err = %v, want a still-unprotected verdict", err)
 		}
 	})
+}
+
+// GAP-1034: a disabled local account with no active session cannot run
+// its installed agent. An existing session remains able to run it even after
+// the account is disabled, so missing enrollment must still be reported.
+func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsLocalAccountDisabled = previousDomain, previousDisabled })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	for _, tc := range []struct {
+		disabled      bool
+		sessionActive bool
+		wantReported  int
+	}{
+		{disabled: true, sessionActive: false, wantReported: 0},
+		{disabled: false, sessionActive: false, wantReported: 1},
+		{disabled: true, sessionActive: true, wantReported: 1},
+	} {
+		windowsLocalAccountDisabled = func(string) (bool, error) { return tc.disabled, nil }
+		sessions := map[string][]string{}
+		if tc.sessionActive {
+			sessions[testLocalUserSID] = []string{}
+		}
+		stubActiveSessions(t, sessions)
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reported) != tc.wantReported {
+			t.Fatalf("disabled=%v sessionActive=%v: reported %+v, want %d", tc.disabled, tc.sessionActive, reported, tc.wantReported)
+		}
+	}
+}
+
+// GAP-0430: a deleted local account (LookupAccountSid says ERROR_NONE_MAPPED)
+// is revoked even when its profile folder remains; a domain account whose
+// lookup fails, or a lookup that timed out, is not judged deleted.
+func TestWindowsDeletedLocalAccountNeedsANoneMappedLocalSID(t *testing.T) {
+	previous := windowsMachineAccountDomainSID
+	t.Cleanup(func() { windowsMachineAccountDomainSID = previous })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	local := testMachineDomainSID + "-1182"
+	noneMapped := func(string) (string, string, error) { return "", "", windows.ERROR_NONE_MAPPED }
+	timedOut := func(string) (string, string, error) { return "", "", errors.New("account name lookup timed out") }
+	if !windowsDeletedLocalAccount(local, noneMapped) {
+		t.Fatal("a deleted local account was not judged deleted")
+	}
+	if windowsDeletedLocalAccount(local, timedOut) {
+		t.Fatal("a timed-out lookup was judged a deleted account")
+	}
+	if windowsDeletedLocalAccount("S-1-5-21-111-222-333-1104", noneMapped) {
+		t.Fatal("a domain account was judged deleted")
+	}
 }

@@ -307,6 +307,50 @@ class TestRefreshSplunkBridge(unittest.TestCase):
         self.assertNotEqual(data, b"NEW")  # operator artefact survived
 
     @patch("defenseclaw.bundle_refresh.bundled_splunk_bridge_dir")
+    def test_refresh_makes_mounted_splunk_assets_readable_under_private_umask(self, mock_bundle: MagicMock) -> None:
+        """GAP-0341: a package extracted under a private umask left
+        splunk/default.yml 0600, which the container's non-root users
+        could not read, so Splunk restarted without end."""
+        from defenseclaw.bundle_refresh import refresh_splunk_bridge
+
+        if os.name == "nt":
+            self.skipTest("POSIX bind-mount mode contract")
+        os.makedirs(os.path.join(self.bundle, "splunk", "apps", "app", "bin"))
+        for rel in ("splunk/default.yml", "splunk/package_local_mode_app.sh", "splunk/apps/app/bin/tool.py"):
+            with open(os.path.join(self.bundle, rel), "w", encoding="utf-8") as handle:
+                handle.write("dccert-block-marker\n")
+        for root, dirs, files in os.walk(self.bundle):
+            for name in dirs:
+                os.chmod(os.path.join(root, name), 0o700)
+            for name in files:
+                os.chmod(os.path.join(root, name), 0o600)
+        mock_bundle.return_value = Path(self.bundle)
+        for _ in range(2):  # the initial seed, then a refresh
+            result = refresh_splunk_bridge(self.tmp)
+            self.assertEqual(result.errors, [])
+            splunk = os.path.join(self._seeded_dest(), "splunk")
+            modes = {
+                rel: stat.S_IMODE(os.stat(os.path.join(splunk, rel)).st_mode)
+                for rel in ("", "default.yml", "package_local_mode_app.sh", "apps/app/bin", "apps/app/bin/tool.py")
+            }
+            self.assertEqual(
+                modes,
+                {
+                    "": 0o755,
+                    "default.yml": 0o644,
+                    "package_local_mode_app.sh": 0o755,
+                    "apps/app/bin": 0o755,
+                    "apps/app/bin/tool.py": 0o755,
+                },
+            )
+        operator_env = os.path.join(self._seeded_dest(), "env", ".env")
+        with open(operator_env, "w", encoding="utf-8") as handle:
+            handle.write("SPLUNK_PASSWORD=dccert-decoy\n")
+        os.chmod(operator_env, 0o600)
+        refresh_splunk_bridge(self.tmp)
+        self.assertEqual(stat.S_IMODE(os.stat(operator_env).st_mode), 0o600)
+
+    @patch("defenseclaw.bundle_refresh.bundled_splunk_bridge_dir")
     def test_missing_bundle_returns_skipped(self, mock_bundle: MagicMock) -> None:
         from defenseclaw.bundle_refresh import refresh_splunk_bridge
 

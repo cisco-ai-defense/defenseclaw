@@ -13,13 +13,37 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
-	"gopkg.in/yaml.v3"
 )
+
+func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nguardrail:\n  mode: ACTION\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Version != 9 ||
+		strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "config_version 9") {
+		t.Fatalf("v9 schema error = %v", err)
+	}
+}
+
+// GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
+// is reported as those two fields, not as the kind of another destination
+// type ("kind must be the literal jsonl").
+func TestV8SchemaNamesFieldsThatExcludeEachOther(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nobservability:\n  destinations:\n"+
+		"    - name: eo3-http\n      kind: http_jsonl\n      endpoint: https://collector.example.test/ingest\n"+
+		"      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Keyword != "not" || schemaErr.Path != "$.observability.destinations[0]" ||
+		schemaErr.Expected != "either bearer_env or bearer_credential, not both" {
+		t.Fatalf("both credential fields = %v (%+v)", err, schemaErr)
+	}
+}
 
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
 	var schema map[string]any
@@ -69,7 +93,12 @@ managed:
 	}
 }
 
-func TestConfigV8SchemaAcceptsClawRollbackCustodyField(t *testing.T) {
+// A 0.8.x config still carries claw.openclaw_home_original (0.8.x wrote it,
+// empty unless the retired standalone sandbox pinned a home): the v8 schema
+// keeps accepting it until the v9 migration has dropped it
+// (migrateRetiredStandaloneSandbox), as long as the v8 schema validates
+// 0.8.x files.
+func TestConfigV8SchemaAcceptsTheRetiredOpenClawHomePin(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw
 claw:
@@ -85,14 +114,7 @@ claw:
 		ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"},
 	)
 	if err != nil {
-		t.Fatalf("v8 compiler rejected current claw rollback custody field: %v", err)
-	}
-	var parsed Config
-	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Claw.OpenClawHomeOriginal != "/tmp/original-openclaw" {
-		t.Fatalf("claw.openclaw_home_original = %q", parsed.Claw.OpenClawHomeOriginal)
+		t.Fatalf("v8 compiler rejected the retired claw.openclaw_home_original: %v", err)
 	}
 }
 
@@ -140,6 +162,31 @@ func TestConfigV8SchemaMatchesTypedObservabilitySourceFields(t *testing.T) {
 	}
 }
 
+func TestConfigV8SchemaRetentionDefaultIsSevenDays(t *testing.T) {
+	compiled, err := compileObservabilityV8Local(ObservabilityV8LocalSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.RetentionDays != 7 {
+		t.Fatalf("compiled default retention = %d days, want 7", compiled.RetentionDays)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions := schema["$defs"].(map[string]any)
+	localStore := definitions["localStore"].(map[string]any)
+	properties := localStore["properties"].(map[string]any)
+	retentionDays, ok := properties["retention_days"].(map[string]any)
+	if !ok {
+		t.Fatal("observability.local.retention_days is absent from canonical schema")
+	}
+	if got := retentionDays["default"]; got != float64(7) {
+		t.Fatalf("observability.local.retention_days default = %v, want 7", got)
+	}
+}
+
 func TestConfigV8SchemaRetentionMaximumMatchesCompiler(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
@@ -152,5 +199,30 @@ func TestConfigV8SchemaRetentionMaximumMatchesCompiler(t *testing.T) {
 	got, ok := retentionDays["maximum"].(float64)
 	if !ok || got != float64(ObservabilityV8MaxRetentionDays) {
 		t.Fatalf("observability.local.retention_days maximum = %v, want %d", retentionDays["maximum"], ObservabilityV8MaxRetentionDays)
+	}
+}
+
+// GAP-0498, GAP-0514: a schema violation names what is wrong: the required
+// key an assignment lacks and what it takes, the minimum an empty match
+// misses, and a size limit with the size the value has.
+func TestV8SchemaNamesMissingKeysAndLimits(t *testing.T) {
+	base := "config_version: 9\nguardrail:\n  profiles:\n    engineering: {}\n"
+	for _, tc := range []struct{ name, doc, keyword, expected string }{
+		{"no match", base + "  profile_assignments:\n    - profile: engineering\n", "required",
+			"the required key match: a mapping that sets at least one of agents, connectors, groups, users"},
+		{"empty match", base + "  profile_assignments:\n    - profile: engineering\n      match: {}\n", "minProperties",
+			"a mapping that sets at least one of agents, connectors, groups, users"},
+		{"empty groups", base + "  profile_assignments:\n    - profile: engineering\n      match: {groups: []}\n", "minItems", "a nonempty list"},
+		{"long request_access", base + "    contractors:\n      sandbox:\n        request_access: " + strings.Repeat("x", 600) + "\n",
+			"maxLength", "a string of at most 512 characters (it has 600)"},
+	} {
+		err := ValidateV8SchemaBytes("admin.yaml", []byte(tc.doc))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != tc.keyword || schemaErr.Expected != tc.expected {
+			t.Fatalf("%s: %v (%+v)", tc.name, err, schemaErr)
+		}
+		if tc.keyword == "required" && !slices.Equal(schemaErr.Missing, []string{"match"}) {
+			t.Fatalf("%s: missing = %q", tc.name, schemaErr.Missing)
+		}
 	}
 }

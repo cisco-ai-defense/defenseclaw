@@ -150,7 +150,15 @@ func TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) 
 		for _, tc := range blocked {
 			name := cause.name + ": " + tc.String()
 			r, _ := runSessionStop(t, cause, tc.sessionStopEvent, true)
-			if (tc.code >= 0 && r.code != tc.code) || !strings.Contains(r.stdout, tc.stdout) {
+			code, stdout := tc.code, tc.stdout
+			if !cause.foreign && tc.connector == "claudecode" {
+				if strings.Contains(tc.payload, `"PreToolUse"`) {
+					code, stdout = 0, `"permissionDecision":"deny"`
+				} else if strings.Contains(tc.payload, `"UserPromptSubmit"`) {
+					code, stdout = 0, `"decision":"block"`
+				}
+			}
+			if (code >= 0 && r.code != code) || !strings.Contains(r.stdout, stdout) {
 				t.Fatalf("%s: want a block, got code=%d stdout=%q stderr=%q", name, r.code, r.stdout, r.stderr)
 			}
 		}

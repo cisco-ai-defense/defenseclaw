@@ -129,6 +129,34 @@ func TestCompatibilityAuditV8CarriesSandboxIdentity(t *testing.T) {
 	}
 }
 
+// TestCompatibilityAuditV8ClassifiesRulePackDirAsPath pins the rule-pack
+// directory of a hook row as a path-class field of the record body, so the
+// sensitive profile hashes it and strict removes it (GAP-0131).
+func TestCompatibilityAuditV8ClassifiesRulePackDirAsPath(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	dir := "/home/alice@corp.example/.defenseclaw/policies/guardrail/default"
+	if err := logger.LogEventCtx(context.Background(), Event{
+		Action: string(ActionConnectorHook), Target: "PreToolUse", Actor: "defenseclaw",
+		Severity: "INFO", Connector: "codex", RulePackDir: dir,
+	}); err != nil {
+		t.Fatalf("LogEventCtx: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	body, _ := records[0].Body()
+	object, err := body.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object["rule_pack_dir"] != dir || records[0].FieldClasses()["/rule_pack_dir"] != observability.FieldClassPath {
+		t.Fatalf("body = %v classes = %v", object, records[0].FieldClasses())
+	}
+}
+
 // TestCompatibilityAuditV8OmitsMalformedSandboxIdentity pins the shape
 // check on the body's sandbox attribution: a value that is not a bounded
 // sandbox identifier is omitted and the other one is kept.

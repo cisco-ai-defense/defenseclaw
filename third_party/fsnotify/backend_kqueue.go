@@ -245,9 +245,12 @@ func (w *kqueue) Close() error {
 		return nil
 	}
 
+	// DefenseClaw fork: w.Remove returns early once the watcher is marked
+	// closed, so upstream v1.9.0 leaked every watch descriptor here (readEvents
+	// closes only kq and the pipe). Release them without the closed guard.
 	pathsToRemove := w.watches.listPaths(false)
 	for _, name := range pathsToRemove {
-		w.Remove(name)
+		w.removeWatch(name, false)
 	}
 
 	unix.Close(w.closepipe[1]) // Send "quit" message to readEvents
@@ -287,7 +290,10 @@ func (w *kqueue) remove(name string, unwatchFiles bool) error {
 	if w.isClosed() {
 		return nil
 	}
+	return w.removeWatch(name, unwatchFiles)
+}
 
+func (w *kqueue) removeWatch(name string, unwatchFiles bool) error {
 	name = filepath.Clean(name)
 	info, ok := w.watches.byPath(name)
 	if !ok {

@@ -30,6 +30,12 @@ type sidecarRuntimeEmitter interface {
 	) (pipeline.LocalLogOutcome, error)
 }
 
+// sidecarRuntimeAtomicBatchEmitter persists a group of related records with
+// one commit.
+type sidecarRuntimeAtomicBatchEmitter interface {
+	EmitAtomicBatch(context.Context, []observabilityruntime.LogBatchItem) ([]pipeline.LocalLogOutcome, error)
+}
+
 type sidecarRuntimeLocalOnlyEmitter interface {
 	EmitLocalOnly(
 		context.Context,
@@ -125,7 +131,7 @@ func (s *Sidecar) beginObservabilityV8Run() error {
 	}
 	// The target process must have completed mandatory runtime assembly before
 	// any subsystem starts serving.
-	if cfg := s.currentConfig(); cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion || s.observabilityV8 == nil {
+	if cfg := s.currentConfig(); cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) || s.observabilityV8 == nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
 	}
 	s.observabilityV8Run = true
@@ -185,15 +191,6 @@ func (a *APIServer) bindTelemetryCanaryRuntime(emitter sidecarRuntimeCanaryEmitt
 	}
 	a.observabilityV8Mu.Lock()
 	a.observabilityV8Canary = emitter
-	a.observabilityV8Mu.Unlock()
-}
-
-func (a *APIServer) bindLocalOnlyObservabilityRuntime(emitter sidecarRuntimeLocalOnlyEmitter) {
-	if a == nil {
-		return
-	}
-	a.observabilityV8Mu.Lock()
-	a.observabilityV8LocalOnly = emitter
 	a.observabilityV8Mu.Unlock()
 }
 

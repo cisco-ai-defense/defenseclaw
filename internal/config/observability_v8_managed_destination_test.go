@@ -150,6 +150,36 @@ func TestManagedAIDDestinationGateAndReloadDigest(t *testing.T) {
 	}
 }
 
+// A Secure Client plan that turns compatibility_aliases off tells the managed
+// sink to leave out deployment.environment and deployment.mode, as on main.
+func TestManagedAIDDestinationCarriesTheAliasSwitch(t *testing.T) {
+	base := mustCompileObservabilityV8(t, nil)
+	on, off := true, false
+	for _, test := range []struct {
+		name   string
+		source *bool
+		want   bool
+	}{{"absent", nil, true}, {"on", &on, true}, {"off", &off, false}} {
+		plan := base
+		if test.source != nil {
+			var err error
+			if plan, err = withObservabilityV8SecureClientAliasSwitch(base, test.source); err != nil {
+				t.Fatal(err)
+			}
+		}
+		plan, err := WithObservabilityV8ManagedAIDDestination(plan, ObservabilityV8ManagedAIDOptions{
+			DeploymentMode: "managed_enterprise", Endpoint: "https://aid.example.test",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination, ok := plan.RuntimeDestination(ObservabilityV8ManagedAIDDestinationName)
+		if !ok || ObservabilityV8ManagedAIDDeploymentAliases(destination) != test.want {
+			t.Fatalf("switch %s: deployment aliases = %t, want %t", test.name, !test.want, test.want)
+		}
+	}
+}
+
 func TestManagedAIDDestinationPinsExactSourceHashWithoutPublishingIt(t *testing.T) {
 	base := mustCompileObservabilityV8(t, nil)
 	rawA := []byte("config_version: 8\nmode: one\n")

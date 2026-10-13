@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 from defenseclaw import policy_catalog as pc
-from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import CustomRulePack, HILTConfig, PerConnectorGuardrailConfig, default_config
 
 SELECTABLE = (
     "privacy-high-assurance",
@@ -268,9 +268,10 @@ def test_scope_postures_global_first_then_active_connectors(tmp_path: Path) -> N
     )
     cfg.guardrail.mode = "observe"
     cfg.guardrail.hilt = HILTConfig(enabled=True, min_severity="HIGH")
+    cfg.guardrail.custom_packs["protected-codex"] = CustomRulePack(path=str(composed))
     cfg.guardrail.connectors = {
         "codex": PerConnectorGuardrailConfig(
-            mode="action", hilt=HILTConfig(enabled=True, min_severity="CRITICAL"), rule_pack_dir=str(composed)
+            mode="action", hilt=HILTConfig(enabled=True, min_severity="CRITICAL"), rule_pack="protected-codex"
         ),
         "claudecode": PerConnectorGuardrailConfig(),
     }

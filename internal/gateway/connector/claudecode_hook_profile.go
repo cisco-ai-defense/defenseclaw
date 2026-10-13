@@ -16,10 +16,7 @@
 
 package connector
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 // claudeCodeProfileDecode implements HookProfile.Decode for Claude
 // Code. Today (post PR #284) the unified gateway handler decodes
@@ -251,26 +248,6 @@ func claudeCodeReasonOrDefault(reason string) string {
 		return "Blocked by DefenseClaw Claude Code policy."
 	}
 	return reason
-}
-
-// claudeCodeAdditionalContextForProfile mirrors
-// claudeCodeAdditionalContext() in gateway/claude_code_hook.go. See
-// codexAdditionalContextForProfile for the duplication rationale.
-func claudeCodeAdditionalContextForProfile(rawAction, severity, reason string, wouldBlock bool) string {
-	if rawAction == "allow" || rawAction == "" {
-		return ""
-	}
-	lead := "DefenseClaw observed"
-	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
-	if wouldBlock {
-		// A full clause cannot take the article that follows "observed".
-		lead = "DefenseClaw would block this in action mode:"
-		finding = fmt.Sprintf("%s Claude Code hook finding", severity)
-	}
-	if reason == "" {
-		return fmt.Sprintf("%s %s.", lead, finding)
-	}
-	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // claudeCodeCanEnforceProfile mirrors claudeCodeCanEnforce() in

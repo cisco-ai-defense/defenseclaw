@@ -868,7 +868,7 @@ func TestAttemptDeadlineBoundsCooperativeAdapter(t *testing.T) {
 	if got := adapter.deliverCalls.Load(); got != uint64(config.Retry.MaxAttempts) {
 		t.Fatalf("attempts=%d", got)
 	}
-	if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 || got.Delivered != 0 {
+	if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Delivered != 0 {
 		t.Fatalf("counters=%+v", got)
 	}
 }

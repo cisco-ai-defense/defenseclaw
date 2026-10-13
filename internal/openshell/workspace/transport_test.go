@@ -119,6 +119,11 @@ func TestRunProcess(t *testing.T) {
 	if _, code, err := runProcess(ctx, []string{"true"}, io.Discard); err != nil || code != 0 {
 		t.Fatalf("true: code=%d err=%v", code, err)
 	}
+	// GAP-0368: a Ctrl-C that reached the command is an interrupt, not a
+	// failure with "exit -1".
+	if _, _, err := runProcess(ctx, []string{"sh", "-c", "kill -INT $$"}, io.Discard); !errors.Is(err, openshell.ErrInterrupted) {
+		t.Fatalf("a command a Ctrl-C ended: %v", err)
+	}
 }
 
 type scriptedAnswer = func(ctx context.Context) ([]byte, []byte, int, error)

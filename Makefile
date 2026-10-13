@@ -9,16 +9,34 @@ VERSION     := 1.0.0
 GIT_COMMIT  := $(or $(shell git rev-parse --short HEAD 2>/dev/null),unknown)
 BUILD_DATE  := $(or $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null),unknown)
 BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)
-GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
+# Not named GOFLAGS: make exports a variable that is also set in the environment, and go
+# then reads this -ldflags value as its own GOFLAGS setting and refuses to build.
+GO_BUILD_FLAGS := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
+# Packages the OpenClaw plugin loads from its own node_modules: each "dependencies" entry of
+# its package.json plus js-yaml's dependency argparse. OpenClaw refuses to load a plugin whose
+# declared dependency is missing, so the embed and the source install copy all of them, and
+# cli/defenseclaw/extension_fingerprint.py allows exactly these (GAP-0189).
+PLUGIN_RUNTIME_DEPS := js-yaml argparse undici
 EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
-# The race-enabled gateway package can exceed the default test deadline on
-# supported arm64 developer/CI hosts without any individual test hanging.
+# The gateway package can exceed go test's default 10m deadline (race-enabled
+# or not) without any individual test hanging; targets that run all or most
+# of it set this timeout.
 GO_TEST_TIMEOUT ?= 60m
+# Race-enabled, the gateway and audit packages each take well over an hour as
+# one test binary. gateway-test and go-test-cov run them as this many parallel
+# shards (the CI split, scripts/go_test_shards.py); each shard keeps
+# GO_TEST_TIMEOUT.
+GO_TEST_SHARDS ?= 8
+GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --shard-count $(GO_TEST_SHARDS)
+# -race also turns on checkptr in every package. In the transpiled SQLite
+# (modernc.org) that every audit store runs, checkptr alone doubles the cost
+# of the race suites; race detection stays on everywhere. CI uses the same flags.
+GO_RACE_FLAGS := -race -gcflags=modernc.org/...=-d=checkptr=0
 
 DIST_DIR    := dist
 
@@ -78,7 +96,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
-        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-restart-gateway \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
@@ -155,6 +173,7 @@ all: _source-install-dev-preflight
 	@$(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py
 	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory source-migrate
+	@$(MAKE) --no-print-directory source-acp-refresh
 	@$(MAKE) --no-print-directory source-restart-gateway
 	@# Pre-1.0 installers left their retired binaries behind; install.sh
 	@# removes them, so a source install must too (GAP-0053).
@@ -194,6 +213,18 @@ source-migrate: _source-install-preflight
 		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" migrate; then \
 			echo "  Could not migrate the existing config — fix the error above, then re-run: defenseclaw migrate"; \
 			exit 1; \
+		fi; \
+	fi
+
+# make all replaced defenseclaw-acp, so every ACP editor entry DefenseClaw
+# wrote still pins the old guard digest and fails closed. Re-pin the entries
+# that start this install's guard, as the release upgrade does. Best effort.
+source-acp-refresh: _source-install-preflight
+	@data_dir="$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}"; \
+	guard="$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"; \
+	if [ -f "$$data_dir/config.yaml" ] && [ -f "$$guard" ]; then \
+		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" acp refresh --guard-path "$$guard"; then \
+			echo "  Could not re-pin the ACP guard in your editor entries. Run: defenseclaw acp refresh"; \
 		fi; \
 	fi
 
@@ -429,7 +460,8 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract and the private semantic guardrail facts.
+# Client) contract, the private semantic guardrail facts and the vendored
+# Tetragon API (third_party/tetragon).
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -440,6 +472,16 @@ PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+# The Tetragon gRPC API (cilium/tetragon api/v1.7.1, Apache-2.0), vendored
+# unmodified under third_party/tetragon for the Linux sensor helper. The
+# upstream go_package is remapped so no github.com/cilium/tetragon module is
+# imported; see third_party/tetragon/README.md for the provenance checks.
+TETRAGON_PROTO_PKG := github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon
+TETRAGON_PROTOS := tetragon/bpf.proto tetragon/capabilities.proto tetragon/events.proto \
+	tetragon/sensors.proto tetragon/tetragon.proto
+TETRAGON_PROTO_M := $(foreach p,$(TETRAGON_PROTOS),M$(p)=$(TETRAGON_PROTO_PKG))
+TETRAGON_PROTO_STUBS := $(addprefix third_party/tetragon/api/v1/,$(TETRAGON_PROTOS:.proto=.pb.go)) \
+	third_party/tetragon/api/v1/tetragon/sensors_grpc.pb.go
 
 proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
@@ -455,21 +497,27 @@ proto: proto-tools
 	@cd internal/guardrail/semanticpb && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
 		--go_out=. --go_opt=paths=source_relative \
 		facts.proto
+	@cd third_party/tetragon/api/v1 && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative $(addprefix --go_opt=,$(TETRAGON_PROTO_M)) \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative $(addprefix --go-grpc_opt=,$(TETRAGON_PROTO_M)) \
+		$(TETRAGON_PROTOS)
 	@echo "Regenerated committed Go protobuf stubs"
 
 proto-check: proto
 	@git ls-files --error-unmatch -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
-		internal/guardrail/semanticpb/facts.pb.go >/dev/null
+		internal/guardrail/semanticpb/facts.pb.go \
+		$(TETRAGON_PROTO_STUBS) >/dev/null
 	@git diff --exit-code -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
-		internal/guardrail/semanticpb/facts.pb.go
+		internal/guardrail/semanticpb/facts.pb.go \
+		$(TETRAGON_PROTO_STUBS)
 
 gateway: _checkout-write-preflight sync-openclaw-extension
-	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
-	go build $(GOFLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
+	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
@@ -492,29 +540,21 @@ endif
 # scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
 # by relative path. Flattening the tree silently breaks plugin load.
 #
-# Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
-# `make plugin` runs. Forcing every gateway build to first run npm
+# Best-effort: a fresh clone has no extensions/defenseclaw/dist/index.js
+# until `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
 # so //go:embed has at least one entry (the tracked .placeholder is kept
 # even after a sync, so a build leaves the checkout clean), and the
-# OpenClaw connector finds no package.json at runtime and returns a clear error when
+# OpenClaw connector finds no plugin entry at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
-	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ ! -f "$$embed_dir/package.json" ]; then \
-	    mkdir -p "$$embed_dir"; \
-	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
-	      "OpenClaw extension bundle is not present in this source checkout." \
-	      > "$$embed_dir/.placeholder"; \
-	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
-	  else \
-	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
-	  fi; \
+	if [ ! -f "$$plugin_dist/index.js" ] && [ -f "$$embed_dir/dist/index.js" ]; then \
+	  echo "  • OpenClaw extension dist/ not built — keeping the previously synced tree under $$embed_dir/"; \
 	  exit 0; \
 	fi; \
 	mkdir -p "$$embed_dir"; \
@@ -522,6 +562,13 @@ sync-openclaw-extension: _checkout-write-preflight
 	  [ -e "$$entry" ] || continue; \
 	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
 	done; \
+	if [ ! -f "$$plugin_dist/index.js" ]; then \
+	  [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	    "OpenClaw extension bundle is not present in this source checkout." \
+	    > "$$embed_dir/.placeholder"; \
+	  echo "  • OpenClaw extension dist/ not built — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
+	  exit 0; \
+	fi; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
@@ -537,10 +584,11 @@ sync-openclaw-extension: _checkout-write-preflight
 	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
 	      done); \
 	fi; \
-	for dep in js-yaml argparse; do \
-	  if [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ]; then \
-	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
-	  fi; \
+	for dep in $(PLUGIN_RUNTIME_DEPS); do \
+	  [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ] || { \
+	    echo "OpenClaw extension dependency $$dep is not installed under $(PLUGIN_DIR)/node_modules — run 'make plugin'" >&2; \
+	    exit 1; }; \
+	  cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
 	done; \
 	echo "  • Synced OpenClaw extension → $$embed_dir/"
 
@@ -553,24 +601,29 @@ sync-openclaw-extension: _checkout-write-preflight
 extensions: plugin sync-openclaw-extension
 	@echo "  • OpenClaw extension is built and embedded — rebuild the gateway with 'make gateway'"
 
+# The resource stamper runs on the build host. Make exports the command-line
+# GOOS/GOARCH to the recipe, so a plain go run would compile it for the target
+# and fail with exec format error on a Linux or macOS host.
+HOST_GO_RUN := env -u GOOS -u GOARCH go run
+
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	@if [ "$(GOOS)" = "windows" ] && [ "$(GOARCH)" != "amd64" ]; then \
 		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
 	fi
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_FLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
 	@if [ "$(GOOS)" = "windows" ]; then \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(ACP_GUARD)-$(GOOS)-$(GOARCH).exe -component acp-guard -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
 			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
 			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe -component hook -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 	fi
@@ -769,14 +822,13 @@ plugin-install: _source-install-preflight gateway-install
 	@cp $(PLUGIN_DIR)/package.json $(DC_EXT_DIR)/
 	@test -f $(PLUGIN_DIR)/openclaw.plugin.json && cp $(PLUGIN_DIR)/openclaw.plugin.json $(DC_EXT_DIR)/ || true
 	@cp -r $(PLUGIN_DIR)/dist $(DC_EXT_DIR)/
-	@if [ -d $(PLUGIN_DIR)/node_modules ]; then \
-		mkdir -p $(DC_EXT_DIR)/node_modules; \
-		for dep in js-yaml argparse; do \
-			if [ -d $(PLUGIN_DIR)/node_modules/$$dep ]; then \
-				cp -r $(PLUGIN_DIR)/node_modules/$$dep $(DC_EXT_DIR)/node_modules/; \
-			fi; \
-		done; \
-	fi
+	@mkdir -p $(DC_EXT_DIR)/node_modules
+	@for dep in $(PLUGIN_RUNTIME_DEPS); do \
+		[ -d $(PLUGIN_DIR)/node_modules/$$dep ] || { \
+			echo "OpenClaw extension dependency $$dep is not installed under $(PLUGIN_DIR)/node_modules — run 'make plugin'" >&2; \
+			exit 1; }; \
+		cp -r $(PLUGIN_DIR)/node_modules/$$dep $(DC_EXT_DIR)/node_modules/; \
+	done
 	@if [ -d $(OC_EXT_DIR) ]; then \
 		rm -rf $(OC_EXT_DIR)/dist; \
 		cp $(PLUGIN_DIR)/package.json $(OC_EXT_DIR)/; \
@@ -803,7 +855,9 @@ tui-test: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q
 
 gateway-test: sync-openclaw-extension
-	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
+	$(GO_SHARD_RUN) --package-dir internal/gateway -- \
+		go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway
+	go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) ./test/... -v
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
@@ -1045,12 +1099,20 @@ contextual-judge-test:
 		benchmarks.scripts.test_benchmark_score_contextual_judge
 
 go-test-cov: sync-openclaw-extension
-	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
+	@rm -f coverage-go-*.out
+	go test $(GO_RACE_FLAGS) -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-other.out \
+		$$(go list ./... | grep -Ev "^github.com/defenseclaw/defenseclaw/internal/(audit|gateway)$$")
+	$(GO_SHARD_RUN) --package-dir internal/gateway -- go test $(GO_RACE_FLAGS) -count=1 \
+		-timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-gateway-{shard}.out ./internal/gateway
+	$(GO_SHARD_RUN) --package-dir internal/audit -- go test $(GO_RACE_FLAGS) -count=1 \
+		-timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-audit-{shard}.out ./internal/audit
+	$(HOST_PYTHON) scripts/merge_go_coverage.py --output coverage.out coverage-go-*.out
+	@rm -f coverage-go-*.out
 
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 
 go-connector-matrix-test: sync-openclaw-extension
-	go test -count=1 \
+	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
 		./internal/gateway \
@@ -1284,6 +1346,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data: _checkout-write-preflight
+	@rm -rf cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars
@@ -1303,7 +1366,6 @@ _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
-	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
@@ -1404,7 +1466,6 @@ dist-installers:
 		sed 's/__DEFENSECLAW_VERSION__/$(VERSION)/g' scripts/$$script > $(DIST_DIR)/$$script; \
 	done
 	@chmod 755 $(DIST_DIR)/install.sh $(DIST_DIR)/defenseclaw-upgrade.sh
-	@cp scripts/install-openshell-sandbox.sh $(DIST_DIR)/install-openshell-sandbox.sh
 
 # Hash-pinned dependencies for the wheel, so installs never resolve live.
 dist-requirements:

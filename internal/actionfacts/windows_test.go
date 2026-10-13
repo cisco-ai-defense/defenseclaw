@@ -5982,3 +5982,52 @@ func TestWindowsRedirectFactProjectionLimit(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1415: Codex on Windows ran the first script. What follows the New-Item
+// statement (a pipeline to Out-Null, a compound if/else, a call operator or a
+// comment) must not take the statement, or the path of its own analysis, out
+// of the view.
+func TestPowerShellScriptSubsetKeepsLeadingStatementFacts(t *testing.T) {
+	t.Parallel()
+	const target = `C:\Users\Public\rv17u\rv17w-block-marker.txt`
+	statement := `New-Item -ItemType File -Path '` + target + `' -Force`
+	for _, script := range []string{
+		statement + ` | Out-Null; if (Test-Path -LiteralPath '` + target + `') { 'worked' } else { 'failed' }`,
+		statement + `; & 'C:\tools\check.exe' # verify`,
+	} {
+		input := Input{Tool: "shell", Command: script, CWD: `C:\Users\rv17u`, DialectHint: DialectPowerShell}
+		facts := Analyze(input)
+		view, ok := PowerShellCommandSubsetReduction(input, facts)
+		if facts.Authoritative() || !ok || len(view.Commands) != 1 || view.Commands[0].Program != "new-item" ||
+			!view.EnforcementEligible() ||
+			!slices.ContainsFunc(view.Paths, func(p PathFact) bool { return p.CommandID == 1 && p.Value == target }) {
+			t.Errorf("%s: view %v %+v", script, ok, view)
+		}
+	}
+}
+
+// GAP-1415 (rv18): Codex assigned the path to a variable before New-Item, and
+// Claude Code passed the same script to powershell -Command from its POSIX
+// shell. Neither parse is complete, so no reduced view keeps New-Item; the
+// gateway's migrated literal rule matches the parsed words of the call
+// instead (GAP-1469), so the full path must stay one of those words.
+func TestPowerShellScriptPathStaysAParsedWord(t *testing.T) {
+	t.Parallel()
+	const target = `C:\Users\Public\rv18u\rv18w-block-marker.txt`
+	for _, input := range []Input{
+		{Tool: "shell", CWD: `C:\Users\rv18u`, DialectHint: DialectPowerShell, Command: `$path = '` + target +
+			`'; New-Item -Path $path -ItemType File -Force | Out-Null; $item = Get-Item -LiteralPath $path; ` +
+			`[pscustomobject]@{ Path = $item.FullName; Exists = $true; Length = $item.Length }`},
+		{Tool: "Bash", CWD: "/home/alice", DialectHint: DialectPOSIX, Command: `powershell -Command "New-Item -ItemType File -Path '` +
+			target + `' -Force | Out-Null; Get-Item '` + target + `' | Select-Object Name, Length"`},
+	} {
+		facts := Analyze(input)
+		if !slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
+			return slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
+				return strings.Contains(argument.Value, target)
+			})
+		}) {
+			t.Errorf("%s: no parsed word holds %s: %+v", input.Command, target, facts.Commands)
+		}
+	}
+}

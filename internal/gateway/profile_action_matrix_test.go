@@ -88,7 +88,7 @@ func TestProfileActionMatrix(t *testing.T) {
 			for _, row := range matrix {
 				row := row
 				want := profile.pick(row)
-				got := guardrailRuntimeAction(cfg, row.severity, false)
+				got := guardrailActionForConnector(cfg, "", row.severity, false)
 				if got != want {
 					t.Errorf("severity=%s profile=%s: action=%s, want %s",
 						row.severity, profile.name, got, want)
@@ -110,7 +110,7 @@ func TestProfile_CriticalAlwaysBlocks(t *testing.T) {
 	} {
 		cfg := &config.Config{}
 		cfg.Guardrail.RulePackDir = rp
-		if got := guardrailRuntimeAction(cfg, "CRITICAL", false); got != "block" {
+		if got := guardrailActionForConnector(cfg, "", "CRITICAL", false); got != "block" {
 			t.Errorf("profile=%s CRITICAL action=%s, want block", rp, got)
 		}
 		// Even with HILT enabled at CRITICAL threshold, a confirmable
@@ -118,7 +118,7 @@ func TestProfile_CriticalAlwaysBlocks(t *testing.T) {
 		// and-below per decision.go:41.
 		cfg.Guardrail.HILT.Enabled = true
 		cfg.Guardrail.HILT.MinSeverity = "CRITICAL"
-		if got := guardrailRuntimeAction(cfg, "CRITICAL", true); got != "block" {
+		if got := guardrailActionForConnector(cfg, "", "CRITICAL", true); got != "block" {
 			t.Errorf("profile=%s CRITICAL+HILT confirmable action=%s, want block", rp, got)
 		}
 	}
@@ -142,7 +142,7 @@ func TestProfile_HighWithHILTConfirms(t *testing.T) {
 		cfg.Guardrail.RulePackDir = c.profile
 		cfg.Guardrail.HILT.Enabled = true
 		cfg.Guardrail.HILT.MinSeverity = "HIGH"
-		if got := guardrailRuntimeAction(cfg, "HIGH", true); got != c.wantAction {
+		if got := guardrailActionForConnector(cfg, "", "HIGH", true); got != c.wantAction {
 			t.Errorf("profile=%s HIGH+HILT confirmable action=%s, want %s",
 				c.profile, got, c.wantAction)
 		}

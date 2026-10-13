@@ -212,3 +212,13 @@ def test_live_mode_fails_when_litellm_cannot_report_its_registry_source(monkeypa
     )
     assert mod.main(["--live"]) == 2
     assert "cannot confirm litellm used the upstream registry" in capsys.readouterr().err
+
+
+def test_corrupt_bundled_snapshot_reports_the_registry_unavailable(monkeypatch, tmp_path, capsys) -> None:
+    """A truncated snapshot exits 2 with the message, not a traceback."""
+    (tmp_path / mod.BUNDLED_REGISTRY).write_text('{"gpt-4": {', encoding="utf-8")
+    spec = importlib.util.spec_from_loader("litellm", loader=None, is_package=True)
+    spec.submodule_search_locations = [str(tmp_path)]
+    monkeypatch.setattr(mod.importlib.util, "find_spec", lambda name: spec)
+    assert mod.main([]) == 2
+    assert "litellm registry unavailable" in capsys.readouterr().err

@@ -23,6 +23,12 @@
 // the block. DEFENSECLAW_NO_SANDBOX=1 bypasses a wrapper, and a shell inside a
 // sandbox (DEFENSECLAW_SANDBOX_ID set) runs the harness natively. PATH shims
 // are deliberately not used.
+//
+// Neither variable is a way around an organization's policy: both only turn
+// the run into a host run. On a managed host whose organization requires the
+// harness in a sandbox (openshell.admin or a profile's sandbox required_for),
+// the harness's host hooks are refused by the managed gateway's
+// require-sandbox gate, which never reads these variables.
 package wrapper
 
 import (
@@ -56,12 +62,18 @@ const (
 	EndMarker   = "# <<< defenseclaw sandbox wrappers <<<"
 )
 
-// EnvBypass runs the harness directly, without a sandbox.
+// EnvBypass runs the harness directly, without a sandbox, where the
+// organization allows a host run of it.
 const EnvBypass = "DEFENSECLAW_NO_SANDBOX"
 
 // envNested is set inside every DefenseClaw sandbox (openshell.EnvSandboxID);
-// a wrapper there runs the harness natively.
+// a wrapper there runs the harness natively. It proves nothing: anyone can
+// set it, and the run it starts on the host is a host run to the gateway.
 const envNested = "DEFENSECLAW_SANDBOX_ID"
+
+// bypassScope is what the bypass texts add: a managed host refuses the host
+// run of a harness its organization requires in a sandbox.
+const bypassScope = ", where your organization allows it"
 
 // maxRCBytes bounds the rc files the package reads.
 const maxRCBytes = 4 << 20
@@ -160,7 +172,7 @@ func Render(shell Shell, b Block) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(BeginMarker + "\n")
 	sb.WriteString("# Added by `defenseclaw sandbox enable`; remove with `defenseclaw sandbox disable <harness>`.\n")
-	sb.WriteString("# " + EnvBypass + "=1 runs the harness directly, without a sandbox.\n")
+	sb.WriteString("# " + EnvBypass + "=1 runs the harness directly, without a sandbox" + bypassScope + ".\n")
 	bin := shellQuote(b.Binary)
 	for _, w := range wraps {
 		if err := w.validate(); err != nil {
@@ -237,7 +249,7 @@ func writeRealias(sb *strings.Builder, shell Shell, wraps []Wrap) {
 // calls is gone. It never runs the harness unsandboxed on its own.
 func missingMessage(command string) string {
 	return "defenseclaw: the sandbox launcher is missing (reinstall DefenseClaw or run `defenseclaw sandbox disable " +
-		command + "`); " + EnvBypass + "=1 " + command + " starts " + command + " without a sandbox"
+		command + "`); " + EnvBypass + "=1 " + command + " starts " + command + " without a sandbox" + bypassScope
 }
 
 // ErrMalformedBlock reports an rc file whose wrapper markers are unbalanced

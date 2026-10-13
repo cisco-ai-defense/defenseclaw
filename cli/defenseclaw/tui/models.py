@@ -98,6 +98,8 @@ class StatusModel:
     redaction_on: bool = True
     # Short policy posture string (``policy enforce`` / ``policy observe``).
     policy_posture: str = ""
+    # The policy generation and digest the gateway applied (``gen 7 · abc...``).
+    applied_policy: str = ""
     # Total commands the user has run this session.
     commands_run: int = 0
 

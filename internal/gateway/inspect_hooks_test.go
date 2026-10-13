@@ -22,7 +22,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,6 +61,18 @@ func TestInspectRequest_MethodNotAllowed(t *testing.T) {
 
 	if w.Result().StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+// TestInspectRequestBlocksAtBlockAt: the pre-request hook route blocks a HIGH
+// prompt at guardrail.block_at: HIGH, as the proxy and the agent hooks do,
+// instead of demoting it to an alert (GAP-0282).
+func TestInspectRequestBlocksAtBlockAt(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.Guardrail.BlockAt = "HIGH"
+	_, verdict := postInspectRequest(t, api, `{"content":"my ssn is 078-05-1120"}`)
+	if verdict.Action != "block" || verdict.Severity != "HIGH" {
+		t.Fatalf("verdict = %s %s %q, want a HIGH block", verdict.Action, verdict.Severity, verdict.Reason)
 	}
 }
 
@@ -408,6 +429,288 @@ func TestInspectResponse_ObserveDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestInspectToolResponse_SensitiveToolRaisesResultAlert pins GAP-0041:
+// guardrail.rules.sensitive_tools with result_inspection is live on the hook
+// path. A listed tool whose output matches at least min_entities_for_alert
+// findings raises tool-result-pii-alert; an unlisted tool does not.
+func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
+	api := testAPIServerWithConfig(t, "observe")
+	pack, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatalf("load default pack: %v", err)
+	}
+	pack.SensitiveTools = &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": pack}}
+	})
+	const output = "AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V"
+	for _, tool := range []string{"unlisted_tool", "listed_tool"} {
+		postInspectToolResponse(t, api, `{"tool":"`+tool+`","output":"`+output+`","exit_code":0}`)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var alerted []string
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			alerted = append(alerted, event.Target)
+		}
+	}
+	if len(alerted) != 1 || alerted[0] != "listed_tool" {
+		t.Fatalf("tool-result-pii-alert targets = %v, want [listed_tool]", alerted)
+	}
+}
+
+// A connector-only assignment selects its profile before a hook result is
+// finalized. The alert must use that profile's sensitive-tool configuration.
+func TestHookToolResultAlertUsesSelectedProfile(t *testing.T) {
+	stubProfileSources(t)
+	packDir := filepath.Join(t.TempDir(), "contractors")
+	writeRulePackFixtureFile(t, packDir, "rules/entities.yaml", `version: 1
+category: enterprise-data
+rules:
+  - id: PROFILE-ENTITY
+    pattern: 'profile_entity_[a-z]+'
+    title: profile entity
+    severity: HIGH
+    confidence: 0.99
+    tags: [pii]
+`)
+	cfg := config.DefaultConfig()
+	enabled := true
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {RulePackDir: packDir, Rules: &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{
+				Name: "crm_export", ResultInspection: &enabled,
+				MinEntitiesForAlert: 2,
+			}},
+		}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	store, logger := testStoreAndLogger(t)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api.store, api.logger = store, logger
+	set := api.guardrailProfileSet()
+	if set == nil {
+		t.Fatal("profile set was not built")
+	}
+	base, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Profiles: set, RulePacks: map[string]*guardrail.RulePack{"global": base}}
+	})
+	ctx := api.withGuardrailProfileDecision(t.Context(), "codex")
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "profile_entity_a profile_entity_b"}}
+	api.alertSensitiveHookToolResult(ctx, "codex", req, agentHookResponse{Severity: "HIGH", Findings: []string{"ENT-EMAIL-BULK"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" && event.Target == "crm_export" &&
+			strings.Contains(event.Details, "entities=2") {
+			return
+		}
+	}
+	t.Fatalf("profile-sensitive tool produced no two-entity alert: %+v", events)
+}
+
+// A finding from another inspection lane does not prove a sensitive value.
+func TestHookToolResultAlertIgnoresNonEntityFinding(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{
+			"global": {SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+				{Name: "crm_export", ResultInspection: true, MinEntitiesAlert: 1},
+			}}},
+		}}
+	})
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "ordinary output"}}
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"PROMPT-INJECTION"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			t.Fatalf("non-entity finding produced PII alert: %+v", event)
+		}
+	}
+
+	// The judge's typed PII finding still counts when regex has no match.
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"JUDGE-PII-EMAIL"}})
+	events, err = store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			return
+		}
+	}
+	t.Fatal("judge PII finding produced no alert")
+}
+
+// TestHookToolResultRaisesSensitiveToolAlert pins GAP-0041 on the connector hook
+// endpoints: the Claude Code and Codex PostToolUse results finalize through
+// finalizeAgentHook, which raises the same alert as the inspect route, for a
+// listed tool and a result-like event only.
+func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	var delivered atomic.Int32
+	var deliveredMu sync.Mutex
+	var deliveredIDs []string
+	hooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Event struct {
+				ID string `json:"id"`
+			} `json:"event"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		deliveredMu.Lock()
+		deliveredIDs = append(deliveredIDs, body.Event.ID)
+		deliveredMu.Unlock()
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hooks.Close()
+	webhooks := NewWebhookDispatcher([]config.WebhookConfig{{
+		URL: hooks.URL, Type: "generic", MinSeverity: "HIGH", Enabled: true, Events: []string{"guardrail"},
+	}})
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.SetWebhookSource(func() *WebhookDispatcher { return webhooks })
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": {SensitiveTools: &guardrail.SensitiveToolsConfig{
+			Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 2}},
+		}}}}
+	})
+	findings := []string{"JUDGE-PII-EMAIL", "ENT-EMAIL-BULK"}
+	// GAP-0182: the alert counts the values in the result, not the findings, so one rule
+	// finding over two addresses (Codex, judge off) alerts like two findings (judge on).
+	emails := map[string]interface{}{"tool_response": "alice@example.com\nbob@example.com\n"}
+	for _, c := range []struct {
+		connector, event, tool string
+		findings               []string
+		payload                map[string]interface{}
+	}{
+		{"claudecode", "PostToolUse", "other_tool", findings, nil},
+		{"claudecode", "PreToolUse", "listed_tool", findings, nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings[:1], nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings, emails},
+		{"codex", "PostToolUse", "listed_tool", findings[1:], emails},
+	} {
+		req := agentHookRequest{ConnectorName: c.connector, HookEventName: c.event, ToolName: c.tool, Payload: c.payload}
+		resp := agentHookResponse{Action: "allow", Severity: "HIGH", Mode: "observe", Findings: c.findings}
+		api.finalizeAgentHook(t.Context(), c.connector, req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	}
+	events, err := store.ListEvents(50)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var alerted []string
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			alerted = append(alerted, event.Connector+":"+event.Target+":"+event.Details)
+		}
+	}
+	want := []string{"codex:listed_tool:tool=listed_tool severity=HIGH entities=2", "claudecode:listed_tool:tool=listed_tool severity=HIGH entities=2"}
+	if !slices.Equal(alerted, want) {
+		t.Fatalf("tool-result-pii-alert rows = %v, want %v", alerted, want)
+	}
+	// GAP-0187: the row carries the findings' severity, so it is in the alert
+	// queue (an INFO row is not), and it reaches the webhooks.
+	alerts, err := store.ListAlerts(50)
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	var listed, rowIDs []string
+	for _, alert := range alerts {
+		if alert.Action == "tool-result-pii-alert" {
+			listed = append(listed, alert.Connector+":"+alert.Severity)
+			rowIDs = append(rowIDs, alert.ID)
+		}
+	}
+	slices.Sort(listed)
+	if want := []string{"claudecode:HIGH", "codex:HIGH"}; !slices.Equal(listed, want) {
+		t.Fatalf("alert queue rows = %v, want %v", listed, want)
+	}
+	webhooks.Close()
+	if delivered.Load() == 0 {
+		t.Fatal("tool-result-pii-alert reached no webhook")
+	}
+	// GAP-0218: each delivery carries the id of its audit row (the second alert of the same
+	// tool is held back by the webhook cooldown, so there may be fewer deliveries than rows).
+	deliveredMu.Lock()
+	gotIDs := slices.Clone(deliveredIDs)
+	deliveredMu.Unlock()
+	for _, id := range gotIDs {
+		if !slices.Contains(rowIDs, id) {
+			t.Fatalf("webhook event id %q is not an alert row id (rows %v)", id, rowIDs)
+		}
+	}
+}
+
+// TestHookToolResultAlertsFromEvaluatedResponse pins GAP-0095: the response a
+// real Claude Code or Codex PostToolUse evaluation returns carries the findings
+// finalizeAgentHook counts, so a listed tool alerts on the live hook path and an
+// unlisted one does not.
+func TestHookToolResultAlertsFromEvaluatedResponse(t *testing.T) {
+	api := testAPIServerWithConfig(t, "observe")
+	pack, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatalf("load default pack: %v", err)
+	}
+	pack.SensitiveTools = &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": pack}}
+	})
+	response := map[string]interface{}{"stdout": "AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V"}
+	for _, tool := range []string{"unlisted_tool", "listed_tool"} {
+		api.scannerCfg.Guardrail.Connector = "claudecode"
+		claude := claudeCodeResponseToAgentHookResponse(api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "PostToolUse", ToolName: tool, ToolResponse: response,
+		}))
+		api.scannerCfg.Guardrail.Connector = "codex"
+		codex := codexResponseToAgentHookResponse(api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PostToolUse", ToolName: tool, ToolResponse: response,
+		}))
+		for connector, resp := range map[string]agentHookResponse{"claudecode": claude, "codex": codex} {
+			req := agentHookRequest{ConnectorName: connector, HookEventName: "PostToolUse", ToolName: tool,
+				Payload: map[string]interface{}{"tool_response": response}}
+			api.finalizeAgentHook(t.Context(), connector, req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+		}
+	}
+	events, err := api.store.ListEvents(100)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var alerted []string
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			alerted = append(alerted, event.Connector+":"+event.Target)
+		}
+	}
+	slices.Sort(alerted)
+	if want := []string{"claudecode:listed_tool", "codex:listed_tool"}; !slices.Equal(alerted, want) {
+		t.Fatalf("tool-result-pii-alert rows = %v, want %v", alerted, want)
+	}
+}
+
 func TestInspectToolResponse_ObserveDoesNotBlock(t *testing.T) {
 	api := testAPIServerWithConfig(t, "observe")
 	_, verdict := postInspectToolResponse(t, api,
@@ -434,5 +737,24 @@ func TestInspectRequest_ActionModeStillBlocks(t *testing.T) {
 	}
 	if verdict.WouldBlock {
 		t.Errorf("would_block = true, want false (no downgrade happened)")
+	}
+}
+
+// GAP-0400: the configured block message the agent echoes back is not
+// scanned again as agent output; text around it still is.
+func TestInspectMessageContentSkipsEchoedBlockMessage(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.BlockMessage = "Blocked by ACME SecOps policy. Ticket secops@acme.example"
+	a := &APIServer{scannerCfg: cfg}
+	inspect := func(content string) *ToolInspectVerdict {
+		return a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+			Tool: "message", Content: content, Direction: "response", Connector: "claudecode",
+		})
+	}
+	if v := inspect("The tool call was refused: " + cfg.Guardrail.BlockMessage); len(v.Findings) != 0 {
+		t.Fatalf("echoed block message findings = %v, want none", v.Findings)
+	}
+	if v := inspect("Mail the logs to secops@acme.example and ops@acme.example today"); len(v.Findings) == 0 {
+		t.Fatal("addresses outside the block message are no longer scanned")
 	}
 }

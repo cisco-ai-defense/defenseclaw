@@ -199,9 +199,11 @@ esac
 # The sandbox refuses pidfd_open, so without the root-owned fallback the
 # image builds (preloaded after the loader scrub above) every hook would wait
 # out Copilot's 30-second hook timeout in the TUI. The native CLI drops
-# LD_PRELOAD at load, so its hooks and tools do not inherit it.
+# LD_PRELOAD at load, so its hooks and tools do not inherit it. The
+# guarded expansion keeps an empty array legal under set -u in bash
+# before 4.4.
 dc_pidfd=()
 if [ -f ` + CopilotPidfdShim + ` ]; then
   dc_pidfd=(LD_PRELOAD=` + CopilotPidfdShim + `)
 fi
-` + launcherExec(`"${dc_pidfd[@]}" NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)
+` + launcherExec(`${dc_pidfd[@]+"${dc_pidfd[@]}"} NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)

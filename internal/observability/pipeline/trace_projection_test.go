@@ -322,8 +322,8 @@ func TestTraceProjectionOutcomeAccessorsAreDetached(t *testing.T) {
 			destinationName: "one",
 		}},
 	}
-	work, failures := outcome.OptionalWork(), outcome.OptionalFailures()
-	work = append(work, ProjectedDelivery{})
+	failures := outcome.OptionalFailures()
+	_ = append(outcome.OptionalWork(), ProjectedDelivery{})
 	failures[0].destinationName = "changed"
 	if len(outcome.OptionalWork()) != 1 ||
 		!reflect.DeepEqual([]string{outcome.OptionalFailures()[0].DestinationName()}, []string{"one"}) {

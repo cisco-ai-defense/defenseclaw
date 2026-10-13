@@ -61,6 +61,11 @@ type compiledSemanticRule struct {
 	rule    PatternRule
 	program *semantic.Program
 	owner   semanticOwner
+	// migratedLiteral is set for a migrated 0.8.x literal rule
+	// (guardrail.MigratedLiteralRule): its pattern also blocks when it
+	// matches the text of the call, as on 0.8.x
+	// (withMigratedLiteralRuleFindings).
+	migratedLiteral bool
 }
 
 var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
@@ -126,9 +131,9 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback: authoritativeSemanticSafeNegative,
 		// Download-and-execute is a strong risk signal, but a known installer
 		// has the same observable shape. Keep the generic POSIX compatibility
-		// rule detection-only. Native PowerShell download-and-execute retains
+		// rule alert-only. Native PowerShell download-and-execute retains
 		// its distinct CMD-WIN-IWR-IEX proof and enforcement contract.
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,
@@ -678,29 +683,6 @@ func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
-}
-
-func shadowContentAccessSafeNegative(facts actionfacts.Facts) bool {
-	if !facts.Authoritative() {
-		return false
-	}
-	for _, candidate := range facts.Paths {
-		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" ||
-			candidate.Access != actionfacts.PathAccessRead {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if ok && command.Effect == actionfacts.EffectExecute &&
-			exactTargetedShadowAccountLookup(command) {
-			return true
-		}
-	}
-	return pathOwnerSafeNegative(
-		func(value string) bool { return canonicalSemanticPath(value) == "/etc/shadow" },
-		func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
-			return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/shadow"
-		},
-	)(facts)
 }
 
 func exactTargetedShadowAccountLookup(command actionfacts.CommandFact) bool {
@@ -1533,8 +1515,19 @@ func matchesActiveSSHPrivateKey(
 }
 
 func matchesAWSCredentials(value string) bool {
-	return strings.HasSuffix(value, "/.aws/credentials") ||
-		value == ".aws/credentials"
+	if strings.HasPrefix(value, ".aws/") {
+		return matchesAWSCredentialsName(strings.TrimPrefix(value, ".aws/"))
+	}
+	index := strings.LastIndex(value, "/.aws/")
+	return index >= 0 && matchesAWSCredentialsName(value[index+len("/.aws/"):])
+}
+
+func matchesAWSCredentialsName(name string) bool {
+	if name == "credentials" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(name, "credentials.")
+	return ok && suffix != "" && !strings.Contains(suffix, "/")
 }
 
 func matchesActiveAWSCredentials(
@@ -1542,7 +1535,8 @@ func matchesActiveAWSCredentials(
 	candidate actionfacts.PathFact,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	return ok && relative == ".aws/credentials"
+	return ok && strings.HasPrefix(relative, ".aws/") &&
+		matchesAWSCredentialsName(strings.TrimPrefix(relative, ".aws/"))
 }
 
 func passwordCrackerPotfileReadPrerequisite(facts actionfacts.Facts) bool {

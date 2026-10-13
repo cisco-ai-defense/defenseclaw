@@ -1128,10 +1128,10 @@ func containsCorrelationTarget(values []connector.CorrelationValue, target conne
 }
 
 // GAP-1331: in a live gateway the same conversation has both a durable prompt
-// cursor (whose agent is the correlation ledger's minted agent) and the hook
-// lifecycle snapshot (whose agent is the telemetry root agent). A native Codex
-// record that only inherits the cursor's agent must take the live hook
-// identity, not be dropped as invalid_mapped_field.
+// cursor and the hook lifecycle snapshot, and they can name different agents
+// (a cursor minted before the ledger took the telemetry root agent,
+// GAP-0031). A native Codex record that only inherits the cursor's agent
+// must take the live hook identity, not be dropped as invalid_mapped_field.
 func TestNativeOTLPCodexCursorDerivedAgentYieldsToLiveHookLifecycle(t *testing.T) {
 	installCorrelationHMACForTest()
 	fixture := newCodexNativeOTLPFixture(t)
@@ -1141,7 +1141,7 @@ func TestNativeOTLPCodexCursorDerivedAgentYieldsToLiveHookLifecycle(t *testing.T
 	)
 	meta := llmEventMeta{
 		Source: "codex", SessionID: "conversation-native-1", TurnID: prompt.TurnID,
-		AgentID: stableLLMEventID("agent", "codex", "conversation-native-1", "root"), AgentType: "codex",
+		AgentID: "agent-live-hook-root", AgentType: "codex",
 	}
 	if meta.AgentID == prompt.AgentID {
 		t.Fatalf("fixture needs distinct ledger and telemetry agents, both %q", meta.AgentID)

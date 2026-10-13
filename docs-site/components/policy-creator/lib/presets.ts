@@ -109,6 +109,7 @@ function readAdmission(raw: unknown): AdmissionConfig {
 function readGuardrail(raw: unknown): GuardrailConfig {
   const o = (raw ?? {}) as Partial<GuardrailConfig> & { hilt?: Partial<GuardrailConfig['hilt']> };
   return {
+    ...(o.mode === 'observe' || o.mode === 'action' ? { mode: o.mode } : {}),
     block_threshold: clampSeverityRank(o.block_threshold ?? 4),
     alert_threshold: clampSeverityRank(o.alert_threshold ?? 2),
     cisco_trust_level: (['full', 'advisory', 'none'] as const).includes(

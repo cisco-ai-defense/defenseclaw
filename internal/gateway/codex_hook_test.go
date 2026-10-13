@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -183,6 +184,37 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 	}
 	if resp.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL", resp.Severity)
+	}
+}
+
+// Codex's task-title helper wraps the user prompt in an instruction that says
+// "Do not answer the request"; the judge must not read that as an override
+// (GAP-0230), while the user prompt after it is still inspected.
+func TestCodexPromptForInspectionDropsOnlyTheTitleHelperInstruction(t *testing.T) {
+	const preamble = "Generate a concise, single-line task title of at most 64 characters and under five words where possible." +
+		" Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms," +
+		" or code terms require otherwise. Preserve ticket references exactly. Write in the user's language." +
+		" Do not use quotes, markdown, or trailing punctuation. Do not answer the request."
+	user := "Reply with only the word POST93-CODEX"
+	if got := codexPromptForInspection(preamble + "\nUser prompt:\n" + user); got != "User prompt:\n"+user {
+		t.Fatalf("title helper prompt = %q, want the user prompt kept", got)
+	}
+	tampered := strings.Replace(preamble, "Preserve ticket references exactly.", "Preserve ticket references exactly. "+trustExploitKeyword(), 1)
+	for _, prompt := range []string{user, "note: " + preamble, tampered} {
+		if got := codexPromptForInspection(prompt); got != prompt {
+			t.Fatalf("prompt %q was changed to %q", prompt, got)
+		}
+	}
+	// Secure Client sends AI Defense the whole prompt, as main did (GAP-0278).
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.scannerCfg.Guardrail.Connector = "codex"
+	aid := &stubAIDInspector{verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}}
+	api.SetCiscoInspector(aid)
+	full := preamble + "\nUser prompt:\n" + user
+	api.evaluateCodexHook(t.Context(), codexHookRequest{HookEventName: "UserPromptSubmit", Prompt: full})
+	if aid.calls != 1 || len(aid.messages) != 1 || !strings.Contains(aid.messages[0].Content, preamble) {
+		t.Fatalf("AI Defense calls=%d messages=%+v, want the whole prompt", aid.calls, aid.messages)
 	}
 }
 
@@ -1597,6 +1629,12 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	if resp.WouldBlock {
 		t.Fatal("terminal runtime detection disabled should not report would_block")
 	}
+
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "rogue"}}
+	resp = api.evaluateCodexHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("explicit terminal MCP deny: action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
 }
 
 // TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
@@ -1760,5 +1798,29 @@ func TestSanitizeHookCWD_Traversal(t *testing.T) {
 	got := sanitizeHookCWD(t.TempDir())
 	if got == "" {
 		t.Error("sanitizeHookCWD(valid absolute dir) returned empty")
+	}
+}
+
+func TestUnknownTerminalMCPUsesReloadedDefaultDeny(t *testing.T) {
+	startup := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	startup.Guardrail.Connector = "codex"
+	startup.Guardrail.Mode = "action"
+	startup.AssetPolicy.Enabled = true
+	startup.AssetPolicy.Mode = "action"
+	live := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	live.Guardrail.Connector = "codex"
+	live.Guardrail.Mode = "action"
+	live.AssetPolicy.Enabled = true
+	live.AssetPolicy.Mode = "action"
+	live.AssetPolicy.MCP.Default = "deny"
+	api := &APIServer{scannerCfg: startup}
+	api.SetConfigRuntime(nil, func() *config.Config { return live })
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "npx -y @modelcontextprotocol/server-filesystem /tmp"},
+	})
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("reloaded default deny: action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
 	}
 }

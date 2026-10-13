@@ -15,7 +15,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -248,10 +247,4 @@ func decodeStrictFile(path string, target any) error {
 		return fmt.Errorf("decode %s: %w", filepath.Base(path), err)
 	}
 	return nil
-}
-
-func sortedRequiredOutputFiles() []string {
-	out := append([]string(nil), requiredOutputFiles...)
-	sort.Strings(out)
-	return out
 }

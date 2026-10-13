@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
@@ -200,7 +201,7 @@ func TestScrubClaudeCode_PreservesNonHookState(t *testing.T) {
 func TestScrubCodex_StripsManagedSections(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	writeFile(t, path, `model = "gpt-5"
+	writeFile(t, path, "\ufeff# user comment\n"+`model = "gpt-5"
 personality = "pragmatic"
 
 [projects."/Users/u/dev"]
@@ -219,6 +220,9 @@ notify = ["bash", "/Users/u/.defenseclaw/notify-bridge.sh"]
 		t.Fatalf("scrubCodexFile: %v", err)
 	}
 	out := readFile(t, path)
+	if !strings.HasPrefix(out, "\ufeff# user comment\n") {
+		t.Fatalf("BOM or user comment was dropped: %q", out[:min(len(out), 30)])
+	}
 	for _, want := range []string{
 		`model = "gpt-5"`,
 		`personality = "pragmatic"`,
@@ -236,7 +240,7 @@ notify = ["bash", "/Users/u/.defenseclaw/notify-bridge.sh"]
 	}
 	// Round-trip parse guard: what we leave behind must still be valid TOML.
 	var parsed map[string]any
-	if err := toml.Unmarshal([]byte(out), &parsed); err != nil {
+	if err := connector.ParseCodexTOML([]byte(out), &parsed); err != nil {
 		t.Errorf("post-scrub TOML no longer parses: %v\n---output---\n%s", err, out)
 	}
 }

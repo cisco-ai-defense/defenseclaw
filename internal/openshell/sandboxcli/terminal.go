@@ -79,6 +79,7 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 		}
 	}()
 	err = cmd.Wait()
+	noteHarnessQuit()
 	release()
 	signal.Stop(sig)
 	close(sig)

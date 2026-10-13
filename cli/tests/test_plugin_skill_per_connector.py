@@ -41,7 +41,7 @@ class PolicyEngineForConnectorTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
-        self.pe = PolicyEngine(self.app.store)
+        self.pe = PolicyEngine(self.app.store, self.app.cfg)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -92,7 +92,7 @@ class PluginPerConnectorCLITests(unittest.TestCase):
             os.makedirs(root)
         self.app.cfg.plugin_dirs = lambda connector=None: [connector_roots[connector or "codex"]]  # type: ignore[method-assign]
         self.runner = CliRunner()
-        self.pe = PolicyEngine(self.app.store)
+        self.pe = PolicyEngine(self.app.store, self.app.cfg)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -131,10 +131,10 @@ class PluginPerConnectorCLITests(unittest.TestCase):
         # global allow, codex block — codex view must show the block.
         self.invoke(["allow", "p"])
         self.invoke(["block", "p", "--connector", "codex"])
-        codex_map = _build_plugin_actions_map(self.app.store, "codex")
+        codex_map = _build_plugin_actions_map(self.app.store, "codex", self.app.cfg)
         self.assertEqual(codex_map["p"].actions.install, "block")
         # a peer with no override sees the global allow.
-        hermes_map = _build_plugin_actions_map(self.app.store, "hermes")
+        hermes_map = _build_plugin_actions_map(self.app.store, "hermes", self.app.cfg)
         self.assertEqual(hermes_map["p"].actions.install, "allow")
 
 
@@ -145,7 +145,7 @@ class SkillPerConnectorCLITests(unittest.TestCase):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         self.runner = CliRunner()
-        self.pe = PolicyEngine(self.app.store)
+        self.pe = PolicyEngine(self.app.store, self.app.cfg)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -176,11 +176,11 @@ class SkillPerConnectorCLITests(unittest.TestCase):
 
     def test_actions_map_per_connector(self):
         self.invoke(["block", "s", "--connector", "codex"])
-        codex_map = _build_actions_map(self.app.store, "codex")
+        codex_map = _build_actions_map(self.app.store, "codex", self.app.cfg)
         self.assertIn("s", codex_map)
         self.assertEqual(codex_map["s"].actions.install, "block")
         # global view (no connector) does not see the codex-only row.
-        global_map = _build_actions_map(self.app.store)
+        global_map = _build_actions_map(self.app.store, cfg=self.app.cfg)
         self.assertNotIn("s", global_map)
 
 
@@ -189,7 +189,7 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
-        self.pe = PolicyEngine(self.app.store)
+        self.pe = PolicyEngine(self.app.store, self.app.cfg)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -198,7 +198,6 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
         self.pe.block_for_connector("plugin", "p", "codex", "blocked on codex")
         blocked = evaluate_admission(
             self.pe,
-            policy_dir=self.app.cfg.policy_dir,
             target_type="plugin",
             name="p",
             connector="codex",
@@ -207,7 +206,6 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
         # hermes has no block → not blocked (scan required, no result yet).
         other = evaluate_admission(
             self.pe,
-            policy_dir=self.app.cfg.policy_dir,
             target_type="plugin",
             name="p",
             connector="hermes",
@@ -219,7 +217,6 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
         for c in ("codex", "hermes", "openclaw"):
             d = evaluate_admission(
                 self.pe,
-                policy_dir=self.app.cfg.policy_dir,
                 target_type="skill",
                 name="s",
                 connector=c,

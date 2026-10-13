@@ -1610,19 +1610,6 @@ func generationCanaryBuckets() []observability.Bucket {
 	}
 }
 
-func traceNames(requests []*collectortracepb.ExportTraceServiceRequest) string {
-	for _, request := range requests {
-		for _, resource := range request.ResourceSpans {
-			for _, scope := range resource.ScopeSpans {
-				for _, span := range scope.Spans {
-					return span.Name
-				}
-			}
-		}
-	}
-	return ""
-}
-
 func metricNames(requests []*collectormetricpb.ExportMetricsServiceRequest) []string {
 	result := make([]string, 0)
 	for _, request := range requests {

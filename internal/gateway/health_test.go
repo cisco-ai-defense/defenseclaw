@@ -515,6 +515,12 @@ func TestObservabilityV8HealthRejectsStaleFailureAcrossReload(t *testing.T) {
 	if rows[0]["failure"] != nil || rows[0]["generation"] != uint64(9) {
 		t.Fatalf("stale transition contaminated successor: %+v", rows[0])
 	}
+	// A record the destination skips by design is not a failure (GAP-0078).
+	health.observeObservabilityV8Failure("reload-safe", 9, "unsupported_shape", now.Add(3*time.Hour))
+	rows = health.Snapshot().Telemetry.Details["destinations"].([]map[string]interface{})
+	if rows[0]["failure"] != nil {
+		t.Fatalf("a by-design skip was shown as a destination failure: %+v", rows[0])
+	}
 }
 
 func eventHistoryTransition(

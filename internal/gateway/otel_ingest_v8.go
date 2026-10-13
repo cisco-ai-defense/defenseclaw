@@ -495,34 +495,6 @@ func (a *APIServer) emitOTLPBatchAccountingV8(
 	return nil
 }
 
-func (a *APIServer) emitOTLPBatchAcceptedV8(
-	ctx context.Context,
-	signal otelIngestSignal,
-	connector string,
-	payloadFormat string,
-	stats otelIngestStats,
-	wireBytes int64,
-	normalizedBytes int64,
-	started time.Time,
-) (pipeline.LocalLogOutcome, error) {
-	return a.emitOTLPIngestV8(ctx, otlpIngestV8Event{
-		producerKey:     otlpIngestProducerKey(signal),
-		eventName:       "telemetry.batch.accepted",
-		rawSeverity:     "INFO",
-		phase:           "admission",
-		outcome:         observability.OutcomeCompleted,
-		signal:          signal,
-		connector:       connector,
-		payloadFormat:   payloadFormat,
-		records:         stats.Records,
-		resources:       stats.Resources,
-		wireBytes:       wireBytes,
-		normalizedBytes: normalizedBytes,
-		latency:         time.Since(started),
-		correlation:     otlpIngestCorrelation(ctx, connector),
-	})
-}
-
 func (a *APIServer) emitOTLPBatchRejectedV8(
 	ctx context.Context,
 	signal otelIngestSignal,
@@ -559,18 +531,8 @@ func (a *APIServer) emitOTLPBatchRejectedV8(
 }
 
 type otlpIngestV8MetricSummary struct {
-	recorded    int
-	unsupported int
-	failed      int
-}
-
-func (summary *otlpIngestV8MetricSummary) add(other otlpIngestV8MetricSummary) {
-	if summary == nil {
-		return
-	}
-	summary.recorded += other.recorded
-	summary.unsupported += other.unsupported
-	summary.failed += other.failed
+	recorded int
+	failed   int
 }
 
 type otlpGeneratedMetricBuild func(

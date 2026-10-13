@@ -22,9 +22,8 @@ behavior so a regression to the original vulnerable code re-fails the test:
   not be swallowed.
 * F-0122 — first-run init must create operator-private directories 0700.
 
-The legacy sandbox findings (F-0161, F-0162, F-0166, F-0421, F-0425) are
-covered against ``defenseclaw sandbox legacy-cleanup`` in
-``test_sandbox_legacy.py``.
+The legacy sandbox findings (F-0161, F-0162, F-0166, F-0421, F-0425) went
+with the openshell-sandbox (0.0.x) integration and its cleanup command.
 """
 
 import os
@@ -152,6 +151,17 @@ class TestRestartFailsClosed(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 _restart_openclaw_gateway()
         self.assertNotIn("✓", buf.getvalue())
+        # A foreground `openclaw gateway run` has no service: OpenClaw 2026.9 exits non-zero
+        # while that gateway keeps running, and setup must not roll back (GAP-0191).
+        foreground = subprocess.CompletedProcess(
+            ["openclaw"], 1, stdout="", stderr="Gateway restart failed: Error: Foreground Gateway owner pid 7 no longer listens on port 18789\n"
+        )
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=foreground):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertIs(_restart_openclaw_gateway(), True)
+        self.assertIn("no OpenClaw gateway service", buf.getvalue())
+        self.assertNotIn("✗", buf.getvalue())
 
     def test_gap1470_rollback_to_empty_roster_skips_openclaw(self):
         from types import SimpleNamespace
@@ -268,7 +278,6 @@ def test_gap1826_rollback_keeps_the_failed_generation_lock_for_the_gateway() -> 
 
         cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
         with (
-            patch.object(cmd_setup, "_sync_guardrail_hilt_to_opa"),
             patch.object(cmd_setup, "_restart_restored_connector_runtime", side_effect=restart),
             pytest.raises(click.ClickException) as raised,
         ):

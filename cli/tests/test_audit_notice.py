@@ -41,7 +41,7 @@ def test_skill_block_with_gateway_down_warns_once_and_exits_zero() -> None:
         app.logger.log_action = MagicMock(side_effect=CanonicalObservabilityUnavailableError("down"))
         result = make_separate_stderr_runner().invoke(skill, ["block", "demo"], obj=app)
         assert result.exit_code == 0, result.output
-        assert PolicyEngine(app.store).is_blocked("skill", "demo")
+        assert PolicyEngine(app.store, app.cfg).is_blocked("skill", "demo")
         assert result.stderr.count("audit event was not recorded") == 1
         assert "run the command again" not in result.stderr
     finally:

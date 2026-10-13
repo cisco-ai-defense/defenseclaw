@@ -115,8 +115,12 @@ func recordSandboxEvent(ctx context.Context, recorder *SandboxRecorder, event an
 		return recorder.RecordSandboxFinding(ctx, event)
 	case SandboxWorkspaceEvent:
 		return recorder.RecordSandboxWorkspace(ctx, event)
+	case SandboxActivityEvent:
+		return recorder.RecordSandboxActivity(ctx, event)
+	case SandboxProcessEvent:
+		return recorder.RecordSandboxProcess(ctx, event)
 	}
-	panic(fmt.Sprintf("recordSandboxEvent: unsupported event %T", event))
+	return recordManagedEvent(ctx, recorder, event)
 }
 
 func onlySandboxRecord(t *testing.T, runtime *testRuntimeV8Emitter) (router.Metadata, observability.Record) {
@@ -269,7 +273,7 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 	for index, step := range steps {
 		identity.Phase = step.phase
 		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode,
+			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode, UserID: "1005", UserName: "dcr-sbx",
 		}); err != nil {
 			t.Fatalf("step %d (%s): %v", index, step.phase, err)
 		}
@@ -293,6 +297,8 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 			"defenseclaw.sandbox.phase.previous":    optional(step.previous),
 			"defenseclaw.sandbox.lifecycle.trigger": string(step.trigger),
 			"defenseclaw.sandbox.exit_code":         exit,
+			"user.id":                               "1005",
+			"defenseclaw.user.name":                 "dcr-sbx",
 		})
 		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
 		last := active[len(active)-1]
@@ -965,6 +971,26 @@ func TestSandboxFamilies(t *testing.T) {
 	})
 }
 
+// Sandbox decision events carry the live effective policy digest and generation.
+func TestSandboxDecisionEventsCarryThePolicyStamp(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present(digest), observability.Present(int64(9))
+	})
+	t.Cleanup(func() { SetPolicyStamp(nil) })
+	harness := newSandboxHarness(t)
+	for _, event := range []any{
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com", Blocked: true},
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com"},
+	} {
+		_, record := harness.recordOne(t, router.AdmissionOrdinary, event)
+		assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+			"defenseclaw.policy.effective_digest": digest,
+			"defenseclaw.policy.generation":       int64(9),
+		})
+	}
+}
+
 func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	t.Run("blocked floor is content free", func(t *testing.T) {
 		const canary = "sandbox-egress-canary-3e1f"
@@ -1028,6 +1054,266 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	})
 }
 
+// GAP-0082: a sandbox egress row names its host as the target and the
+// sandbox, binary, code and reason as its details, not only egress.blocked.
+func TestSandboxEgressRowNamesTheHostAndTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+		Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "pastebin.com", Port: 443, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_PASTE_SITE", Reason: "paste site", Executable: "/usr/bin/curl",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	want := "decision=block sandbox=" + testSandboxIdentity().Name + " binary=/usr/bin/curl code=SANDBOX_EGRESS_PASTE_SITE reason=paste site"
+	if rows[0].Target != "pastebin.com" || rows[0].Details != want {
+		t.Fatalf("row target=%q details=%q, want pastebin.com and %q", rows[0].Target, rows[0].Details, want)
+	}
+}
+
+// GAP-0160: a sandbox's degraded health row reads "sandbox degraded: …"
+// (its target names the sandbox), not "openshell degraded", which stays for
+// the OpenShell integration's own health.
+func TestSandboxHealthRowNamesTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	for _, ev := range []SandboxHealthEvent{
+		{Sandbox: testSandboxIdentity(), State: SandboxHealthDegraded, ErrorCode: "openshell_pack_invalid", ErrorSummary: "the sandbox policy cannot be resolved"},
+		{State: SandboxHealthDegraded, ErrorCode: "openshell_unavailable", ErrorSummary: "the gateway does not answer"},
+	} {
+		if err := recorder.RecordSandboxHealth(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Details] = true
+	}
+	if !got["sandbox degraded: the sandbox policy cannot be resolved"] || !got["openshell degraded: the gateway does not answer"] {
+		t.Fatalf("details = %v", got)
+	}
+}
+
+// TestSandboxEgressEndsAndActivity pins the records the sandbox manager adds
+// on top of the egress decisions: the end of an allowed connection
+// (completed with its bytes and duration, failed or timed out) without a
+// second metric point, the actor OpenShell named, the binding, the launching
+// user and the hooks' session, and the process, SSH and inference families.
+// GAP-0134, GAP-0138: a refusal that is audited only (a refused name lookup,
+// the harness's own request) counts no egress decision, and OpenShell's
+// record of a connection it closed on a policy reload carries no bytes or
+// time, which OpenShell does not count.
+func TestSandboxEgressAuditOnlyRecords(t *testing.T) {
+	harness := newSandboxHarness(t)
+	sb := testSandboxIdentity()
+	envelope := CorrelationEnvelope{SessionID: "envelope-session", AgentID: "agent-sandbox-1"}
+	runtime, _ := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "github.com", Blocked: true, DecisionCode: SandboxEgressCodeLookupRefused, Severity: "INFO"}, envelope)
+	if events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents); len(events) != 0 {
+		t.Fatalf("a refused lookup counted %d egress decisions", len(events))
+	}
+	_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "api.example.com", Port: 443, End: SandboxEgressFailed, Terminated: true, DecisionCode: "SANDBOX_EGRESS_TERMINATED"}, envelope)
+	if record.Outcome() != observability.OutcomeCancelled {
+		t.Fatalf("outcome = %q", record.Outcome())
+	}
+	assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.network.bytes_up": nil, "defenseclaw.network.duration_ms": nil})
+}
+
+func TestSandboxEgressEndsAndActivity(t *testing.T) {
+	harness := newSandboxHarness(t)
+	sb := testSandboxIdentity()
+	sb.BindingID = "sb_0123456789abcdef0123456789abcdef"
+	envelope := CorrelationEnvelope{SessionID: "envelope-session", AgentID: "agent-sandbox-1"}
+	exit := func(code int) *int { return &code }
+	type activityCase struct {
+		name      string
+		event     any
+		eventName string
+		bucket    observability.Bucket
+		outcome   observability.Outcome
+		body      map[string]any
+		metrics   int
+	}
+	for _, test := range []activityCase{
+		{
+			name: "egress decision carries the actor and the hooks' session",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceOpenShell, Host: "api.example.com", Port: 443,
+				PID: 4242, Executable: "/usr/bin/curl", ConversationID: "hook-session-7", UserID: "1000", UserName: "dev",
+			},
+			eventName: observability.TelemetryEventEgressAllowed, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeAllowed, metrics: 1,
+			body: map[string]any{
+				"defenseclaw.sandbox.process.pid": int64(4242), "defenseclaw.sandbox.process.executable": "/usr/bin/curl",
+				"gen_ai.conversation.id": "hook-session-7", "user.id": "1000", "defenseclaw.user.name": "dev",
+				"defenseclaw.network.bytes_up": nil, "defenseclaw.network.duration_ms": nil,
+			},
+		},
+		{
+			name: "egress completed",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org", Port: 443, End: SandboxEgressCompleted,
+				BytesUp: 2048, BytesDown: 0, Duration: 1500 * time.Millisecond, PID: -1, Executable: "\xff",
+			},
+			eventName: observability.TelemetryEventEgressCompleted, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeCompleted,
+			body: map[string]any{
+				"defenseclaw.network.bytes_up": int64(2048), "defenseclaw.network.bytes_down": int64(0),
+				"defenseclaw.network.duration_ms": int64(1500), "defenseclaw.network.decision": "allow",
+				"defenseclaw.network.blocked": false, "defenseclaw.sandbox.process.pid": nil,
+				"defenseclaw.sandbox.process.executable": nil, "gen_ai.conversation.id": "envelope-session",
+			},
+		},
+		{
+			name: "egress timed out",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "slow.example", End: SandboxEgressFailed, TimedOut: true,
+				Duration: 30250 * time.Millisecond, Reason: "upstream timed out",
+			},
+			eventName: observability.TelemetryEventEgressFailed, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeTimedOut,
+			body: map[string]any{
+				"defenseclaw.network.duration_ms": int64(30250), "defenseclaw.network.bytes_up": nil,
+				"defenseclaw.network.reason": "upstream timed out",
+			},
+		},
+		{
+			name: "egress cut short",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "drop.example", End: SandboxEgressFailed, Terminated: true,
+				BytesUp: 1 << 20, BytesDown: 120, Duration: 4250 * time.Millisecond, DecisionCode: "SANDBOX_EGRESS_TERMINATED",
+			},
+			eventName: observability.TelemetryEventEgressFailed, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeCancelled,
+			body: map[string]any{
+				"defenseclaw.network.bytes_up": int64(1 << 20), "defenseclaw.network.bytes_down": int64(120),
+				"defenseclaw.network.duration_ms": int64(4250), "defenseclaw.network.decision_code": "SANDBOX_EGRESS_TERMINATED",
+			},
+		},
+		{
+			name: "process start",
+			event: SandboxActivityEvent{
+				Sandbox: sb, Kind: SandboxActivityProcess, ProcessEvent: SandboxProcessStart, PID: 42,
+				Executable: "/usr/bin/python3", CommandLine: "python3 /work/app/main.py dccert-block-marker",
+				ConversationID: "hook-session-7", UserID: "1000", UserName: "dev",
+			},
+			eventName: observability.TelemetryEventSandboxProcess, bucket: observability.BucketToolActivity,
+			outcome: observability.OutcomeAttempted,
+			body: map[string]any{
+				"defenseclaw.sandbox.process.event": "start", "defenseclaw.sandbox.process.source": "ocsf",
+				"defenseclaw.sandbox.process.pid": int64(42), "defenseclaw.sandbox.process.executable": "/usr/bin/python3",
+				"defenseclaw.sandbox.process.command_line": "python3 /work/app/main.py dccert-block-marker",
+				"defenseclaw.sandbox.process.exit_code":    nil, "gen_ai.conversation.id": "hook-session-7",
+				"user.id": "1000", "defenseclaw.user.name": "dev",
+			},
+		},
+		{
+			name: "process exit",
+			event: SandboxActivityEvent{
+				Sandbox: sb, Kind: SandboxActivityProcess, ProcessEvent: SandboxProcessExit, PID: 42, Executable: "python3",
+				ExitCode: exit(2), CommandLine: "kept off exit records", ProcessSource: SandboxProcessSourceSample,
+			},
+			eventName: observability.TelemetryEventSandboxProcess, bucket: observability.BucketToolActivity,
+			outcome: observability.OutcomeFailed,
+			body: map[string]any{
+				"defenseclaw.sandbox.process.event": "exit", "defenseclaw.sandbox.process.source": "sample",
+				"defenseclaw.sandbox.process.exit_code": int64(2), "defenseclaw.sandbox.process.command_line": nil,
+			},
+		},
+		{
+			name: "ssh connection",
+			event: SandboxActivityEvent{
+				Sandbox: sb, Kind: SandboxActivitySSH, SSHActivity: "OPEN", SSHAllowed: true, SSHAuth: "NSSH1", Peer: "10.42.0.1:48201",
+			},
+			eventName: observability.TelemetryEventSandboxSsh, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeAllowed,
+			body: map[string]any{
+				"defenseclaw.sandbox.ssh.activity": "OPEN", "defenseclaw.sandbox.ssh.auth": "NSSH1", "client.address": "10.42.0.1",
+			},
+		},
+		{
+			name:      "ssh listener with a peer that is no address",
+			event:     SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivitySSH, SSHActivity: "LISTEN", Peer: "not an address"},
+			eventName: observability.TelemetryEventSandboxSsh, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeCompleted,
+			body:    map[string]any{"defenseclaw.sandbox.ssh.activity": "LISTEN", "client.address": nil},
+		},
+		{
+			name: "inference",
+			event: SandboxActivityEvent{
+				Sandbox: sb, Kind: SandboxActivityInference, Provider: "Anthropic", Model: "claude-haiku", Status: "Success",
+				Latency: 812 * time.Millisecond, Operation: "messages:create",
+			},
+			eventName: observability.TelemetryEventSandboxInference, bucket: observability.BucketModelIO,
+			outcome: observability.OutcomeCompleted,
+			body: map[string]any{
+				"gen_ai.provider.name": "anthropic", "gen_ai.request.model": "claude-haiku",
+				"defenseclaw.sandbox.inference.status": "Success", "defenseclaw.sandbox.inference.latency_ms": int64(812),
+				"defenseclaw.sandbox.inference.operation": "messages:create",
+			},
+		},
+		{
+			name:      "inference without a status",
+			event:     SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityInference, Provider: "anthropic", Model: "claude-haiku"},
+			eventName: observability.TelemetryEventSandboxInference, bucket: observability.BucketModelIO,
+			outcome: observability.OutcomeCompleted,
+			body:    map[string]any{"gen_ai.request.model": "claude-haiku", "defenseclaw.sandbox.inference.status": nil},
+		},
+		{
+			name:      "failed inference",
+			event:     SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityInference, Status: "Error", Model: "bad model name"},
+			eventName: observability.TelemetryEventSandboxInference, bucket: observability.BucketModelIO,
+			outcome: observability.OutcomeFailed,
+			body:    map[string]any{"gen_ai.request.model": nil, "defenseclaw.sandbox.inference.latency_ms": nil},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, record := harness.recordOne(t, router.AdmissionOrdinary, test.event, envelope)
+			if record.EventName() != observability.EventName(test.eventName) || record.Bucket() != test.bucket ||
+				record.Outcome() != test.outcome || record.Mandatory() {
+				t.Fatalf("record identity=%#v bucket=%q outcome=%q mandatory=%v", record.Identity(), record.Bucket(), record.Outcome(), record.Mandatory())
+			}
+			body := sandboxBody(t, record)
+			assertSandboxCorrelation(t, body, sb)
+			assertSandboxFields(t, body, map[string]any{"defenseclaw.sandbox.binding.id": sb.BindingID})
+			assertSandboxFields(t, body, test.body)
+			events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents)
+			if len(events) != test.metrics {
+				t.Fatalf("egress metrics=%d want %d", len(events), test.metrics)
+			}
+			if test.metrics > 0 && metricAttributes(t, events[0])["defenseclaw.connector.source"] != sb.Connector {
+				t.Fatalf("egress metric attributes=%#v, want the connector", metricAttributes(t, events[0]))
+			}
+		})
+	}
+	_, recorder := harness.bind(t, router.AdmissionOrdinary)
+	for name, event := range map[string]any{
+		"blocked with an end":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", Blocked: true, End: SandboxEgressCompleted},
+		"completed timed out":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, TimedOut: true},
+		"completed cut short":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, Terminated: true},
+		"decision cut short":          SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", Terminated: true},
+		"unknown end":                 SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: "closed"},
+		"negative bytes":              SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, BytesUp: -1},
+		"unknown activity":            SandboxActivityEvent{Sandbox: sb, Kind: "file"},
+		"process without an event":    SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityProcess},
+		"process from unknown source": SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityProcess, ProcessEvent: SandboxProcessStart, ProcessSource: "ebpf"},
+		"ssh without activity":        SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivitySSH},
+		"binding id not an identifier": SandboxActivityEvent{Sandbox: SandboxIdentity{Name: sb.Name, BindingID: "sb 1"},
+			Kind: SandboxActivitySSH, SSHActivity: "OPEN"},
+	} {
+		if err := recordSandboxEvent(context.Background(), recorder, event); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 // TestSandboxPolicyTargetRecordsEgressPatterns pins the target_ref of egress
 // rule changes. The decider accepts host patterns that cannot start an
 // identifier, and a mandatory record that opens *.pastebin.com or ::/0 must
@@ -1086,8 +1372,8 @@ func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 func TestSandboxFindingKinds(t *testing.T) {
 	harness := newSandboxHarness(t)
 	for _, kind := range []SandboxFindingKind{
-		SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload, SandboxFindingNestedRepo,
+		SandboxFindingOCSF, SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload,
+		SandboxFindingNestedRepo, SandboxFindingShadowAI,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
 			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxFindingEvent{
@@ -1110,7 +1396,7 @@ func TestSandboxFindingKinds(t *testing.T) {
 	}
 	_, recorder := harness.bind(t, router.AdmissionOrdinary)
 	if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
-		Sandbox: testSandboxIdentity(), Kind: SandboxFindingTamperAttempt,
+		Sandbox: testSandboxIdentity(), Kind: SandboxFindingHookSilence,
 	}); err == nil {
 		t.Fatal("a finding without severity was accepted")
 	}
@@ -1334,7 +1620,7 @@ func TestSandboxActionsRequireTypedFamilies(t *testing.T) {
 	logger, runtime, _ := newSandboxTestRecorder(t, router.AdmissionOrdinary)
 	for _, action := range []Action{
 		ActionSandboxLifecycle, ActionSandboxWorkspace, ActionSandboxEgress, ActionSandboxApproval,
-		ActionSandboxPolicy, ActionSandboxHealth, ActionSandboxFinding,
+		ActionSandboxPolicy, ActionSandboxHealth, ActionSandboxFinding, ActionSandboxActivity,
 	} {
 		if !IsKnownAction(string(action)) {
 			t.Fatalf("%s is not a registered audit action", action)
@@ -1743,7 +2029,7 @@ func testSandboxFindingTargetRefIsBoundedNotDropped(t *testing.T, harness *sandb
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxFindingEvent{
-				Sandbox: testSandboxIdentity(), Kind: SandboxFindingBinaryDrift, Severity: "HIGH", TargetRef: test.in,
+				Sandbox: testSandboxIdentity(), Kind: SandboxFindingShadowAI, Severity: "HIGH", TargetRef: test.in,
 			})
 			assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.finding.target_ref": optional(test.want)})
 		})
@@ -2258,5 +2544,19 @@ func assertCatalogValue(t *testing.T, family, key, fieldType string, value any, 
 		}
 	default:
 		t.Fatalf("%s %s has unsupported catalog type %s", family, key, fieldType)
+	}
+}
+
+// GAP-0169: the OpenShell integration's own health row (a gateway that does
+// not answer) names OpenShell as its target, not nothing.
+func TestOpenShellHealthRowNamesOpenShell(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: SandboxHealthDegraded,
+		ErrorCode: "openshell_unavailable", ErrorSummary: "the OpenShell gateway is not running"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 || rows[0].Target != "openshell" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }

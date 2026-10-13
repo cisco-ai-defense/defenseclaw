@@ -839,16 +839,7 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	}{
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
-		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", "", "", hookBinary)},
-		{name: "event-bound-start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contractID, hookBinary)},
-		{
-			name: "event-bound-non-waiting",
-			command: legacyWindowsNativePowerShellHookCommandForCodexEvent(
-				event,
-				contractID,
-				hookBinary,
-			),
-		},
+		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
 	}
 	for _, testCase := range legacyCommands {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -1958,41 +1949,6 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	}
 }
 
-func TestLegacyEventBoundCodexOwnershipIsStrictAndFinite(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	setHookBinaryOverride(t, hookBinary)
-	legacy := legacyWindowsNativePowerShellHookCommandForCodexEvent(
-		"SessionStart",
-		"codex-hooks-v4",
-		hookBinary,
-	)
-	wantLegacyScript := "$ErrorActionPreference='Stop'; " +
-		"$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-		"& 'C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe' " +
-		"'hook' '--connector' 'codex' '--event' 'SessionStart' " +
-		"'--hook-contract' 'codex-hooks-v4'; exit $LASTEXITCODE"
-	if got := decodePowerShellEncodedCommandForTest(t, legacy); got != wantLegacyScript {
-		t.Fatalf("legacy event-bound script = %q, want %q", got, wantLegacyScript)
-	}
-	if !isNativeHookCommand(legacy) {
-		t.Fatalf("exact legacy event-bound command was not recognized: %q", legacy)
-	}
-
-	for _, tampered := range []string{
-		legacyWindowsNativePowerShellHookCommandForCodexEvent("FutureEvent", "codex-hooks-v4", hookBinary),
-		legacyWindowsNativePowerShellHookCommandForCodexEvent("SessionStart", "codex-hooks-v999", hookBinary),
-		legacyWindowsNativePowerShellHookCommandForCodexEvent(
-			"SessionStart",
-			"codex-hooks-v4",
-			`C:\Temp\defenseclaw-hook.exe`,
-		),
-	} {
-		if isNativeHookCommand(tampered) {
-			t.Fatalf("ownership accepted tampered legacy event-bound command: %q", tampered)
-		}
-	}
-}
-
 func TestCodexEventBoundUnixCommandsCoverFiniteContracts(t *testing.T) {
 	const hookPath = "/home/u/.defenseclaw/hooks/codex-hook.sh"
 	const hooksDir = "/home/u/.defenseclaw/hooks"
@@ -2426,7 +2382,28 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if err := json.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Claude Code config: %v", err)
 				}
-				if !structuredHookCommandReferences(cfg, []string{nativeHookFlag + connectorName}) {
+				// Per-user Setup registers the launcher through the cmd.exe
+				// guard (GAP-1091); read each handler as the exec form it runs.
+				var execView func(raw interface{}) interface{}
+				execView = func(raw interface{}) interface{} {
+					switch value := claudeCodeExecView(raw).(type) {
+					case []interface{}:
+						out := make([]interface{}, len(value))
+						for i, item := range value {
+							out[i] = execView(item)
+						}
+						return out
+					case map[string]interface{}:
+						out := make(map[string]interface{}, len(value))
+						for key, item := range value {
+							out[key] = execView(item)
+						}
+						return out
+					default:
+						return value
+					}
+				}
+				if !structuredHookCommandReferences(execView(cfg), []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
 			} else if connectorName == "codex" {

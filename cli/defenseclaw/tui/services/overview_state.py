@@ -121,6 +121,17 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
+    # The effective policy the gateway applied (/status ``policy``): its
+    # applied generation and effective_policy_digest ("" when not reported).
+    policy_generation: int = 0
+    policy_digest: str = ""
+
+    def applied_policy_label(self, digest_chars: int = 12) -> str:
+        """``gen N · <hex>`` for the status strip, "" when not reported."""
+        digest = self.policy_digest.removeprefix("sha256:")
+        if not digest:
+            return ""
+        return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
 # Probe states that mean the sidecar is not running.
@@ -163,7 +174,6 @@ class OverviewConfig:
     guardrail_rule_pack_dir: str = ""
     guardrail_port: int = 0
     guardrail_model: str = ""
-    guardrail_strategy: str = "default"
     guardrail_judge_enabled: bool = False
     guardrail_judge_model: str = ""
     hilt_enabled: bool = False
@@ -186,7 +196,7 @@ class OverviewConfig:
     # ``(connector, mode)`` keep working untouched. Empty for single-connector
     # installs. Surfaced on the roster rows so the Overview reflects that
     # connectors can enforce different packs (block thresholds), which the
-    # process-global ``guardrail_strategy`` posture line cannot show.
+    # process-global posture line cannot show.
     connector_packs: tuple[tuple[str, str], ...] = ()
     # Connectors that are configured + still in the roster (so their history
     # stays filterable) but have enforcement turned off via
@@ -195,15 +205,11 @@ class OverviewConfig:
     # DISABLED rather than hiding them; a *fully removed* connector simply
     # leaves ``active_connectors()`` and never reaches the roster at all.
     connector_disabled: tuple[str, ...] = ()
-    # N3: scanner action overrides from the *active* policy's synced
-    # ``data.json`` (``scanner_overrides`` → scanner_type → severity →
-    # ``{install,file,runtime}`` → action). These live only in the active
-    # policy YAML / ``data.json``; today only ``policy show`` surfaces them, so
-    # ``defenseclaw status`` and the Overview guardrail summary are blind to a
-    # policy that, say, downgrades a scanner surface to ``warn``/``allow``.
-    # Stored flattened as ``(scanner_type, severity, surface, action)`` so the
-    # frozen dataclass stays hashable; empty for the default config → no
-    # Overview change. Populated by the adapter (which reads ``data.json``);
+    # N3: the admission actions config.yaml sets per asset type
+    # (``admission.<type>.actions``) that differ from the built-in policy.
+    # Stored flattened as ``(asset_type, severity, surface, action)`` so the
+    # frozen dataclass stays hashable; empty when config.yaml sets none → no
+    # Overview change. Populated by :func:`admission_action_overrides`;
     # rendered via :func:`format_scanner_overrides_summary` /
     # :meth:`OverviewPanelModel.scanner_overrides_summary`.
     scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
@@ -615,6 +621,10 @@ class OverviewPanelModel:
         self.observability_status: V8OperatorStatus | None = None
         self.observability_status_error = ""
         self.native_delivery_summary: NativeDeliverySummary | None = None
+        # The guardrail profile the gateway resolves for this account
+        # (``current_user_guardrail_profile``); None without profiles.
+        self.guardrail_profile: dict[str, Any] | None = None
+        self.connector_guardrail_profiles: dict[str, dict[str, Any]] = {}
         self.runtime = RuntimeOverview()
         # True until the first audit-history read finishes; a large audit.db
         # can take a minute, and the counts read 0 until then (GAP-1240).
@@ -632,6 +642,42 @@ class OverviewPanelModel:
 
     def set_health(self, health: HealthSnapshot | None) -> None:
         self.health = health
+
+    def set_guardrail_profile(self, result: dict[str, Any] | None, connector: str = "") -> None:
+        if connector:
+            if result is None:
+                self.connector_guardrail_profiles.pop(connector.strip().lower(), None)
+            else:
+                self.connector_guardrail_profiles[connector.strip().lower()] = result
+        else:
+            self.guardrail_profile = result
+            # The unscoped gateway response also names connector assignments.
+            # Keep only connector-wide entries: an agent assignment must not
+            # change the posture shown for every call on that connector.
+            self.connector_guardrail_profiles = {
+                str(item["connector"]).strip().lower(): {
+                    "profile": item["profile"],
+                    "effective": {"mode": item.get("mode", "")},
+                }
+                for item in (result or {}).get("overrides", [])
+                if isinstance(item, dict)
+                and item.get("connector")
+                and not item.get("agent")
+                and item.get("profile")
+            }
+
+    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
+        """(name, effective settings) of the profile that decides for you."""
+
+        result = (
+            self.connector_guardrail_profiles.get(connector.strip().lower(), self.guardrail_profile)
+            if connector else self.guardrail_profile
+        ) or {}
+        name = str(result.get("profile") or "")
+        if not name or result.get("error"):
+            return None
+        effective = result.get("effective")
+        return name, effective if isinstance(effective, dict) else {}
 
     def set_gateway_probe(self, state: str, detail: str = "") -> None:
         """Record the latest authenticated sidecar API probe result."""
@@ -1349,13 +1395,11 @@ class OverviewPanelModel:
         return ""
 
     def scanner_overrides_summary(self) -> str:
-        """One-line summary of the active policy's scanner action overrides,
+        """One-line summary of the admission actions config.yaml overrides,
         or ``""`` when there are none (N3).
 
-        Surfaces overrides that today live only in ``policy show`` /
-        ``data.json``. Empty (the default config) renders nothing, so the
-        Overview is unchanged until the adapter populates
-        :attr:`OverviewConfig.scanner_overrides`. See
+        Empty (the default config) renders nothing. See
+        :attr:`OverviewConfig.scanner_overrides` and
         :func:`format_scanner_overrides_summary`.
         """
         if self.cfg is None:
@@ -1586,6 +1630,31 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         base = (self.cfg.guardrail_mode or "").strip()
+        roster = [name.strip().lower() for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
+        if not roster and self.active_connector_name():
+            roster = [self.active_connector_name()]
+        if not connector and len(roster) == 1:
+            connector = roster[0]
+        if not connector and len(roster) > 1 and self.guardrail_profile:
+            resolved = [self._applied_profile(name) for name in roster]
+            if all(resolved):
+                labels = [
+                    (profile[0], str(profile[1].get("mode") or base).strip())
+                    for profile in resolved if profile is not None
+                ]
+                if len(set(labels)) == 1:
+                    return f"{labels[0][1]}, profile {labels[0][0]}"
+                counts: dict[str, int] = {}
+                for _, mode in labels:
+                    counts[mode] = counts.get(mode, 0) + 1
+                primary = base if base in counts else max(counts, key=counts.__getitem__)
+                others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != primary]
+                return ", ".join([primary, *others]) if others else primary
+        # A matching profile replaces guardrail.* for you: "observe" while
+        # every decision was the profile's action read wrong (GAP-0050).
+        if applied := self._applied_profile(connector):
+            name, effective = applied
+            return f"{str(effective.get('mode') or base).strip()}, profile {name}"
         modes = {c.strip().lower(): (m or base).strip() for c, m in self.cfg.connector_modes if c}
         if connector:
             return modes.get(connector.strip().lower(), base)
@@ -1607,9 +1676,10 @@ class OverviewPanelModel:
             parts.append(mode)
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
-        # The rule pack, not guardrail_strategy: that is read from a
-        # "strategy" key the config doesn't have, so it always said "default".
-        pack = _rule_pack_label(self.cfg.guardrail_rule_pack_dir)
+        roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
+        applied = self._applied_profile(roster[0] if len(roster) == 1 else "")
+        pack_dir = str(applied[1].get("rule_pack_dir") or "") if applied else self.cfg.guardrail_rule_pack_dir
+        pack = _rule_pack_label(pack_dir)
         if pack:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
@@ -2102,15 +2172,62 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     return ""
 
 
+def admission_action_overrides(
+    config: object | None,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Effective explicit admission actions that differ from built-in policy.
+
+    Per-type actions win over scanner-derived skill actions, which win over
+    admission.defaults.actions. Only effective differences are shown to the
+    Overview and status views.
+    """
+
+    admission = getattr(config, "admission", None)
+    if admission is None:
+        return ()
+    try:
+        from defenseclaw.enforce.admission import (  # noqa: PLC0415
+            _builtin_admission,
+            _compile_action_map,
+            _derived_scanner_gate,
+        )
+    except Exception:  # noqa: BLE001 - the override summary is purely informational.
+        return ()
+    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
+    flat: list[tuple[str, str, str, str]] = []
+    for target_type in ("skill", "mcp", "plugin"):
+        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
+        derived = {}
+        if target_type == "skill":
+            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
+            derived = _derived_scanner_gate(
+                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
+            )
+        builtin = _builtin_admission(target_type).actions
+        for severity in dict.fromkeys((*own, *defaults)):
+            if severity in own:
+                compiled = own[severity]
+            elif severity in derived:
+                continue
+            else:
+                compiled = defaults[severity]
+            if compiled == builtin.get(severity):
+                continue
+            action, allowed = compiled
+            for surface in ("install", "file", "runtime"):
+                flat.append((target_type, severity, surface, str(getattr(action, surface))))
+            if allowed:
+                flat.append((target_type, severity, "verdict", "allow"))
+    return tuple(flat)
+
+
 def format_scanner_overrides_summary(
     overrides: tuple[tuple[str, str, str, str], ...],
 ) -> str:
     """One-line summary of active-policy scanner action overrides (N3).
 
-    ``overrides`` is the flattened ``(scanner_type, severity, surface, action)``
-    view of the active policy's ``scanner_overrides`` (synced into
-    ``data.json``; only ``policy show`` surfaces these today). Returns ``""``
-    when empty, so the Overview / ``defenseclaw status`` render nothing for the
+    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
+    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
     common default config. Groups by scanner then severity, e.g.::
 
         secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow

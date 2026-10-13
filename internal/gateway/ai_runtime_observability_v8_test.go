@@ -28,8 +28,10 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
@@ -127,32 +129,40 @@ func TestRenderedProvidersDeduplicateByHostname(t *testing.T) {
 }
 
 // TestPlaneHealthAlwaysCarriesAMechanismOrAReason pins that a reader never has
-// to go to the source to find out what a plane is doing.
+// to go to the source to find out what a plane is doing: a running plane
+// names its mechanism (plane_mechanism, on every cycle), a stopped, blind or
+// partial one its reason (plane_reason), which no longer repeats the
+// mechanism.
 func TestPlaneHealthAlwaysCarriesAMechanismOrAReason(t *testing.T) {
 	t.Parallel()
-	// The adapter's reason fallback is the behaviour under test; exercising it
-	// through the builder would need a live runtime, so the fallback rule is
-	// asserted directly against the same inputs the emitter uses.
 	for _, test := range []struct {
-		name   string
-		health sensor.PlaneHealth
-		want   string
+		name              string
+		health            sensor.PlaneHealth
+		mechanism, reason string
 	}{
-		{"running names its mechanism", sensor.PlaneHealth{Running: true, Mechanism: "ps(1)"}, "ps(1)"},
-		{"blind names its reason", sensor.PlaneHealth{Reason: "eslogger not found"}, "eslogger not found"},
+		{"running names its mechanism", sensor.PlaneHealth{Plane: platform.PlaneA, Running: true, Mechanism: "ps(1)"}, "ps(1)", ""},
+		{"blind names its reason", sensor.PlaneHealth{Plane: platform.PlaneC, Selected: true, Reason: "eslogger not found"}, "", "eslogger not found"},
 		{
-			"running with an explicit reason keeps it",
-			sensor.PlaneHealth{Running: true, Mechanism: "ps(1)", Reason: "partial"},
-			"partial",
+			"partial names both",
+			sensor.PlaneHealth{Plane: platform.PlaneC, Running: true, Mechanism: "fanotify", Reason: "partial"},
+			"fanotify", "partial",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			// Call the production rule rather than restating it. A test that
-			// re-implements the thing it checks agrees with itself and keeps
-			// passing after the rule changes.
-			if reason := planeHealthReason(test.health); reason != test.want {
-				t.Fatalf("reason = %q, want %q", reason, test.want)
+			adapter, emitter := newKernelTestAdapter(router.AdmissionOrdinary)
+			if err := adapter.EmitSnapshot(t.Context(), sensor.Snapshot{Planes: []sensor.PlaneHealth{test.health}}); err != nil {
+				t.Fatalf("EmitSnapshot() error = %v", err)
+			}
+			records := recordsNamed(emitter.records, "ai.runtime.plane_health")
+			if len(records) != 1 {
+				t.Fatalf("%d plane_health records", len(records))
+			}
+			body := kernelRecordBody(t, records[0])
+			mechanism, _ := body["defenseclaw.ai.runtime.plane_mechanism"].(string)
+			reason, _ := body["defenseclaw.ai.runtime.plane_reason"].(string)
+			if mechanism != test.mechanism || reason != test.reason || mechanism+reason == "" {
+				t.Fatalf("mechanism %q reason %q, want %q %q", mechanism, reason, test.mechanism, test.reason)
 			}
 		})
 	}
@@ -164,6 +174,53 @@ func TestNilEmitterYieldsNoAdapter(t *testing.T) {
 	t.Parallel()
 	if adapter := newAIRuntimeV8Adapter(nil); adapter != nil {
 		t.Fatal("a nil emitter produced an adapter")
+	}
+}
+
+func TestRuntimeSnapshotExportsOnlyRunningPlaneHealth(t *testing.T) {
+	t.Parallel()
+	capture := &endpointInventoryCapture{}
+	snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+		{Plane: "a", Available: true, Running: true, Mechanism: "process"},
+		{Plane: "b", Available: false, Running: false, Reason: "not selected"},
+	}}
+	if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	records := capture.snapshot()
+	if len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventAIRuntimePlaneHealth) {
+		t.Fatalf("exported %d plane health records, want one running plane", len(records))
+	}
+}
+
+func TestRuntimeSnapshotExportsStoppedSelectedPlane(t *testing.T) {
+	capture := &endpointInventoryCapture{}
+	snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+		{Plane: "b", Selected: true, Available: true, Running: false, Reason: "permission denied"},
+	}}
+	if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if records := capture.snapshot(); len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventAIRuntimePlaneHealth) {
+		t.Fatalf("stopped selected plane exported %d records, want one", len(records))
+	}
+}
+
+func TestSecureClientRuntimeSnapshotExportsEveryPlane(t *testing.T) {
+	old := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(old) })
+	capture := &endpointInventoryCapture{}
+	snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+		{Plane: "a", Available: true, Running: true, Mechanism: "process"},
+		{Plane: "b", Available: false, Running: false, Reason: "permission denied"},
+		{Plane: "c", Available: false, Running: false, Reason: "not selected in ai_discovery.runtime.planes"},
+	}}
+	if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if records := capture.snapshot(); len(records) != len(snapshot.Planes) {
+		t.Fatalf("Secure Client exported %d plane records, want %d", len(records), len(snapshot.Planes))
 	}
 }
 

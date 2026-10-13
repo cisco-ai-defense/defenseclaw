@@ -34,6 +34,9 @@ def test_cursor_action_shows_closed_and_disabled_connector_has_no_drift(
     cfg.guardrail.connectors["cursor"].mode = "action"
     cfg.guardrail.connectors["codex"].enabled = False
     app = _app(cfg)
+    # The connector table falls back to blocks on a narrow terminal, and the
+    # width comes from the runner (a tty, COLUMNS, or the xdist worker default).
+    monkeypatch.setattr(cmd_guardrail, "_terminal_width", lambda: 200)
     with (
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
@@ -57,9 +60,11 @@ def test_enable_reports_only_the_connectors_it_set_up(monkeypatch: pytest.Monkey
     cfg.guardrail.enabled = False
     cfg.guardrail.connectors["codex"].enabled = False
     app = _app(cfg)
+    # Windows verifies the Claude Code executable first; the runner has none.
     with (
         patch.object(cmd_guardrail, "_resolve_active_connector", return_value="claudecode"),
         patch.object(cmd_setup, "_restart_services") as restart,
+        patch.object(cmd_setup, "_record_windows_setup_agent_selections", return_value=None),
     ):
         result = CliRunner().invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
     assert result.exit_code == 0, result.output

@@ -30,6 +30,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -39,18 +41,18 @@ const snapshotTimeout = 10 * time.Second
 
 // snapshot shells out to ps.
 //
-// macOS has no /proc, and the sysctl KERN_PROC route needs cgo for the struct
-// layout. ps(1) is part of the base system, returns the whole process table to
-// an unprivileged caller, and is the same source the upstream detector used.
+// macOS has no /proc. ps(1) is part of the base system, returns the whole
+// process table (argv, RSS and CPU time) to an unprivileged caller, and is the
+// same source the upstream detector used.
 //
 // The format is deliberately ordered with args last: it is the only field that
-// can contain spaces, so the six fixed fields split on whitespace and the
+// can contain spaces, so the five fixed fields split on whitespace and the
 // remainder is argv verbatim.
 //
-// etime is elapsed wall time, which is how a start instant is recovered here:
-// macOS ps renders an absolute start (lstart) as five space-separated tokens,
-// which would break the fixed-field split, while etime is one token in the
-// same [[DD-]HH:]MM:SS form the CPU field already uses.
+// The start instant comes from the kernel's process list (sysctl
+// kern.proc.all, p_starttime, microsecond resolution), not from ps: ps's
+// elapsed time has one-second resolution, so a start derived from it moves
+// between polls and could not name a process instance (GAP-1372).
 //
 // comm is deliberately not requested. The kernel-backed short process name is
 // truncated to 16 bytes on Darwin, so "/usr/libexec/logd" arrives as
@@ -61,8 +63,7 @@ func snapshot() ([]Process, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
 	defer cancel()
 
-	cmd := processutil.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,ppid=,rss=,time=,etime=,user=,args=")
-	readAt := time.Now()
+	cmd := processutil.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,ppid=,rss=,time=,user=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, 0, err
@@ -73,7 +74,7 @@ func snapshot() ([]Process, int, error) {
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
-		row, ok := parsePSLine(scanner.Text(), readAt)
+		row, ok := parsePSLine(scanner.Text())
 		if !ok {
 			skipped++
 			continue
@@ -83,18 +84,51 @@ func snapshot() ([]Process, int, error) {
 	if err := scanner.Err(); err != nil {
 		return rows, skipped, err
 	}
+	starts := kernelStarts()
+	for index := range rows {
+		// The kernel list is read after ps; a pid whose parent differs between
+		// the two was recycled in between, and its start belongs to the other
+		// process, so the row keeps no start rather than a wrong one.
+		if start, ok := starts[rows[index].PID]; ok && start.ppid == rows[index].PPID {
+			rows[index].StartedAt = start.at
+		}
+	}
 	return rows, skipped, nil
 }
 
-// parsePSLine decodes one row of the ps format above: six whitespace-
+type kernelStart struct {
+	ppid int
+	at   time.Time
+}
+
+// kernelStarts maps every pid to its parent and creation time from the
+// kernel's process list, empty when the list cannot be read.
+func kernelStarts() map[int]kernelStart {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil
+	}
+	starts := make(map[int]kernelStart, len(procs))
+	for index := range procs {
+		proc := &procs[index]
+		started := proc.Proc.P_starttime
+		if started.Sec <= 0 {
+			continue
+		}
+		starts[int(proc.Proc.P_pid)] = kernelStart{
+			ppid: int(proc.Eproc.Ppid),
+			at:   time.Unix(int64(started.Sec), int64(started.Usec)*int64(time.Microsecond)),
+		}
+	}
+	return starts
+}
+
+// parsePSLine decodes one row of the ps format above: five whitespace-
 // delimited fixed fields, then argv verbatim.
-//
-// readAt is when ps was run, which is what elapsed time is subtracted from to
-// recover the start instant.
-func parsePSLine(line string, readAt time.Time) (Process, bool) {
+func parsePSLine(line string) (Process, bool) {
 	rest := strings.TrimLeft(line, " \t")
-	values := make([]string, 0, 6)
-	for len(values) < 6 {
+	values := make([]string, 0, 5)
+	for len(values) < 5 {
 		index := strings.IndexAny(rest, " \t")
 		if index < 0 {
 			return Process{}, false
@@ -118,14 +152,6 @@ func parsePSLine(line string, readAt time.Time) (Process, bool) {
 	if !ok {
 		return Process{}, false
 	}
-	// An unparseable elapsed time leaves the start unset rather than
-	// rejecting the row: the process is real and everything else about it
-	// was read. A wrong start time would be worse than none, because the
-	// correlator spends it rejecting matches.
-	var started time.Time
-	if elapsed, ok := parsePSTime(values[4]); ok {
-		started = readAt.Add(-elapsed)
-	}
 	cmdline := strings.TrimSpace(rest)
 	if cmdline == "" {
 		return Process{}, false
@@ -141,8 +167,7 @@ func parsePSLine(line string, readAt time.Time) (Process, bool) {
 	}
 	return Process{
 		PID: pid, PPID: ppid, Name: baseName(name), Cmdline: cmdline,
-		User: values[5], CPUTime: cpu, RSSBytes: rssKB * 1024,
-		StartedAt: started,
+		User: values[4], CPUTime: cpu, RSSBytes: rssKB * 1024,
 	}, true
 }
 

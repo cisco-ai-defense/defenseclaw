@@ -40,11 +40,31 @@ func readBoundedRegularFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := openReadOnlyNonblocking(resolved)
+	f, err := openReadOnlyNonblocking(resolved, true)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return readOpenedRegularFile(f, limit)
+}
+
+// readBoundedRegularFileNoFollow is readBoundedRegularFile for a file a scan
+// walked to: it reads the file at path itself, never what a link there points
+// at. A package.json linked to /dev/zero made a per-user scan worker allocate
+// until the host ran out of memory (GAP-0694).
+func readBoundedRegularFileNoFollow(path string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("bounded metadata limit must be positive")
+	}
+	f, err := openReadOnlyNonblocking(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readOpenedRegularFile(f, limit)
+}
+
+func readOpenedRegularFile(f *boundedReadFile, limit int64) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -65,6 +85,38 @@ func readBoundedRegularFile(path string, limit int64) ([]byte, error) {
 	return raw, nil
 }
 
+// readRegularFileTail reads at most limit bytes from the end of a regular
+// file (a shell history). A link is followed, as dotfile managers link
+// history files, but the opened object must be a regular file, and a FIFO
+// never blocks the open.
+func readRegularFileTail(path string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("bounded metadata limit must be positive")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := openReadOnlyNonblocking(resolved, true)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errBoundedFileNotRegular
+	}
+	if info.Size() > limit {
+		if _, err := f.Seek(info.Size()-limit, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
 // readRegularFilePrefix is the large-artifact counterpart to
 // readBoundedRegularFile. It verifies the opened object is a regular file and
 // reads at most limit bytes from its prefix, but deliberately does not reject
@@ -78,7 +130,7 @@ func readRegularFilePrefix(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := openReadOnlyNonblocking(resolved)
+	f, err := openReadOnlyNonblocking(resolved, true)
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -231,6 +232,19 @@ func TestGatewayConfigCreate(t *testing.T) {
 	}
 }
 
+// TestGatewayPlanSaysRemove (GAP-0075): keeping OpenShell's telemetry on
+// drops OPENSHELL_TELEMETRY_ENABLED from gateway.env, which the plan
+// showed as "set unset OPENSHELL_TELEMETRY_ENABLED".
+func TestGatewayPlanSaysRemove(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.write(t, "gateway.toml", disabledTOML)
+	f.write(t, "gateway.env", openshell.EnvTelemetryEnabled+"=false\n")
+	text := f.plan(t, openshell.GatewayChanges{UnsetEnv: []string{openshell.EnvTelemetryEnabled}}).String()
+	if !strings.Contains(text, "    remove "+openshell.EnvTelemetryEnabled+" (OpenShell's usage telemetry stays on, its default)\n") || strings.Contains(text, "set unset") {
+		t.Fatalf("plan:\n%s", text)
+	}
+}
+
 func TestGatewayConfigEditKeepsCommentsAndBacksUp(t *testing.T) {
 	f := newGatewayFixture(t)
 	f.write(t, "gateway.toml", operatorTOML)
@@ -387,6 +401,26 @@ func TestGatewayConfigRollback(t *testing.T) {
 		}
 		if err := f.cfg.Rollback(context.Background(), res); err != nil || f.read(t, "gateway.toml") != operatorTOML || f.restarts() != 2 {
 			t.Fatalf("rollback did not restore and restart: %v", err)
+		}
+	})
+	// GAP-0149: teardown restarted a stopped service (another account's
+	// gateway held the port), which then restarted forever. A stopped
+	// service gets its files back and no start.
+	t.Run("rollback of a stopped service", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.write(t, "gateway.toml", operatorTOML)
+		res, err := f.apply(f.plan(t, bindMounts))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.unit = systemdUnit("inactive", "disabled", time.Time{}, filepath.Join(f.dir, "gateway.env"))
+		flushes := f.flushes
+		if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrGatewayServiceStopped) || f.read(t, "gateway.toml") != operatorTOML ||
+			f.restarts() != 1 || f.flushes != flushes {
+			t.Fatalf("Rollback = %v; restarts %d, flushes %d", err, f.restarts(), f.flushes-flushes)
+		}
+		if st, err := f.cfg.Read(); err != nil || !st.RestartPendingSince.IsZero() {
+			t.Fatalf("Rollback left a pending-restart mark: %+v, %v", st, err)
 		}
 	})
 }
@@ -921,6 +955,92 @@ func TestGatewayServiceState(t *testing.T) {
 		}
 		if err := f.cfg.Restart(context.Background()); err != nil || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
 			t.Fatalf("restart: %v", err)
+		}
+		// GAP-0111: run through sudo (an administrator who switched to the
+		// user), Homebrew prints its warning and hints around the JSON, and
+		// setup failed on "unexpected output" though the service ran.
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide this warning by setting `HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1`.\n[\n  {\"running\": true, \"loaded\": true, \"status\": \"started\", \"file\": \"/x.plist\"}\n]\nHint: more\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state around a warning = %+v, %v", st, err)
+		}
+		var env []string
+		for _, c := range f.runner.Calls() {
+			if c.Name == "brew" && c.Args[0] == "services" && c.Args[1] == "info" {
+				env = c.Env
+			}
+		}
+		if !slices.Contains(env, "HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1") || !slices.Contains(env, "HOMEBREW_NO_ENV_HINTS=1") {
+			t.Fatalf("brew services info ran with env %v", env)
+		}
+	})
+	// GAP-0274: Homebrew refuses `brew services` under tmux and prints its
+	// whole usage after the error; the check says one line instead.
+	t.Run("homebrew under tmux", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json",
+			"Error: Invalid usage: brew services cannot run under tmux!\nUsage: brew services [subcommand]\n\nManage background services.\n", errors.New("exit status 1"))
+		_, err := f.cfg.ServiceState(context.Background())
+		if !errors.Is(err, openshell.ErrBrewServicesTmux) || strings.Contains(err.Error(), "Usage") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	// GAP-0286: a per-user Homebrew whose brew the shell has not loaded is
+	// still the prefix the OpenShell CLI (openshell.binary) lives in; its
+	// service and gateway.toml are asked there.
+	t.Run("homebrew prefix of the CLI that is not on PATH", func(t *testing.T) {
+		prefix := filepath.Join(realTempDir(t), "homebrew")
+		for _, dir := range []string{filepath.Join(prefix, "opt", "openshell"), filepath.Join(prefix, "bin")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"openshell", "brew"} {
+			if err := os.WriteFile(filepath.Join(prefix, "bin", name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("HOMEBREW_PREFIX", "")
+		t.Setenv("PATH", t.TempDir())
+		f := newGatewayFixture(t)
+		f.cfg.GOOS, f.cfg.BrewPrefix, f.cfg.CLI = "darwin", "", filepath.Join(prefix, "bin", "openshell")
+		f.cfg.LookPath = func(name string) (string, error) {
+			if filepath.IsAbs(name) {
+				return name, nil
+			}
+			if name == "brew" {
+				return "/opt/homebrew/bin/brew", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		f.runner.On(filepath.Join(prefix, "bin", "brew")+" services info nvidia/openshell/openshell --json",
+			`[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Installed || !st.Active || f.cfg.BrewPrefix != prefix {
+			t.Fatalf("state = %+v, %v; prefix %q, want %q", st, err, f.cfg.BrewPrefix, prefix)
+		}
+	})
+	// GAP-0050: in a shell from sudo -iu, brew prints warnings before its
+	// JSON, and setup stopped at "Gateway service: unexpected output".
+	t.Run("homebrew warns first", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide these hints with HOMEBREW_NO_ENV_HINTS (see `man brew`).\n"+`[{"name":"openshell","running":true,"loaded":true,"status":"started","file":"/x.plist"}]`+"\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state = %+v, %v", st, err)
+		}
+	})
+	// GAP-0076: a service launchd has not loaded reported "is none".
+	t.Run("homebrew service not loaded", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"name":"openshell","running":false,"loaded":false,"status":"none","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || st.Active || st.Status != "not running (not loaded)" {
+			t.Fatalf("state = %+v, %v", st, err)
 		}
 	})
 	// Without the formula there is no service to ask brew about, and brew

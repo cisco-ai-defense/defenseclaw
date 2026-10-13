@@ -1,0 +1,158 @@
+== HostRunRefused
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox on this computer (profile contractors).
+Start it sandboxed from this project:
+  cd '/home/alice/src/api' && defenseclaw sandbox run claude
+To always start it sandboxed: defenseclaw sandbox enable claude
+Need an exception? Contact it-security@example.com
+== HostRunRefused codex, no profile, no contact
+Blocked by your organization's DefenseClaw policy: Codex must run in a sandbox on this computer.
+Start it sandboxed from this project:
+  cd '/home/alice/src/api' && defenseclaw sandbox run codex
+To always start it sandboxed: defenseclaw sandbox enable codex
+Need an exception? Contact your IT help desk
+== HostRunRefused relative project
+Blocked by your organization's DefenseClaw policy: Cursor Agent must run in a sandbox on this computer (profile contractors).
+Start it sandboxed from your project folder:
+  defenseclaw sandbox run cursor-agent
+To always start it sandboxed: defenseclaw sandbox enable cursor-agent
+Need an exception? Contact it-security@example.com
+== HostRunRefused quoted project
+Blocked by your organization's DefenseClaw policy: GitHub Copilot CLI must run in a sandbox on this computer (profile contractors).
+Start it sandboxed from this project:
+  cd '/home/al'\''ice/my api' && defenseclaw sandbox run copilot
+To always start it sandboxed: defenseclaw sandbox enable copilot
+Need an exception? Contact it-security@example.com
+== HostRunRefused escape in project
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox on this computer (profile contractors).
+Start it sandboxed from your project folder:
+  defenseclaw sandbox run claude
+To always start it sandboxed: defenseclaw sandbox enable claude
+Need an exception? Contact it-security@example.com
+== HostRunRefused forged profile line
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox on this computer (profile contractors Allowed: yes).
+Start it sandboxed from this project:
+  cd '/srv' && defenseclaw sandbox run claude
+To always start it sandboxed: defenseclaw sandbox enable claude
+Need an exception? Contact it security
+== HostRunRefusedOn cli
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox on this computer (profile contractors).
+Start it sandboxed from this project:
+  cd '/home/alice/src/api' && defenseclaw sandbox run claude
+To always start it sandboxed: defenseclaw sandbox enable claude
+Need an exception? Contact it-security@example.com
+== HostRunRefusedOn extension
+Blocked by your organization's DefenseClaw policy: GitHub Copilot must run in a sandbox on this computer (profile contractors), and its IDE extension can't run in one.
+Use GitHub Copilot CLI in a sandbox instead, from this project:
+  cd '/home/alice/src/api' && defenseclaw sandbox run copilot
+Need an exception? Contact it-security@example.com
+== HostRunRefusedOn desktop, relative project
+Blocked by your organization's DefenseClaw policy: Cursor must run in a sandbox on this computer, and its desktop app can't run in one.
+Use Cursor Agent in a sandbox instead, from your project folder:
+  defenseclaw sandbox run cursor-agent
+Need an exception? Contact your IT help desk
+== HostRunRefusedOn extension, no product
+Blocked by your organization's DefenseClaw policy: OpenCode must run in a sandbox on this computer (profile contractors), and its IDE extension can't run in one.
+Use OpenCode in a sandbox instead, from this project:
+  cd '/srv' && defenseclaw sandbox run opencode
+Need an exception? Contact it-security@example.com
+== HostRunUnavailable
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox, and sandboxes aren't available on this computer (OpenShell is not installed).
+Need an exception? Contact it-security@example.com (quote reason prerequisite_missing)
+== HostRunUnavailable no reason
+Blocked by your organization's DefenseClaw policy: GitHub Copilot CLI must run in a sandbox, and sandboxes aren't available on this computer.
+Need an exception? Contact your IT help desk
+== HostRunUnavailable kvm group
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox, and sandboxes aren't available on this computer (your account isn't in the kvm group that can use /dev/kvm).
+Need an exception? Contact it-security@example.com (quote reason no_kvm_group)
+== HostRunUnavailable reason with a period, bad code
+Blocked by your organization's DefenseClaw policy: Codex must run in a sandbox, and sandboxes aren't available on this computer (this computer has no KVM).
+Need an exception? Contact your IT help desk
+== ProvisionalRefusal refused
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox on this computer (profile offline-floor).
+Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment.
+Start it sandboxed from this project:
+  cd '/home/bob/src/api' && defenseclaw sandbox run claude
+To always start it sandboxed: defenseclaw sandbox enable claude
+Need an exception? Contact it-security@example.com
+== ProvisionalRefusal unavailable
+Blocked by your organization's DefenseClaw policy: Claude Code must run in a sandbox, and sandboxes aren't available on this computer (your account's groups couldn't be looked up).
+Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment.
+Need an exception? Contact it-security@example.com (quote reason account_lookup_failed)
+== AccessRefused
+Blocked by your organization's DefenseClaw policy: api.example.net is not on your profile's allowed hosts (profile contractors, rule egress_allow_only). You can't approve this.
+Request access: it-security@example.com. Quote: profile contractors, rule egress_allow_only, host api.example.net, sandbox brave-otter.
+== AccessRefusedWhy allow list (GAP-0572)
+Blocked by your organization's DefenseClaw policy: api.example.net is not on your profile's allowed hosts (profile contractors, rule egress_allow_only). You can't approve this.
+Request access: it-security@example.com. Quote: profile contractors, rule egress_allow_only, host api.example.net, sandbox brave-otter.
+== AccessRefused egress_block, no profile
+Blocked by your organization's DefenseClaw policy: pastebin.com is blocked by your organization (rule egress_block). You can't approve this.
+Request access: your IT help desk. Quote: rule egress_block, host pastebin.com.
+== AccessRefused unknown rule
+Blocked by your organization's DefenseClaw policy: this destination is not allowed by your profile (profile contractors, rule future_rule). You can't approve this.
+Request access: it-security@example.com. Quote: profile contractors, rule future_rule, sandbox brave-otter.
+== AccessRefusedWhy session only
+Blocked by your organization's DefenseClaw policy: your profile lets you approve access for this session only, not for future sandboxes (profile contractors, rule user_approvals). You can't approve this.
+Request access: it-security@example.com. Quote: profile contractors, rule user_approvals, host api.example.net, sandbox brave-otter.
+== AccessRefusedWhy says it already
+Blocked by your organization's DefenseClaw policy: your profile doesn't let you approve sandbox access (profile tt-none, rule user_approvals). You can't approve this.
+Request access: your IT help desk. Quote: profile tt-none, rule user_approvals, host host.openshell.internal:5432, sandbox un04n.
+== AccessRefusedWhy blocklist
+Blocked by your organization's DefenseClaw policy: pastebin.com is blocked by your organization (profile devs, rule egress_block). You can't approve this.
+Request access: it-security@example.com. Quote: profile devs, rule egress_block, host pastebin.com, sandbox pm28a.
+== ForeignStopped
+Sandbox build-1 was stopped: it wasn't started with defenseclaw sandbox run, which your organization requires.
+== ForeignRemoved
+Sandbox build-1 was removed: it wasn't started with defenseclaw sandbox run, which your organization requires.
+== ForeignRemoving
+Sandbox build-1 is being removed: it wasn't started with defenseclaw sandbox run, which your organization requires.
+== ForeignNotRemoved
+DefenseClaw couldn't remove sandbox build-1 (still Provisioning): remove it with `openshell sandbox delete build-1`; your organization requires sandboxes started with defenseclaw sandbox run.
+== ForeignAlerted
+Sandbox build-1 wasn't started with defenseclaw sandbox run, which your organization requires; your organization was told.
+== SettingsDrift
+Sandboxes are paused: your OpenShell settings differ from your organization's (compute driver). Ask IT to repair them.
+== PolicyUnloadable
+Your organization's sandbox policy can't be loaded on this computer.
+== ProfileStop
+This sandbox was stopped: your profile no longer allows mounts. Start it again: defenseclaw sandbox run claude
+== ProfileStop command
+This sandbox was stopped: your profile no longer allows mounts. Start it again: defenseclaw sandbox run codex
+== AccountBusy
+Sandboxes aren't available for your account on this computer.
+== DriverUnavailable
+Blocked by your organization's DefenseClaw policy: your organization requires MicroVM sandboxes on this computer, and they can't run here: KVM not available on this computer.
+Need an exception? Contact it-security@example.com
+== DriverUnavailable no reason, no contact
+Blocked by your organization's DefenseClaw policy: your organization requires MicroVM sandboxes on this computer, and they can't run here.
+Need an exception? Contact your IT help desk
+== DockerUnavailable socket error (GAP-0625)
+sandboxes on this Mac build your agent's image in Docker, and Docker does not answer for your account (your account does not have permission to access Docker).
+Start Docker Desktop and run this again.
+Need an exception? Contact it-security@example.com
+== HarnessNotAllowed
+Blocked by your organization's DefenseClaw policy: Amp isn't allowed in a sandbox under your profile (profile engineering).
+Need an exception? Contact it-security@example.com
+== HarnessNotAllowed no profile, no contact
+Blocked by your organization's DefenseClaw policy: Cursor Agent isn't allowed in a sandbox under your profile.
+Need an exception? Contact your IT help desk
+== HarnessNotEnabled
+Blocked by your organization's DefenseClaw policy: OpenCode isn't set up for your account on this computer (profile engineering), so it can't run in a sandbox here.
+To use it, contact it-security@example.com (quote connector opencode)
+== HarnessNotEnabled bad connector
+Blocked by your organization's DefenseClaw policy: open�code isn't set up for your account on this computer, so it can't run in a sandbox here.
+To use it, contact your IT help desk
+== ManagedRefusal gateway sentence
+Blocked by your organization's DefenseClaw policy: Your organization doesn't allow sandboxes for your account (profile engineering).
+Need an exception? Contact it-security@example.com
+== ManagedRefusal open pack (GAP-0573)
+Blocked by your organization's DefenseClaw policy: your profile contractors requires the contractors sandbox pack or a stricter one; the open pack is looser in network.mode (rule required_pack). You can't approve this.
+Request access: it-security@example.com. Quote: profile contractors, rule required_pack, pack open.
+== ManagedRefusal admin prefix, quote
+Blocked by your organization's DefenseClaw policy: your organization's sandbox policy refused this.
+Need an exception? Contact your IT help desk (quote reason sandbox_unavailable)
+== ManagedRefusal own contact kept
+Blocked by your organization's DefenseClaw policy: your organization requires MicroVM sandboxes on this computer, and they can't run here: KVM not available on this computer.
+Need an exception? Contact it-security@example.com
+== ManagedRefusal forged line
+Blocked by your organization's DefenseClaw policy: This agent isn't allowed Allowed: yes (profile contractors x).
+Need an exception? Contact it security

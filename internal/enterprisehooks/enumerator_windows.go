@@ -22,12 +22,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -132,6 +134,11 @@ type EnumerateOptions struct {
 	// ReportUnprotected receives each agent the standalone enumerator found
 	// installed for an eligible profile but could not enroll.
 	ReportUnprotected func(UnprotectedAgent)
+	// ReportExcluded receives each profile the standalone enrollment
+	// excludes (exclude_users or exclude_groups), with its SID and home, so
+	// the cycle can take the gateway's inventory read access off it
+	// (GAP-1024).
+	ReportExcluded func(ManifestTarget)
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -196,7 +203,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	connectors := effectiveWindowsHookConnectors(cfg)
+	connectors := EffectiveWindowsHookConnectors(cfg)
 	if len(connectors) == 0 {
 		// No enabled hook-based connector → no per-user rows to
 		// emit. Return an empty (but valid) manifest so the atomic
@@ -263,6 +270,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
 		}
+		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
+			// A deleted local account whose profile folder could not be
+			// removed (a hive another process still holds) kept its rows: the
+			// guardian could never repair them, status failed and every
+			// later Setup /ensure stopped at the activation evidence. No one
+			// can sign in as it, so its rows are revoked now (GAP-0430).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
 		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
 			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
@@ -271,6 +288,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
@@ -281,6 +301,14 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			sessionActive: sessionActive,
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
+		}
+		if standalone && !sessionActive && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+			// A disabled account cannot start a new session, but an existing
+			// session can still run its agents. Suppress the stale warning
+			// only after the account has signed out (GAP-1034).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
+			rowContext.report = nil
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -691,6 +719,11 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 		lookup := windowsEnrollmentLookupAccountSID
 		go func() {
 			account, domain, err := lookup(sid)
+			if err == nil {
+				// The sAMAccountName, also while its user is signed in with a
+				// UPN, as the gateway names the account (GAP-0533).
+				account = useridentity.CanonicalWindowsAccountName(sid, account, domain)
+			}
 			done <- result{account, domain, err}
 		}()
 		timer := time.NewTimer(remaining)
@@ -705,6 +738,63 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 			return "", "", errors.New("account name lookup timed out")
 		}
 	}
+}
+
+// windowsDeletedLocalAccount reports a local account SID that no longer
+// names an account. A domain or Entra account lookup also fails while its
+// directory is unreachable, so only local accounts are judged, and only by
+// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
+func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	_, _, err := lookup(sid)
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
+// windowsUserInfo1 is USER_INFO_1, the NetUserGetInfo level that carries
+// the account flags.
+type windowsUserInfo1 struct {
+	Name        *uint16
+	Password    *uint16
+	PasswordAge uint32
+	Priv        uint32
+	HomeDir     *uint16
+	Comment     *uint16
+	Flags       uint32
+	ScriptPath  *uint16
+}
+
+// windowsUFAccountDisable is UF_ACCOUNTDISABLE.
+const windowsUFAccountDisable = 0x0002
+
+// windowsLocalAccountDisabled reports whether the local account named
+// account is disabled (NetUserGetInfo); tests replace it.
+var windowsLocalAccountDisabled = func(account string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(account)
+	if err != nil {
+		return false, err
+	}
+	var buf *byte
+	if err := windows.NetUserGetInfo(nil, name, 1, &buf); err != nil {
+		return false, err
+	}
+	defer windows.NetApiBufferFree(buf)
+	return (*windowsUserInfo1)(unsafe.Pointer(buf)).Flags&windowsUFAccountDisable != 0, nil
+}
+
+// windowsDisabledLocalAccount reports a local account that exists but is
+// disabled. Only local accounts are judged, and a failed lookup is no proof.
+func windowsDisabledLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	account, _, err := lookup(sid)
+	if err != nil || strings.TrimSpace(account) == "" {
+		return false
+	}
+	disabled, err := windowsLocalAccountDisabled(account)
+	return err == nil && disabled
 }
 
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one
@@ -1097,7 +1187,7 @@ func sidIsEntraIDUser(sid *windows.SID) bool {
 	return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
 }
 
-// effectiveWindowsHookConnectors returns the connector names for
+// EffectiveWindowsHookConnectors returns the connector names for
 // which the enumerator emits per-user rows. Filters the operator-
 // configured connector list down to those the Windows per-user
 // installer actually supports (see `windowsHookConnectors`),
@@ -1121,7 +1211,24 @@ func sidIsEntraIDUser(sid *windows.SID) bool {
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
 // authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
-func effectiveWindowsHookConnectors(cfg *config.Config) []string {
+//
+// The per-user connectors count only in a standalone process (one that
+// carries the profile pin); use EffectiveWindowsStandaloneHookConnectors
+// where the caller already knows the config is a standalone one.
+func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, windowsEnterpriseStandaloneProcess())
+}
+
+// EffectiveWindowsStandaloneHookConnectors is EffectiveWindowsHookConnectors
+// for a config the caller loaded from the standalone layout. A CLI or Setup
+// lifecycle process does not carry the profile pin, so without this its
+// per-user-only config (opencode, copilot, hermes) counted no connector and
+// verify failed no_connectors_enabled (GAP-1230).
+func EffectiveWindowsStandaloneHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, true)
+}
+
+func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector
@@ -1137,7 +1244,7 @@ func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if !windowsEnumeratorHookConnector(trimmed) {
+		if !windowsEnumeratorHookConnector(trimmed, standalone) {
 			return
 		}
 		if explicitlyDisabled {

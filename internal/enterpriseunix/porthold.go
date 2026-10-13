@@ -217,3 +217,61 @@ func (l *lifecycle) portHeldProblem(ctx context.Context, serviceUID int, serving
 	}
 	return message + "; stop that process, then run `" + l.env.lifecycleCommand("repair") + "`"
 }
+
+// codeAPIPortHeld names a transaction refused before it changed anything
+// because another process listens on the gateway API port (GAP-0366).
+const codeAPIPortHeld = "api_port_held"
+
+// apiPortPreflight describes another process listening on the gateway API
+// port before a transaction changes anything, or "". A per-user gateway
+// still running from before the deployment is the usual holder: the socket
+// unit could not listen, so the install changed everything and then rolled
+// back with activation_failed.
+func (l *lifecycle) apiPortPreflight(ctx context.Context, record *Deployment) string {
+	env := l.env
+	if env.GOOS == "linux" && env.Services.Active(ctx, Unit{Name: unitAPISocket, Kind: "socket"}) {
+		// systemd listens on the port, so nothing else can.
+		return ""
+	}
+	serviceUID := -1
+	if record != nil {
+		serviceUID = record.ServiceUID
+	} else if account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser); err == nil && ok {
+		serviceUID = account.UID
+	}
+	foreign := l.foreignAPIPortHolders(ctx, serviceUID)
+	if len(foreign) == 0 {
+		return ""
+	}
+	perUser := map[int]bool{}
+	for _, process := range env.gatewayProcesses(ctx) {
+		perUser[process.PID] = true
+	}
+	var names, pids []string
+	perUserGateway := false
+	for _, holder := range foreign {
+		name := holder.String()
+		if holder.PID > 0 && perUser[holder.PID] {
+			name += ", a per-user DefenseClaw gateway"
+			perUserGateway = true
+		}
+		names = append(names, name)
+		if holder.PID > 0 {
+			pids = append(pids, strconv.Itoa(holder.PID))
+		}
+	}
+	message := fmt.Sprintf("the gateway API port %s is held by %s, so the managed gateway cannot listen on it; nothing was changed. ",
+		env.Layout.APIAddr, strings.Join(names, "; "))
+	stop := "Stop that process or move it to another port"
+	if len(pids) > 0 {
+		stop = "Stop it with `kill " + strings.Join(pids, " ") + "` or move it to another port"
+	}
+	if perUserGateway {
+		stop += ", and have that user remove the per-user install with `defenseclaw uninstall --binaries --yes`"
+	}
+	retry := "run this command again"
+	if l.opts.FromPackage {
+		retry = "run `" + env.lifecycleCommand(ActionEnsure) + " --from-package`"
+	}
+	return message + stop + ", then " + retry
+}

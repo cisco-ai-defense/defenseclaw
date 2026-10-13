@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -155,18 +156,86 @@ def test_untrusted_launcher_path_is_rejected(
     _which_map(monkeypatch, {"npx": npx, "npx.cmd": npx})
     _trusted(monkeypatch, set())
 
-    with pytest.raises(mcp.MCPStdioLaunchError, match="untrusted Windows path"):
+    with pytest.raises(mcp.MCPStdioLaunchError, match="untrusted Windows path.*setup trusted-paths add"):
         mcp._resolve_trusted_windows_launcher("npx", ".cmd", {"PATH": os.fspath(Path(npx).parent)})
+
+
+def test_program_files_launcher_is_trusted_without_a_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-0779: the managed scanner runtime has no ProgramFiles variable, so npx.cmd
+    in C:\\Program Files\\nodejs matched no trusted prefix. A launcher under Program
+    Files whose folders only administrators can change is trusted; one whose folder
+    others can change is not."""
+    program_files = tmp_path / "Program Files"
+    npx = _touch(program_files / "nodejs" / "npx.cmd")
+    _which_map(monkeypatch, {"npx": npx, "npx.cmd": npx})
+    _trusted(monkeypatch, set())
+    monkeypatch.setattr(mcp, "_windows_program_files_roots", lambda: (os.fspath(program_files),))
+    monkeypatch.setattr(agent_discovery, "_windows_acl_chain_is_safe", lambda _path, _root: True)
+    env = {"PATH": os.fspath(Path(npx).parent)}
+    assert mcp._resolve_trusted_windows_launcher("npx", ".cmd", env) == os.path.realpath(npx)
+
+    monkeypatch.setattr(agent_discovery, "_windows_acl_chain_is_safe", lambda _path, _root: False)
+    with pytest.raises(mcp.MCPStdioLaunchError, match="for all users under Program Files"):
+        mcp._resolve_trusted_windows_launcher("npx", ".cmd", env)
+
+
+def test_failed_start_prints_the_server_stderr_tail(capsys: pytest.CaptureFixture[str]) -> None:
+    # GAP-0385: a server that exits at once (a folder that does not exist)
+    # showed only "exited before completing"; its stderr was withheld.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+        errlog.write("Error: None of the specified directories are accessible\n")
+        mcp._echo_server_stderr_tail(errlog, "npx")
+    assert "[npx stderr] Error: None of the specified directories are accessible" in capsys.readouterr().err
+
+
+def test_failed_start_reads_only_bounded_stderr_tail(capsys: pytest.CaptureFixture[str]) -> None:
+    class BoundedLog:
+        def __init__(self) -> None:
+            self.position = 100_000
+            self.buffer = self
+            self.read_sizes: list[int] = []
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            assert whence in (0, 2)
+            self.position = self.position + offset if whence == 2 else offset
+            return self.position
+
+        def flush(self) -> None:
+            pass
+
+        def tell(self) -> int:
+            return self.position
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            assert size == 4096
+            return b"last line\n"
+
+    log = BoundedLog()
+    mcp._echo_server_stderr_tail(log, "npx")
+    assert log.read_sizes == [4096]
+    assert "[npx stderr] last line" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "command",
-    ["npx.cmd", "npx.bat", "npx.ps1", r"C:\tools\npx"],
+    ["npx.bat", "npx.ps1", r"C:\tools\npx", "node"],
 )
 def test_unsupported_npx_spellings_remain_outside_allowlist(command: str) -> None:
-    error = mcp._stdio_scan_command_error(command, ["package"])
+    with patch.object(mcp.os, "name", "nt"):
+        error = mcp._stdio_scan_command_error(command, ["package"])
+        # GAP-0385: npx.cmd and uvx.exe name the same launchers on Windows
+        # and go through the same trusted-path resolution as npx and uvx.
+        assert mcp._stdio_scan_command_error("npx.cmd", ["package"]) is None
+        assert mcp._stdio_scan_command_error("UVX.EXE", ["package"]) is None
     assert error is not None
     assert "allowlisted stdio launcher" in error
+    if command == "node":
+        # GAP-0406: the refusal names the allowlist and the supported ways in.
+        assert "(allowed: npx, uvx)" in error and "use its URL" in error and "mcp allow" in error
 
 
 def test_uvx_resolves_to_trusted_exe_and_keeps_literal_arguments(
@@ -188,6 +257,26 @@ def test_uvx_resolves_to_trusted_exe_and_keeps_literal_arguments(
     assert plan.command == os.path.realpath(uvx)
     assert plan.args == tuple(args)
     assert plan.launcher == "uvx"
+
+
+def test_uvx_does_not_see_the_embeddable_scanner_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0915: the managed scanner runtime is an embeddable CPython first on
+    # PATH; uvx built the server on it and the server crashed before initialize.
+    runtime = tmp_path / "runtime" / "python"
+    _touch(runtime / "python313._pth")
+    monkeypatch.setattr(mcp.sys, "executable", _touch(runtime / "python.exe"))
+    uvx = _touch(tmp_path / "uv" / "uvx.exe")
+    path = os.fspath(runtime) + ";" + os.fspath(Path(uvx).parent)
+    monkeypatch.setattr(mcp, "_safe_subprocess_env", lambda _operator: {"PATH": path})
+    _which_map(monkeypatch, {"uvx": uvx, "uvx.exe": uvx})
+    _trusted(monkeypatch, {uvx})
+
+    plan = mcp._windows_stdio_launch_plan(MCPServerEntry(name="fixture", command="uvx", args=["mcp-server-time"]))
+
+    assert plan.env["PATH"] == os.fspath(Path(uvx).parent)
 
 
 def test_missing_uvx_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -810,7 +899,15 @@ def test_error_boundaries_are_distinct_and_stderr_safe(
     assert expected in message
     assert "Connection closed" not in message
     assert "do-not-disclose-this-marker" not in message
-    assert "captured and withheld" in message
+    assert "last stderr lines are printed above" in message
+
+
+def test_early_exit_names_the_launcher_exit_code() -> None:
+    # GAP-0915: a uvx server that crashed before initialize printed nothing,
+    # and the error said only that the launcher exited.
+    plan = mcp._StdioLaunchPlan("resolved", (), {}, "uvx")
+    message = str(mcp._classify_windows_stdio_error(ConnectionError("Connection closed"), plan, [], 0, 7, -1073741819))
+    assert "'uvx' exited with code 0xC0000005 before completing" in message
 
 
 def test_windows_scan_preserves_cancellation() -> None:

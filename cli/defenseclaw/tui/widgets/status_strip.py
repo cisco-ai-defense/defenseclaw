@@ -64,8 +64,12 @@ def status_segments(model: StatusModel) -> list[StatusSegment]:
     (connector, redaction posture, command counters, version).
     """
 
-    segments: list[StatusSegment] = [
-        StatusSegment.from_service(model.gateway),
+    segments: list[StatusSegment] = [StatusSegment.from_service(model.gateway)]
+    if model.applied_policy:
+        # Right after the gateway that applied it: the strip is one line and
+        # the end of it is what a narrow terminal cuts.
+        segments.append(StatusSegment(model.applied_policy, "active"))
+    segments += [
         StatusSegment.from_service(model.watchdog),
         # Guardrail pill mirrors the SERVICES box in Overview — it
         # reports the live subsystem state, NOT a hijacked overlay

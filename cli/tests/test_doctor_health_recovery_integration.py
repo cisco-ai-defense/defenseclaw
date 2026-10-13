@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -245,7 +246,7 @@ def test_dry_run_projects_token_creation_into_token_env_plan(tmp_path) -> None:
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.credentials.dotenv.protect", "noop"),
         ("doctor.gateway.token.ensure", "applicable"),
         ("doctor.gateway.token-env.canonicalize", "applicable"),
@@ -618,7 +619,7 @@ def test_missing_or_noncanonical_config_blocks_every_real_repair(
             ),
         )
 
-    assert result.repairs[0]["repair_id"] == "doctor.config.canonical-v8.preflight"
+    assert result.repairs[0]["repair_id"] == "doctor.config.validation.preflight"
     assert result.repairs[0]["state"] == "blocked"
     assert all(applier.call_count == 0 for applier in appliers.values())
     cfg.save.assert_not_called()
@@ -767,6 +768,7 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     store, notice = result.checks
     assert store["status"] == "pass"
     assert notice["status"] == "warn" and notice["reason_code"] == "audit-db-moved-aside"
+    assert f"Older audit records stay in {moved}" in notice["detail"]
     assert f"sqlite3 {moved} .recover" in notice["detail"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
@@ -788,6 +790,22 @@ def test_moved_audit_store_with_unreadable_block_lists_says_none_were_carried_ov
     assert notice["detail"].startswith("the audit store was corrupt and was moved aside")
     assert "0 entries were carried over and earlier blocks no longer apply" in notice["detail"]
     assert "kept the block/allow" not in notice["detail"]
+
+
+def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
+    # GAP-1222: a damaged 0.8.x store kept as an archive drew a permanent WARN
+    # that called it corrupt and its block/allow entries lost.
+    moved = tmp_path / "audit.db.corrupt-20261010T021509Z"
+    moved.write_bytes(b"x")
+    Path(str(moved) + ".carryover.json").write_text('{"carried_over": 0, "pre_1_0": true}', encoding="utf-8")
+
+    result = _DoctorResult()
+    cmd_doctor._check_moved_aside_audit_stores(str(tmp_path / "audit.db"), result)
+
+    (notice,) = result.checks
+    assert notice["status"] == "pass" and notice["reason_code"] == "audit-db-0x-archive"
+    assert f"kept as an archive in {moved}" in notice["detail"] and "config.yaml" in notice["detail"]
+    assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
 
 
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
@@ -823,8 +841,85 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
 
     assert result.checks[0]["status"] == "fail"
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
+    # GAP-0337: a permission slip names the mode and the chmod, not a restore.
+    assert "mode 0644" in result.checks[0]["detail"]
+    assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_doctor_fix_makes_an_exposed_device_key_private(tmp_path) -> None:
+    # GAP-0560: doctor named the exposed device.key but no repair fixed it.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    key = data_dir / "device.key"
+    key.write_bytes(b"k" * 32)
+    os.chmod(key, 0o640)
+    rows = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, rows)
+    assert "doctor --fix --yes" in rows.checks[-1]["remediation"]
+    assert cmd_doctor._fix_private_state_files(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_private_state_files(cfg, assume_yes=True)[0] == "pass"
+    assert stat.S_IMODE(os.lstat(key).st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_world_readable_dotenv_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-0336: plain doctor reported all passed for a 0644 .env.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    clean = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, clean)
+    assert clean.checks[-1]["status"] == "pass"
+
+    os.chmod(dotenv, 0o644)
+    exposed = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, exposed)
+    assert exposed.checks[-1]["status"] == "fail"
+    assert "0644" in exposed.checks[-1]["detail"]
+    assert "defenseclaw doctor --fix --yes" in exposed.checks[-1]["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_dotenv_recommends_secure_replacement(tmp_path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o666)
+
+    result = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    row = result.checks[-1]
+    assert row["status"] == "fail"
+    assert "replace" in row["remediation"]
+    assert "doctor --fix" not in row["remediation"]
+
+
+def test_windows_private_files_distinguish_unsafe_acl_from_uninspected_acl(tmp_path, monkeypatch) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    (data_dir / ".env").write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    fake_os = SimpleNamespace(name="nt", path=os.path, lstat=os.lstat)
+    monkeypatch.setattr(cmd_doctor, "os", fake_os)
+
+    for problem, status, detail in (
+        ("owner SID S-1-5-21-foreign is not the current user", "fail", "unsafe"),
+        ("ACL grants write access to untrusted SID S-1-5-21-foreign", "fail", "unsafe"),
+        ("cannot read Windows ACL (access denied)", "warn", "could not verify"),
+    ):
+        with patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=problem):
+            result = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, result)
+        row = result.checks[-1]
+        assert row["status"] == status
+        assert detail in row["detail"]
+        assert "doctor --fix" not in row["remediation"]
 
 
 def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> None:
@@ -849,7 +944,7 @@ def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> Non
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "applied"),
         ("doctor.state.audit-db.initialize", "applied"),
     ]
@@ -880,7 +975,7 @@ def test_audit_recovery_dry_run_projects_stale_pid_removal_without_writes(tmp_pa
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "applicable"),
         ("doctor.state.audit-db.initialize", "applicable"),
     ]
@@ -925,7 +1020,7 @@ def test_audit_recovery_dry_run_does_not_project_noop_pid_as_absent(tmp_path) ->
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "noop"),
         ("doctor.state.audit-db.initialize", "blocked"),
     ]
@@ -1041,7 +1136,7 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "noop"),
         ("doctor.identity.device-key.initialize", "requires_confirmation"),
     ]
@@ -1064,3 +1159,51 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
     cmd_doctor._check_device_identity(cfg, repaired_health)
     assert repaired_health.checks[-1]["status"] == "pass"
     assert repaired_health.checks[-1]["reason_code"] == "device-key-provenance-valid"
+
+
+def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_path) -> None:
+    # GAP-0323: only device.key was deleted; its provenance files remain.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    attended = (
+        patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value=""),
+        patch("click.confirm", return_value=True),
+    )
+    with attended[0], attended[1]:
+        assert cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)[0] == "pass"
+    os.remove(cfg.gateway.device_key_file)
+
+    health = _DoctorResult()
+    cmd_doctor._check_device_identity(cfg, health)
+    assert "doctor.identity.device-key.initialize" in health.checks[-1]["remediation"]
+    with attended[0], attended[1]:
+        tag, detail = cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)
+    assert tag == "pass", detail
+    status = inspect_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir).status
+    assert status is DeviceKeyHealthStatus.VALID
+    kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
+    assert len(kept) == 2, kept
+
+
+def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> None:
+    # GAP-0325: the gateway health says its open audit.db is no longer on disk.
+    cfg = _cfg(_private_data_dir(tmp_path))
+    health = {"audit_store": {"state": "replaced"}}
+    rows = _DoctorResult()
+    cmd_doctor._check_live_audit_store(health, rows)
+    assert rows.checks[-1]["status"] == "fail"
+    assert "defenseclaw-gateway restart" in rows.checks[-1]["remediation"]
+
+    restart = Mock(return_value=(True, ""))
+    with (
+        patch.object(cmd_doctor, "_live_gateway_health", return_value=health),
+        patch.object(cmd_doctor, "_trusted_gateway_listener_for_lifecycle", return_value=_GatewayTrust("trusted", "", pid=4242)),
+        patch.object(cmd_doctor, "_repair_gateway_lifecycle", restart),
+    ):
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True)[0] == "pass"
+        # The deleted audit.db is the reopen repair's case: the initialize
+        # repair must not block (and so skip) it while the gateway runs.
+        with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value="gateway running"):
+            assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
+    restart.assert_called_once()

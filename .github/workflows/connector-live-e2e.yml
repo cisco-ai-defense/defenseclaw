@@ -39,9 +39,6 @@
 # status. Deterministic contract checks run in windows-native.yml.
 # Antigravity's official client uses Windows Credential Manager/browser auth,
 # so its real-client cell runs only on a dedicated pre-authenticated runner.
-# OmniGent 0.7.0 has a separate required packaged native-degraded cell in
-# windows-native.yml; it remains outside green live certification, does not add
-# a public Setup availability gate, and claims no authentication/HITL evidence.
 
 name: Connector Live E2E
 
@@ -71,7 +68,6 @@ on:
           - opencode
           - cursor
           - copilot
-          - openhands
           - hermes
           - devin
           - antigravity
@@ -139,11 +135,11 @@ on:
         type: string
         default: ""
       use_azure:
-        description: "Route Codex + OpenHands through Azure OpenAI"
+        description: "Route Codex through Azure OpenAI"
         type: boolean
         default: false
       use_bedrock:
-        description: "Route Claude Code + OpenHands through Amazon Bedrock"
+        description: "Route Claude Code through Amazon Bedrock"
         type: boolean
         default: false
 
@@ -160,10 +156,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # Gate — decide which contract cells to run for this event.
   #
-  #   schedule / workflow_dispatch → full 2-OS x 9 Unix shell-hook matrix.
+  #   schedule / workflow_dispatch → full 2-OS x 8 Unix shell-hook matrix.
   #                                  Linux gets one cell per connector; macOS
   #                                  runs every connector in one cell so the
-  #                                  ~2 min install is paid once, not 9 times.
+  #                                  ~2 min install is paid once, not 8 times.
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
@@ -192,7 +188,7 @@ jobs:
           # Native Windows contract validation is a separate, explicit x64 matrix.
           # The macOS entry keeps the "Contract codex / macos-latest" name that
           # branch protection requires, but runs every listed connector.
-          full='{"os":["ubuntu-latest"],"connector":["codex","claudecode","amp","cursor","copilot","openhands","hermes","devin","antigravity"],"include":[{"os":"macos-latest","connector":"codex","connectors":"codex claudecode amp cursor copilot openhands hermes devin antigravity"}]}'
+          full='{"os":["ubuntu-latest"],"connector":["codex","claudecode","amp","cursor","copilot","hermes","devin","antigravity"],"include":[{"os":"macos-latest","connector":"codex","connectors":"codex claudecode amp cursor copilot hermes devin antigravity"}]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because windows-native.yml separately checks the native
           # Windows hook contract on every PR. This adds the missing native macOS
@@ -432,7 +428,7 @@ jobs:
         # windows-live below; an unrun or failed cell proves nothing.
         #
         # Currently scoped to the connectors we can authenticate with Azure
-        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Cursor and
+        # OpenAI / Amazon Bedrock (Codex, Claude Code). Cursor and
         # Copilot are deferred until their native keys exist — add
         # their cells back here when CURSOR_API_KEY /
         # COPILOT_GITHUB_TOKEN are configured.
@@ -443,8 +439,6 @@ jobs:
           - { connector: claudecode, os: macos-latest,   dcos: macos }
           - { connector: amp,        os: ubuntu-latest,  dcos: linux }
           - { connector: amp,        os: macos-latest,   dcos: macos }
-          # OpenHands needs the Docker runtime, so it is Linux-only.
-          - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -465,7 +459,6 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       # Optional Bedrock model-id overrides (non-secret config Variables).
       CLAUDE_BEDROCK_MODEL: ${{ vars.CLAUDE_BEDROCK_MODEL }}
-      OPENHANDS_BEDROCK_MODEL: ${{ vars.OPENHANDS_BEDROCK_MODEL }}
       # Provider-selection flags. A dispatch toggle wins; otherwise the repo
       # Variable (DC_USE_AZURE / DC_USE_BEDROCK = "1") makes it the default for
       # nightly runs; otherwise off (use the direct provider keys).
@@ -504,9 +497,9 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
-      # Several live agents still use npm and OpenHands uses pipx. Claude's
-      # Windows lane uses Anthropic's native PowerShell installer; Node remains
-      # required by the other matrix cells.
+      # Several live agents still use npm. Claude's Windows lane uses
+      # Anthropic's native PowerShell installer; Node remains required by the
+      # other matrix cells.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:
@@ -538,11 +531,10 @@ jobs:
         if: steps.select.outputs.run == 'true'
         env:
           MATRIX_CONNECTOR: ${{ matrix.connector }}
-          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode' || matrix.connector == 'openhands') && secrets.OPENAI_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode') && secrets.OPENAI_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ matrix.connector == 'claudecode' && secrets.ANTHROPIC_API_KEY || '' }}
           AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}
           CURSOR_API_KEY: ${{ matrix.connector == 'cursor' && secrets.CURSOR_API_KEY || '' }}
-          LLM_API_KEY: ${{ matrix.connector == 'openhands' && secrets.LLM_API_KEY || '' }}
         run: |
           env_file="${HOME}/.defenseclaw/.env"
           mkdir -p "${HOME}/.defenseclaw"
@@ -565,10 +557,6 @@ jobs:
               ;;
             cursor)
               write_key CURSOR_API_KEY "${CURSOR_API_KEY:-}"
-              ;;
-            openhands)
-              write_key OPENAI_API_KEY "${OPENAI_API_KEY:-}"
-              write_key LLM_API_KEY "${LLM_API_KEY:-}"
               ;;
             copilot|hermes|devin|antigravity)
               :
@@ -594,17 +582,16 @@ jobs:
       - name: Live driver
         if: ${{ steps.select.outputs.run == 'true' && !(matrix.connector == 'cursor' && steps.cursor_validate.outputs.cursor_hooks_fire == '0') }}
         env:
-          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode' || matrix.connector == 'openhands') && secrets.OPENAI_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode') && secrets.OPENAI_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ matrix.connector == 'claudecode' && secrets.ANTHROPIC_API_KEY || '' }}
           AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}
           CURSOR_API_KEY: ${{ matrix.connector == 'cursor' && secrets.CURSOR_API_KEY || '' }}
           COPILOT_GITHUB_TOKEN: ${{ matrix.connector == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
-          LLM_API_KEY: ${{ matrix.connector == 'openhands' && secrets.LLM_API_KEY || '' }}
-          AZURE_OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'openhands') && secrets.AZURE_OPENAI_API_KEY || '' }}
-          AWS_BEARER_TOKEN_BEDROCK: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
-          AWS_ACCESS_KEY_ID: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_ACCESS_KEY_ID || '' }}
-          AWS_SECRET_ACCESS_KEY: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_SECRET_ACCESS_KEY || '' }}
-          AWS_SESSION_TOKEN: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_SESSION_TOKEN || '' }}
+          AZURE_OPENAI_API_KEY: ${{ matrix.connector == 'codex' && secrets.AZURE_OPENAI_API_KEY || '' }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ matrix.connector == 'claudecode' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
+          AWS_ACCESS_KEY_ID: ${{ matrix.connector == 'claudecode' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ matrix.connector == 'claudecode' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          AWS_SESSION_TOKEN: ${{ matrix.connector == 'claudecode' && secrets.AWS_SESSION_TOKEN || '' }}
         run: bash scripts/live-connector-e2e/run.sh --layer live --connector "${{ matrix.connector }}"
 
       - name: Upload live results

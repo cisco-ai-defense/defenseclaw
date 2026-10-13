@@ -56,14 +56,17 @@ const (
 	windowsEnterpriseLastResult   = "last-result.json"
 	windowsEnterpriseLogMaxBytes  = 5 << 20
 	windowsEnterpriseLogGenerates = 5
-	// SYSTEM and Administrators write; users read, so a support engineer
-	// can collect the log without elevation.
-	windowsEnterpriseLogSDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+	// SYSTEM and Administrators write; Administrators and the Event Log
+	// Readers group read. Each line holds a full result, whose warnings name
+	// other accounts, their SIDs and guardrail profiles, so standard users
+	// may not read it (GAP-0421; until this release BUILTIN\Users read it).
+	windowsEnterpriseLogSDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-32-573)"
 )
 
 // The lifecycle events go to a dedicated classic event log whose CustomSD
 // lets only LocalSystem and Administrators write it (and clear it), while
-// the accounts that can read the Application log can still read it. Any
+// the accounts that can read the Application log can still read it, so an
+// event carries codes and no account (GAP-0421). Any
 // account can write Application-log entries under any source name, so the
 // Application-log copy under "DefenseClaw Enterprise" is kept only for
 // detection rules that have not moved yet (legacy; a later release drops
@@ -147,6 +150,15 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 			// The failed install created C:\Program Files\Cisco; its
 			// rollback emptied it.
 			removeEmptyWindowsEnterpriseInstallParent()
+		}
+		if windowsEnterprisePurgeRemovedMachineDeployment(result) {
+			// The machine deployment is gone; only per-user data stays, so
+			// the marker and the Add/Remove Programs entry go too. They kept
+			// an Intune registry detection rule saying installed, so the
+			// install command never ran again (GAP-0676).
+			err := removeWindowsEnterpriseRegistration()
+			removeEmptyWindowsEnterpriseInstallParent()
+			return err
 		}
 		return nil
 	}
@@ -605,6 +617,29 @@ func windowsEnterpriseRolledBackFirstInstall(result *enterprisestatus.Result) bo
 	if result == nil || result.OK || result.Installed || !windowsEnterpriseMutationAction(result.Action) {
 		return false
 	}
+	return windowsEnterpriseInstallRootGone()
+}
+
+// windowsEnterprisePurgeRemovedMachineDeployment reports a failed uninstall
+// whose only errors are per-user folders it could not remove (a purge that
+// did not run as LocalSystem) after it removed the machine deployment: the
+// result says not installed and the standalone install root is gone.
+func windowsEnterprisePurgeRemovedMachineDeployment(result *enterprisestatus.Result) bool {
+	if result == nil || result.OK || result.Installed || result.TransactionPending ||
+		result.Action != "uninstall" || len(result.Errors) == 0 {
+		return false
+	}
+	for _, message := range result.Errors {
+		if message.Code != "per_user_state_remaining" {
+			return false
+		}
+	}
+	return windowsEnterpriseInstallRootGone()
+}
+
+// windowsEnterpriseInstallRootGone reports that the standalone install root
+// does not exist. A seam for tests.
+var windowsEnterpriseInstallRootGone = func() bool {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return false
@@ -643,6 +678,13 @@ func writeWindowsEnterpriseLogEvent(logName string, id uint32, severity, message
 	}
 }
 
+// windowsEnterpriseEventMessage is the event text: the action, the result and
+// the code of each error and warning, never their messages. Every account can
+// read the Application log, and the messages name other accounts, their SIDs,
+// home folders and guardrail profiles (GAP-0421), so they stay in the
+// lifecycle log line with the same record, which only administrators and
+// Event Log Readers can read. include_user_principal does not change this:
+// it is for the administrator's destinations, not for a log every user reads.
 func windowsEnterpriseEventMessage(result *enterprisestatus.Result) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "DefenseClaw enterprise %s (standalone) ok=%t exit=%d version=%s",
@@ -653,11 +695,25 @@ func windowsEnterpriseEventMessage(result *enterprisestatus.Result) string {
 	if result.Noop {
 		fmt.Fprintf(&builder, " noop=%s", result.NoopReason)
 	}
-	for _, message := range result.Errors {
-		fmt.Fprintf(&builder, "\r\nerror %s: %s", message.Code, message.Message)
+	writeCodes := func(kind string, messages []enterprisestatus.Message) {
+		var codes []string
+		counts := map[string]int{}
+		for _, message := range messages {
+			if counts[message.Code]++; counts[message.Code] == 1 {
+				codes = append(codes, message.Code)
+			}
+		}
+		for _, code := range codes {
+			fmt.Fprintf(&builder, "\r\n%s %s", kind, code)
+			if counts[code] > 1 {
+				fmt.Fprintf(&builder, " (x%d)", counts[code])
+			}
+		}
 	}
-	for _, message := range result.Warnings {
-		fmt.Fprintf(&builder, "\r\nwarning %s: %s", message.Code, message.Message)
+	writeCodes("error", result.Errors)
+	writeCodes("warning", result.Warnings)
+	if len(result.Errors)+len(result.Warnings) != 0 {
+		fmt.Fprintf(&builder, "\r\ndetails: the %s line with this record (administrators)", windowsEnterpriseLogName)
 	}
 	text := builder.String()
 	if len(text) > 31000 {
@@ -707,7 +763,30 @@ func ensureWindowsEnterpriseLogDirectory(directory string) error {
 	if err := winpath.RejectReparseChain(directory); err != nil {
 		return err
 	}
-	return managed.ValidateTrustedRuntimeDir(directory, "enterprise lifecycle log directory")
+	if err := managed.ValidateTrustedRuntimeDir(directory, "enterprise lifecycle log directory"); err != nil {
+		return err
+	}
+	return protectWindowsEnterpriseLogDirectory(directory)
+}
+
+// protectWindowsEnterpriseLogDirectory writes the folder's access list again
+// on every run. A folder an earlier release created let BUILTIN\Users read
+// every result (GAP-0421); setting the DACL also gives the files in it the
+// new inherited entries.
+func protectWindowsEnterpriseLogDirectory(directory string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(windowsEnterpriseLogSDDL)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("protect %s: %w", directory, err)
+	}
+	return nil
 }
 
 // appendWindowsEnterpriseLifecycleLog appends one JSON line per run, keeps

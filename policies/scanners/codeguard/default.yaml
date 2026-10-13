@@ -4,12 +4,6 @@ version: 1
 name: default
 description: "Default CodeGuard policy — core security patterns"
 
-rule_dirs:
-  - rules/
-  - custom/
-
-max_file_size_kb: 256
-
 severity_overrides: {}
 
 disabled_rules: []

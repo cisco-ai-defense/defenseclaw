@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // policyFileLimit bounds every vendor policy read. Real files are a few KiB.
@@ -93,6 +94,27 @@ func takeBackPolicyPath(opts Options, path string, state *State) ([]string, erro
 		state.detail("%s", note)
 	}
 	return result.created, err
+}
+
+// TakeBackVendorPolicyFolder takes back dir, a vendor folder under
+// ProgramData that holds DefenseClaw machine state (the Codex requirements
+// folder and the hooks' runtime selectors), when a standard user created it
+// or one of its ancestors below ProgramData before DefenseClaw: each gets
+// DefenseClaw's owner and protected DACL, an object planted at a part of
+// the path is cleared, and what such a user put inside is moved aside to a
+// hidden name for an administrator to review, as for the Copilot and
+// OpenCode folders (machine-policy.mdx, Windows differences). It returns
+// what it did. Elsewhere, and for a missing folder, it does nothing.
+func TakeBackVendorPolicyFolder(opts Options, dir string) ([]string, error) {
+	if opts.SkipTrustChecks || opts.WindowsProgramData == "" {
+		return nil, nil
+	}
+	var state State
+	if _, err := takeBackPolicyPath(opts, filepath.Join(dir, ".defenseclaw-takeback"), &state); err != nil {
+		return state.Details, err
+	}
+	displaceUntrustedEntries(opts, platformPath(opts, dir), &state)
+	return state.Details, nil
 }
 
 // readPolicyFile returns (data, exists). The file must be a regular,

@@ -32,15 +32,3 @@ func ResolveRelativeGatewayDeviceKeyFile(keyFile, dataDir string) (string, bool)
 	}
 	return target, true
 }
-
-func normalizeRelativeGatewayDeviceKeyFile(candidate *Config) {
-	if candidate == nil || filepath.IsAbs(candidate.Gateway.DeviceKeyFile) {
-		return
-	}
-	if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(
-		candidate.Gateway.DeviceKeyFile,
-		candidate.DataDir,
-	); ok {
-		candidate.Gateway.DeviceKeyFile = resolved
-	}
-}

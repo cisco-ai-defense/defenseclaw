@@ -330,9 +330,10 @@ function Initialize-WrapperLog {
     try {
         if (-not (Test-Path -LiteralPath $directory)) {
             # Same descriptor the lifecycle uses: SYSTEM and Administrators
-            # write, users read.
+            # write, Administrators and Event Log Readers read. The results
+            # name other accounts, so standard users may not read them.
             $security = [System.Security.AccessControl.DirectorySecurity]::new()
-            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
+            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-32-573)')
             [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($directory), $security)
         }
         if (Test-DefenseClawAdminOnlyItem -Path $directory) {
@@ -450,6 +451,36 @@ function Test-WrapperAdminOnlyAncestors {
     return $true
 }
 
+function Get-WrapperUntrustedInputFix {
+    # Names the accounts that own or can change an input the admin-only check
+    # refused. The source folder may hold unrelated application data, so the
+    # wrapper never recommends changing its ACLs (GAP-1175).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sids = [System.Collections.Generic.List[string]]::new()
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($script:DefenseClawAdminSids -notcontains $owner) {
+        $sids.Add($owner)
+    }
+    # The rights Test-DefenseClawAdminOnlyItem refuses.
+    $dangerous = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        $sid = $rule.IdentityReference.Value
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if (($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+        if ($script:DefenseClawAdminSids -contains $sid -or $sids.Contains($sid)) { continue }
+        if (([int64]$rule.FileSystemRights -band $dangerous) -ne 0) { $sids.Add($sid) }
+    }
+    $accounts = foreach ($sid in $sids) {
+        try {
+            ([System.Security.Principal.SecurityIdentifier]::new($sid)).Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $sid
+        }
+    }
+    return [pscustomobject]@{ Accounts = @($accounts) }
+}
+
 function Copy-WrapperInput {
     # Copies a bounded input into staging. Config and credentials must come
     # from an administrator-only location because nothing verifies them
@@ -464,7 +495,13 @@ function Copy-WrapperInput {
         Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "$Label is not a regular file: $Source"
     }
     if ($RequireAdminOnly -and -not (Test-DefenseClawAdminOnlyItem -Path $Source)) {
-        Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "$Label is writable by a non-administrator: $Source"
+        $message = "$Label is writable by a non-administrator: $Source"
+        $fix = try { Get-WrapperUntrustedInputFix -Path $Source } catch { $null }
+        if ($null -ne $fix) {
+            if ($fix.Accounts.Count -gt 0) { $message += ' (' + ($fix.Accounts -join ', ') + ' can change it)' }
+        }
+        $message += '. Nothing was changed. Stage a trusted copy in a new administrator-only folder dedicated to DefenseClaw, then run the wrapper again with that path'
+        Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' $message
     }
     if ($RequireAdminOnly -and -not (Test-WrapperAdminOnlyAncestors -Path $Source)) {
         Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' "a folder above $Label can be renamed, deleted or re-permissioned by a non-administrator, or is a link: $Source; stage it in an administrator-only folder"

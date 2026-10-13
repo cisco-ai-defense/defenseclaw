@@ -65,7 +65,7 @@ The flags above explicitly set: connector, mode, and (optionally) rule pack. Eve
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
+| Check the result | `defenseclaw doctor` | none: setup no longer runs its own connectivity check |
 
 See [the full flag reference](/docs/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
 
@@ -137,8 +137,10 @@ defenseclaw setup zeptoclaw \
 ```
 
 Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
+that have already crossed the block threshold. The policy also writes the
+matching [admission](/docs/policies/admission) settings, including
+`allow_list_bypass_scan: false`, so first-party skills and plugins are scanned
+too.
 
 </Tab>
 

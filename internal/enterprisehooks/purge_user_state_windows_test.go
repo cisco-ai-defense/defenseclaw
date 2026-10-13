@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -113,5 +114,92 @@ func disableWindowsProcessPrivilegesForTest(t *testing.T, names ...string) {
 			t.Fatalf("disable %s: %v", name, err)
 		}
 		t.Cleanup(func() { _ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil) })
+	}
+}
+
+// GAP-0773: the purge lists the managed ACP folder of an account whose own
+// `enterprise acp setup` run created it (the account owns it), signed out,
+// revoked or ACP-only alike; a per-user install's folder stays.
+func TestWindowsManagedACPUserCopiesListsAccountOwnedManagedFolders(t *testing.T) {
+	previousSubkeys, previousPath := windowsProfileListSubkeyReader, windowsProfileImagePathReader
+	t.Cleanup(func() { windowsProfileListSubkeyReader, windowsProfileImagePathReader = previousSubkeys, previousPath })
+	sid := currentWindowsTestSID(t)
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"managed token copy and lock", []string{"zed-hermes.token", "zed-hermes.contract-lock.json"}, true},
+		{"locks of a revoked enrollment", []string{"jetbrains-kiro.contract-lock.json"}, true},
+		{"per-user install", []string{".token", "zed-hermes.contract-lock.json"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			acpDir := filepath.Join(home, ".defenseclaw", "acp")
+			if err := os.MkdirAll(acpDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(acpDir, name), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The account's own setup run owns the folder; an elevated test
+			// session would otherwise give it to Administrators.
+			if err := windows.SetNamedSecurityInfo(acpDir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			windowsProfileListSubkeyReader = func() ([]string, error) { return []string{sid.String()}, nil }
+			windowsProfileImagePathReader = func(string) (string, error) { return home, nil }
+			copies, err := WindowsManagedACPUserCopies()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(copies) == 1 && copies[0].Home == home; got != tc.want {
+				t.Fatalf("copies = %+v, want listed %t", copies, tc.want)
+			}
+		})
+	}
+}
+
+// GAP-1256: a standard user who makes their .defenseclaw a junction to
+// another account's gets that profile listed for the ACP purge, and the
+// purge, which runs as LocalSystem, refuses it and leaves the other
+// account's acp folder as found.
+func TestPurgeWindowsACPUserStateRefusesJunctionedDataDir(t *testing.T) {
+	previousCheck := windowsEnterpriseMutationIdentityCheck
+	previousSubkeys, previousPath := windowsProfileListSubkeyReader, windowsProfileImagePathReader
+	t.Cleanup(func() {
+		windowsEnterpriseMutationIdentityCheck = previousCheck
+		windowsProfileListSubkeyReader, windowsProfileImagePathReader = previousSubkeys, previousPath
+	})
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	sid := currentWindowsTestSID(t)
+	home := filepath.Join(t.TempDir(), "home")
+	other := filepath.Join(t.TempDir(), "other", ".defenseclaw")
+	token := filepath.Join(other, "acp", "zed-hermes.token")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", filepath.Join(home, ".defenseclaw"), other).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	windowsProfileListSubkeyReader = func() ([]string, error) { return []string{sid.String()}, nil }
+	windowsProfileImagePathReader = func(string) (string, error) { return home, nil }
+	copies, err := WindowsManagedACPUserCopies()
+	if err != nil || len(copies) != 1 || copies[0].Home != home {
+		t.Fatalf("copies = %+v, %v; want the junctioned profile listed for a refusal", copies, err)
+	}
+	if err := PurgeWindowsACPUserState(home, sid.String()); err == nil || !strings.Contains(err.Error(), "link or junction") {
+		t.Fatalf("purge through a junctioned .defenseclaw = %v, want a refusal", err)
+	}
+	if _, err := os.Stat(token); err != nil {
+		t.Fatalf("the purge followed the junction and removed %s: %v", token, err)
 	}
 }

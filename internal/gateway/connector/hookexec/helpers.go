@@ -23,8 +23,9 @@ import (
 	"path/filepath"
 )
 
-// readCapped reads up to max bytes from r. It returns overflow=true (and an
-// empty payload) when the input exceeds max, mirroring
+// readCapped reads up to max bytes from r. It returns overflow=true (and the
+// first max bytes, which no caller hands on as the payload) when the input
+// exceeds max, mirroring
 // defenseclaw_read_stdin_capped: refuse, don't truncate. A 1-byte probe past
 // the cap detects the overflow without buffering an unbounded body.
 func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err error) {
@@ -37,7 +38,8 @@ func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err erro
 		return nil, false, err
 	}
 	if int64(len(data)) > max {
-		return nil, true, nil
+		// The prefix the cap kept: callers read only its leading fields.
+		return data[:max], true, nil
 	}
 	return data, false, nil
 }

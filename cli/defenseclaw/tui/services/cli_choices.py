@@ -92,6 +92,14 @@ WIZARD_LLM_PROVIDERS: tuple[str, ...] = (
     "lm_studio",
 )
 
+
+# Scanner policy presets (``defenseclaw.scanner.settings.POLICY_PRESETS``).
+SKILL_SCANNER_POLICIES: tuple[str, ...] = ("strict", "balanced", "permissive", "low-noise", "quiet")
+
+# ``setup skill-scanner`` / ``setup mcp-scanner --llm-provider`` choices
+# (``_SCANNER_LLM_PROVIDERS`` in ``cmd_setup.py``).
+SCANNER_LLM_PROVIDERS: tuple[str, ...] = (*WIZARD_LLM_PROVIDERS, "openai-compatible")
+
 # Subset used by the LLM provider override field (``setup llm``). The
 # leading empty string keeps "no override" pickable from the choice
 # widget without a separate code path.

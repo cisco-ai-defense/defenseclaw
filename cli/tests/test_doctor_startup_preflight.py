@@ -177,6 +177,29 @@ def test_doctor_on_an_uninitialized_install_points_to_init_only(
     assert json.loads((data_dir / "doctor_cache.json").read_text())["failed"] == 1
 
 
+def test_doctor_json_on_a_managed_device_agrees_with_the_exit_code(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0239: the process exited 3 while the JSON said healthy with exit_code 0, under a v8 check id.
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setattr("defenseclaw.config_writer.machine_managed_standalone", lambda: True)
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 3, result.output
+    payload = json.loads(result.output)
+    assert (payload["outcome"], payload["exit_code"]) == ("managed", 3)
+    check = payload["checks"][0]
+    assert (check["status"], check["reason_code"]) == ("skip", "managed-device")
+    assert check["check_id"] == "doctor.config.validation"
+
+
 def test_non_doctor_command_keeps_store_initialization() -> None:
     """The Doctor exemption must not weaken ordinary command startup."""
 

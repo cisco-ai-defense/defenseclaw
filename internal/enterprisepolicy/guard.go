@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -613,6 +613,8 @@ func ownedCommand(command, hookBinary string) bool {
 	if strings.EqualFold(command, hookBinary) {
 		return true
 	}
+	// Copilot commands start with the removed-deployment guard.
+	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(hookBinary))
 	rest, ok := strings.CutPrefix(command, shellQuote(hookBinary)+" hook --connector ")
 	if !ok {
 		return false
@@ -674,14 +676,6 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "…"
-}
-
-// readGuardFile reads a user or project file without following links or
-// blocking. Anything at the path that is not a regular file (a FIFO a
-// background writer feeds, a device, a socket, a directory) exists but
-// cannot be verified, so the guard and the cleanup fail closed on it.
-func readGuardFile(path string) ([]byte, bool, error) {
-	return readGuardFileLimit(path, guardFileLimit)
 }
 
 func readGuardFileLimit(path string, limit int64) ([]byte, bool, error) {
@@ -874,7 +868,7 @@ func (s *guardScan) scanJSONHooks(source hookSource, data []byte) []Finding {
 func (s *guardScan) scanCodexTOML(source hookSource, data []byte) []Finding {
 	req := s.req
 	cfg := map[string]any{}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := connector.ParseCodexTOML(data, &cfg); err != nil {
 		return []Finding{s.unreadable(source, err)}
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
@@ -1114,7 +1108,7 @@ func decodeGuardDocument(data []byte) (*object, bool, error) {
 	if err == nil {
 		return doc, true, nil
 	}
-	relaxed, relaxedErr := decodeOrderedObject(stripJSONCTrailingCommas(stripJSONCComments(data)))
+	relaxed, relaxedErr := decodeOrderedObject(jsonc.Strip(data))
 	if relaxedErr != nil {
 		return nil, false, err
 	}

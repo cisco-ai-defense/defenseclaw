@@ -30,13 +30,19 @@ else
     pip install --upgrade pip
 fi
 
-echo ""
-echo "Installing skill-scanner (cisco-ai-skill-scanner)..."
-$INSTALLER cisco-ai-skill-scanner
+# The same scanner versions as the DefenseClaw release (pyproject.toml).
+# mcp-scanner stays on 4.3.0: every 4.8.x pins litellm==1.93.0, which is
+# vulnerable to CVE-2026-84377. skill-scanner 2.2.1 needs Python 3.11+.
+SKILL_SCANNER_VERSION=2.2.1
+MCP_SCANNER_VERSION=4.3.0
 
 echo ""
-echo "Installing mcp-scanner (cisco-ai-mcp-scanner)..."
-$INSTALLER cisco-ai-mcp-scanner
+echo "Installing skill-scanner (cisco-ai-skill-scanner ${SKILL_SCANNER_VERSION})..."
+$INSTALLER "cisco-ai-skill-scanner==${SKILL_SCANNER_VERSION}"
+
+echo ""
+echo "Installing mcp-scanner (cisco-ai-mcp-scanner ${MCP_SCANNER_VERSION})..."
+$INSTALLER "cisco-ai-mcp-scanner==${MCP_SCANNER_VERSION}" "litellm>=1.91.5,<1.92.0"
 
 echo ""
 echo "Installing aibom (cisco-aibom)..."

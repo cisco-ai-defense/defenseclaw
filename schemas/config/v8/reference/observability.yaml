@@ -47,9 +47,9 @@ observability:
   resource:
     attributes:
       service.name: defenseclaw-gateway
-      deployment.environment: production
-  # Process-wide trace sampling, semantic-convention profile, compatibility
-  # aliases, and hard payload limits. Bucket collection runs before sampling.
+      deployment.environment.name: production
+  # Process-wide trace sampling, semantic-convention profile, and hard
+  # payload limits. Bucket collection runs before sampling.
   trace_policy:
     # Samplers: always_on/off, traceidratio, or their parentbased variants.
     sampler: parentbased_traceidratio
@@ -58,8 +58,6 @@ observability:
     # Immutable registry profile combining OTel GenAI portability with
     # DefenseClaw lifecycle, guardrail, evidence, and security attributes.
     semantic_profile: defenseclaw-genai-rich-v1
-    # Temporarily emit documented legacy aliases from the same redacted value.
-    compatibility_aliases: true
     # Hard per-span/event/message limits; truncation stays deterministic.
     limits:
       max_attributes_per_span: 128

@@ -37,7 +37,6 @@ of those drop silently again, this test fails.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import unittest
@@ -90,6 +89,7 @@ WIZARD_EMIT_FIXTURE: dict = {
         },
     ],
     "guardrail": {
+        "mode": "action",
         "block_threshold": 4,
         "alert_threshold": 2,
         "cisco_trust_level": "advisory",
@@ -126,27 +126,11 @@ WIZARD_EMIT_FIXTURE: dict = {
 
 class TestPlaygroundEndToEnd(unittest.TestCase):
     """B3: walk the full operator path from wizard output → activate
-    → assert config.yaml + data.json reflect every field the wizard
-    sent."""
+    → assert config.yaml reflects every enforced field the wizard sent."""
 
     def setUp(self) -> None:
         self.app, self.tmp_dir, self.db_path = make_app_context()
         os.makedirs(self.app.cfg.policy_dir, exist_ok=True)
-        # The activator updates ``policies/rego/data.json``; seed it
-        # with the minimum required shape so _sync_opa_data has
-        # something to mutate.
-        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
-        os.makedirs(rego_dir, exist_ok=True)
-        self.data_json_path = os.path.join(rego_dir, "data.json")
-        with open(self.data_json_path, "w") as f:
-            json.dump(
-                {
-                    "config": {},
-                    "actions": {},
-                    "severity_ranking": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
-                },
-                f,
-            )
         # Drop the synthetic wizard emit into the policy dir as if the
         # operator pasted it from the docs-site download.
         self.policy_path = os.path.join(
@@ -162,17 +146,20 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
     def _invoke(self, args: list[str]):
         return self.runner.invoke(policy, args, obj=self.app, catch_exceptions=False)
 
-    def test_activate_propagates_every_field_through_to_config_and_data_json(self) -> None:
+    def test_activate_propagates_every_field_through_to_config(self) -> None:
         result = self._invoke(["activate", "wizard-end-to-end"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
 
         # --- config.yaml mutations -------------------------------------
-        # Skill-action matrix.
+        # Skill-action matrix -> admission defaults.
         self.assertEqual(
-            self.app.cfg.skill_actions.critical.install,
+            self.app.cfg.admission.defaults.actions["critical"]["install"],
             "block",
             "skill_actions.critical.install was not applied",
         )
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+        # HITL is not part of a preset: the wizard's hilt is not applied (GAP-1304).
+        self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
         # Watch.
         self.assertTrue(self.app.cfg.watch.rescan_enabled)
         self.assertEqual(self.app.cfg.watch.rescan_interval_min, 30)
@@ -205,51 +192,19 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             persisted["cisco_ai_defense"]["endpoint"],
             "https://aid.example.com",
         )
+        self.assertEqual(persisted["guardrail"]["mode"], "action")
 
-        # --- data.json mutations ---------------------------------------
-        with open(self.data_json_path) as f:
-            data = json.load(f)
-
-        # Policy name + admission.
-        self.assertEqual(data["config"]["policy_name"], "wizard-end-to-end")
-        self.assertTrue(data["config"]["scan_on_install"])
-        self.assertFalse(data["config"]["allow_list_bypass_scan"])
-        self.assertEqual(data["config"]["max_enforcement_delay_seconds"], 2)
-
-        # OPA action matrix is uppercased on the way through.
-        self.assertEqual(
-            data["actions"]["CRITICAL"]["runtime"],
-            "block",
-            "runtime=disable must map to opa_runtime=block",
-        )
-        self.assertEqual(data["actions"]["LOW"]["runtime"], "allow")
-
-        # Scanner overrides preserved with severity case-folded.
-        self.assertIn("mcp", data["scanner_overrides"])
-        self.assertEqual(
-            data["scanner_overrides"]["mcp"]["MEDIUM"]["runtime"],
-            "block",
-        )
-
-        # Guardrail thresholds + HILT.
-        self.assertEqual(data["guardrail"]["block_threshold"], 4)
-        self.assertTrue(data["guardrail"]["hilt"]["enabled"])
-        self.assertEqual(data["guardrail"]["hilt"]["min_severity"], "MEDIUM")
-        # Custom patterns propagate.
-        self.assertIn("token:", data["guardrail"]["patterns"]["secrets"])
-
-        # Firewall.
-        self.assertEqual(data["firewall"]["default_action"], "deny")
-        self.assertIn("c2.evil.example", data["firewall"]["blocked_destinations"])
-
-        # First-party allow-list merge preserved source_path_contains.
-        fp = data["first_party_allow_list"]
-        plugin_entry = next(
-            (e for e in fp if e.get("target_name") == "defenseclaw"), None
-        )
+        # --- admission and guardrail -----------------------------------
+        adm = self.app.cfg.admission
+        self.assertTrue(adm.defaults.scan_on_install)
+        self.assertFalse(adm.defaults.allow_list_bypass_scan)
+        self.assertEqual(adm.defaults.actions["critical"]["runtime"], "disable")
+        self.assertEqual(adm.defaults.actions["low"]["runtime"], "enable")
+        self.assertEqual(adm.mcp.actions["medium"]["runtime"], "disable")
+        plugin_entry = next((e for e in adm.plugin.first_party_allow_list if e.name == "defenseclaw"), None)
         self.assertIsNotNone(plugin_entry)
-        self.assertIn(".defenseclaw", plugin_entry["source_path_contains"])
-
+        self.assertIn(".defenseclaw", plugin_entry.source_path_contains)
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
 if __name__ == "__main__":  # pragma: no cover — unittest discovery
     unittest.main()

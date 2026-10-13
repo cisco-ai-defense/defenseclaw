@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -217,7 +218,9 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
         "DEFENSE" + "CLAW_DISABLE_REDACTION",
         "DEFENSECLAW_DUMP_RAW_SECRETS",
-        # The managed profile pin comes only from the service definition.
+        # The managed deployment mode and profile pins come only from the
+        # service definition.
+        "DEFENSECLAW_DEPLOYMENT_MODE",
         "DEFENSECLAW_ENTERPRISE_PROFILE",
         "DEFENSECLAW_FAIL_MODE",
         "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
@@ -345,12 +348,41 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     move_file_ex = kernel32.MoveFileExW
     move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
     move_file_ex.restype = wintypes.BOOL
-    if not move_file_ex(
-        _windows_extended_path(source_path),
-        _windows_extended_path(target_path),
-        movefile_replace_existing | movefile_write_through,
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
+    code = _move_retrying_sharing_errors(
+        lambda: bool(
+            move_file_ex(
+                _windows_extended_path(source_path),
+                _windows_extended_path(target_path),
+                movefile_replace_existing | movefile_write_through,
+            )
+        ),
+        ctypes.get_last_error,
+    )
+    if code:
+        raise ctypes.WinError(code)
+
+
+# ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: a reader that opened the
+# target without FILE_SHARE_DELETE (another DefenseClaw process, an indexer,
+# antivirus) makes MoveFileExW fail for a moment.
+_TRANSIENT_MOVE_ERRORS = frozenset({5, 32})
+
+
+def _move_retrying_sharing_errors(
+    move: Callable[[], bool], last_error: Callable[[], int], sleep: Callable[[float], None] = time.sleep
+) -> int:
+    """Run *move* until it succeeds (0) or fails with a non-transient error
+    or eight times (that error code), backing off as the Go writer does."""
+    delay = 0.01
+    for attempt in range(1, 9):
+        if move():
+            return 0
+        code = last_error()
+        if code not in _TRANSIENT_MOVE_ERRORS or attempt == 8:
+            return code
+        sleep(delay)
+        delay = min(delay * 2, 0.08)
+    return 0
 
 
 def delete_file_durable(path: str | os.PathLike[str]) -> None:
@@ -1618,7 +1650,9 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     return None
 
 
-def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+def windows_acl_custody_confidentiality_error(
+    path: str | os.PathLike[str], *, allow_inheritable: bool = False
+) -> str | None:
     """Validate a current-user secret managed by Windows system controllers.
 
     The gateway's connector-token trust model admits the current user,
@@ -1627,7 +1661,8 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     Generic user-secret validation remains stricter; this predicate is for
     that managed-token boundary only. Every other effective read or write ACE,
     a foreign owner, an inheritable or null DACL, or missing owner/SYSTEM access
-    still fails.
+    still fails. ``allow_inheritable`` skips only the inheritance check, to
+    tell a file that just needs its DACL sealed from one that is exposed.
     """
 
     if os.name != "nt":
@@ -1648,7 +1683,7 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
     try:
-        dacl_protected = _windows_dacl_is_protected(path)
+        dacl_protected = allow_inheritable or _windows_dacl_is_protected(path)
     except OSError as exc:
         return f"cannot inspect Windows DACL protection ({exc})"
     if not dacl_protected:
@@ -1689,12 +1724,17 @@ def _protect_private_directory(path: str) -> None:
             _set_windows_owner_only_acl(path)
         except PermissionError as exc:
             # A managed install's DACL (read-only OWNER RIGHTS) denies the
-            # owner WRITE_DAC; name the folder and the way out.
+            # owner WRITE_DAC. When that DACL still admits only this account
+            # and Windows itself, the folder is already private: use it as it
+            # is instead of locking DefenseClaw out of a folder it set up
+            # (GAP-1243). Anything else names the folder and the way out.
+            if windows_acl_custody_confidentiality_error(path) is None:
+                return
             raise PermissionError(
                 exc.errno,
                 f"cannot protect private directory {path}: its access control list does not let this "
-                "account change it (a managed DefenseClaw install can leave it that way); remove the "
-                "folder, or have an administrator reset its access, then run the command again",
+                "account change it (a managed DefenseClaw install can leave it that way); have an "
+                f'administrator reset its access (icacls "{path}" /reset /t), then run the command again',
             ) from exc
         problem = windows_acl_write_error(path)
         if problem is not None:

@@ -42,7 +42,9 @@ CRITICAL findings always block, with or without HITL.
 DefenseClaw has three parts: the `defenseclaw` CLI, which sets everything up and
 shows you what happened; the `defenseclaw-gateway` sidecar, which makes every
 decision and records it; and a connector for each agent, the hooks or plugin
-that send the agent's prompts and tool calls to the gateway.
+that send the agent's prompts and tool calls to the gateway. Every decision
+you make lives in one file, `~/.defenseclaw/config.yaml`
+([how that works](/docs/reference/source-of-truth)).
 [What is DefenseClaw?](/docs/get-started/what-is-defenseclaw) shows the
 architecture and explains what DefenseClaw doesn't protect against.
 
@@ -53,6 +55,7 @@ architecture and explains what DefenseClaw doesn't protect against.
   <Card title="Guardrail" href="/docs/guardrail" description="The central setup command: modes, scanner backends, rule packs, the LLM judge and HITL." />
   <Card title="Observe, action and HITL" href="/docs/hitl" description="Three modes that build on each other. Start by logging, then block, then ask a person when needed." />
   <Card title="OpenShell sandboxes" href="/docs/sandboxes" description="Preview: run a coding agent inside an NVIDIA OpenShell sandbox on Linux or an Apple-silicon Mac." />
+  <Card title="Sandboxes on managed computers" href="/docs/enterprise/sandboxes" description="Enterprise: sandbox policy by directory group, required sandboxes, MicroVMs on Linux and macOS." />
   <Card title="Support matrix" href="/docs/support-matrix" description="Which agents and features work on Linux, macOS and Windows, in each edition." />
   <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files and environment variables." />
 </Cards>

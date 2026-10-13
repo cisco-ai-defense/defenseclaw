@@ -73,6 +73,27 @@ class CliSmokeTests(unittest.TestCase):
             if group == "mcp":
                 self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
 
+    def test_help_never_shows_internal_ledger_ids(self):
+        # Ledger ids belong in code comments and commit messages; click
+        # prints command docstrings and option help to users.
+        import re
+
+        import click
+        from defenseclaw.main import cli
+
+        leaks = []
+
+        def walk(command, ctx):
+            if re.search(r"GAP-\d", command.get_help(ctx)):
+                leaks.append(ctx.command_path)
+            if isinstance(command, click.Group):
+                for name in command.list_commands(ctx):
+                    sub = command.get_command(ctx, name)
+                    walk(sub, click.Context(sub, info_name=name, parent=ctx))
+
+        walk(cli, click.Context(cli, info_name="defenseclaw"))
+        self.assertEqual(leaks, [])
+
     def test_init_help_works(self):
         from defenseclaw.main import cli
 
@@ -110,7 +131,7 @@ class CliSmokeTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["path"], expected)
             document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            self.assertEqual(document["config_version"], 8)
+            self.assertEqual(document["config_version"], 9)
             self.assertEqual(
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected],
@@ -470,7 +491,7 @@ class CliSmokeTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("Configuration schema v8 is required", result.output)
+            self.assertIn("written by an older DefenseClaw", result.output)
             self.assertEqual(config_file.read_text(encoding="utf-8"), original)
             self.assertFalse((home / "audit.db").exists())
 
@@ -572,7 +593,7 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(config_exists)
-        self.assertIn("config_version: 8", config_text)
+        self.assertIn("config_version: 9", config_text)
         self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
         self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -135,6 +137,10 @@ type Event struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
+	// RulePackDirInEnvelope marks a Secure Client hook row, whose directory
+	// rides in the structured envelope and the raw column as on main, not in
+	// a path-class record field (issue #1092).
+	RulePackDirInEnvelope bool `json:"-"`
 
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
@@ -216,6 +222,10 @@ type Store struct {
 	dbPath      string
 	dbPathGuard *preparedAuditDatabasePath
 
+	// secureClientSchema keeps the tables, columns and indexes main creates
+	// (WithSecureClientSchema).
+	secureClientSchema bool
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
@@ -227,8 +237,16 @@ type Store struct {
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
 
+	// plannerStatsRows is the history size at the last ANALYZE
+	// (RefreshPlannerStatistics).
+	plannerStatsRows atomic.Int64
+
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+
+	// progress receives the one-line notes Init writes while it applies
+	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
+	progress io.Writer
 
 	// findingLifecycleMu serializes the one mutable state projection and its
 	// process-local up/down-counter baselines. SQLite serializes these writers
@@ -236,6 +254,23 @@ type Store struct {
 	// publishing two current-state baselines after a runtime restart/reload.
 	findingLifecycleMu      sync.Mutex
 	findingGaugeInitialized map[string]struct{}
+}
+
+// SetMigrationProgress sends the notes Init writes while it applies
+// migrations ("[audit] applying migration N: ...") to w instead of stderr.
+// The daemon keeps stderr, which is its time-stamped gateway.log; the
+// launcher and one-shot commands pass io.Discard, so an upgrade's installer
+// output does not carry an internal description per migration (GAP-0153).
+// Call it before Init.
+func (s *Store) SetMigrationProgress(w io.Writer) {
+	s.progress = w
+}
+
+func (s *Store) migrationProgress() io.Writer {
+	if s.progress != nil {
+		return s.progress
+	}
+	return os.Stderr
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -344,7 +379,11 @@ func buildAuditPragmas() string {
 // becomes a problem, we can introduce a separate read-only pool
 // without touching this hot path.
 func openSQLite(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath+auditPragmas)
+	return openSQLiteWithPragmas(dbPath, auditPragmas)
+}
+
+func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
@@ -354,12 +393,30 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func NewStore(dbPath string) (*Store, error) {
-	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
+	return newStoreWithHooks(dbPath, auditDBPathHooks{}, opts...)
+}
+
+func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
+	store := &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store, nil
+}
+
+// StoreOption configures a Store when it is opened.
+type StoreOption func(*Store)
+
+// WithSecureClientSchema keeps audit.db identical to main's on a Secure
+// Client host: the indexes no query reads stay (#1092, GAP-0253). Every
+// opener on such a host sets it.
+func WithSecureClientSchema() StoreOption {
+	return func(s *Store) { s.secureClientSchema = true }
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1780,80 +1837,12 @@ var migrations = []migration{
 		apply:       migrateFindingLifecycleState,
 	},
 	{
-		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
-		apply:       migrateToolChainLineageState,
-	},
-	{
-		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
-		apply:       migrateToolChainDerivedLineageState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to nine result slots",
-		apply:       migrateToolChainExpandedCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to ten result slots",
-		apply:       migrateToolChainTenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to eleven result slots",
-		apply:       migrateToolChainElevenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to twelve result slots",
-		apply:       migrateToolChainTwelveSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to thirteen result slots",
-		apply:       migrateToolChainThirteenSlotCatalogState,
-	},
-	{
-		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
-		apply:       migrateToolChainFourteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
-		apply:       migrateToolChainEighteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
-		apply:       migrateToolChainTwentySlotValueLineageState,
-	},
-	{
-		description: "guardrails: reserve append-only bounded chain mask capacity",
-		apply:       migrateToolChainAppendOnlyMaskCapacity,
-	},
-	{
 		description: "guardrails: bind pending SQL value sources to authoritative results",
 		apply:       migrateToolChainSQLValueSourceState,
 	},
 	{
-		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
-		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-two for compromised credential authentication",
-		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
-	},
-	{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
-		apply:       migrateToolChainTwentyThreeSlotADCSState,
-	},
-	{
-		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
-		apply:       migrateToolChainTwentyFourSlotS4UState,
-	},
-	{
-		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
-		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
-	},
-	{
-		description: "guardrails: add result slot twenty-six for exact file-email lineage",
-		apply:       migrateToolChainTwentySixSlotFileEmailState,
 	},
 }
 
@@ -1869,6 +1858,35 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 		return false, fmt.Errorf("audit: sqlite_master lookup for %q: %w", table, err)
 	}
 	return count > 0, nil
+}
+
+// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// writes several audit rows, and each index is another B-tree page per row in
+// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
+// after the migrations, which still create them as main does. The schema
+// version does not move, so an older binary opened on the store after a
+// rollback runs without them.
+var unreadAuditIndexes = []struct{ name, create string }{
+	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
+	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
+	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
+	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
+	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+}
+
+// trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
+// store makes sure they exist, so its schema stays main's.
+func (s *Store) trimUnreadAuditIndexes() error {
+	for _, index := range unreadAuditIndexes {
+		statement := "DROP INDEX IF EXISTS " + index.name
+		if s.secureClientSchema {
+			statement = index.create
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Init() error {
@@ -1912,11 +1930,16 @@ func (s *Store) Init() error {
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
-		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		fmt.Fprintf(s.migrationProgress(), "[audit] applying migration %d: %s\n", ver, m.description)
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
 		purgedHistory = purgedHistory || (current > 0 && m.description == historicalEvidencePurgeMigrationDescription)
+	}
+	// Before the reclaim below, so the dropped indexes' pages are reclaimed
+	// with the purged history.
+	if err := s.trimUnreadAuditIndexes(); err != nil {
+		return err
 	}
 	if purgedHistory {
 		s.reclaimPurgedHistory()
@@ -2026,6 +2049,30 @@ func (s *Store) DatabasePath() string {
 		return ""
 	}
 	return s.dbPath
+}
+
+// DatabaseFileReplaced reports whether the database path no longer names
+// the file this store opened: it was deleted or replaced while the gateway
+// ran. SQLite keeps writing to the open, unlinked file, so every new audit
+// record is lost until the gateway opens the store again (GAP-0325).
+func (s *Store) DatabaseFileReplaced() bool {
+	if s == nil {
+		return false
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed || s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
+		return false
+	}
+	pinned, err := s.dbPathGuard.pinned.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Lstat(s.dbPathGuard.path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	return err == nil && !os.SameFile(pinned, current)
 }
 
 // acquireReady pins the store against Close for one mandatory v8 transaction.
@@ -3490,6 +3537,32 @@ const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny
 	'fail','failed','failure','quarantine','quarantined','reject','rejected',
 	'revoked','terminated','timed_out'`
 
+// SandboxEgressCodeHarnessFetch is the decision code of a refused request a
+// sandbox's harness makes on its own and does without (OpenCode's model
+// catalog, the Codex tip download). The refusal is expected: it is audited
+// at INFO, but no alert (GAP-0130). Mirrors
+// ALERT_AUDIT_ONLY_DECISION_CODES in cli/defenseclaw/alert_semantics.py.
+const SandboxEgressCodeHarnessFetch = "SANDBOX_EGRESS_HARNESS_FETCH"
+
+// SandboxEgressCodeLookupRefused is the decision code of OpenShell's refusal
+// of a sandbox's name lookup. OpenShell judges the connection that follows
+// on its own, and that denial is the alert; the lookup is audited at INFO
+// (GAP-0134).
+const SandboxEgressCodeLookupRefused = "SANDBOX_EGRESS_LOOKUP_REFUSED"
+
+// auditOnlyEgressCode reports a decision code of a refusal that is audited
+// only: no alert, no defenseclaw.egress.events point and no blocked count on
+// the Sandboxes dashboard.
+func auditOnlyEgressCode(code string) bool {
+	return code == SandboxEgressCodeHarnessFetch || code == SandboxEgressCodeLookupRefused
+}
+
+// auditOnlyEgressSQL keeps the refusals that are audited only off the alert
+// queue.
+const auditOnlyEgressSQL = `COALESCE(CASE WHEN json_valid(COALESCE(event.payload_json,''))
+		THEN json_extract(event.payload_json, '$."defenseclaw.network.decision_code"') END, '')
+		NOT IN ('` + SandboxEgressCodeHarnessFetch + `','` + SandboxEgressCodeLookupRefused + `')`
+
 func canonicalAlertOutcomeSQL() string {
 	return `LOWER(COALESCE(
 		CASE WHEN json_valid(COALESCE(event.payload_json,''))
@@ -3548,6 +3621,10 @@ func connectorEnforcedAlertSQL() string {
 	)`
 }
 
+// alertEligibilitySQL is the one alert-queue predicate. The legacy finding
+// actions are alerts when their severity is real, whether an older gateway
+// wrote them without a bucket or a current one files them under
+// security.finding with a legacy.audit.* event name (GAP-0187).
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
@@ -3589,21 +3666,27 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 		OR (
 			event.bucket IN ('enforcement.action','network.egress')
 			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			AND ` + auditOnlyEgressSQL + `
 		)
 		OR (
 			event.bucket IN ('platform.health','diagnostic')
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
-			event.bucket IS NULL
+			event.action IN (` + legacyActionPlaceholders + `)
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
 			AND (
-				(
-					event.action IN (` + legacyActionPlaceholders + `)
-					AND UPPER(COALESCE(event.severity,'')) IN
-						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				event.bucket IS NULL
+				OR (
+					event.bucket = 'security.finding'
+					AND event.event_name LIKE 'legacy.audit.%'
 				)
-				OR ` + legacyExplicit + `
 			)
+		)
+		OR (
+			event.bucket IS NULL
+			AND ` + legacyExplicit + `
 		)
 	)`
 }
@@ -4266,6 +4349,18 @@ func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes
 	return nil
 }
 
+// DeleteTargetSnapshot drops the rescan baseline of a target that left its
+// path, so a later copy at that path is a new install, not an unchanged one.
+func (s *Store) DeleteTargetSnapshot(targetType, targetPath string) error {
+	if _, err := s.execDB(context.Background(), "audit",
+		`DELETE FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+		targetType, targetPath,
+	); err != nil {
+		return fmt.Errorf("audit: delete target snapshot: %w", err)
+	}
+	return nil
+}
+
 // ListNetworkEgressEvents returns recent egress events. Optionally filter by
 // hostname prefix (empty string returns all). Results are newest-first.
 func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEgressRow, error) {
@@ -4420,7 +4515,7 @@ func currentRunID() string {
 	if v := gatewaylog.ProcessRunID(); v != "" {
 		return v
 	}
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	return strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 }
 
 // processAgentInstanceID holds the per-process agent instance ID that

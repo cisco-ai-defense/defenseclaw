@@ -95,7 +95,7 @@ func TestGuardrailProxyAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
 		if tok != "" {
 			req.Header.Set("X-DC-Auth", "Bearer "+tok)
 		}
-		if got := proxy.authenticateRequest(httptest.NewRecorder(), req); got != want {
+		if _, got := proxy.authenticateRequest(req); got != want {
 			t.Errorf("token %q: authenticated = %v, want %v", tok, got, want)
 		}
 	}

@@ -30,12 +30,14 @@ ADDITIONAL_RUNTIME_SOURCES = (
 # These implementations have no valid target-runtime use. Their presence is a
 # hard failure even when no current caller happens to reference them.
 REMOVED_RUNTIME_PATHS = (
-    # The legacy openshell-sandbox (0.0.x) standalone integration. Only the
-    # consented legacy cleanup (cli/defenseclaw/sandbox_legacy.py) and the
-    # bind shim (internal/config/legacy_openshell.go) remain. The OpenShell
-    # 0.1 integration's command lives in internal/cli/sandbox.go again.
+    # The legacy openshell-sandbox (0.0.x) standalone integration, its
+    # cleanup command and its API bind shim (the config_version 9 migration
+    # resets what the shim read). The OpenShell 0.1 integration's command
+    # lives in internal/cli/sandbox.go again.
     "cli/defenseclaw/commands/cmd_init_sandbox.py",
     "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+    "cli/defenseclaw/sandbox_legacy.py",
+    "internal/config/legacy_openshell.go",
     "internal/audit/openshell_metrics_v8.go",
     "internal/cli/policy_diff.go",
     "internal/enforce/mcp_enforcer.go",
@@ -66,16 +68,11 @@ class Rule:
     suffixes: tuple[str, ...] = (".go", ".py")
 
 
-# Exact compatibility boundaries. They may decode or reject v7 source, but may
-# not construct a target runtime. Runtime callsites outside these paths fail.
+# Exact compatibility boundaries: the strict YAML entrypoint that rejects a v7
+# key, and the one-way upgrade conversion. Runtime callsites outside these paths
+# fail.
 LEGACY_CONFIG_BOUNDARIES = (
-    "internal/config/config.go",
-    "internal/config/sinks.go",
     "internal/config/yaml_v8.go",
-    "cli/defenseclaw/config.py",
-    # Recovery commands can classify credentials before a v7 source has been
-    # upgraded; exact-v8 classification still resolves canonical destinations.
-    "cli/defenseclaw/credentials.py",
     "cli/defenseclaw/migrations.py",
     "cli/defenseclaw/observability/v8_migration.py",
 )
@@ -111,8 +108,7 @@ RULES = (
             r"\b(?:LookPath|Command|which)\(\s*[\"']openshell-sandbox[\"']|"
             r"\bWriteSandboxPolicy\b|\bEvaluateSandbox\b|\bopenclaw_cmd_prefix\b",
         ),
-        "the legacy openshell-sandbox (0.0.x) runtime was removed; the only surviving code is the "
-        "consented legacy-cleanup and the bind shim, which never run or supervise the binary",
+        "the legacy openshell-sandbox (0.0.x) runtime was removed",
     ),
     Rule(
         "legacy-openshell-sandbox-launcher",
@@ -180,6 +176,16 @@ RULES = (
         "target Go code may not read legacy observability config",
         allowed_prefixes=LEGACY_CONFIG_BOUNDARIES,
         include_tests=False,
+        suffixes=(".go",),
+    ),
+    Rule(
+        "legacy-go-config-decoder",
+        re.compile(
+            r"\bCurrentConfigVersion\b|\bmigrateConfig\(|\bmigrateFlatOTelConfigFromViper\b|"
+            r"\bdetectLegacySplunk\b|\bOTelDestinationConfig\b|\bconfig\.AuditSink\b|\bAuditSinkKind\b",
+        ),
+        "the pre-v8 config decoder is removed; `defenseclaw migrate` converts a released 0.8.x config once "
+        "and the Go runtime refuses an older source",
         suffixes=(".go",),
     ),
     Rule(

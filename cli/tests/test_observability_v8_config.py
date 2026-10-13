@@ -38,6 +38,7 @@ from defenseclaw.observability.v8_config import (
     V8ConfigError,
     _go_schema_pattern,
     _parse_source,
+    _schema_validator,
     _shape,
     load_validate_v8,
     observability_v8_parity_contract,
@@ -254,10 +255,57 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
         load_validate_v8(f"config_version: 8\n{legacy}\n")
 
     assert captured.value.keyword in {"additionalProperties", "oneOf"}
-    assert "run defenseclaw upgrade" in str(captured.value)
+    # An upgrade cannot fix a released key left in a current file.
+    assert "run defenseclaw upgrade" not in str(captured.value)
 
 
-@pytest.mark.parametrize("version", [7, 9, "8", 8.0, True])
+def test_v9_schema_refusals_say_v9() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nobservability: 5\n")
+
+    assert "v8" not in str(captured.value)
+
+
+def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nguardrail: {no_such_key: 1}\n")
+
+    assert captured.value.keyword == "additionalProperties"
+    assert "$.guardrail.no_such_key" in str(captured.value)
+    assert "upgrade" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("removed", "path", "action"),
+    [
+        ("skill_actions: {high: {install: block}}", "$.skill_actions", "use admission.skill.actions"),
+        ("guardrail: {rule_pack_dir: /x}", "$.guardrail.rule_pack_dir", "use rule_pack or custom_packs"),
+        (
+            "guardrail: {connectors: {codex: {rule_pack_dir: /x}}}",
+            "$.guardrail.connectors.codex.rule_pack_dir",
+            "use rule_pack or custom_packs",
+        ),
+        ("privacy: {disable_redaction: true}", "$.privacy", "remove it: config_version 9 has no privacy section"),
+        (
+            "observability: {trace_policy: {compatibility_aliases: false}}",
+            "$.observability.trace_policy.compatibility_aliases",
+            "remove it: telemetry carries only canonical attribute names",
+        ),
+    ],
+)
+def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, action: str) -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(f"config_version: 9\n{removed}\n")
+
+    assert captured.value.path == path
+    assert captured.value.keyword == "legacy-key-forbidden"
+    message = str(captured.value)
+    assert action in message
+    assert "invalid configuration" in message and "invalid v9" not in message
+    assert "defenseclaw upgrade" not in message
+
+
+@pytest.mark.parametrize("version", [7, 10, "8", 8.0, True])
 def test_exact_v8_rejects_other_version_values(version: object) -> None:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8({"config_version": version})
@@ -410,6 +458,13 @@ def test_yaml_core_booleans_stay_booleans(spelling: str) -> None:
     assert source["openshell"]["yolo"] is (spelling.lower() == "true")
 
 
+def test_packaged_v8_schema_is_a_valid_draft_2020_12_schema() -> None:
+    # _schema_validator no longer self-checks the static schema on every run (GAP-0199).
+    from jsonschema import Draft202012Validator
+
+    Draft202012Validator.check_schema(_schema_validator().schema)
+
+
 def test_schema_patterns_anchor_at_the_end_of_text_like_go() -> None:
     # Python's "$" also matches before a final newline; RE2's does not.
     for source in (
@@ -546,11 +601,11 @@ def test_resource_attribute_aggregate_boundary() -> None:
 @pytest.mark.parametrize(
     ("attributes", "message"),
     [
-        ({"custom.label": ""}, "canonical v8 schema"),
+        ({"custom.label": ""}, "configuration schema"),
         ({"custom.label": " \u00a0 "}, "nonblank"),
         ({"custom.label": "line\nvalue"}, "control characters"),
         ({"custom.label": "\ud800"}, "valid UTF-8"),
-        ({"custom/label": "value"}, "canonical v8 schema"),
+        ({"custom/label": "value"}, "configuration schema"),
         ({"defenseclaw.instance.id": "value"}, "process-owned"),
         ({"defenseclaw.preset": "generic-otlp"}, "process-owned"),
         (
@@ -591,7 +646,7 @@ observability:
     rendered = str(captured.value)
     assert canary not in rendered
     assert "redacted.yaml" in rendered
-    assert captured.value.path == "$.observability"
+    assert captured.value.path == "$.observability.unknown_field"
 
 
 def test_semantic_diagnostics_do_not_render_resource_credentials() -> None:
@@ -840,7 +895,16 @@ observability:
 """
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(wrong_kind)
-    assert captured.value.keyword == "oneOf"
+    # GAP-0186: the problem inside the chosen shape, not every shape's key list.
+    assert captured.value.keyword == "additionalProperties"
+    assert captured.value.path.endswith("destinations[0].logger_name")
+
+    unknown_kind = wrong_kind.replace("http_jsonl", "carrier_pigeon")
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(unknown_kind)
+    assert captured.value.path.endswith("destinations[0].kind")
+    assert captured.value.corrective_action == "use one of jsonl, console, prometheus, splunk_hec, http_jsonl, otlp"
+    assert len(str(captured.value)) < 200
 
 
 def test_compatibility_adapter_fields_enforce_utf8_byte_bounds() -> None:

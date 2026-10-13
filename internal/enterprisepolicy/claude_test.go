@@ -13,7 +13,6 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"encoding/xml"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,6 +102,27 @@ func TestClaudeDetectsLaterDropInAndDisableAllHooks(t *testing.T) {
 	}
 }
 
+// A company drop-in saved by a Windows editor (UTF-8 BOM, CRLF) is read as
+// Claude Code reads it: it was refused, verify failed for every user and the
+// error said Claude Code would not start (GAP-0914).
+func TestClaudeReadsACompanyDropInWithBOMAndCRLF(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	company := "\ufeff{\r\n  \"permissions\": {\"ask\": [\"Bash(curl:*)\"]}\r\n}\r\n"
+	path := filepath.Join(claudeDir(t, opts), "managed-settings.d", "20-company-bom-crlf.json")
+	writeFile(t, path, company)
+	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	state, err := claudeTarget{}.Verify(opts)
+	if err != nil || !state.Covered {
+		t.Fatalf("a BOM+CRLF company drop-in must not break coverage: %v %+v", err, state.Conflicts)
+	}
+	if readFile(t, path) != company {
+		t.Fatal("the company drop-in changed")
+	}
+}
+
 func TestClaudeHigherPrecedenceSources(t *testing.T) {
 	opts := testOptions(t)
 	withHigherSources(t, higherSource(t, `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`, `{"model": "opus"}`))
@@ -184,23 +204,59 @@ func TestClaudeExportFormats(t *testing.T) {
 	}
 }
 
+// An administrator edited DefenseClaw's hook commands (another folder,
+// another binary name) and removal restored the edited copy, so every
+// Claude Code call ran a missing hook (GAP-1099). Once DefenseClaw published
+// the drop-in under its reserved name, the file is DefenseClaw's whatever it
+// holds, with or without a repair in between; the administrator's own
+// drop-in stays. Codex marks its blocks, so an edited command there goes too.
 func TestClaudeRemoveDeletesOnlyTheDropIn(t *testing.T) {
 	withHigherSources(t)
-	opts := testOptions(t)
-	adminDropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", "10-company.json")
-	writeFile(t, adminDropIn, `{"env": {"X": "1"}}`)
-	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name, from, to string
+		repair         bool
+	}{
+		{"folder edited then repaired", "/bin/defenseclaw-hook", "/binx/defenseclaw-hook", true},
+		{"binary renamed then repaired", "defenseclaw-hook", "defenseclaw-hookX", true},
+		{"binary renamed without a repair", "defenseclaw-hook", "defenseclaw-hookX", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			adminDropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", "10-company.json")
+			writeFile(t, adminDropIn, `{"env": {"X": "1"}}`)
+			mustReconcile(t, claudeTarget{}, opts)
+			dropIn := claudeDropIn(t, opts)
+			published := readFile(t, dropIn)
+			writeFile(t, dropIn, strings.ReplaceAll(published, tc.from, tc.to))
+			if readFile(t, dropIn) == published {
+				t.Fatal("test edit did not apply")
+			}
+			if tc.repair {
+				mustReconcile(t, claudeTarget{}, opts)
+			}
+			mustRemove(t, claudeTarget{}, opts)
+			mustNotExist(t, dropIn, "DefenseClaw's drop-in after an edit of its hook commands")
+			if readFile(t, adminDropIn) != `{"env": {"X": "1"}}` {
+				t.Fatal("administrator drop-in must survive removal")
+			}
+		})
 	}
-	if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(claudeDir(t, opts), "managed-settings.d", DefenseClawDropInName)); !os.IsNotExist(err) {
-		t.Fatalf("drop-in must be removed: %v", err)
-	}
-	if readFile(t, adminDropIn) != `{"env": {"X": "1"}}` {
-		t.Fatal("administrator drop-in must survive removal")
-	}
+	t.Run("codex requirements.toml", func(t *testing.T) {
+		opts := testOptions(t)
+		path := codexPath(t, opts)
+		writeFile(t, path, adminCodexRequirements)
+		mustReconcile(t, codexTarget{}, opts)
+		published := readFile(t, path)
+		writeFile(t, path, strings.ReplaceAll(published, "/bin/defenseclaw-hook", "/binx/defenseclaw-hookX"))
+		if readFile(t, path) == published {
+			t.Fatal("test edit did not apply")
+		}
+		mustReconcile(t, codexTarget{}, opts)
+		mustRemove(t, codexTarget{}, opts)
+		if got := readFile(t, path); got != adminCodexRequirements {
+			t.Fatalf("removal must leave exactly the administrator text:\n%s", got)
+		}
+	})
 }
 
 func TestClaudeWindowsUsesExecForm(t *testing.T) {

@@ -103,7 +103,11 @@ class GuardrailEnableMatrixTests(unittest.TestCase):
                 app, tmp_dir, db_path = _build_app_for(connector)
                 try:
                     runner = CliRunner()
-                    with patch("defenseclaw.commands.cmd_setup._restart_services") as mock_restart:
+                    # Windows verifies the agent executable first; the runner has none.
+                    with (
+                        patch("defenseclaw.commands.cmd_setup._restart_services") as mock_restart,
+                        patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"),
+                    ):
                         result = runner.invoke(
                             guardrail,
                             ["enable", "--yes"],

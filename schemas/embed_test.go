@@ -337,6 +337,9 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"managed",
 		"enterprise",
 		"routing",
+		"admission",
+		"llm_providers",
+		"update",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))
@@ -347,8 +350,8 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		}
 	}
 	version := schemaMap(t, properties, "config_version")
-	if got := version["const"]; got != float64(8) {
-		t.Fatalf("config_version const = %v, want 8", got)
+	if got, ok := version["enum"].([]any); !ok || len(got) != 2 || got[0] != float64(8) || got[1] != float64(9) {
+		t.Fatalf("config_version enum = %v, want [8 9]", version["enum"])
 	}
 	for _, legacy := range []string{"audit_db", "audit_sinks", "judge_bodies_db", "otel", "splunk"} {
 		if _, ok := properties[legacy]; ok {
@@ -929,14 +932,6 @@ gateway:
     plugin: {enabled: true, take_action: true, dirs: [/opt/plugins]}
     mcp: {take_action: true}
   watchdog: {enabled: true, interval: 30, debounce: 2}
-skill_actions: &actions
-  critical: {file: quarantine, runtime: disable, install: block}
-  high: {file: quarantine, runtime: disable, install: block}
-  medium: {file: none, runtime: enable, install: allow}
-  low: {file: none, runtime: enable, install: allow}
-  info: {file: none, runtime: enable, install: none}
-mcp_actions: *actions
-plugin_actions: *actions
 asset_policy:
   enabled: true
   mode: action
@@ -1003,7 +998,7 @@ notifications:
 	defaultsCompatible := map[string]any{"config_version": 8}
 	for _, section := range []string{
 		"llm", "inspect_llm", "cisco_ai_defense", "scanners", "openshell", "watch", "firewall",
-		"guardrail", "gateway", "skill_actions", "mcp_actions", "plugin_actions", "asset_policy",
+		"guardrail", "gateway", "asset_policy",
 		"registries", "application_protection", "notifications",
 	} {
 		defaultsCompatible[section] = map[string]any{}
@@ -1025,7 +1020,6 @@ func TestDefenseClawConfigV8RejectsUnknownNestedCurrentFields(t *testing.T) {
 		{"guardrail", map[string]any{"config_version": 8, "guardrail": map[string]any{"mystery": true}}},
 		{"guardrail connector", map[string]any{"config_version": 8, "guardrail": map[string]any{"connectors": map[string]any{"codex": map[string]any{"mystery": true}}}}},
 		{"gateway", map[string]any{"config_version": 8, "gateway": map[string]any{"watcher": map[string]any{"mystery": true}}}},
-		{"action matrix", map[string]any{"config_version": 8, "skill_actions": map[string]any{"critical": map[string]any{"mystery": true}}}},
 		{"asset policy", map[string]any{"config_version": 8, "asset_policy": map[string]any{"mcp": map[string]any{"mystery": true}}}},
 		{"registry", map[string]any{"config_version": 8, "registries": map[string]any{"sources": []any{map[string]any{"mystery": true}}}}},
 		{"application protection", map[string]any{"config_version": 8, "application_protection": map[string]any{"connectors": map[string]any{"codex": map[string]any{"mystery": true}}}}},

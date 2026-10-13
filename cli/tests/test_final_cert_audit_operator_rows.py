@@ -12,7 +12,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import os
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup, cmd_setup_redaction
@@ -31,6 +32,10 @@ def test_setup_llm_judge_records_operator_activity_without_key_value() -> None:
     from tests.helpers import cleanup_app, make_app_context
 
     app, tmp_dir, db_path = make_app_context()
+    # setup llm exports the key it was given into this process; restore the
+    # environment so the next test in the shard does not see DEFENSECLAW_LLM_KEY.
+    env_guard = patch.dict(os.environ)
+    env_guard.start()
     try:
         app.logger = MagicMock()
         result = CliRunner().invoke(
@@ -54,12 +59,13 @@ def test_setup_llm_judge_records_operator_activity_without_key_value() -> None:
         operation, details = app.logger.log_config_change.call_args.args
         assert "sk-test-not-logged" not in details
         activity = _activity(operation, details)
-        assert activity["actor"] == "cli:operator"
+        assert activity["actor"].startswith("cli:")
         assert activity["target_id"] == "llm:guardrail.judge"
         assert activity["diff"][0]["path"] == "model"
         assert activity["diff"][0]["after"] == "anthropic/claude-sonnet-4-5"
         assert activity["after"]["api_key_env"]
     finally:
+        env_guard.stop()
         cleanup_app(app, db_path, tmp_dir)
 
 

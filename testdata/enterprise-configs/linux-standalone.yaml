@@ -1,4 +1,4 @@
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw          # must be exactly this path
 policy_dir: /etc/defenseclaw/policies

@@ -145,6 +145,7 @@ def test_restore_line_prompt_mode_fixes_inherited_raw_tty() -> None:
         terminal_checkbox.restore_line_prompt_mode()
 
     assert current_mode[0] & termios.ICRNL
+    assert current_mode[1] & termios.OPOST and current_mode[1] & termios.ONLCR  # GAP-0057 staircase
     assert current_mode[3] & termios.ECHO
     assert current_mode[3] & termios.ICANON
 

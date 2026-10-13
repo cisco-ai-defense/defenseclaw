@@ -16,9 +16,53 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-const darwinDSCL = "/usr/bin/dscl"
+// GroupNameLookupDefinitive reports whether Open Directory's "no such group"
+// for a name is definitive: it looks groups up by name, but while the node of
+// a bound Active Directory domain is offline it does not know that domain's
+// groups, and an assignment group was reported as renamed or deleted in the
+// directory (GAP-0496).
+func GroupNameLookupDefinitive() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return !OpenDirectoryOffline(ctx)
+}
+
+// QualifiedGroupName has nothing to offer on macOS, whose group names carry
+// no domain.
+func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
+func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
+
+// SameNameAccounts finds no twins on macOS: Open Directory resolves a short
+// name to one account.
+func SameNameAccounts(context.Context, Resolver, Account) []Account { return nil }
+
+const (
+	darwinDSCL   = "/usr/bin/dscl"
+	darwinODUtil = "/usr/bin/odutil"
+)
+
+// platformOpenDirectoryNodeStates runs `odutil show nodenames`, which lists
+// each Open Directory node with its state; any user may run it.
+func platformOpenDirectoryNodeStates(ctx context.Context) (string, error) {
+	if err := validateTrustedTool(darwinODUtil); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := runTrustedCommand(ctx, darwinODUtil, []string{"show", "nodenames"})
+	if err != nil {
+		return "", err
+	}
+	if result.exitCode != 0 {
+		return "", fmt.Errorf("unixidentity: odutil exited %d", result.exitCode)
+	}
+	return string(result.stdout), nil
+}
 
 // DefaultUIDRange is the interactive-account uid range. macOS local
 // accounts start at 501; directory accounts often use large uids.
@@ -30,12 +74,49 @@ func Default(ctx context.Context) Resolver {
 	return NewCachingResolver(NewOSUserResolver(ctx))
 }
 
+// DirectoryFactsFunc is nil on macOS: Open Directory answers each spelling
+// of an account with the account itself.
+func DirectoryFactsFunc(context.Context) func(uid int) (useridentity.DirectoryFacts, bool) {
+	return nil
+}
+
 // platformLocalAccounts lists the local directory node's accounts.
 func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {
 		return nil, err
 	}
 	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "UniqueID"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLLocalAccounts(string(result.stdout)), nil
+}
+
+// platformMobileAccounts lists the local node's mobile accounts with the
+// directory node each came from.
+func platformMobileAccounts(ctx context.Context) (map[string]string, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "OriginalNodeName"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLOriginalNodes(string(result.stdout)), nil
+}
+
+// platformLocalGroups lists the local directory node's groups.
+func platformLocalGroups(ctx context.Context) (map[string]int, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Groups", "PrimaryGroupID"})
 	if err != nil {
 		return nil, err
 	}

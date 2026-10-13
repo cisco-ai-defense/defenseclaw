@@ -266,6 +266,25 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 	if raw2, _ := os.ReadFile(outPath); string(raw2) != string(raw) {
 		t.Fatalf("--force output differs:\n%s\nvs\n%s", raw2, raw)
 	}
+
+	// GAP-0126: --db reads a database by path with no configuration, the
+	// way the other install's audit log is read after a rollback.
+	prevDB := auditExportDB
+	t.Cleanup(func() { auditExportDB = prevDB })
+	cfg = nil
+	auditExportDB = dbPath
+	auditExportConnector = ""
+	auditExportOut = dir + "/other-window.jsonl"
+	if err := runAuditExport(nil, nil); err != nil {
+		t.Fatalf("runAuditExport --db: %v", err)
+	}
+	if other, _ := os.ReadFile(auditExportOut); len(strings.Split(strings.TrimSpace(string(other)), "\n")) != 3 {
+		t.Fatalf("--db export rows:\n%s", other)
+	}
+	auditExportDB = dir + "/missing.db"
+	if err := runAuditExport(nil, nil); err == nil || !strings.Contains(err.Error(), "is not an audit database file") {
+		t.Fatalf("--db with a missing file error = %v", err)
+	}
 }
 
 func TestLineCountWriterCountsLines(t *testing.T) {

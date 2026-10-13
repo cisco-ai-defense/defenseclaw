@@ -1,0 +1,51 @@
+version: 1
+category: cognitive-file
+rules:
+  - id: COG-SOUL
+    pattern: '(?i)SOUL\.md'
+    title: "SOUL.md access (agent identity)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [cognitive-tampering]
+  - id: COG-IDENTITY
+    pattern: '(?i)IDENTITY\.md'
+    title: "IDENTITY.md access"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [cognitive-tampering]
+  - id: COG-MEMORY
+    pattern: '(?i)MEMORY\.md'
+    title: "MEMORY.md access"
+    severity: HIGH
+    confidence: 0.85
+    tags: [cognitive-tampering]
+  - id: COG-CLAUDE-MD
+    pattern: '(?i)CLAUDE\.md'
+    title: "CLAUDE.md access"
+    severity: HIGH
+    confidence: 0.85
+    tags: [cognitive-tampering]
+  - id: COG-TOOLS-MD
+    pattern: '(?i)TOOLS\.md'
+    title: "TOOLS.md access"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering]
+  - id: COG-AGENTS-MD
+    pattern: '(?i)AGENTS\.md'
+    title: "AGENTS.md access"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering]
+  - id: COG-OPENCLAW-JSON
+    pattern: '(?i)openclaw\.json'
+    title: "openclaw.json config access"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering]
+  - id: COG-GATEWAY-JSON
+    pattern: '(?i)gateway\.json'
+    title: "gateway.json config access"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering]

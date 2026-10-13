@@ -33,15 +33,16 @@ var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEn
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
 
+// enterpriseHookRemovedAccountNote follows each failure status and verify
+// report as a warning for a deleted account whose profile folder was removed.
+const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
+
 // enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
-// a guardian row of a local account that was deleted and whose profile
-// folder was removed too: no one can sign in as it, and the enumerator drops
-// its rows at its next pass. Tests replace it.
+// a guardian row of a local account that was deleted: no one can sign in as
+// it, and the enumerator drops its rows at its next pass, also when its
+// profile folder could not be removed (GAP-0430). Tests replace it.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
-		return false
-	}
-	if _, err := os.Lstat(row.UserHome); !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
 	return windowsEnterpriseAccountDeleted(row.SID)
@@ -569,6 +570,10 @@ var enterpriseHooksWindowsConfigLoader = func() (*config.Config, error) {
 	return config.LoadFromFile(config.ConfigPath())
 }
 
+// refuseEnterpriseIdentityViewForStandardUser is a no-op on Windows: the
+// views run from an elevated prompt, and the gateway refuses others.
+func refuseEnterpriseIdentityViewForStandardUser(*cobra.Command) error { return nil }
+
 func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {
 		if cmd == enterpriseHooksStatusCmd {
@@ -611,6 +616,9 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 func enterpriseHooksNativePlatformPreflight() error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {
 		return nil
+	}
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return fmt.Errorf("enterprise hooks cannot run inside the managed gateway service")
 	}
 	token := windows.GetCurrentProcessToken()
 	if token.IsElevated() {
@@ -688,6 +696,9 @@ func enterpriseHooksNativeMutationIdentityPreflight() error {
 	}
 	if user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return fmt.Errorf("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
+	}
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return fmt.Errorf("managed enterprise hook mutations cannot run inside the managed gateway service")
 	}
 	return nil
 }

@@ -548,6 +548,44 @@ func TestSandboxHookFailClosedNamesThePrompt(t *testing.T) {
 		if run.exitCode != 2 || !strings.Contains(run.stderr, tc.want) {
 			t.Fatalf("%s: exit %d stderr %q, want exit 2 and %q", tc.hook, run.exitCode, run.stderr, tc.want)
 		}
+		// The reason says what is down and how the user brings it back,
+		// not "sandbox ingress unreachable" (GAP-0272).
+		// A daemon just started takes a moment to answer (GAP-0332).
+		// The image also runs on managed computers, whose users can't start
+		// DefenseClaw's services: the doctor names the fix (GAP-0506).
+		if !strings.Contains(run.stderr, "its daemon is stopped or restarting, or was started less than a minute ago") ||
+			!strings.Contains(run.stderr, "the user runs `defenseclaw sandbox doctor` there, which says what is wrong and how to bring it back, and retries in a minute") ||
+			strings.Contains(run.stderr, "defenseclaw-gateway start") {
+			t.Fatalf("%s: stderr %q does not name the stopped daemon and the doctor", tc.hook, run.stderr)
+		}
+	}
+}
+
+// TestSandboxHookNamesTheManagedAnswer: on a managed computer the user's
+// daemon answers for the managed gateway. A 502 for an unreachable managed
+// gateway and the gateway's own 503 refusal are named as such, never as a
+// stopped daemon the user should start (GAP-0506).
+func TestSandboxHookNamesTheManagedAnswer(t *testing.T) {
+	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
+	refusal := `503|{"error":"sandbox_unavailable","message":"Your account can't be looked up on this computer right now. Try again in a moment."}`
+	for _, tc := range []struct {
+		name      string
+		responses []string
+		want      string
+	}{
+		{"managed gateway down", []string{`502|{"error":"the managed DefenseClaw gateway is not reachable"}`, `502|{"error":"the managed DefenseClaw gateway is not reachable"}`},
+			"the DefenseClaw gateway service on the user's machine does not answer, so every tool call is blocked until it is back: the user tries again in a moment, and if this continues asks their administrator"},
+		{"managed refusal", []string{refusal, refusal},
+			"DefenseClaw on the user's machine can't check this call right now, so it is blocked: Your account can't be looked up on this computer right now. Try again in a moment."},
+		{"relay 503 without a message", []string{`503|upstream busy`, `503|upstream busy`},
+			"the user runs `defenseclaw sandbox doctor` there"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := h.run(t, SandboxHookDir+"/claude-code-hook.sh", nil, claudePreToolUse, map[string]string{SandboxTokenEnv: "tok"}, tc.responses)
+			if run.exitCode != 2 || len(run.calls) != 2 || !strings.Contains(run.stderr, tc.want) || strings.Contains(run.stderr, "defenseclaw-gateway start") {
+				t.Fatalf("exit %d calls %d stderr %q, want a block naming %q", run.exitCode, len(run.calls), run.stderr, tc.want)
+			}
+		})
 	}
 }
 

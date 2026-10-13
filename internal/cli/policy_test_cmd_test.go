@@ -28,8 +28,8 @@ import (
 // embedded OPA engine, so a standard install needs no separate opa binary.
 func TestPolicyTestAndValidateUseRegoDirWithoutOPA(t *testing.T) {
 	dir := t.TempDir()
-	writePolicyPathTestLayout(t, dir, policyPathTestData(t, "regodir"), true)
-	passing := "package defenseclaw_test\n\nimport rego.v1\n\ntest_marker if data.marker == \"regodir\"\n"
+	writePolicyPathTestLayout(t, dir)
+	passing := "package defenseclaw_test\n\nimport rego.v1\n\ntest_admission if data.defenseclaw.admission.verdict == \"allowed\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "policy_test.rego"), []byte(passing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestPolicyTestAndValidateUseRegoDirWithoutOPA(t *testing.T) {
 		t.Fatalf("policy validate --rego-dir: %v", err)
 	}
 
-	failing := "package defenseclaw_test\n\nimport rego.v1\n\ntest_marker if data.marker == \"other\"\n"
+	failing := "package defenseclaw_test\n\nimport rego.v1\n\ntest_admission if data.defenseclaw.admission.verdict == \"other\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "policy_test.rego"), []byte(failing), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -308,11 +308,16 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 		},
 	}}
 	pinWindowsStandaloneProfileForTest(t, false)
-	if got := effectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex"}) {
+	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex"}) {
 		t.Fatalf("Secure Client connectors = %v", got)
 	}
+	// A CLI or Setup process reading the standalone config carries no pin
+	// but still counts the per-user connectors (GAP-1230).
+	if got := EffectiveWindowsStandaloneHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
+		t.Fatalf("standalone config connectors without the pin = %v", got)
+	}
 	pinWindowsStandaloneProfileForTest(t, true)
-	if got := effectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
+	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
 		t.Fatalf("standalone connectors = %v", got)
 	}
 

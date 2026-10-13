@@ -153,10 +153,33 @@ def test_local_logs_preserve_the_canonical_post_redaction_projection() -> None:
         collector = yaml.safe_load(text)
         assert collector["service"]["pipelines"]["logs"]["processors"] == [
             "resource",
+            "transform/sandbox-identity",
             "batch",
         ]
         assert forbidden_processors.isdisjoint(collector["processors"])
         assert all(mutation not in text for mutation in forbidden_mutations)
+        # The one log statement set only adds an attribute; it never writes the body.
+        assert collector["processors"]["transform/sandbox-identity"] == compat.EXPECTED_SANDBOX_IDENTITY_PROCESSOR
+        statements = collector["processors"]["transform/sandbox-identity"]["log_statements"][0]["statements"]
+        assert not any(statement.startswith(("set(log.body", "set(body")) for statement in statements)
+        assert any(statement.startswith('set(log.attributes["defenseclaw.sandbox.name"]') for statement in statements)
+
+
+def test_collector_rejects_a_sandbox_identity_processor_that_changes_the_body(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
+    collector["processors"]["transform/sandbox-identity"]["log_statements"][0]["statements"].append(
+        'set(log.body, "")',
+    )
+    path = tmp_path / "collector.yaml"
+    path.write_text(yaml.safe_dump(collector), encoding="utf-8")
+    monkeypatch.setattr(compat, "COLLECTOR", path)
+
+    errors = compat._collector_errors()
+
+    assert any("transform/sandbox-identity" in error for error in errors)
 
 
 def test_loki_accepts_canonical_v8_records_without_silent_truncation() -> None:
@@ -187,16 +210,11 @@ def _apply_resource_insert_actions(
         key = item["key"]
         if key in result:
             continue
-        source = item.get("from_attribute")
-        if source is not None:
-            if source in result:
-                result[key] = result[source]
-            continue
         result[key] = item["value"]
     return result
 
 
-def test_collector_environment_alias_preserves_canonical_and_explicit_values() -> None:
+def test_collector_defaults_the_canonical_environment_only_when_absent() -> None:
     paths = [compat.COLLECTOR, compat.PACKAGED / "otel-collector/config.yaml"]
     for path in paths:
         collector = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -206,19 +224,11 @@ def test_collector_environment_alias_preserves_canonical_and_explicit_values() -
             {"deployment.environment.name": "production"},
         )
         assert canonical["deployment.environment.name"] == "production"
-        assert canonical["deployment.environment"] == "production"
-
-        explicit_legacy = _apply_resource_insert_actions(
-            collector,
-            {
-                "deployment.environment.name": "production",
-                "deployment.environment": "legacy-production",
-            },
-        )
-        assert explicit_legacy["deployment.environment"] == "legacy-production"
+        assert "deployment.environment" not in canonical
 
         defaulted = _apply_resource_insert_actions(collector, {})
-        assert defaulted["deployment.environment"] == "local-dev"
+        assert defaulted["deployment.environment.name"] == "local-dev"
+        assert "deployment.environment" not in defaulted
 
 
 def test_custom_resource_attributes_are_not_dashboard_required_dimensions() -> None:
@@ -350,7 +360,7 @@ def test_collector_validator_rejects_delta_conversion_or_dimension_drift(
     assert any("spanmetrics/agent360 dimensions drifted" in error and "trace_id" in error for error in errors)
 
 
-def test_collector_validator_rejects_environment_alias_order_drift(
+def test_collector_validator_rejects_resource_action_drift(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -362,7 +372,7 @@ def test_collector_validator_rejects_environment_alias_order_drift(
 
     errors = compat._collector_errors()
 
-    assert any("derive deployment.environment from deployment.environment.name" in error for error in errors)
+    assert any("default deployment.environment.name to local-dev" in error for error in errors)
 
 
 def test_complete_bundle_and_packaged_tree_are_byte_identical() -> None:

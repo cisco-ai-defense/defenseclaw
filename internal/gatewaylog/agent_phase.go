@@ -97,22 +97,3 @@ func AgentPhaseCode(raw string) int {
 	}
 	return 0
 }
-
-// normalizeEventAgentPhases runs at the Writer choke point before runtime
-// schema validation. A recognized current phase is canonicalized; an unknown
-// current phase is preserved so the strict schema still rejects malformed
-// events. agent_previous_phase is optional, so unsupported values are omitted
-// rather than causing an otherwise valid, correlated event to be dropped.
-func normalizeEventAgentPhases(event *Event) {
-	if event == nil {
-		return
-	}
-	if phase, ok := NormalizeAgentPhase(event.AgentPhase); ok {
-		event.AgentPhase = phase
-	}
-	if previous, ok := NormalizeAgentPhase(event.AgentPreviousPhase); ok {
-		event.AgentPreviousPhase = previous
-	} else {
-		event.AgentPreviousPhase = ""
-	}
-}

@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://defenseclaw.dev/schemas/sandbox/managed_explain.schema.json",
+  "title": "ManagedExplain",
+  "description": "The caller's own sandbox policy on a managed host: the managed part of GET /api/v1/sandbox/policy/explain and of `defenseclaw sandbox policy explain --json`. It describes only the caller's own profile and match; no property names another account.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile",
+    "match",
+    "allowed",
+    "allow_unblock",
+    "allow_mount",
+    "allow_host_ports",
+    "allow_yolo",
+    "policy_digest"
+  ],
+  "properties": {
+    "profile": {"type": "string"},
+    "description": {"type": "string"},
+    "match": {"type": "string"},
+    "matched_group": {"type": "string"},
+    "provisional": {"type": "boolean"},
+    "allowed": {"type": "boolean"},
+    "required_for": {"type": "array", "items": {"type": "string"}},
+    "when_unavailable": {"type": "string", "enum": ["", "refuse", "alert"]},
+    "allowed_harnesses": {"type": "array", "items": {"type": "string"}},
+    "allowed_credentials": {"type": "array", "items": {"type": "string"}},
+    "egress_allow_only": {"type": "array", "items": {"type": "string"}},
+    "egress_block": {"type": "array", "items": {"type": "string"}},
+    "user_approvals": {"type": "string", "enum": ["", "none", "session"]},
+    "allow_unblock": {"type": "boolean"},
+    "mcp_included": {"type": "array", "items": {"type": "string"}},
+    "mcp_blocked": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "reason"],
+        "properties": {
+          "name": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "workdir_mode": {"type": "string"},
+    "workspace": {"type": "object", "additionalProperties": false, "required": ["masks", "git_depth", "max_upload_mb"], "properties": {"masks": {"type": ["array", "null"], "items": {"type": "string"}}, "unmask": {"type": "array", "items": {"type": "string"}}, "git_depth": {"type": "integer"}, "max_upload_mb": {"type": "integer"}}},
+    "allow_mount": {"type": "boolean"},
+    "allow_host_ports": {"type": "boolean"},
+    "allow_yolo": {"type": "boolean"},
+    "on_silence": {"type": "string", "enum": ["", "stop", "alert"]},
+    "max_silence_after": {"type": "string"},
+    "process_tree": {"type": "boolean"},
+    "delete_stopped_after": {"type": "string"},
+    "driver": {"enum": ["docker", "vm"]},
+    "driver_reason": {"enum": ["configured", "kvm_available", "kvm_missing", "kvm_access", "cpu_virtualization", "vm_driver_missing", "vm_prerequisite_missing"]},
+    "driver_fallback": {"enum": ["docker", "none"]},
+    "policy_digest": {"type": "string"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "request_access": {"type": "string", "maxLength": 512},
+    "posture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pack", "pack_source", "pack_digest", "profile", "network_mode", "approvals", "settings"],
+      "properties": {
+        "pack": {"type": "string"},
+        "pack_source": {"type": "string", "pattern": "^(organization|builtin:[a-z0-9-]+)$"},
+        "pack_digest": {"type": "string"},
+        "pack_chain": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "builtin", "source", "digest"],
+            "properties": {
+              "name": {"type": "string"},
+              "builtin": {"type": "boolean"},
+              "source": {"type": "string", "pattern": "^(organization|builtin:[a-z0-9-]+)$"},
+              "digest": {"type": "string"}
+            }
+          }
+        },
+        "profile": {"type": "string"},
+        "network_mode": {"type": "string"},
+        "approvals": {"type": "string"},
+        "settings": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "value", "source", "origin"],
+            "properties": {
+              "key": {"type": "string"},
+              "value": {"type": "string"},
+              "source": {"type": "string"},
+              "origin": {"type": "string"},
+              "requested": {"type": "string"}
+            }
+          }
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "source", "attempted", "constraint", "message"],
+            "properties": {
+              "key": {"type": "string"},
+              "source": {"type": "string"},
+              "attempted": {"type": "string"},
+              "enforced": {"type": "string"},
+              "constraint": {"type": "string"},
+              "fatal": {"type": "boolean"},
+              "admin": {"type": "boolean"},
+              "message": {"type": "string"},
+              "detail": {"type": "string"}
+            }
+          }
+        },
+        "repo_tightened": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["organization", "profile", "pack", "repo", "flag"]
+      }
+    }
+  }
+}

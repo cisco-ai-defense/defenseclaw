@@ -110,9 +110,29 @@ func (f *fakeSandboxController) RunLog(_ context.Context, name string, lines int
 		func() { f.lines = lines })
 }
 
+func (f *fakeSandboxController) Destinations(_ context.Context, name string) (*sandboxapi.Destinations, error) {
+	return answer(f, "destinations "+name, &sandboxapi.Destinations{Name: name, Destinations: []sandboxapi.DestinationRow{
+		{Host: "api.example.com", Kind: sandboxapi.DestinationOtherAI, Sources: []string{sandboxapi.SourceProxy}},
+	}})
+}
+
+func (f *fakeSandboxController) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
+	return answer(f, "policy test "+req.Sandbox, &sandboxapi.PolicyTestResult{Sandbox: req.Sandbox, Decisions: []sandboxapi.PolicyDecision{
+		{PolicyCheck: req.Checks[0], Rule: "block", Source: "pack balanced"},
+	}})
+}
+
 func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
 	_, err := answer(f, "workspace "+name+" "+r.Operation, struct{}{})
 	return err
+}
+
+func (f *fakeSandboxController) Discover(_ context.Context, name string) (*sandboxapi.DiscoveryResult, error) {
+	return answer(f, "discover "+name, &sandboxapi.DiscoveryResult{Name: name, Result: "ok", Signals: []sandboxapi.DiscoverySignal{}})
+}
+
+func (f *fakeSandboxController) Processes(_ context.Context, name string) (*sandboxapi.ProcessList, error) {
+	return answer(f, "processes "+name, &sandboxapi.ProcessList{Name: name, Enabled: true, Processes: []sandboxapi.Process{}})
 }
 
 func (f *fakeSandboxController) Approvals(_ context.Context, sandbox string) ([]sandboxapi.Approval, error) {
@@ -152,6 +172,7 @@ func (f *fakeSandboxController) SubscribeActivity(since uint64, sandbox string) 
 
 func sandboxTestAPI(t *testing.T, ctl SandboxController, enabled bool) (*APIServer, http.Handler) {
 	t.Helper()
+	stubSandboxGatewayElsewhere(t, "")
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Gateway.Token = "test-token"
@@ -253,6 +274,9 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"GET", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", `{"operation":"pull","pull_mode":"branch"}`, 200, "workspace box pull"},
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", "", 400, ""},
+		{"POST", sandboxapi.PathSandboxes + "/box/discover", "", 200, "discover box"},
+		{"GET", sandboxapi.PathSandboxes + "/box/processes", "", 200, "processes box"},
+		{"POST", sandboxapi.PathSandboxes + "/box/discover", `{"surprise":1}`, 400, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
 		{"GET", sandboxapi.PathApprovals + "?sandbox=box", "", 200, "approvals box"},
 		{"POST", sandboxapi.PathApprovals + "/ap_1", `{"decision":"approve","always":true}`, 200, "decide ap_1"},
@@ -283,7 +307,7 @@ func TestSandboxAPIRoutes(t *testing.T) {
 
 // The status names the uid the daemon runs as, for the doctor's same-user
 // check, whether or not the sandbox subsystem runs; while it does not, the
-// other routes say whether it is disabled or unavailable.
+// other routes say whether it is off or unavailable.
 func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -308,9 +332,38 @@ func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
 			continue
 		}
 		w = serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
-		if w.Code != http.StatusServiceUnavailable || decodeSandboxError(t, w).Code != tc.listCode {
+		// GAP-0008: one wording for sandboxes that are off, as sandbox run says it.
+		if e := decodeSandboxError(t, w); w.Code != http.StatusServiceUnavailable || e.Code != tc.listCode ||
+			(e.Code == sandboxapi.CodeDisabled && e.Message != sandboxapi.DisabledMessage) {
 			t.Fatalf("%s: list = %d %s", tc.name, w.Code, w.Body.String())
 		}
+	}
+}
+
+// stubSandboxGatewayElsewhere pins what the off answer finds on the
+// machine's OpenShell gateway port.
+func stubSandboxGatewayElsewhere(t *testing.T, held string) {
+	t.Helper()
+	previous := sandboxGatewayElsewhere
+	sandboxGatewayElsewhere = func() string { return held }
+	t.Cleanup(func() { sandboxGatewayElsewhere = previous })
+}
+
+// GAP-0307: on an account whose sandboxes are off while another account
+// runs the machine's OpenShell gateway, the status and every route say so,
+// with the holder, instead of sending the user to setup, which stops there.
+func TestSandboxAPIOffNamesAnotherAccountsGateway(t *testing.T) {
+	_, h := sandboxTestAPI(t, nil, false)
+	const held = "127.0.0.1:17670, the gateway's port, is held by PID 4242 of another account (uid 1001, dcm-sv1)"
+	stubSandboxGatewayElsewhere(t, held)
+	var st sandboxapi.Status
+	if w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, "")); json.Unmarshal(w.Body.Bytes(), &st) != nil ||
+		st.Enabled || st.GatewayElsewhere != held || !strings.Contains(st.Reason, "another account runs this machine's OpenShell gateway ("+held+")") {
+		t.Fatalf("status = %s", w.Body.String())
+	}
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
+	if e := decodeSandboxError(t, w); e.Code != sandboxapi.CodeDisabled || e.Message != st.Reason || e.Message != st.OffMessage() {
+		t.Fatalf("list = %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -416,11 +469,18 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	if log, err := c.RunLog(ctx, "box", 0); err != nil || log.State != sandboxapi.RunInterrupted || log.Log != "partial\n" || ctl.lines != 0 {
 		t.Fatalf("run log = %+v, %v (lines %d)", log, err, ctl.lines)
 	}
+	if d, err := c.Destinations(ctx, "box"); err != nil || d.Name != "box" || len(d.Destinations) != 1 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI {
+		t.Fatalf("destinations = %+v, %v", d, err)
+	}
 	if list, err := c.Approvals(ctx, ""); err != nil || list == nil {
 		t.Fatalf("approvals = %v, %v", list, err)
 	}
 	if _, err := c.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
+	}
+	if res, err := c.PolicyTest(ctx, sandboxapi.PolicyTestRequest{Sandbox: "box", Checks: []sandboxapi.PolicyCheck{{Host: "a.example", Port: 443}}}); err != nil ||
+		res.Sandbox != "box" || len(res.Decisions) != 1 || res.Decisions[0].Host != "a.example" || res.Decisions[0].Source != "pack balanced" {
+		t.Fatalf("policy test = %+v, %v", res, err)
 	}
 	if st, err := c.Status(ctx); err != nil || !st.Available {
 		t.Fatalf("status = %+v, %v", st, err)

@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -76,7 +78,7 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 	}
 	for field, value := range map[string]string{
 		"semantic": prompt.SemanticEventID, "logical": prompt.LogicalEventID,
-		"connector instance": prompt.ConnectorInstanceID, "turn": prompt.TurnID, "agent": prompt.AgentID,
+		"connector instance": prompt.ConnectorInstanceID, "turn": prompt.TurnID,
 	} {
 		parsed, parseErr := uuid.Parse(value)
 		if parseErr != nil || parsed.Version() != 7 {
@@ -108,6 +110,68 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 	}
 	if parsed, parseErr := uuid.Parse(tool.ToolInvocationID); parseErr != nil || parsed.Version() != 7 {
 		t.Fatalf("minted tool id=%q err=%v", tool.ToolInvocationID, parseErr)
+	}
+}
+
+// GAP-0102: the ledger mints the session root agent with the ID the hook model
+// records derive (GAP-0031), except under Secure Client, which keeps the
+// UUIDv7 agent of main (issue #1092).
+// Codex does not declare agentless-main inference, but a verified agent
+// identity can still name the exact root cursor that SessionStart persisted.
+func TestCodexAgentlessHookRestoresIdentityScopedRootCursor(t *testing.T) {
+	agentIdentityTestSetup(t)
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	t.Cleanup(func() { _ = store.Close() })
+	profile := server.hookProfileForConnector("codex")
+	const identity = "agt-0000000000000c04"
+	const session = "codex-session-cursor"
+	correlate := func(event string) agentHookRequest {
+		payload := map[string]interface{}{"hook_event_name": event, "session_id": session}
+		if event == "PreToolUse" {
+			payload["tool_name"] = "shell_command"
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := normalizeAgentHookRequestWithCorrelationEvent("codex", payload, profile.Correlation, "", identity)
+		_, req, err = server.correlateHookOccurrence(t.Context(), profile, req, raw)
+		if err != nil || req.SuppressCorrelationEmit {
+			t.Fatalf("%s: err=%v suppressed=%t", event, err, req.SuppressCorrelationEmit)
+		}
+		return req
+	}
+	start := correlate("SessionStart")
+	tool := correlate("PreToolUse")
+	if start.AgentID == "" || tool.AgentID != start.AgentID {
+		t.Fatalf("Codex agentless tool agent=%q, SessionStart agent=%q", tool.AgentID, start.AgentID)
+	}
+}
+
+func TestHookOccurrenceRootAgentKeepsUUIDv7UnderSecureClient(t *testing.T) {
+	installCorrelationHMACForTest()
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+		server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		server.scannerCfg.Enterprise.Profile = profile
+		hookProfile := server.hookProfileForConnector("claudecode")
+		body := `{"hook_event_name":"UserPromptSubmit","session_id":"session-1","prompt":"hello"}`
+		var payload map[string]interface{}
+		_ = json.Unmarshal([]byte(body), &payload)
+		_, prompt, err := server.correlateHookOccurrence(t.Context(), hookProfile,
+			normalizeAgentHookRequestWithProfile("claudecode", payload, hookProfile), []byte(body))
+		_ = store.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if profile == managed.ProfileSecureClient {
+			if parsed, parseErr := uuid.Parse(prompt.AgentID); parseErr != nil || parsed.Version() != 7 {
+				t.Fatalf("Secure Client root agent %q is not UUIDv7", prompt.AgentID)
+			}
+		} else if want := stableLLMEventID("agent", "claudecode", "session-1", "root"); prompt.AgentID != want {
+			t.Fatalf("standalone root agent = %q, want %q", prompt.AgentID, want)
+		}
 	}
 }
 
@@ -463,8 +527,9 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 		prompt.SourceEventID != "" || prompt.CorrelationReceipt != nil {
 		t.Fatalf("cursor prompt identity=%+v", prompt)
 	}
-	if parsed, parseErr := uuid.Parse(prompt.AgentID); parseErr != nil || parsed.Version() != 7 {
-		t.Fatalf("cursor prompt agent=%q err=%v", prompt.AgentID, parseErr)
+	// GAP-0031: the minted root agent is the one the model records name.
+	if want := hookLLMEventMeta(t.Context(), "cursor", "cursor-conversation-1", "", "", "", "", "", "", map[string]interface{}{}).AgentID; prompt.AgentID != want {
+		t.Fatalf("cursor prompt agent=%q, want the model records' %q", prompt.AgentID, want)
 	}
 
 	startPayload := map[string]interface{}{
@@ -1091,5 +1156,44 @@ func TestHookTraceContextIsTopologyNotSameOccurrenceAuthority(t *testing.T) {
 	}
 	if !sawTrace || !sawSpan {
 		t.Fatalf("trace/span topology missing canonical identities: %+v", graph.Relationships)
+	}
+}
+
+func TestHookCursorAfterRestartDoesNotCrossAgentIdentity(t *testing.T) {
+	installCorrelationHMACForTest()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	server, store := newHookCorrelationServer(t, path)
+	profile := server.hookProfileForConnector("claudecode")
+	startBody := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"shared-session","prompt":"hello"}`)
+	var startPayload map[string]interface{}
+	if err := json.Unmarshal(startBody, &startPayload); err != nil {
+		t.Fatal(err)
+	}
+	start := normalizeAgentHookRequestWithProfile("claudecode", startPayload, profile)
+	start.AgentIdentityID = "agt-user-a"
+	_, start, err := server.correlateHookOccurrence(t.Context(), profile, start, startBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, reopened := newHookCorrelationServer(t, path)
+	defer reopened.Close() //nolint:errcheck
+	profile = server.hookProfileForConnector("claudecode")
+	hookBody := []byte(`{"hook_event_name":"PreToolUse","session_id":"shared-session","tool_name":"Read"}`)
+	var hookPayload map[string]interface{}
+	if err := json.Unmarshal(hookBody, &hookPayload); err != nil {
+		t.Fatal(err)
+	}
+	hook := normalizeAgentHookRequestWithProfile("claudecode", hookPayload, profile)
+	hook.AgentIdentityID = "agt-user-b"
+	_, hook, err = server.correlateHookOccurrence(t.Context(), profile, hook, hookBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hook.AgentID == start.AgentID || hook.TurnID == start.TurnID ||
+		(start.ExecutionID != "" && hook.ExecutionID == start.ExecutionID) {
+		t.Fatalf("another identity's cursor reused: start=%+v hook=%+v", start, hook)
 	}
 }

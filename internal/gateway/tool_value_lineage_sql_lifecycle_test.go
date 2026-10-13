@@ -368,7 +368,7 @@ func runSQLLifecycleGatewayStageForConnector(
 		t.Fatal(err)
 	}
 	req := normalizeAgentHookRequestWithRawProfileEvent(
-		connectorName, payload, rawBody, profile, "",
+		connectorName, payload, rawBody, profile, "", "",
 	)
 	ctx := withAuthenticatedHookConnector(context.Background(), connectorName)
 	ctx, req, err = api.correlateHookOccurrence(ctx, profile, req, rawBody)

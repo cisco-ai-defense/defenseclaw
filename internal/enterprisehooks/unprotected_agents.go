@@ -46,6 +46,10 @@ const (
 	// older than KiroIDEGlobalHooksFloor and does not read the global hook
 	// file the guardian writes.
 	UnprotectedCodeKiroIDEBelowGlobalHooksFloor = "kiro_ide_below_global_hooks_floor"
+	// UnprotectedCodeHomeUntrusted: an eligible account whose home is
+	// untrusted and that has no agent the enumerator could list; the entry
+	// names the account, not a connector.
+	UnprotectedCodeHomeUntrusted = "home_untrusted"
 )
 
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
@@ -116,6 +120,9 @@ func (a UnprotectedAgent) Message() string {
 		}
 		name += ")"
 	}
+	if name == "" {
+		return fmt.Sprintf("user %s is not enrolled: %s", who, strings.TrimSpace(a.Reason))
+	}
 	return fmt.Sprintf("%s for user %s is not protected: %s", name, who, strings.TrimSpace(a.Reason))
 }
 
@@ -144,11 +151,15 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 	}
 	out := make([]UnprotectedAgent, 0, len(record.Agents))
 	for _, agent := range record.Agents {
-		if strings.TrimSpace(agent.Connector) == "" || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
+		accountOnly := agent.Code == UnprotectedCodeHomeUntrusted
+		if accountOnly {
+			agent.Connector, agent.Version, agent.Surface, agent.Host, agent.HostVersion = "", "", "", "", ""
+		}
+		if (strings.TrimSpace(agent.Connector) == "" && !accountOnly) || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
 			continue
 		}
 		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified &&
-			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
 		if agent.Refusal != RefusalEnforced && agent.Refusal != RefusalMissing {

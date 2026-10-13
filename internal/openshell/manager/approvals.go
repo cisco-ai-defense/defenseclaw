@@ -20,28 +20,38 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/netip"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"weak"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
-// Approval actors.
+// Approval actors, the Reason of an applied approval's feed event.
 const (
-	actorAutomatic = "automatic"
-	actorOperator  = "operator"
-	actorPolicy    = "policy"
+	actorAutomatic = sandboxapi.ApprovedAutomatically
+	actorOperator  = sandboxapi.ApprovedByOperator
+	actorPolicy    = sandboxapi.ApprovedByPolicy
 )
 
 // maxPendingApprovals bounds asks per sandbox so a proposal flood cannot
@@ -98,6 +108,11 @@ type approval struct {
 	// draft chunk behind it (hostPortAsk): approving merges its rule into
 	// the sandbox policy directly (applyHostPortAsk).
 	local bool
+	// proxy marks a local ask for a destination the egress proxy refused
+	// as not on the allowlist (proxyAsk): approving it unblocks the host
+	// for the sandbox (or, "always", for the person), as `sandbox unblock`
+	// does, since the proxy, not an OpenShell rule, is what refused it.
+	proxy bool
 }
 
 // approvalID names the ask for one proposed rule of one sandbox: a digest
@@ -267,7 +282,7 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	rec := b.rec
 	m.mu.Unlock()
 	if d == nil {
-		d, _ = m.egressDecider(cfg, eff)
+		d, _ = m.egressDeciderFor(cfg, eff, m.registrationOf(b))
 	}
 	return triage.Policy{
 		Effective: eff, Decider: d, Principal: m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff),
@@ -276,8 +291,36 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 }
 
-// harnessFetches are the requests the sandbox's harness makes around the
-// egress proxy that it does without (harness.Spec.DirectFetches).
+// harnessFetchHost reports host (and port, 0 when unknown) as one of the
+// harness's own background requests it does without
+// (harness.Spec.DirectFetches). The egress proxy's refusal of one is
+// audited (at INFO, decision code audit.SandboxEgressCodeHarnessFetch, which
+// keeps it off the alerts) but, like OpenShell's (harnessFetchDenial),
+// neither shown on the feed nor counted as a blocked site, a destination or
+// shadow AI: the proxy cannot tell the harness's request from a tool's, so
+// the host decides.
+func harnessFetchHost(harnessName, host string, port int) bool {
+	host = triage.NormalizeHost(host)
+	for _, f := range harnessFetches(harnessName) {
+		if host == triage.NormalizeHost(f.Host) && (port == 0 || port == f.Port) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolHostOf says what refusing host breaks for the harness harnessName,
+// when a tool of the harness calls it on every use (harness.ToolHost).
+func toolHostOf(harnessName, host string) (string, bool) {
+	spec, ok := harness.Get(harnessName)
+	if !ok {
+		return "", false
+	}
+	return spec.ToolHostOf(triage.NormalizeHost(host))
+}
+
+// harnessFetches are the requests the sandbox's harness makes on its own
+// that it does without (harness.Spec.DirectFetches).
 func harnessFetches(name string) []triage.HarnessFetch {
 	spec, ok := harness.Get(name)
 	if !ok {
@@ -323,6 +366,13 @@ func (m *Manager) recheckApproval(ctx context.Context, it triage.Item, chunk ope
 		return errors.New("it needs the user's approval now: " + d.Message)
 	}
 	if operator {
+		scope := sandboxrelay.DecisionScopeSession
+		if always {
+			scope = sandboxrelay.DecisionScopeAlways
+		}
+		if err := sandboxreg.CheckApprovals(m.floor(eff), sandboxrelay.DecisionEgressAllow, scope); err != nil {
+			return err
+		}
 		return triage.CheckProposal(eff, p, always)
 	}
 	return nil
@@ -445,6 +495,26 @@ func recent(times []time.Time, cutoff time.Time) []time.Time {
 
 func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingID string, p triage.Proposal, d triage.Decision) {
 	now := m.now()
+	m.mu.Lock()
+	eff := b.eff
+	m.mu.Unlock()
+	// orgRefusal is the managed refusal the feed shows under a rejection
+	// by the floor's rules (accessRefusal).
+	orgRefusal, orgRule := "", ""
+	if d.Verdict == triage.Ask {
+		// An ask the floor doesn't let the user answer (user_approvals:
+		// none) is refused at once, with the request-access contact,
+		// instead of waiting for an approval that can't be given.
+		f := m.floor(eff)
+		var refusal *sandboxreg.DecisionRefusedError
+		if err := sandboxreg.CheckApprovals(f, sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession); errors.As(err, &refusal) {
+			d.Verdict, d.Reason = triage.Reject, triage.ReasonAdmin
+			d.Message = d.Host + ": " + refusal.Message + ". Request access: " + requestAccess(f)
+			orgRefusal, orgRule = m.accessRefusal(b, f, refusal.Message, refusal.Rule, d.Host), refusal.Rule
+		}
+	} else if rule := firstNonEmpty(d.AdminRule, adminRule(d.Violation)); d.Verdict == triage.Reject && rule != "" {
+		orgRefusal, orgRule = m.accessRefusal(b, m.floor(eff), "", rule, d.Host), rule
+	}
 	a := &approval{
 		id: approvalID(p.Sandbox, p.RuleDigest), sandbox: p.Sandbox, chunkID: p.ChunkID, reviewToken: p.ReviewToken,
 		decision: d, proposal: p, createdAt: now.UTC(),
@@ -561,11 +631,23 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 		m.storeApproval(a)
 		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
 		m.recordApproval(ctx, id, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
+		if d.Port == 22 {
+			// SSH out of a sandbox: OpenShell's denial is on the feed
+			// already, saying what to do instead; a second line for the
+			// one attempt, with another reason, would only confuse.
+			return
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
 			Category: string(d.Reason), Reason: string(d.Reason), Message: blockedMessage(d),
-			Unblockable: d.Violation == nil && d.Unblockable,
+			Unblockable: d.Violation == nil && d.Unblockable, Refusal: orgRefusal,
 		})
+		if orgRefusal != "" {
+			// The agent's next hook says it can't be approved and whom the
+			// user asks (GAP-0502).
+			m.refusals.noteRefused(bindingID, p.Sandbox, triage.NormalizeHost(d.Host), d.Port, orgRefusal, now)
+			m.managedAccessRefused(ctx, b, triage.NormalizeHost(d.Host), d.Port, orgRule, accessRefusedProposal)
+		}
 	default:
 		a.status = sandboxapi.ApprovalPending
 		m.storeApproval(a)
@@ -573,6 +655,9 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 			Kind: sandboxapi.ActivityApprovalRequested, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port,
 			ApprovalID: a.id, Reason: string(d.Reason), Message: d.Message,
 		})
+		// The agent's next hook says the connection waits for the user
+		// (GAP-0268).
+		m.refusals.noteDirect(bindingID, p.Sandbox, triage.NormalizeHost(d.Host), d.Port, NoteAsked, now)
 	}
 }
 
@@ -634,9 +719,7 @@ func (m *Manager) recordApproval(ctx context.Context, id audit.SandboxIdentity, 
 			}
 		}
 	}
-	if err := m.tel.RecordSandboxApproval(ctx, ev); err != nil {
-		m.logf("approval telemetry %s: %v", a.id, err)
-	}
+	m.tel.RecordSandboxApproval(ctx, ev)
 }
 
 // approvalsApplied receives the batcher's results.
@@ -762,16 +845,15 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			continue
 		}
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalApproved, a.actor)
-		if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
-			Sandbox: ident, Operation: audit.SandboxPolicyRuleAdd, PolicyHash: r.PolicyHash, Actor: approvalActor(a.actor),
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+			Sandbox: ident, Operation: audit.SandboxPolicyRuleAdd, PolicyHash: r.PolicyHash, Actor: m.actorRef(a.actor),
 			Origin: originFor(a.actor), Target: a.decision.Host, Reason: policyReasonApproval, ChangeCount: 1, Timestamp: m.now(),
-		}); err != nil {
-			m.logf("policy telemetry for approval %s: %v", a.id, err)
-		}
+		})
 		msg := "approved " + a.decision.Host
 		if r.Forced {
 			msg += " (applied while hooks were busy)"
 		}
+		m.refusals.forgetNote(r.Item.BindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: a.decision.Host, Port: a.decision.Port, Reason: a.actor, Message: msg})
 	}
@@ -830,13 +912,6 @@ func (m *Manager) retryApply(a *approval, it triage.Item) {
 	})
 }
 
-func approvalActor(actor string) string {
-	if actor == actorOperator {
-		return "operator"
-	}
-	return "triage"
-}
-
 func originFor(actor string) string {
 	if actor == actorOperator {
 		return "api"
@@ -880,7 +955,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		a.status = approvalDeciding
 	}
 	// While deciding, triage leaves the approval's proposal alone.
-	p, chunkID, local := a.proposal, a.chunkID, a.local
+	p, chunkID, local, proxyAsk := a.proposal, a.chunkID, a.local, a.proxy
 	host, port := a.decision.Host, a.decision.Port
 	m.mu.Unlock()
 	if status != sandboxapi.ApprovalPending {
@@ -908,10 +983,48 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	res := &sandboxapi.ApprovalResult{}
 	switch strings.ToLower(strings.TrimSpace(d.Decision)) {
 	case sandboxapi.DecisionApprove:
+		scope := sandboxrelay.DecisionScopeSession
+		if d.Always {
+			scope = sandboxrelay.DecisionScopeAlways
+		}
+		f := m.floor(eff)
+		if err := sandboxreg.CheckApprovals(f, sandboxrelay.DecisionEgressAllow, scope); err != nil {
+			m.recordAdminRefusal(ctx, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+			return nil, m.decisionRefusal(err, b, f, host)
+		}
 		if d.Always {
 			if err := alwaysApprovable(p); err != nil {
 				return nil, err
 			}
+		}
+		if proxyAsk {
+			// The proxy's own refusal. For the session it is an approval
+			// (approveProxyAsk), which allow_unblock: false leaves the user;
+			// "always" keeps the host for every sandbox as an unblock does.
+			// Both check it against the policy and the floor, keep it with
+			// the managed gateway and open the host in the sandbox's
+			// decider at once.
+			var msg string
+			if d.Always {
+				un, err := m.unblock(ctx, sandboxapi.UnblockRequest{Host: host, Sandbox: a.sandbox, Always: true}, a.id)
+				if err != nil {
+					return nil, err
+				}
+				msg = un.Message
+			} else if msg, err = m.approveProxyAsk(ctx, b, eff, host, port, a.id); err != nil {
+				return nil, err
+			}
+			m.mu.Lock()
+			a.status, a.actor, a.always, a.resolvedAt = sandboxapi.ApprovalApproved, actorOperator, d.Always, m.now().UTC()
+			ident := b.identity()
+			m.mu.Unlock()
+			decided, res.Persisted = true, d.Always
+			m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalApproved, actorOperator)
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
+				Host: host, Port: port, Reason: "approved", Message: "approved " + host})
+			m.refusals.forgetNote(bindingID, triage.NormalizeHost(host), port, NoteAsked)
+			res.Message = msg
+			break
 		}
 		// The whole proposal is judged again against the current policy:
 		// approving applies every endpoint, port and allowed IP in it. An
@@ -922,7 +1035,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			cur = triage.Classify(ctx, p, m.triagePolicy(b, eff))
 			if cur.Verdict == triage.Reject {
 				if cur.Violation != nil {
-					return nil, m.violationErrorFor(ctx, cur.Violation, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+					return nil, m.decisionViolation(ctx, cur.Violation, b, eff, audit.SandboxPolicyRuleAdd, host)
 				}
 				return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
 			}
@@ -938,13 +1051,27 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		if err := triage.CheckProposal(eff, p, d.Always); err != nil {
 			return nil, m.violationErrorFor(ctx, err, a.sandbox, audit.SandboxPolicyRuleAdd, host)
 		}
-		if d.Always {
-			for _, h := range hosts {
-				if err := m.persistAllow(ctx, h); err != nil {
-					return nil, err
-				}
+		// The managed gateway re-checks the host against the floor,
+		// records the person and keeps an "always"; outside managed mode an
+		// "always" joins openshell.egress.unblocked. A host port reaches
+		// the managed gateway too, for this session. An approval names one
+		// host: triage refuses a proposal of more than one destination
+		// host (ReasonMultipleHosts), above for an agent's proposal, and a
+		// host-port ask has one endpoint.
+		decisionHosts := hosts
+		if m.authority() != nil {
+			decisionHosts = managedDecisionHosts(p)
+		}
+		for _, h := range decisionHosts {
+			decisionPort := 0
+			if h == openshellHostAlias {
+				decisionPort = port
 			}
-			res.Persisted = true
+			stored, err := m.keepDecisionAt(ctx, b, sandboxrelay.DecisionEgressAllow, h, decisionPort, scope, a.id)
+			if err != nil {
+				return nil, err
+			}
+			res.Persisted = res.Persisted || stored
 		}
 		m.mu.Lock()
 		a.status, a.actor, a.always = sandboxapi.ApprovalQueued, actorOperator, d.Always
@@ -972,13 +1099,15 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 				return nil, upstream("reject proposal", err)
 			}
 		}
-		if d.Always && len(hosts) > 0 {
+		if d.Always {
+			// A user block only tightens: it is always kept.
 			for _, h := range hosts {
-				if err := m.persistBlock(ctx, h); err != nil {
+				stored, err := m.keepDecision(ctx, b, sandboxrelay.DecisionEgressBlock, h, sandboxrelay.DecisionScopeAlways, a.id)
+				if err != nil {
 					return nil, err
 				}
+				res.Persisted = res.Persisted || stored
 			}
-			res.Persisted = true
 		}
 		m.mu.Lock()
 		a.status, a.actor, a.resolvedAt = sandboxapi.ApprovalRejected, actorOperator, m.now().UTC()
@@ -986,9 +1115,19 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 		decided = true
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorOperator)
+		// The feed names the port as the approval does, the reply says what
+		// the reject leaves, and the agent's next hook says the user
+		// declined, not a network error (GAP-0236, GAP-0260).
+		target := host
+		if local {
+			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
-			Host: host, Port: port, Reason: "rejected", Message: "rejected " + host})
-		res.Message = "rejected"
+			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})
+		res.Message = fmt.Sprintf("%s stays closed to %s; its attempts in the next %s are refused without a new ask, and the one after that asks again",
+			target, a.sandbox, packs.ShortDuration(collapseWindow))
+		m.refusals.forgetNote(bindingID, triage.NormalizeHost(host), port, NoteAsked)
+		m.refusals.noteDirect(bindingID, a.sandbox, triage.NormalizeHost(host), port, NoteDeclined, m.now())
 	default:
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "decision must be approve or reject")
 	}
@@ -998,6 +1137,19 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 	}
 	return res, nil
+}
+
+// managedDecisionHosts are the hosts of a proposal the managed gateway
+// decides: its network hosts, and this machine (the OpenShell host alias)
+// when it opens a host port.
+func managedDecisionHosts(p triage.Proposal) []string {
+	out := networkHosts(p)
+	for _, ep := range p.Endpoints {
+		if triage.NormalizeHost(ep.Host) == openshellHostAlias {
+			return append(out, openshellHostAlias)
+		}
+	}
+	return out
 }
 
 // networkHosts are a proposal's destination names outside this machine
@@ -1086,4 +1238,585 @@ func (m *Manager) pruneApprovals() {
 
 func packActionHarness(harness string) packs.Action {
 	return packs.Action{Kind: packs.ActionHarness, Harness: harness}
+}
+
+// ManagedAuthority is the managed gateway as a managed host's sandbox
+// daemon reaches it (sandboxrelay.Client has these methods): it re-checks
+// the user's asks, unblocks and blocks against the user's floor and keeps
+// the ones that last (POST and GET /api/v1/sandbox/decisions), and takes
+// the daemon's records of foreign sandboxes, rules and containers (POST
+// /api/v1/sandbox/events), stamping both with the person's identity. A
+// Persist that implements it runs the manager in managed mode: no decision
+// is written to a configuration then (the managed daemon's Persist is the
+// gateway's sandboxDecisionsClient).
+//
+// Errors are *sandboxapi.Error values: sandboxapi.CodeConflict means the
+// managed gateway no longer knows the registration (revoked, expired,
+// unknown, or its account changed), and sandboxapi.CodeUnavailable that it
+// could not be reached or was busy.
+type ManagedAuthority interface {
+	Decide(ctx context.Context, req sandboxrelay.DecisionRequest) (sandboxrelay.DecisionResult, error)
+	Decisions(ctx context.Context, registration string) ([]sandboxrelay.Decision, error)
+	Events(ctx context.Context, batch sandboxrelay.EventBatch) error
+}
+
+// RegistrationLookup is implemented by a ManagedAuthority that knows the
+// managed registration of each of the daemon's sandboxes by name (the
+// managed daemon keeps them from the bind that follows the create on). The
+// manager records it on the sandbox the first time it needs it
+// (registrationOf), so a sandbox whose record does not carry one yet is
+// not taken for a foreign one.
+type RegistrationLookup interface {
+	SandboxRegistration(sandbox string) (string, bool)
+}
+
+// registrationOf is the managed registration of sandbox b: its record's,
+// or the one the authority holds for its name (RegistrationLookup), which
+// is then kept on the record. "" when it has none. Callers must not hold
+// m.mu.
+func (m *Manager) registrationOf(b *box) string {
+	m.mu.Lock()
+	name, registration := b.rec.Name, b.rec.RegistrationID
+	m.mu.Unlock()
+	if registration != "" {
+		return registration
+	}
+	lookup, ok := m.opts.Persist.(RegistrationLookup)
+	if !ok {
+		return ""
+	}
+	if registration, ok = lookup.SandboxRegistration(name); !ok || registration == "" {
+		return ""
+	}
+	m.mu.Lock()
+	if b.rec.Name == name && b.rec.RegistrationID == "" {
+		b.rec.RegistrationID = registration
+	}
+	m.mu.Unlock()
+	return registration
+}
+
+// liveBoxes are the sandboxes the manager holds that are neither deleted
+// nor kept as a snapshot.
+func (m *Manager) liveBoxes() []*box {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*box, 0, len(m.boxes))
+	for _, b := range m.boxes {
+		if !b.deleted && !b.retained {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// registrationGone reports an authority's answer that it no longer knows
+// the registration (ManagedAuthority).
+func registrationGone(err error) bool {
+	return sandboxapi.IsCode(err, sandboxapi.CodeConflict)
+}
+
+// authority is the managed gateway, or nil outside managed mode.
+func (m *Manager) authority() ManagedAuthority {
+	a, _ := m.opts.Persist.(ManagedAuthority)
+	return a
+}
+
+// managedMode reports a manager whose decisions the managed gateway keeps:
+// a managed daemon's (authority), or one under a managed_enterprise
+// configuration, which has no authority to keep them and so keeps none.
+// It decides the egress default (deny), foreign sandboxes, rules and
+// containers, and where decisions go.
+func (m *Manager) managedMode() bool {
+	return m.authority() != nil || managed.IsManagedEnterprise(m.config().DeploymentMode)
+}
+
+// floor is the floor F a sandbox's policy was resolved under: the loosest
+// the sandbox may get, and what bounds the user's decisions, credentials
+// and rules there. It is read from the sandbox's own resolved policy
+// (effectiveFloor), so in managed mode it is the floor of the profile the
+// sandbox's registration resolved, never the daemon's configuration. A
+// managed sandbox whose policy carries no floor, and a managed call with
+// no sandbox (eff nil), get closedFloor: nothing is approved, unblocked
+// or handed over on a floor DefenseClaw does not know. Outside managed
+// mode a policy without one is bounded by openshell.admin.
+func (m *Manager) floor(eff *packs.Effective) config.OpenShellAdminConfig {
+	if f, ok := effectiveFloor(eff); ok {
+		return f
+	}
+	if m.managedMode() {
+		return closedFloor()
+	}
+	return m.config().OpenShell.Admin
+}
+
+// effectiveFloor reads F from a resolved policy through the floor accessor
+// of packs.Effective (Floor, which returns the Flags.Floor the policy was
+// resolved under, or openshell.admin without one); ok is false for no
+// policy, or one without the accessor. A variable so tests can give a
+// sandbox a floor that differs from the daemon's configuration.
+var effectiveFloor = func(eff *packs.Effective) (config.OpenShellAdminConfig, bool) {
+	if eff == nil {
+		return config.OpenShellAdminConfig{}, false
+	}
+	if fp, ok := any(eff).(interface {
+		Floor() config.OpenShellAdminConfig
+	}); ok {
+		return fp.Floor(), true
+	}
+	return config.OpenShellAdminConfig{}, false
+}
+
+// closedFloor is the floor of a managed sandbox whose floor is unknown: no
+// approvals, no credentials, no unblocks, no host ports, and foreign
+// sandboxes stop.
+func closedFloor() config.OpenShellAdminConfig {
+	off := false
+	return config.OpenShellAdminConfig{
+		UserApprovals: config.OpenShellUserApprovalsNone, AllowedCredentials: []string{config.OpenShellCredentialsNone},
+		AllowUnblock: &off, AllowHostPorts: &off, ForeignSandboxes: config.OpenShellForeignSandboxesStop,
+	}
+}
+
+// requestAccess is the floor's request-access contact.
+func requestAccess(f config.OpenShellAdminConfig) string {
+	if s := strings.TrimSpace(f.RequestAccess); s != "" {
+		return s
+	}
+	return config.OpenShellRequestAccessFallback
+}
+
+// decisionRefusal is the API error of a decision the floor refuses
+// (sandboxreg.CheckDecision or CheckApprovals) for sandbox b: the managed
+// refusal (accessRefusal) with the check's own words.
+func (m *Manager) decisionRefusal(err error, b *box, f config.OpenShellAdminConfig, host string) error {
+	var refusal *sandboxreg.DecisionRefusedError
+	if !errors.As(err, &refusal) {
+		return err
+	}
+	if refusal.Rule == sandboxreg.RuleInvalid {
+		return &sandboxapi.Error{Code: sandboxapi.CodeInvalid, Message: strings.TrimPrefix(refusal.Message, sandboxapi.AdminMessage+": ")}
+	}
+	return accessRefusedError(m.accessRefusal(b, f, refusal.Message, refusal.Rule, host), refusal.Rule, host)
+}
+
+// Reason codes of the access_refused records (managedAccessRefused): which
+// check refused the connection.
+const (
+	accessRefusedByProxy     = "egress_proxy"
+	accessRefusedProposal    = "egress_proposal"
+	accessRefusedRuleRemoved = "approved_rule_removed"
+)
+
+// managedAccessRefused records, for the managed gateway, a connection of
+// b's sandbox that the organization's floor refused (rule): the gateway
+// stamps the person and registration and emits
+// event.sandbox.access_refused. The daemon's own egress telemetry is not
+// kept on a managed computer, so a refusal the person saw in the activity
+// feed left no audit record (GAP-0605). Outside managed mode it does
+// nothing.
+func (m *Manager) managedAccessRefused(ctx context.Context, b *box, host string, port int, rule, reason string) {
+	if b == nil || m.authority() == nil {
+		return
+	}
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	m.managedEvent(ctx, m.registrationOf(b), sandboxrelay.EventAccessRefused, map[string]any{
+		"sandbox": truncate(name, 128), "host": truncate(host, 253), "port": port, "rule": truncate(rule, 128), "reason": reason,
+	})
+}
+
+// accessRefusedError is the API error of a managed refusal msg
+// (accessRefusal) by rule: the message is complete, so the CLI prints it
+// as it is (sandboxapi.IsPolicyRefusal), and the violation names the rule
+// for the readers that branch on it.
+func accessRefusedError(msg, rule, host string) *sandboxapi.Error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: msg,
+		Violation: &sandboxapi.Violation{Key: "approvals", Attempted: host, Constraint: "openshell.admin." + rule, Admin: true,
+			Message: msg}}
+}
+
+// ProfileLookup is implemented by a ManagedAuthority that knows the
+// guardrail profile each of the daemon's sandboxes matched (the managed
+// daemon's registrations): refusals name it and quote it.
+type ProfileLookup interface {
+	SandboxProfile(sandbox string) (string, bool)
+}
+
+// profileOf is the guardrail profile sandbox b's registration matched, ""
+// outside managed mode, for no sandbox, or while it is not known. Callers
+// must not hold m.mu.
+func (m *Manager) profileOf(b *box) string {
+	lookup, ok := m.opts.Persist.(ProfileLookup)
+	if !ok || b == nil {
+		return ""
+	}
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	profile, _ := lookup.SandboxProfile(name)
+	return profile
+}
+
+// accessRefusal is the managed refusal (sandboxapi.AccessRefusedWhy) of an
+// ask, approval or unblock for host in sandbox b (nil: none) that rule of
+// the floor f refuses; why is the refusing check's words, "" to say it by
+// the rule. Every such refusal has this one shape, with the profile, the
+// sandbox and f's request-access contact (GAP-0508, GAP-0468, GAP-0502).
+// Callers must not hold m.mu.
+func (m *Manager) accessRefusal(b *box, f config.OpenShellAdminConfig, why, rule, host string) string {
+	name := ""
+	if b != nil {
+		m.mu.Lock()
+		name = b.rec.Name
+		m.mu.Unlock()
+	}
+	return sandboxapi.AccessRefusedWhy(why, rule, host, m.profileOf(b), name, f.RequestAccess)
+}
+
+// adminRule is the floor rule (the openshell.admin key) that refuses with
+// the organization's violation v, "" for any other refusal.
+func adminRule(v *packs.Violation) string {
+	if v == nil || !v.Admin() {
+		return ""
+	}
+	rule, ok := strings.CutPrefix(v.Constraint, "openshell.admin.")
+	if !ok || rule == "" || strings.Contains(rule, ".") {
+		return ""
+	}
+	return rule
+}
+
+// person is the trusted actor reference of the person who decides on this
+// daemon's sandboxes: the account it runs as (cli:<account>).
+func (m *Manager) person() string {
+	if name := m.host.Name; name != "" && policyTarget.MatchString(name) && len(name) <= 128 {
+		return configwrite.ActorPrefixCLI + name
+	}
+	return configwrite.ActorPrefixCLI + "uid-" + strconv.Itoa(m.host.UID)
+}
+
+// actorRef is the actor reference of an approval's policy record: the
+// person for the user's own approvals, triage for DefenseClaw's.
+func (m *Manager) actorRef(actor string) string {
+	if actor == actorOperator {
+		return m.person()
+	}
+	return "triage"
+}
+
+// keepDecision applies one of the user's decisions beyond the sandbox's
+// own state. In managed mode the managed gateway re-checks every one
+// against the user's floor and keeps what lasts (an "always", a user
+// block), recording the person; stored reports it kept this one. Outside
+// it, an "always" allow or unblock joins openshell.egress.unblocked and a
+// user block openshell.egress.block (Persist); a session decision keeps
+// nothing. A sandbox without a registration fails closed in managed mode.
+func (m *Manager) keepDecision(ctx context.Context, b *box, kind, host, scope, approvalID string) (stored bool, err error) {
+	return m.keepDecisionAt(ctx, b, kind, host, 0, scope, approvalID)
+}
+
+// keepDecisionAt is keepDecision for a decision about port of host: the
+// managed gateway's record of it names the port (a host-port ask).
+func (m *Manager) keepDecisionAt(ctx context.Context, b *box, kind, host string, port int, scope, approvalID string) (stored bool, err error) {
+	if auth := m.authority(); auth != nil {
+		registration := ""
+		if b != nil {
+			registration = m.registrationOf(b)
+		}
+		if registration == "" {
+			return false, sandboxapi.Errorf(sandboxapi.CodeUnavailable,
+				"this sandbox has no registration with your organization's DefenseClaw gateway, so its decisions can't be made; start it again")
+		}
+		res, err := auth.Decide(ctx, sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: registration,
+			Kind: kind, Host: host, Scope: scope, ApprovalID: approvalID, Port: port})
+		if err != nil {
+			return false, err
+		}
+		if res.Stored {
+			// The sandbox's decider follows it now, not at the next
+			// reconcile.
+			m.noteDecision(registration, res.Decision)
+			m.refreshEgress()
+		}
+		return res.Stored, nil
+	}
+	if m.managedMode() {
+		if scope == sandboxrelay.DecisionScopeSession {
+			return false, nil
+		}
+		return false, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
+			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
+	}
+	switch {
+	case kind == sandboxrelay.DecisionEgressBlock && scope == sandboxrelay.DecisionScopeAlways:
+		return true, m.persistBlock(ctx, host)
+	case scope == sandboxrelay.DecisionScopeAlways:
+		return true, m.persistAllow(ctx, host)
+	}
+	return false, nil
+}
+
+// managedState is what a manager in managed mode keeps of the managed
+// gateway between reconciles: each registration's saved decisions (capped
+// by the floor), and the foreign items it reported. It hangs off the
+// Manager (managedSide) and goes with it.
+type managedState struct {
+	mu sync.Mutex
+	// decisions are the saved decisions per registration, as the last
+	// refresh (or a decision since) left them.
+	decisions map[string][]sandboxrelay.Decision
+	// foreignRules counts each sandbox's removals of rules DefenseClaw
+	// neither rendered nor approved: a repeat stops the sandbox.
+	foreignRules map[string]int
+	// reported are the foreign sandboxes and containers already alerted
+	// on (alert mode), so a reconcile reports each once.
+	reported map[string]bool
+	// foreignRemoving counts, per foreign sandbox, the reconciles whose
+	// delete OpenShell took while the sandbox stayed (reconcileForeign).
+	foreignRemoving map[string]int
+	// foreignLeft is how many foreign sandboxes the last reconcile left
+	// running (ForeignSandboxesRunning).
+	foreignLeft int
+	// pending are the records for the managed gateway kept while the
+	// gateway was out of reach, or, for a record that needs one, while
+	// none of the person's sandboxes is registered (flushManagedEvents).
+	pending []sandboxrelay.Event
+	// containersAt is when the containers were last looked into
+	// (reportForeignContainers).
+	containersAt time.Time
+}
+
+var managedStates sync.Map // weak.Pointer[Manager] -> *managedState
+
+// managedSide returns the manager's managedState, made on first use and
+// dropped once the manager is collected.
+func (m *Manager) managedSide() *managedState {
+	key := weak.Make(m)
+	if v, ok := managedStates.Load(key); ok {
+		return v.(*managedState)
+	}
+	st := &managedState{decisions: map[string][]sandboxrelay.Decision{}, foreignRules: map[string]int{}, reported: map[string]bool{},
+		foreignRemoving: map[string]int{}}
+	v, loaded := managedStates.LoadOrStore(key, st)
+	if !loaded {
+		runtime.AddCleanup(m, func(k weak.Pointer[Manager]) { managedStates.Delete(k) }, key)
+	}
+	return v.(*managedState)
+}
+
+// noteDecision adds a decision the managed gateway just stored to its
+// registration's saved decisions, so the sandbox's decider follows it
+// before the next refresh.
+func (m *Manager) noteDecision(registration string, d sandboxrelay.Decision) {
+	st := m.managedSide()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	have, loaded := st.decisions[registration]
+	if !loaded {
+		// Not loaded yet: the first load brings this one with the others.
+		return
+	}
+	list := slices.DeleteFunc(slices.Clone(have), func(have sandboxrelay.Decision) bool {
+		return have.ID != "" && have.ID == d.ID
+	})
+	st.decisions[registration] = append(list, d)
+}
+
+// savedDecisions are a registration's saved decisions the floor f still
+// allows (sandboxreg.CheckDecision): saved decisions are capped by the
+// floor whenever the sandbox's policy resolves.
+func (m *Manager) savedDecisions(registration string, f config.OpenShellAdminConfig) []sandboxrelay.Decision {
+	if registration == "" {
+		return nil
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	list, loaded := st.decisions[registration]
+	list = slices.Clone(list)
+	st.mu.Unlock()
+	if !loaded {
+		list = m.loadDecisions(registration)
+	}
+	return slices.DeleteFunc(list, func(d sandboxrelay.Decision) bool {
+		return sandboxreg.CheckDecision(f, sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: registration,
+			Kind: d.Kind, Host: d.Host, Scope: d.Scope}) != nil
+	})
+}
+
+// loadDecisionsTimeout bounds the first load of a registration's saved
+// decisions (loadDecisions).
+const loadDecisionsTimeout = 5 * time.Second
+
+// loadDecisions loads the saved decisions of a registration the daemon has
+// not loaded yet, a sandbox just created: its first requests follow the
+// person's "always" decisions at once, not only after the next reconcile
+// refreshed them (GAP-0674). A load that fails keeps nothing, so the next
+// policy build or the reconcile tries again.
+func (m *Manager) loadDecisions(registration string) []sandboxrelay.Decision {
+	auth := m.authority()
+	if auth == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), loadDecisionsTimeout)
+	defer cancel()
+	list, err := auth.Decisions(ctx, registration)
+	if err != nil {
+		m.logf("load the saved sandbox decisions of registration %s: %v", registration, err)
+		return nil
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if have, ok := st.decisions[registration]; ok {
+		// A refresh or a new decision got there first.
+		return slices.Clone(have)
+	}
+	if list == nil {
+		list = []sandboxrelay.Decision{}
+	}
+	st.decisions[registration] = list
+	return slices.Clone(list)
+}
+
+// refreshDecisions reloads the saved decisions of every registered
+// sandbox from the managed gateway (reconcile). A registration the gateway
+// can't answer for keeps what it had; one no sandbox holds, or one the
+// gateway no longer knows (revoked, expired), is dropped.
+func (m *Manager) refreshDecisions(ctx context.Context) {
+	auth := m.authority()
+	if auth == nil {
+		return
+	}
+	var registrations []string
+	for _, b := range m.liveBoxes() {
+		if r := m.registrationOf(b); r != "" {
+			registrations = append(registrations, r)
+		}
+	}
+	fresh := map[string][]sandboxrelay.Decision{}
+	failed := map[string]bool{}
+	for _, r := range registrations {
+		list, err := auth.Decisions(ctx, r)
+		if err != nil {
+			m.logf("load the saved sandbox decisions of registration %s: %v", r, err)
+			if !registrationGone(err) {
+				failed[r] = true
+			}
+			continue
+		}
+		fresh[r] = list
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for r := range failed {
+		fresh[r] = st.decisions[r]
+	}
+	st.decisions = fresh
+}
+
+// maxPendingEvents bounds the records kept for the managed gateway
+// (managedState.pending); the oldest go first. A batch without a
+// registration holds at most as many.
+const maxPendingEvents = sandboxrelay.MaxUnregisteredEventRecords
+
+// managedEvent posts one record of the daemon to the managed gateway,
+// which stamps it with the person's identity and emits it (kind is one of
+// the sandboxrelay Event kinds), under registration, or without one when
+// none of the person's sandboxes is registered (flushManagedEvents). Outside
+// managed mode nothing is posted.
+func (m *Manager) managedEvent(ctx context.Context, registration, kind string, payload any) {
+	if m.authority() == nil {
+		return
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	m.keepEvents(sandboxrelay.Event{Kind: kind, Time: m.now().UTC(), Payload: raw})
+	m.flushManagedEvents(ctx, registration)
+}
+
+// eventWithoutRegistration reports a record the events route takes without
+// a registration (sandboxrelay.EventWithoutRegistration).
+func eventWithoutRegistration(ev sandboxrelay.Event) bool {
+	return sandboxrelay.EventWithoutRegistration(ev.Kind)
+}
+
+// keepEvents adds records to the pending ones, dropping the oldest past
+// maxPendingEvents.
+func (m *Manager) keepEvents(events ...sandboxrelay.Event) {
+	st := m.managedSide()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.pending = append(st.pending, events...)
+	if over := len(st.pending) - maxPendingEvents; over > 0 {
+		st.pending = slices.Delete(st.pending, 0, over)
+	}
+}
+
+// flushManagedEvents posts the pending records under registration, except the
+// foreign sandbox and container records, which always go out without one
+// (the gateway stamps them with the verified caller). Without a registration
+// any other record is kept for the next one. A gateway out of reach keeps
+// them for the next try; one that refuses the batch drops them (the log has
+// each).
+func (m *Manager) flushManagedEvents(ctx context.Context, registration string) {
+	auth := m.authority()
+	if auth == nil {
+		return
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	events := st.pending
+	st.pending = nil
+	// A foreign sandbox or container belongs to none of the person's
+	// registrations, so it is posted under none: the registration picked for
+	// the batch (anyRegistration) may be one the managed gateway no longer
+	// takes, and a refused batch drops its records, which cost the audit
+	// record of a foreign sandbox that was announced to the user (GAP-0633).
+	unregistered, registered := splitEvents(events, eventWithoutRegistration)
+	if registration == "" {
+		st.pending = registered
+		registered = nil
+	}
+	st.mu.Unlock()
+	m.postEvents(ctx, auth, "", unregistered)
+	m.postEvents(ctx, auth, registration, registered)
+}
+
+// postEvents posts one batch of records under registration. A gateway out of
+// reach keeps them for the next try; one that refuses the batch drops them.
+func (m *Manager) postEvents(ctx context.Context, auth ManagedAuthority, registration string, events []sandboxrelay.Event) {
+	if len(events) == 0 {
+		return
+	}
+	err := auth.Events(ctx, sandboxrelay.EventBatch{V: sandboxrelay.WireVersion, Registration: registration, Events: events})
+	if err == nil {
+		return
+	}
+	m.logf("report %d record(s) to the managed gateway: %v", len(events), err)
+	if sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		st := m.managedSide()
+		st.mu.Lock()
+		later := st.pending
+		st.pending = nil
+		st.mu.Unlock()
+		m.keepEvents(append(events, later...)...)
+	}
+}
+
+// splitEvents splits events into those keep reports and the others, each
+// in order.
+func splitEvents(events []sandboxrelay.Event, keep func(sandboxrelay.Event) bool) (kept, rest []sandboxrelay.Event) {
+	for _, ev := range events {
+		if keep(ev) {
+			kept = append(kept, ev)
+		} else {
+			rest = append(rest, ev)
+		}
+	}
+	return kept, rest
 }

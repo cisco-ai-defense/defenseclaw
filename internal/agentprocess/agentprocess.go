@@ -171,6 +171,28 @@ func agentFrom(lookup func(int) (Process, error), self int) (Process, bool) {
 	return Process{}, false
 }
 
+// ErrNoAgent is CommandLine's error when no agent ancestor can be named.
+var ErrNoAgent = errors.New("no agent process runs this process")
+
+// maxCommandLineBytes bounds one argument vector read.
+const maxCommandLineBytes = 256 << 10
+
+// CommandLine returns the argument vector of the agent process that runs
+// this process (the process Identity names) and its working directory where
+// the platform reports one ("" elsewhere). An agent reads some of its
+// configuration from its command line, which no file shows: Claude Code's
+// --mcp-config and Codex's -c overrides (GAP-0954). It fails with ErrNoAgent
+// when there is no agent ancestor.
+func CommandLine() ([]string, string, error) {
+	lookup, done := newLookup()
+	defer done()
+	agent, ok := agentFrom(lookup, os.Getpid())
+	if !ok {
+		return nil, "", ErrNoAgent
+	}
+	return commandLine(agent.PID)
+}
+
 // Host returns the normalized executable name of the process that started
 // the agent (the agent's nearest ancestor that is not a shell or wrapper),
 // or "" when it cannot be resolved. It tells an agent a desktop app runs

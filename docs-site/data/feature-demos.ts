@@ -507,14 +507,17 @@ exporters:
     "schema_effects": ["filesystem:read", "network:outbound"]
   }
 ]` },
-      { id: 'mcp-actions', label: 'mcp-actions.yaml', language: 'yaml', source: `mcp_actions:
-  high:
-    runtime: disable
-    install: block
-scanner:
-  prompts: enabled
-  resources: enabled
-  llm_intent_analysis: optional` },
+      { id: 'mcp-actions', label: 'config.yaml', language: 'yaml', source: `config_version: 9
+admission:
+  mcp:
+    actions:
+      high:
+        runtime: disable
+        install: block
+scanners:
+  mcp_scanner:
+    scan_prompts: true
+    scan_resources: true` },
       { id: 'mcp-result', label: 'scan-result.json', language: 'json', source: `{
   "server": "catalog-lookup",
   "transport": "local_stdio",
@@ -530,7 +533,7 @@ scanner:
       { id: 'mcp-sandbox', label: 'Scanner', value: 'Local stdio subprocess', detail: 'The local stdio server starts as a short-lived scan subprocess with a scrubbed environment.', tone: 'info' },
       { id: 'mcp-effects', label: 'Capability mismatch', value: 'Filesystem + outbound network', detail: 'The descriptor implies more than a read-only lookup.', tone: 'danger' },
       { id: 'mcp-high', label: 'Consolidated severity', value: 'HIGH', detail: 'Findings consolidate before action mapping.', tone: 'warning' },
-      { id: 'mcp-map', label: 'mcp_actions.high', value: 'Disable + block install', detail: 'The policy mapping acts on the whole server.', tone: 'danger' },
+      { id: 'mcp-map', label: 'admission.mcp.actions.high', value: 'Disable + block install', detail: 'The policy mapping acts on the whole server.', tone: 'danger' },
       { id: 'mcp-audit', label: 'Evidence', value: 'Admission event written', detail: 'The source, finding, severity, and action are retained.', tone: 'success' },
     ],
     outcomes: [{ id: 'mcp-disabled', kind: 'disable', label: 'Disable runtime and block install', reason: 'HIGH capability mismatch', action: 'Write admission audit event' }],
@@ -540,7 +543,7 @@ scanner:
       step('mcp-start', 'Start server', 'Start the local stdio server as a short-lived scan subprocess.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
       step('mcp-enumerate', 'Enumerate', 'Read tool descriptions and schemas, plus prompts/resources when enabled.', 'tools', ['mcp-sandbox', 'mcp-effects'], [{ tabId: 'tools', start: 2, end: 6, tone: 'danger' }]),
       step('mcp-severity', 'Consolidate', 'The claimed-intent mismatch resolves to HIGH.', 'mcp-result', ['mcp-effects', 'mcp-high'], [{ tabId: 'mcp-result', start: 3, end: 5, tone: 'warning' }]),
-      step('mcp-resolve', 'Resolve policy', 'mcp_actions.high disables runtime and blocks installation.', 'mcp-actions', ['mcp-high', 'mcp-map'], [{ tabId: 'mcp-actions', start: 1, end: 4, tone: 'danger' }]),
+      step('mcp-resolve', 'Resolve policy', 'admission.mcp.actions.high disables runtime and blocks installation.', 'mcp-actions', ['mcp-high', 'mcp-map'], [{ tabId: 'mcp-actions', start: 1, end: 6, tone: 'danger' }]),
       step('mcp-record', 'Record', 'The admission action is written to the audit history.', 'mcp-result', ['mcp-map', 'mcp-audit'], [{ tabId: 'mcp-result', start: 5, end: 7, tone: 'success' }], 'mcp-disabled'),
     ],
     boundaries: {
@@ -567,11 +570,14 @@ tools:
   - filesystem.read
   - network.post
 install_state: quarantined` },
-      { id: 'skill-actions', label: 'skill-actions.yaml', language: 'yaml', source: `skill_actions:
-  critical:
-    file: quarantine
-    runtime: disable
-    install: block
+      { id: 'skill-actions', label: 'config.yaml', language: 'yaml', source: `config_version: 9
+admission:
+  skill:
+    actions:
+      critical:
+        file: quarantine
+        runtime: disable
+        install: block
 # LLM intent analysis is optional` },
       { id: 'skill-result', label: 'scan-result.json', language: 'json', source: `{
   "skill": "workspace-helper",
@@ -588,21 +594,21 @@ install_state: quarantined` },
       { id: 'skill-static', label: 'Static checks', value: 'Manifest · tools · paths', detail: 'Deterministic checks run without an LLM key.', tone: 'danger' },
       { id: 'skill-intent', label: 'Optional analysis', value: 'Instruction intent', detail: 'LLM-assisted analysis is optional and not the only scanner.', tone: 'info' },
       { id: 'skill-critical', label: 'Consolidated severity', value: 'CRITICAL', detail: 'The findings reach the highest severity.', tone: 'danger' },
-      { id: 'skill-map', label: 'skill_actions', value: 'Quarantine + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
+      { id: 'skill-map', label: 'admission.skill.actions', value: 'Quarantine + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
       { id: 'skill-audit', label: 'Evidence', value: 'Action + reason audited', detail: 'Manual restore or allow would also create an audit trail.', tone: 'success' },
     ],
     outcomes: [{ id: 'skill-retained', kind: 'quarantine', label: 'Quarantine', reason: 'CRITICAL skill findings', action: 'Move to quarantine, disable runtime, block install, write audit event' }],
     steps: [
       step('skill-appears', 'Detect', 'A new skill appears in a configured connector directory.', 'skill-manifest', ['skill-detected'], [{ tabId: 'skill-manifest', start: 1, end: 5, tone: 'info' }]),
       step('skill-scan', 'Scan statically', 'Not on a block or allow list, so the watcher scans it in place: manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-detected', 'skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
-      step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 6, end: 6, tone: 'info' }]),
+      step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 9, end: 9, tone: 'info' }]),
       step('skill-score', 'Consolidate', 'Static and optional findings consolidate to CRITICAL.', 'skill-result', ['skill-intent', 'skill-critical'], [{ tabId: 'skill-result', start: 2, end: 4, tone: 'danger' }]),
-      step('skill-policy', 'Resolve policy', 'skill_actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 5, tone: 'danger' }]),
+      step('skill-policy', 'Resolve policy', 'admission.skill.actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 2, end: 8, tone: 'danger' }]),
       step('skill-quarantine', 'Quarantine', 'The watcher moves the skill out of the agent\'s skill folder into quarantine.', 'skill-manifest', ['skill-map'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
       step('skill-record', 'Record', 'The final action and reason enter the audit trail.', 'skill-result', ['skill-map', 'skill-audit'], [{ tabId: 'skill-result', start: 4, end: 7, tone: 'success' }], 'skill-retained'),
     ],
     boundaries: {
-      did: ['Scan the skill where it was installed', 'Combine deterministic checks with optional LLM analysis', 'Quarantine on the skill_actions verdict'],
+      did: ['Scan the skill where it was installed', 'Combine deterministic checks with optional LLM analysis', 'Quarantine on the admission.skill.actions verdict'],
       didNot: ['Hide the skill from the agent while the scan runs', 'Treat LLM analysis as mandatory or sufficient alone', 'Skip the audit trail for a manual allow'],
     },
   },

@@ -25,20 +25,19 @@ import (
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
 type unixLifecycleOptions struct {
-	payload              string
-	fromPackage          bool
-	config               string
-	noStart              bool
-	adoptExisting        bool
-	allowDowngrade       bool
-	purge                bool
-	removeServiceAccount bool
-	keepState            bool
-	keepServiceAccount   bool
-	productVersion       string
-	reason               string
-	lockWait             time.Duration
-	json                 bool
+	payload            string
+	fromPackage        bool
+	config             string
+	noStart            bool
+	adoptExisting      bool
+	allowDowngrade     bool
+	purge              bool
+	keepState          bool
+	keepServiceAccount bool
+	productVersion     string
+	reason             string
+	lockWait           time.Duration
+	json               bool
 }
 
 // enterpriseSecretOptions are the flags of `enterprise secret <action>`.
@@ -117,8 +116,25 @@ arguments, 75 another lifecycle run holds the lock.`,
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
+	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
+	if name == "linux" {
+		group.AddCommand(newUnixTetragonCommand())
+	}
+	// `enterprise <os> policy`, as the other administrator views are spelled
+	// (GAP-0201, GAP-0240).
+	policy, _, _, _ := newEnterprisePolicyGroup(name)
+	group.AddCommand(policy)
 	return group
 }
+
+// sandboxRowsHelp documents the sandbox rows of status and verify.
+const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the services list also has the sandbox rows: the install mode and driver, " +
+	"each prerequisite that mode needs (OpenShell, its MicroVM driver, e2fsprogs, Docker or /dev/kvm) as ok or missing with what to run, " +
+	"the docker or kvm group membership of the users that run sandboxes, the OpenShell users installed themselves (setup mode: user-installed, unmanaged), " +
+	"and the changes waiting for a user's sandboxes to stop (pending). A missing prerequisite is a warning, openshell_prerequisite_missing: " +
+	"DefenseClaw itself is healthy, and the gateway refuses the sandbox runs of users until it is fixed. On Linux, with driver vm or auto and " +
+	"driver_fallback docker, the docker fallback has its own rows (fallback ...), and a missing MicroVM prerequisite while the fallback is ready " +
+	"is the warning openshell_driver_fallback: users get docker sandboxes with every profile floor unchanged."
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
@@ -196,6 +212,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	case "status":
 		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
 	}
+	if action == "status" || action == "verify" {
+		cmd.Long += sandboxRowsHelp
+	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.
 	cmd.SetFlagErrorFunc(lifecycleFlagError)
@@ -219,7 +238,6 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
 		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
-		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "delete the gateway service account (the default now; kept for older scripts)")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
 		addLockWaitFlag(flags, &opts.lockWait)

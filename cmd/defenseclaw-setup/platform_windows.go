@@ -2048,21 +2048,6 @@ func writeInstalledAppValuesSnapshot(key registry.Key, values installedAppValues
 	return flushRegistryKey(key)
 }
 
-func installedAppValuesMatchKey(
-	key registry.Key,
-	maintenancePath, installRoot, version, transactionID string,
-	unsigned bool,
-) (bool, error) {
-	return installedAppValuesMatchKeySnapshot(key, newInstalledAppValues(
-		maintenancePath,
-		installRoot,
-		version,
-		transactionID,
-		unsigned,
-		estimateInstallKB(installRoot),
-	))
-}
-
 func installedAppValuesMatchKeySnapshot(key registry.Key, values installedAppValues) (bool, error) {
 	for name, want := range values.strings {
 		got, valueType, err := key.GetStringValue(name)

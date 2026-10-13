@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"go.opentelemetry.io/otel/trace"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -305,5 +307,22 @@ func TestEventRouterBlockedPromptTurnCarriesThePrompt(t *testing.T) {
 	}
 	if withPrompt[observability.TelemetryFamilyAgentInvoke] != 1 || withPrompt[observability.TelemetryFamilyModelChat] != 1 {
 		t.Fatalf("spans with the blocked prompt=%v, want one agent and one chat", withPrompt)
+	}
+}
+
+func TestSecureClientAssistantMessageKeepsLegacyHealthShape(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	router, _ := bindEventRouterModelV8Runtime(t, []string{"traces"})
+	health := NewSidecarHealth()
+	router.SetHealth(health)
+	router.handleSessionMessage(EventFrame{Type: "event", Event: "session.message",
+		Payload: eventRouterAssistantMessagePayload(t, "secure-client", "run-secure-client")})
+	snap := health.Snapshot()
+	if snap.Interception != nil && snap.Interception.LastAgentModelActivityAt != "" {
+		t.Fatalf("Secure Client health gained model activity: %+v", snap.Interception)
 	}
 }

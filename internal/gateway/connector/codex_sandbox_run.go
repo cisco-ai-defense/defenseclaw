@@ -99,11 +99,11 @@ func (c *CodexConnector) SandboxRunFiles(target SandboxRenderTarget, run Sandbox
 		return nil, err
 	}
 	requirements := map[string]interface{}{}
-	if err := toml.Unmarshal(baseRequirements, &requirements); err != nil {
+	if err := parseCodexTOML(baseRequirements, &requirements); err != nil {
 		return nil, fmt.Errorf("codex run config: re-read the image requirements: %w", err)
 	}
 	managed := map[string]interface{}{}
-	if err := toml.Unmarshal(baseManaged, &managed); err != nil {
+	if err := parseCodexTOML(baseManaged, &managed); err != nil {
 		return nil, fmt.Errorf("codex run config: re-read the image managed config: %w", err)
 	}
 	for _, key := range codexSandboxRunManagedKeys {
@@ -231,11 +231,11 @@ func addCodexSandboxRunRequirements(requirements map[string]interface{}, run San
 // run key landed as intended.
 func verifyCodexSandboxRunPolicy(requirementsBody, managedBody []byte, run SandboxRunConfig) error {
 	requirements := map[string]interface{}{}
-	if err := toml.Unmarshal(requirementsBody, &requirements); err != nil {
+	if err := parseCodexTOML(requirementsBody, &requirements); err != nil {
 		return fmt.Errorf("verify Codex run requirements: %w", err)
 	}
 	managed := map[string]interface{}{}
-	if err := toml.Unmarshal(managedBody, &managed); err != nil {
+	if err := parseCodexTOML(managedBody, &managed); err != nil {
 		return fmt.Errorf("verify Codex run managed config: %w", err)
 	}
 	strs := func(v interface{}) []string {

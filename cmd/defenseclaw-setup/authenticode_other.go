@@ -10,7 +10,3 @@ import "errors"
 func verifyEmbeddedAuthenticodeTrust(_ string) error {
 	return errors.New("WinVerifyTrust is available only on Windows")
 }
-
-func verifyPublishedStableHookRuntime(_, _ string) error {
-	return errors.New("stable hook runtime Authenticode is available only on Windows")
-}

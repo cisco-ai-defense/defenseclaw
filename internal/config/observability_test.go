@@ -76,74 +76,49 @@ func TestObservability_Validate_RejectsDuplicateAlias(t *testing.T) {
 	}
 }
 
-// TestObservability_LoadRoundTrip pins decoder fidelity for the explicit
-// upgrade path: historical sink overrides must survive legacy Load without
-// becoming callable target-runtime routing policy.
+// TestObservability_LoadRoundTrip pins the per-connector webhook overrides
+// through the loader: an override and an explicit empty list (suppress), and
+// that a load-save cycle keeps that shape.
 func TestObservability_LoadRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", tmpDir)
 
 	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	data := []byte(`audit_sinks:
-  - name: global-jsonl
-    kind: http_jsonl
-    enabled: true
-    http_jsonl:
-      url: https://global.example/ingest
+	data := []byte(`config_version: 9
 observability:
   connectors:
     codex:
-      audit_sinks:
-        - name: codex-jsonl
-          kind: http_jsonl
-          enabled: true
-          http_jsonl:
-            url: https://codex.example/ingest
-    claudecode:
-      audit_sinks: []
-    hermes:
       webhooks:
-        - name: hermes-hook
-          url: https://hermes.example/hook
+        - name: codex-hook
+          url: https://codex.example/hook
           type: generic
           enabled: true
+    claudecode:
+      webhooks: []
 `)
 	if err := os.WriteFile(configFile, data, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
 	conns := cfg.Observability.Connectors
-	if len(conns) != 3 {
-		t.Fatalf("expected 3 connectors, got %d (%v)", len(conns), cfg.Observability.ConnectorNames())
+	if len(conns) != 2 {
+		t.Fatalf("expected 2 connectors, got %d (%v)", len(conns), cfg.Observability.ConnectorNames())
+	}
+	if pc := conns["codex"]; pc.Webhooks == nil || len(*pc.Webhooks) != 1 {
+		t.Fatalf("codex.webhooks = %v, want 1-entry override", pc.Webhooks)
+	}
+	// Explicit empty list = suppress (non-nil pointer, len 0).
+	if pc := conns["claudecode"]; pc.Webhooks == nil || len(*pc.Webhooks) != 0 {
+		t.Fatalf("claudecode.webhooks = %v, want a non-nil empty list (suppress)", pc.Webhooks)
 	}
 
-	// codex: override present with one sink
-	if pc := conns["codex"]; pc.AuditSinks == nil || len(*pc.AuditSinks) != 1 {
-		t.Fatalf("codex.audit_sinks = %v, want 1-entry override", pc.AuditSinks)
-	}
-
-	// claudecode: explicit empty list = suppress (non-nil pointer, len 0)
-	pcCC := conns["claudecode"]
-	if pcCC.AuditSinks == nil {
-		t.Fatal("claudecode.audit_sinks is nil; explicit [] must round-trip as non-nil empty (suppress)")
-	}
-	if len(*pcCC.AuditSinks) != 0 {
-		t.Fatalf("claudecode.audit_sinks len = %d, want 0", len(*pcCC.AuditSinks))
-	}
-
-	// hermes: only webhooks set; audit_sinks must be nil (inherit)
-	if pc := conns["hermes"]; pc.AuditSinks != nil {
-		t.Fatalf("hermes.audit_sinks = %v, want nil (inherit)", pc.AuditSinks)
-	}
-
-	// Save round-trip: the marshaled YAML must keep the suppress + override
-	// shape so a load→save cycle does not silently re-introduce global
-	// routing for a suppressed connector.
+	// A load-save cycle must keep the suppress + override shape, so it never
+	// silently re-introduces global routing for a suppressed connector.
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("yaml.Marshal: %v", err)
@@ -152,10 +127,10 @@ observability:
 	if err := yaml.Unmarshal(out, &reparsed); err != nil {
 		t.Fatalf("re-unmarshal: %v", err)
 	}
-	if pc := reparsed.Observability.Connectors["claudecode"]; pc.AuditSinks == nil || len(*pc.AuditSinks) != 0 {
-		t.Fatalf("claudecode suppress did not survive Save round-trip: %v", pc.AuditSinks)
+	if pc := reparsed.Observability.Connectors["claudecode"]; pc.Webhooks == nil || len(*pc.Webhooks) != 0 {
+		t.Fatalf("claudecode suppress did not survive Save round-trip: %v", pc.Webhooks)
 	}
-	if pc := reparsed.Observability.Connectors["codex"]; pc.AuditSinks == nil || len(*pc.AuditSinks) != 1 {
-		t.Fatalf("codex override did not survive Save round-trip: %v", pc.AuditSinks)
+	if pc := reparsed.Observability.Connectors["codex"]; pc.Webhooks == nil || len(*pc.Webhooks) != 1 {
+		t.Fatalf("codex override did not survive Save round-trip: %v", pc.Webhooks)
 	}
 }

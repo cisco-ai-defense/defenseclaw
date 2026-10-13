@@ -216,6 +216,18 @@ def test_pull_request_suites(files, expected, py_select, go_packages) -> None:
     assert json.loads(outputs["go_tests"]) == go_packages
 
 
+def test_enterprise_lifecycle_paths_run_the_enterprise_lanes() -> None:
+    for path in (
+        "internal/enterpriseunix/lifecycle.go",
+        "internal/enterprisestatus/result.go",
+        "internal/managed/managed.go",
+        "internal/config/migrate_v9.go",
+        "packaging/mdm/contract/lifecycle-result.schema.json",
+    ):
+        outputs = classify(path)
+        assert outputs["packaging"] and outputs["enterprise"], path
+
+
 def test_large_pull_requests_and_empty_diffs_run_everything() -> None:
     many = [f"docs-site/content/docs/page-{index}.mdx" for index in range(ci_changes.LARGE_PR_FILES + 1)]
     assert ran(classify(*many)) == ALL_GROUPS
@@ -228,6 +240,13 @@ def test_events_other_than_pull_request_run_everything(capsys) -> None:
         assert capsys.readouterr().out.strip() == "true"
         assert ci_changes.main(["--event", event, "--get", "py_select"]) == 0
         assert capsys.readouterr().out.strip() == ""
+    # A dispatch runs every suite on one commit, and pushes to the branch
+    # after it must not cancel it (only the pull_request run is superseded).
+    for name in ("ci.yml", "windows-native.yml"):
+        workflow = _workflow(name)
+        assert "workflow_dispatch" in workflow[True], name
+        group = workflow["concurrency"]["group"]
+        assert group.endswith("-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}"), name
 
 
 def test_every_tracked_path_is_classified() -> None:

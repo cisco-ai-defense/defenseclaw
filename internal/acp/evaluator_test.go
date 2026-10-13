@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestNewHTTPEvaluatorRequiresLiteralLoopback(t *testing.T) {
@@ -38,7 +40,17 @@ func TestNewHTTPEvaluatorRequiresLiteralLoopback(t *testing.T) {
 func TestHTTPEvaluatorReturnsHardModeMismatch(t *testing.T) {
 	const token = "secret"
 	const serverNonce = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	// On a Secure Client host the guard sends no session facts, as its
+	// hooks send none (issue #1092), even from inside an SSH session.
+	restoreSecureClient := secureClientHost
+	secureClientHost = func() bool { return true }
+	t.Cleanup(func() { secureClientHost = restoreSecureClient })
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if facts := r.Header.Get(useridentity.SessionFactsHeader); facts != "" {
+			t.Errorf("Secure Client guard sent session facts %q", facts)
+		}
 		body, _ := io.ReadAll(r.Body)
 		keyID := r.Header.Get(AuthKeyIDHeader)
 		nonce := r.Header.Get(AuthNonceHeader)

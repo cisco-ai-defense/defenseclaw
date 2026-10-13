@@ -15,13 +15,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	osuser "os/user"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -32,9 +32,13 @@ func withRestoredManagedPosture(t *testing.T) {
 	t.Helper()
 	priorAIDOnly := ManagedEnterpriseActive()
 	priorHosted := managedServiceHosted.Load()
+	// The fixture policy tree belongs to the test account, not root.
+	priorTreeTrust := managedPolicyTreeTrust
+	managedPolicyTreeTrust = func(*config.Config, string) error { return nil }
 	t.Cleanup(func() {
 		setManagedEnterpriseRedactionPosture(priorAIDOnly)
 		setManagedServiceHosted(priorHosted)
+		managedPolicyTreeTrust = priorTreeTrust
 	})
 }
 
@@ -131,8 +135,13 @@ func TestNewSidecarPublishesTheProfilePosture(t *testing.T) {
 
 	for _, test := range profilePostures {
 		t.Run(test.name, func(t *testing.T) {
-			bootProfileSidecar(t, test)
+			stderr := captureStderr(t, func() { bootProfileSidecar(t, test) })
 			assertProfilePosture(t, test)
+			// A managed standalone gateway is hook-only: it must not
+			// announce a fleet client it never dials.
+			if test.name == "standalone" && strings.Contains(stderr, "initializing client") {
+				t.Fatalf("hook-only boot announced the fleet client:\n%s", stderr)
+			}
 		})
 	}
 }
@@ -216,9 +225,7 @@ func TestStandaloneHookLaneBlocksOnTheLocalEngine(t *testing.T) {
 			t.Fatal(err)
 		}
 		store, logger := testStoreAndLogger(t)
-		if err := enforce.NewPolicyEngine(store).BlockToolForConnector(markerTool, "", "marker"); err != nil {
-			t.Fatal(err)
-		}
+		denyTool(cfg, markerTool, "", "marker")
 		a := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 		if inspector != nil {
 			a.SetCiscoInspector(inspector)

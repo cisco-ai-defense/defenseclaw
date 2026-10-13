@@ -134,7 +134,7 @@ guardrail:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dir, ok := standaloneLayoutDataDirForSource(darwin.ConfigPath, []byte("config_version: 8\ndeployment_mode: managed_enterprise\n"), true); ok {
+		if dir, ok := standaloneLayoutDataDirForSource(darwin.ConfigPath, []byte("config_version: 8\ndeployment_mode: managed_enterprise\n")); ok {
 			t.Fatalf("a Secure Client config got the standalone data_dir %q", dir)
 		}
 	})

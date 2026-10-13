@@ -71,7 +71,7 @@ func (s *Store) reclaimPurgedHistory() {
 		return
 	}
 	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
-	fmt.Fprintln(os.Stderr, "[audit] reclaiming the disk space of the purged pre-1.0 history")
+	fmt.Fprintln(s.migrationProgress(), "[audit] reclaiming the disk space of the purged pre-1.0 history")
 	// auto_vacuum is per connection until VACUUM applies it, so both run on conn.
 	for _, statement := range []string{`PRAGMA auto_vacuum=INCREMENTAL`, `VACUUM`} {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {

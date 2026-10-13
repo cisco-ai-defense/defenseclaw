@@ -34,7 +34,8 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
@@ -85,9 +86,11 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     # shellcheck source=/dev/null
     . "$TOKEN_FILE"
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process inherits the
+# bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 CONTENT="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: inspect request refusing oversized payload" >&2
@@ -130,7 +133,14 @@ fail_unauthorized() {
 
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to. Like
+  # a 401, a malformed bearer fails closed whatever the fail mode: otherwise a
+  # CR in an inherited DEFENSECLAW_GATEWAY_TOKEN would turn it into an allow.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_unauthorized "invalid gateway token" ;;
+  esac
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
 if [ -n "$RUNTIME_CONNECTOR" ]; then
@@ -143,18 +153,17 @@ fi
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}")" || {
-  fail_unreachable "sandbox ingress unreachable"
+  fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-RESPONSE=$(printf '%s' "$CONTENT" | curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/request" \
+# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# content on descriptors, never on its command line.
+RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/request" 5 "$CONTENT" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
   fail_unreachable "gateway unreachable"
 }{{end}}
 

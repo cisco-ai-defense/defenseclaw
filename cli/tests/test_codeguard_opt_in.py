@@ -29,7 +29,6 @@ from defenseclaw import commands as command_helpers
 from defenseclaw import gateway
 from defenseclaw.codeguard_skill import (
     codeguard_status,
-    ensure_codeguard_skill,
     install_codeguard_asset,
 )
 from defenseclaw.commands.cmd_codeguard import codeguard
@@ -256,11 +255,6 @@ def test_codeguard_cli_conflict_exits_nonzero(tmp_path, monkeypatch):
     assert result.exit_code != 0
     assert "conflict at " in result.output
     assert "use --replace" in result.output
-
-
-def test_ensure_codeguard_skill_is_noop(tmp_path):
-    ensure_codeguard_skill(str(tmp_path / ".openclaw"), str(tmp_path / ".openclaw" / "openclaw.json"))
-    assert not (tmp_path / ".openclaw" / "skills" / "codeguard").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -94,3 +94,72 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
+    """GAP-1408: the standalone Windows runtime ran plugin scans rules-only."""
+
+    def _run(self, env):
+        import contextlib
+        import re
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "cmd", "defenseclaw-scanners", "main.go"), encoding="utf-8") as stream:
+            script = re.search(r"pluginScanScript = `(.*?)`", stream.read(), re.S).group(1)
+        captured: dict = {}
+
+        class _Result:
+            def to_dict(self):
+                return {"scanner": "plugin-scanner", "target": "/p", "findings": []}
+
+        def fake_scan_plugin(target, options):
+            captured["override"] = options.llm_override
+            return _Result()
+
+        clean = {k: "" for k in ("DEFENSECLAW_LLM_KEY", "DEFENSECLAW_SCANNER_LLM_API_KEY")}
+        with patch.dict(os.environ, {**clean, **env}), \
+                patch("defenseclaw.scanner.plugin_scanner.scan_plugin", fake_scan_plugin), \
+                patch("defenseclaw.scanner.rulepack.overlay_findings", return_value=[]), \
+                patch("defenseclaw.config.load", return_value=None), \
+                patch.object(sys, "argv", ["plugin-scan", "/p"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(script, "pluginScanScript", "exec"), {"__name__": "__main__"})
+        return captured
+
+    def test_runtime_runs_the_configured_judge(self):
+        cap = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": "openai/gpt-4o-mini",
+                         "DEFENSECLAW_SCANNER_LLM_API_KEY": "k"})
+        self.assertEqual(cap["override"]["model"], "openai/gpt-4o-mini")
+        self.assertTrue(cap["override"]["enabled"])
+
+    def test_runtime_judge_without_its_key_stops_the_scan(self):
+        with self.assertRaises(SystemExit) as stop:
+            self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": "openai/gpt-4o-mini"})
+        self.assertIn("openai/gpt-4o-mini", str(stop.exception.code))
+
+    def test_windows_bedrock_judge_without_a_key_stops_the_scan(self):
+        """GAP-1444: a key-less Bedrock judge (api_key mode) only warned on Windows; GAP-1460: iam_credentials."""
+        from defenseclaw.config import BedrockKeyConfig, LLMConfig
+        from defenseclaw.scanner import _llm_env
+
+        model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=True), \
+                patch.object(_llm_env, "_aws_credential_chain_found", return_value=False), \
+                patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "", "DEFENSECLAW_LLM_KEY": ""}):
+            with self.assertRaises(SystemExit) as stop:
+                self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model})
+            self.assertIn(model, str(stop.exception.code))
+            keyed = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model, "DEFENSECLAW_SCANNER_LLM_API_KEY": "k"})
+            self.assertTrue(keyed["override"]["enabled"])
+            # GAP-1460: iam_credentials signs with the keys in the variables
+            # llm.bedrock names; the runtime gets them with the auth mode.
+            iam = LLMConfig(model=model, bedrock=BedrockKeyConfig(
+                auth_mode="iam_credentials", access_key_env="CORP_BEDROCK_AK", secret_key_env="CORP_BEDROCK_SK"))
+            self.assertFalse(_llm_env.llm_analyzer_ready(iam))
+            with patch.dict(os.environ, {"CORP_BEDROCK_AK": "ak", "CORP_BEDROCK_SK": "sk"}):
+                self.assertTrue(_llm_env.llm_analyzer_ready(iam))
+            runtime = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model, "AWS_ACCESS_KEY_ID": "ak",
+                                 "AWS_SECRET_ACCESS_KEY": "sk", "DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE": "iam_credentials"})
+            self.assertTrue(runtime["override"]["enabled"])
+        with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=False):
+            self.assertTrue(_llm_env.llm_analyzer_ready(LLMConfig(model=model)))

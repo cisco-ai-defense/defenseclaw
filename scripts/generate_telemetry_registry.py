@@ -1982,12 +1982,6 @@ class ResourceDynamicMembersIR:
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceCompatibilityAliasIR:
-    alias: str
-    canonical: str
-
-
-@dataclass(frozen=True, slots=True)
 class GroupIR:
     id: str
     type: str
@@ -2021,7 +2015,6 @@ class GroupIR:
     route_selector: bool | None
     compatibility_profiles: tuple[str, ...] | None
     resource_dynamic_members: ResourceDynamicMembersIR | None
-    resource_compatibility_aliases: tuple[ResourceCompatibilityAliasIR, ...] | None
     legacy_bindings: tuple[LegacyBindingIR, ...] | None
     introduced_in: str | None
     deprecated_in: str | None
@@ -5717,10 +5710,13 @@ def _parse_resource_dynamic_members(value: Any, path: str) -> ResourceDynamicMem
         ),
         (
             "defenseclaw.claw.home_dir",
+            "defenseclaw.device.id",
             "defenseclaw.gateway.host",
             "defenseclaw.gateway.port",
             "defenseclaw.preset",
             "defenseclaw.preset_name",
+            "deployment.environment",
+            "deployment.mode",
             "discovery.source",
             "telemetry.sdk.language",
             "telemetry.sdk.name",
@@ -5730,38 +5726,6 @@ def _parse_resource_dynamic_members(value: Any, path: str) -> ResourceDynamicMem
     )
     if parsed != expected:
         raise RegistryError(f"{path}: custom resource member contract differs from the canonical v8 contract")
-    return parsed
-
-
-def _parse_resource_compatibility_aliases(
-    value: Any,
-    path: str,
-) -> tuple[ResourceCompatibilityAliasIR, ...]:
-    if not isinstance(value, list):
-        raise RegistryError(f"{path}: expected sequence")
-    result: list[ResourceCompatibilityAliasIR] = []
-    for index, item in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if not isinstance(item, dict):
-            raise RegistryError(f"{item_path}: expected mapping")
-        _exact_keys(item, {"alias", "canonical"}, set(), item_path)
-        result.append(
-            ResourceCompatibilityAliasIR(
-                _string(item["alias"], f"{item_path}.alias", pattern=_ID),
-                _string(item["canonical"], f"{item_path}.canonical", pattern=_ID),
-            )
-        )
-    expected = (
-        ResourceCompatibilityAliasIR("deployment.environment", "deployment.environment.name"),
-        ResourceCompatibilityAliasIR("deployment.mode", "defenseclaw.deployment.mode"),
-        ResourceCompatibilityAliasIR(
-            "defenseclaw.device.id",
-            "defenseclaw.device.public_key_fingerprint",
-        ),
-    )
-    parsed = tuple(result)
-    if parsed != expected:
-        raise RegistryError(f"{path}: compatibility aliases differ from the canonical v8 mapping")
     return parsed
 
 
@@ -5907,7 +5871,6 @@ def _parse_group(value: Any, path: str, mandatory_rule_ids: frozenset[str]) -> G
     route_selector: bool | None = None
     compatibility_profiles: tuple[str, ...] | None = None
     resource_dynamic_members: ResourceDynamicMembersIR | None = None
-    resource_compatibility_aliases: tuple[ResourceCompatibilityAliasIR, ...] | None = None
     legacy_bindings: tuple[LegacyBindingIR, ...] | None = None
     if "x-defenseclaw" in value:
         extension = value["x-defenseclaw"]
@@ -5927,7 +5890,6 @@ def _parse_group(value: Any, path: str, mandatory_rule_ids: frozenset[str]) -> G
                 "route_selector",
                 "compatibility_profiles",
                 "custom_resource_attributes",
-                "compatibility_aliases",
                 "legacy_bindings",
             },
             f"{path}.x-defenseclaw",
@@ -5938,13 +5900,6 @@ def _parse_group(value: Any, path: str, mandatory_rule_ids: frozenset[str]) -> G
             resource_dynamic_members = _parse_resource_dynamic_members(
                 extension["custom_resource_attributes"],
                 f"{path}.x-defenseclaw.custom_resource_attributes",
-            )
-        if "compatibility_aliases" in extension:
-            if group_type != "resource" or group_id != "resource.core":
-                raise RegistryError(f"{path}.x-defenseclaw.compatibility_aliases: allowed only on resource.core")
-            resource_compatibility_aliases = _parse_resource_compatibility_aliases(
-                extension["compatibility_aliases"],
-                f"{path}.x-defenseclaw.compatibility_aliases",
             )
         if "bucket" in extension:
             bucket = _string(extension["bucket"], f"{path}.x-defenseclaw.bucket", pattern=_ID)
@@ -6018,21 +5973,8 @@ def _parse_group(value: Any, path: str, mandatory_rule_ids: frozenset[str]) -> G
             "defenseclaw.instance.id",
             "defenseclaw.device.public_key_fingerprint",
         }
-        if (resource_dynamic_members is None) != (resource_compatibility_aliases is None):
-            raise RegistryError(f"{path}.x-defenseclaw: resource custom members and aliases must be declared together")
         if set(attribute_refs) == production_fixed and resource_dynamic_members is None:
-            raise RegistryError(f"{path}.x-defenseclaw: canonical resource.core requires custom members and aliases")
-        if resource_dynamic_members is None:
-            pass
-        else:
-            assert resource_compatibility_aliases is not None
-            fixed = set(attribute_refs)
-            aliases = {item.alias for item in resource_compatibility_aliases}
-            canonicals = {item.canonical for item in resource_compatibility_aliases}
-            if not canonicals.issubset(fixed) or aliases & fixed:
-                raise RegistryError(f"{path}.x-defenseclaw.compatibility_aliases: fixed resource ownership mismatch")
-            if aliases & set(resource_dynamic_members.reserved_keys):
-                raise RegistryError(f"{path}.x-defenseclaw: aliases and additional reserved keys must be disjoint")
+            raise RegistryError(f"{path}.x-defenseclaw: canonical resource.core requires custom members")
     if "introduced_in" not in value:
         raise RegistryError(f"{path}.introduced_in: required for every group")
     introduced_in = None
@@ -6083,7 +6025,6 @@ def _parse_group(value: Any, path: str, mandatory_rule_ids: frozenset[str]) -> G
         route_selector,
         compatibility_profiles,
         resource_dynamic_members,
-        resource_compatibility_aliases,
         legacy_bindings,
         introduced_in,
         deprecated_in,
@@ -6811,8 +6752,7 @@ def _resource_dynamic_fields(
         errors.add("dynamic_attribute_object_required")
         return False
     contract = group.resource_dynamic_members
-    aliases = group.resource_compatibility_aliases
-    if contract is None or aliases is None:
+    if contract is None:
         return _registered_dynamic_fields(
             payload,
             group,
@@ -6823,23 +6763,21 @@ def _resource_dynamic_fields(
             errors=errors,
         )
     uses = {use.ref: use for use in group.resolved_uses}
-    alias_sources = {item.alias: item.canonical for item in aliases}
-    registered = set(uses) | set(alias_sources)
+    registered = set(uses)
     custom: list[tuple[str, str]] = []
     normalized = {key.replace(".", "_").replace("-", "_") for key in registered | set(contract.reserved_keys)}
     for reference, value in payload.items():
-        canonical = alias_sources.get(reference, reference)
-        use = uses.get(canonical)
+        use = uses.get(reference)
         if use is not None:
-            local = local_attributes.get(canonical)
-            extension = upstream_extensions.get(canonical)
+            local = local_attributes.get(reference)
+            extension = upstream_extensions.get(reference)
             if local is not None and (
                 not _attribute_type_accepts(value, local.field_type)
                 or not _normalization_accepts(value, local.normalization)
             ):
                 errors.add("dynamic_attribute_value_invalid")
             if extension is not None:
-                upstream = upstream_attributes.get(canonical)
+                upstream = upstream_attributes.get(reference)
                 if (
                     upstream is None
                     or not _upstream_attribute_type_accepts(value, upstream[1])
@@ -7345,15 +7283,7 @@ def _validate_example_field_classes(
                 raise RegistryError(f"{path}: dynamic attribute names must be strings")
             reference = projections.get(wire_name, wire_name)
             if reference not in references:
-                alias_sources = (
-                    {item.alias: item.canonical for item in (resource_group.resource_compatibility_aliases or ())}
-                    if resource_group is not None
-                    else {}
-                )
-                alias_reference = alias_sources.get(reference)
-                if alias_reference in references:
-                    reference = alias_reference
-                elif resource_group is not None and resource_group.resource_dynamic_members is not None:
+                if resource_group is not None and resource_group.resource_dynamic_members is not None:
                     field_class = resource_group.resource_dynamic_members.field_class
                     base_pointer = prefix + _rfc6901_token(wire_name)
                     for pointer in _json_leaf_pointers(dynamic[wire_name], base_pointer):

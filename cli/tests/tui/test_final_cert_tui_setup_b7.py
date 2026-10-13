@@ -38,12 +38,12 @@ def test_connector_readiness_wording_and_form_hints() -> None:
     console.print(DetailModalModel.from_pairs("t", [("Connector: claudecode", "PASS · configured")]).table())
     assert "Connector: claudecode" in console.export_text()
     hook = {field.label: field for field in connector_setup_wizard_fields({"guardrail": {"connector": "claudecode"}})}
-    assert "Scanner Mode" not in hook and "Verify After Setup" not in hook
+    assert "Scanner Mode" not in hook
     assert hook["Guardrail Mode"].hint.startswith("observe only logs")
     assert not any(field.hint.startswith(("Select ", "Toggle ")) for field in hook.values())
     # Linux: Windows has no openclaw, so the form would open on a hook connector.
     proxy = {field.label for field in connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")}
-    assert {"Scanner Mode", "Verify After Setup"} <= proxy
+    assert "Scanner Mode" in proxy
     texts = " ".join(
         f"{goal.label} {goal.summary}"
         for wizard in (SetupWizard.CONNECTOR_SETUP, SetupWizard.TOKEN_ROTATION)

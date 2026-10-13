@@ -41,8 +41,12 @@ func TestCodexResponseFor_ObserveContextRequiresImportantFinding(t *testing.T) {
 			action: "allow", rawAction: "alert", severity: "LOW",
 		},
 		{
-			name: "observe medium confirmation is silent", mode: "observe",
-			action: "allow", rawAction: "confirm", severity: "MEDIUM",
+			name: "observe medium alert is visible", mode: "observe",
+			action: "allow", rawAction: "alert", severity: "MEDIUM", wantOutput: true,
+		},
+		{
+			name: "observe medium confirmation is visible", mode: "observe",
+			action: "allow", rawAction: "confirm", severity: "MEDIUM", wantOutput: true,
 		},
 		{
 			name: "observe high alert remains visible", mode: "observe",
@@ -75,6 +79,18 @@ func TestCodexResponseFor_ObserveContextRequiresImportantFinding(t *testing.T) {
 		}},
 	}) {
 		t.Fatal("detection-only finding must not be eligible for Observe context")
+	}
+	if !codexObserveContextEnforcementEligible(&ToolInspectVerdict{
+		Severity: "MEDIUM",
+		DetailedFindings: []RuleFinding{{
+			RuleID: "MEDIUM-ALERT", Severity: "MEDIUM",
+			enforcement: findingEnforcementAllowed,
+		}},
+	}) {
+		t.Fatal("enforcement-eligible MEDIUM finding must be eligible for Observe context")
+	}
+	if codexObserveContextEnforcementEligible(&ToolInspectVerdict{Severity: "LOW"}) {
+		t.Fatal("LOW verdict must stay audit-only in Observe mode")
 	}
 	if !codexObserveContextEnforcementEligible(&ToolInspectVerdict{
 		Severity: "HIGH",
@@ -119,6 +135,30 @@ func TestEvaluateCodexHook_ObserveImportantContextDeduplicatesByEvidence(t *test
 	if distinct.Action != "allow" || distinct.RawAction == "allow" ||
 		distinct.AdditionalContext == "" || distinct.CodexOutput == nil {
 		t.Fatalf("distinct response = %+v, want different evidence to remain visible", distinct)
+	}
+}
+
+// An Observe-mode MEDIUM alert reaches the Codex chat like Claude Code's does
+// (GAP-0316, GAP-0320, GAP-0368).
+func TestEvaluateCodexHook_ObserveMediumAlertIsVisible(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "codex"
+	api := &APIServer{scannerCfg: cfg}
+
+	jwt := "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJ" + "zdWIiOiJkZWNveSJ9." + "ZGVjb3ktc2lnbmF0dXJl"
+	resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "medium-session",
+		Prompt:        "token " + jwt,
+	})
+	if resp.Action != "allow" || resp.RawAction != "alert" || resp.Severity != "MEDIUM" {
+		t.Fatalf("response = %+v, want allow/alert/MEDIUM", resp)
+	}
+	hook, _ := resp.CodexOutput["hookSpecificOutput"].(map[string]interface{})
+	context, _ := hook["additionalContext"].(string)
+	if !strings.Contains(context, "DefenseClaw observed a MEDIUM Codex hook finding") {
+		t.Fatalf("Codex output = %+v, want the observed MEDIUM notice", resp.CodexOutput)
 	}
 }
 

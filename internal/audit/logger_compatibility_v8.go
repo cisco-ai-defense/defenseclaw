@@ -190,6 +190,15 @@ func compatibilityAuditV8Body(event Event) (map[string]any, map[string]observabi
 			classes["/structured_json"] = observability.FieldClassContent
 		}
 	}
+	// The rule-pack directory is a filesystem path. It rides in its own
+	// path-class field so a profile that hashes or removes paths reaches it; a
+	// copy inside details or the structured envelope would be free-form content
+	// that carries a home directory (and an SSSD fully qualified account name)
+	// through the sensitive profile unchanged (GAP-0131).
+	if dir := strings.TrimSpace(event.RulePackDir); dir != "" && !event.RulePackDirInEnvelope {
+		body["rule_pack_dir"] = dir
+		classes["/rule_pack_dir"] = observability.FieldClassPath
+	}
 	// Sandbox attribution has no generic correlation field yet, so a
 	// sandbox's codex notify, inspect and other generic rows carry it in
 	// the body. A value outside the shape of defenseclaw.sandbox.id or

@@ -10,7 +10,9 @@
 # with that same installed gateway. A standalone lifecycle now removes that
 # exact journal, records why, and goes on; any other retire failure, a
 # pending transaction or the Secure Client profile keeps the error. The
-# gateway command is stubbed; runs in a disposable scratch directory.
+# teardown journal of a refused or rolled-back uninstall goes the same way
+# (GAP-1041). The gateway command is stubbed; runs in a disposable scratch
+# directory.
 
 [CmdletBinding()]
 param(
@@ -100,10 +102,36 @@ try {
             & $run 'other retire failure' 'Standalone' 'managed-hook lifecycle snapshot retire failed: deployment managed-hook activation binding is invalid' $false $true $false
             & $run 'pending transaction' 'Standalone' $gcRefusal $true $true $false
             & $run 'Secure Client' 'SecureClient' $gcRefusal $false $true $false
+
+            # GAP-1041: the teardown journal of a rolled-back uninstall goes
+            # (and -Stale reports it); another phase, or a pending
+            # transaction, keeps it.
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            $layout['ManagedHooksTeardownJournalPath'] = [IO.Path]::Combine($Root, 'managed-hooks-teardown-journal.json')
+            foreach ($case in @(
+                    @('rolled_back', $false, $true),
+                    @('prepared', $false, $false),
+                    @('rolled_back', $true, $false)
+                )) {
+                [IO.File]::WriteAllText($layout.ManagedHooksTeardownJournalPath, ('{"schema_version":6,"phase":"' + $case[0] + '"}'))
+                if ($case[1]) {
+                    [IO.File]::WriteAllText($layout.PendingPath, '{}')
+                }
+                $script:DefenseClawStaleTeardownJournalRemoved = ''
+                $removed = Remove-DefenseClawRolledBackTeardownJournal -Layout $layout -Stale
+                $gone = -not [IO.File]::Exists($layout.ManagedHooksTeardownJournalPath)
+                $reported = -not [string]::IsNullOrEmpty($script:DefenseClawStaleTeardownJournalRemoved)
+                if ($removed -ne $case[2] -or $gone -ne $case[2] -or $reported -ne $case[2]) {
+                    $failures.Add("teardown journal $($case[0]) pending=$($case[1]): removed=$removed gone=$gone reported=$reported, want $($case[2])")
+                }
+                [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
+                [IO.File]::Delete($layout.PendingPath)
+            }
         }
         finally {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
             $script:DefenseClawStaleLifecycleJournalRemoved = ''
+            $script:DefenseClawStaleTeardownJournalRemoved = ''
         }
         return , $failures
     } $root

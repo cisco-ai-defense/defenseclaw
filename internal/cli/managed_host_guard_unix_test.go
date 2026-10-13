@@ -13,6 +13,8 @@
 package cli
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +44,29 @@ func withUnixManagedHostDescriptor(t *testing.T) string {
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	return descriptor
+}
+
+func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	err := managedWindowsConfigLoadError(nil, fmt.Errorf("read config: %w", fs.ErrPermission))
+	if err == nil || !strings.Contains(err.Error(), "needs administrator access") || strings.Contains(err.Error(), "read v8 config") {
+		t.Fatalf("managed config permission error = %v", err)
+	}
+}
+
+func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 1000)
+	restore := managedHostServiceUID
+	t.Cleanup(func() { managedHostServiceUID = restore })
+	managedHostServiceUID = func(string) (int, bool) { return 991, true }
+	for _, command := range []*cobra.Command{statusCmd, policyShowCmd, policyReloadCmd} {
+		err := command.PersistentPreRunE(command, nil)
+		if err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+			strings.Contains(err.Error(), "move this account's gateway") {
+			t.Fatalf("%s read a per-user deployment: %v", command.Name(), err)
+		}
+	}
 }
 
 // unixPlatformForTest names this OS the way the `enterprise` group does.
@@ -298,6 +323,17 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 		}
 	}
 
+	// enterprise acp enroll|verify|revoke pin the deployment too (GAP-0249).
+	// The temporary layout holds no config.yaml, so the load itself fails.
+	clearManagedStandaloneAdminEnv(t)
+	withManagedHostCallerUID(t, 0)
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	_ = enterpriseACPCmd.PersistentPreRunE(enterpriseACPEnrollCmd, nil)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Errorf("enterprise acp enroll read %q, want the managed config %q", got, layout.ConfigPath)
+	}
+
 	clearManagedStandaloneAdminEnv(t)
 	withManagedHostCallerUID(t, 1000)
 	if applyManagedStandaloneAdminEnv(nil) || os.Getenv(managed.ConfigPathEnv) != "" {
@@ -319,6 +355,29 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 	}
 	if applyManagedStandaloneAdminEnv(nil) || os.Getenv(managed.ConfigPathEnv) != "" {
 		t.Fatal("a host without a standalone deployment got the managed defaults")
+	}
+}
+
+// policy show and policy validate are administrator commands on a managed
+// host: as root they read the standalone deployment, as policy digest does.
+// They used to read /var/root/.defenseclaw/config.yaml, fail, and tell the
+// administrator to run the same command with sudo.
+func TestPolicyShowAndValidateReadTheManagedDeploymentAsAdministrator(t *testing.T) {
+	layout := withManagedStandaloneDeployment(t, 991)
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	for _, command := range []*cobra.Command{policyShowCmd, policyValidateCmd} {
+		clearManagedStandaloneAdminEnv(t)
+		withManagedHostCallerUID(t, 0)
+		if command.PersistentPreRunE == nil {
+			t.Fatalf("policy %s inherits the per-user pre-run", command.Name())
+		}
+		// The temporary layout holds no config.yaml, so the load itself fails;
+		// the pin it was aimed at is what this checks.
+		_ = command.PersistentPreRunE(command, nil)
+		if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+			t.Errorf("policy %s read %q, want the managed config %q", command.Name(), got, layout.ConfigPath)
+		}
 	}
 }
 
@@ -425,5 +484,62 @@ func TestEnterpriseHooksTellAStandardUserThatAnAdministratorRunsThem(t *testing.
 	t.Setenv(managed.ConfigPathEnv, "")
 	if err := enterpriseHooksNativePersistentPreRun(enterpriseHooksApplyTargetCmd, nil); err != nil {
 		t.Fatalf("the per-user worker was refused: %v", err)
+	}
+}
+
+// A standard user's `enterprise linux ide-plugins` on a managed host gets
+// the managed-host sentence with the administrator command, as status and
+// audit export do, not a raw config permission error (GAP-0610).
+func TestEnterpriseIDEPluginsTellAStandardUserThatAnAdministratorRunsIt(t *testing.T) {
+	withManagedStandaloneDeployment(t, 991)
+	withManagedHostCallerUID(t, 1000)
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	asked := false
+	enterpriseIdentityViewGet = func(string, any) (string, error) { asked = true; return "", nil }
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	group := &cobra.Command{Use: "enterprise"}
+	parent := &cobra.Command{Use: platform}
+	root.AddCommand(group)
+	group.AddCommand(parent)
+	parent.AddCommand(newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[2]))
+	root.SetArgs([]string{"enterprise", platform, "ide-plugins", "--user", "eob"})
+	root.SetOut(new(strings.Builder))
+	root.SetErr(new(strings.Builder))
+	err := root.Execute()
+	if err == nil || asked {
+		t.Fatalf("err = %v, asked the gateway = %t: a standard user must be refused first", err, asked)
+	}
+	for _, want := range []string{"managed by your organization", "`sudo ", "/defenseclaw-gateway enterprise " + platform + " ide-plugins`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want %q", err, want)
+		}
+	}
+}
+
+// The managed gateway service reads the layout's config and data directory
+// even when a unit drop-in names others in its environment (GAP-0473).
+func TestManagedUnixGatewayIgnoresConfigAndHomeFromItsEnvironment(t *testing.T) {
+	layout := unixStandaloneLayoutForTest(t)
+	withUnixManagedHostDescriptor(t)
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.ConfigPathEnv, "/etc/other/config.yaml")
+	t.Setenv("DEFENSECLAW_HOME", "/etc/other")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "")
+	var warn strings.Builder
+	pinManagedUnixGatewayInputs(&warn)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Fatalf("%s = %q, want %q", managed.ConfigPathEnv, got, layout.ConfigPath)
+	}
+	if got := os.Getenv("DEFENSECLAW_HOME"); got != layout.DataDir {
+		t.Fatalf("DEFENSECLAW_HOME = %q, want %q", got, layout.DataDir)
+	}
+	if !strings.Contains(warn.String(), "ignores DEFENSECLAW_CONFIG=/etc/other/config.yaml") {
+		t.Fatalf("warning = %q", warn.String())
 	}
 }

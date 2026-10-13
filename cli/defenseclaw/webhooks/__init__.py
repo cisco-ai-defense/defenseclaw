@@ -38,6 +38,7 @@ from defenseclaw.webhooks.dispatch import (
     format_pagerduty_payload,
     format_slack_payload,
     format_webex_payload,
+    network_error_text,
     send_synthetic,
     synthetic_event,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "format_pagerduty_payload",
     "format_slack_payload",
     "format_webex_payload",
+    "network_error_text",
     "list_webhooks",
     "remove_webhook",
     "send_synthetic",

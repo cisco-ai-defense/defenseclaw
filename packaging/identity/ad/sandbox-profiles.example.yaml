@@ -1,0 +1,149 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+#
+# Machine config for the standalone enterprise profile on a Linux or macOS computer
+# joined to Active Directory (SSSD and Kerberos on Linux, a directory binding on
+# macOS), where the AD group a person is in picks both their guardrail profile and
+# their OpenShell sandbox policy. Copy it, change the realm, the group names, the
+# hosts and the contact, then apply it as root:
+#
+#   Linux:  sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure \
+#               --from-package --config /root/defenseclaw-config.yaml --json
+#   macOS:  sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure \
+#               --from-package --config /root/defenseclaw-config.yaml --json
+#
+# The file must be root-owned and not writable by anyone else. ensure validates it
+# first and keeps the installed config when it is invalid, and it prints a warning
+# for each setting that works but is probably not what you meant (for example a
+# default_profile that is looser than an assigned profile).
+#
+# Group names are what `getent group` prints on the host. With SSSD's fully qualified
+# names (what `realm join` sets) that is group@realm in lower case, as below. On macOS
+# use the names `dscl` shows for the AD groups, for example CORP\Contractors. To check
+# a match before anyone signs in:
+#   sudo defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector claudecode
+# The output includes effective.sandbox, with the source of each value.
+#
+# How the sandbox part works:
+#   * openshell.admin is the floor: the loosest anyone gets.
+#   * A profile's sandbox section can only TIGHTEN the floor. It uses the same keys plus
+#     required_for, when_unavailable, user_approvals, allowed_credentials, on_silence,
+#     max_silence_after, process_tree, foreign_sandboxes, allow_upstream_telemetry,
+#     delete_stopped_after and request_access.
+#   * Put strict settings in profiles and in default_profile. Anyone DefenseClaw cannot
+#     look up (for example while the domain controller and the SSSD cache are both
+#     unavailable) gets default_profile.
+#
+# To pin a custom pack for a profile, put it under <policy_dir>/sandbox/<name>/ and add
+#   required_pack: /etc/defenseclaw/policies/sandbox/contractors/pack.yaml
+#   required_pack_digest: sha256:<digest from `defenseclaw sandbox pack show contractors`>
+# to the profile's sandbox section (and to default_profile's section, or ensure warns).
+# A profile's pack must be at least as strict as the
+# floor's pack. The packs directory must not be readable by users.
+#
+# Not for the Secure Client integration: it refuses every sandbox section. Windows
+# computers cannot run sandboxes; a required_for agent there is refused (or alerted,
+# with when_unavailable: alert).
+
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies      # macOS: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+  openshell:
+    # prerequisite: you provide OpenShell (deb, rpm plus the driver, Homebrew or your own
+    #   package); ensure verifies it and refuses sandboxes with a fix line when it is
+    #   missing.
+    # setup: each user's daemon installs NVIDIA's release into ~/.local at the first
+    #   sandbox (needs an exact version).
+    install: setup
+    driver: docker            # docker, vm or auto; the default is vm on macOS, docker on Linux
+    # driver_fallback: docker # Linux, driver vm or auto: docker (default) or none where KVM is not available
+    version: "0.1.3"
+    gateway_port: 17670
+    # macOS only, for the vm driver: a directory whose whole chain is owned by root and
+    # that holds mke2fs and debugfs. Without it each user needs ~/.local/opt/e2fsprogs.
+    # e2fsprogs_dir: /opt/cisco/defenseclaw/e2fsprogs/bin
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+
+# Put the user principal name in records. Off by default: it names a person.
+# ai_discovery:
+#   include_user_principal: true
+
+openshell:
+  enabled: true
+  # The floor for everyone.
+  admin:
+    egress_block: [pastebin.com, transfer.sh]
+    allow_upstream_telemetry: false
+    foreign_sandboxes: stop            # stop or alert sandboxes DefenseClaw did not start
+    request_access: "it-security@example.com, https://help.example.com/ai-sandbox"
+
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {enabled: true}
+    codex: {enabled: true}
+
+  profiles:
+    contractors:
+      description: Contractors. Coding agents only in a sandbox.
+      mode: action
+      block_at: MEDIUM
+      sandbox:
+        required_for: [claudecode, codex]    # these agents are refused on the host
+        when_unavailable: refuse             # refuse (default) or alert where sandboxes cannot run
+        allowed_harnesses: [claudecode, codex]
+        egress_allow_only: [api.anthropic.com, "*.amazonaws.com", github.com]
+        allow_mount: false
+        allow_unblock: false
+        user_approvals: session              # none, or session: answers last for one session
+        allowed_credentials: [bedrock]       # model credentials that may enter a sandbox
+        process_tree: true
+        delete_stopped_after: 14d
+    engineering:
+      description: Engineering. Sandboxes available, not required.
+      mode: action
+      block_at: HIGH
+      sandbox:
+        allowed_harnesses: [claudecode, codex, opencode, hermes]
+        on_silence: stop                     # user-tier agents whose hooks go quiet
+        max_silence_after: 5m
+    offline-floor:
+      description: The default when your group cannot be read
+      mode: action
+      block_at: MEDIUM
+      sandbox:
+        # Offline and unverified users get this profile, so it repeats every setting of
+        # the assigned profiles above. If it were looser, a directory outage would give
+        # contractors less than their profile; ensure prints a warning for each setting
+        # that is looser. Pin a pack (required_pack) here as well when you pin one above.
+        required_for: [claudecode, codex]
+        when_unavailable: refuse
+        min_profile: strict
+        allowed_harnesses: [claudecode, codex]
+        egress_allow_only: [api.anthropic.com, "*.amazonaws.com", github.com]
+        allow_mount: false
+        allow_unblock: false
+        user_approvals: session
+        allowed_credentials: [bedrock]
+        process_tree: true
+        on_silence: stop
+        max_silence_after: 5m
+        delete_stopped_after: 14d
+
+  # Ordered: the first assignment that matches the verified user and the agent's
+  # connector wins. match.agents is ignored for sandboxes.
+  profile_assignments:
+    - profile: contractors
+      match:
+        groups: ["contractors@corp.example.com"]
+    - profile: engineering
+      match:
+        groups: ["engineering@corp.example.com"]
+
+  default_profile: offline-floor

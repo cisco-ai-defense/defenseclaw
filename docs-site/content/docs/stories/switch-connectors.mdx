@@ -82,6 +82,7 @@ defenseclaw-gateway audit export --connector codex --since 30m
 | --- | --- |
 | Audit DB (`~/.defenseclaw/audit.db`) | Active connector roster |
 | Rule packs (`~/.defenseclaw/policies/`) | Hook scripts wired in agent config |
+| Admission and the block/allow lists (`admission` and `asset_policy` in `config.yaml`) | Rules that name the removed connector (`connector: codex`), which no longer match anything |
 | Observability destinations and notifier webhooks | `guardrail.connectors.<name>` policy blocks |
 | Historical audit attribution | Backed-up agent files for removed or replaced connectors |
 

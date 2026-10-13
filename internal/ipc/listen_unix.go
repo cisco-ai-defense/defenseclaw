@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"sync"
 	"syscall"
 )
 
@@ -37,24 +39,70 @@ func listenSecuredForOS(ctx context.Context, spec ListenSpec) (net.Listener, err
 	if err := chownIfRequested(dir, spec); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(spec.Path); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("ipc: remove stale socket %s: %w", spec.Path, err)
-	}
+	return publishSocket(ctx, spec)
+}
 
+// publishSocket binds the socket under a temporary name in the same
+// directory, gives it its final mode and owner, and only then renames it onto
+// spec.Path. bind(2) creates the file with the process umask and the
+// process's own group, so binding at the final path left a window in which a
+// peer's connect failed with "permission denied" -- a gateway redialing a
+// restarting sensor helper hit it (GAP-1418). The rename also replaces a
+// stale socket in one step.
+func publishSocket(ctx context.Context, spec ListenSpec) (net.Listener, error) {
+	staging := filepath.Join(dirOf(spec.Path), fmt.Sprintf(".%d.sock", os.Getpid()))
+	if err := os.Remove(staging); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("ipc: remove stale staging socket %s: %w", staging, err)
+	}
 	var lc net.ListenConfig
-	inner, err := lc.Listen(ctx, "unix", spec.Path)
+	inner, err := lc.Listen(ctx, "unix", staging)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: listen unix %s: %w", spec.Path, err)
 	}
-	if err := os.Chmod(spec.Path, spec.SocketMode); err != nil {
+	unix, ok := inner.(*net.UnixListener)
+	if !ok {
 		_ = inner.Close()
-		return nil, fmt.Errorf("ipc: chmod socket %s: %w", spec.Path, err)
+		return nil, fmt.Errorf("ipc: %s is not a unix listener", spec.Path)
 	}
-	if err := chownIfRequested(spec.Path, spec); err != nil {
-		_ = inner.Close()
+	unix.SetUnlinkOnClose(false)
+	fail := func(err error) (net.Listener, error) {
+		_ = unix.Close()
+		_ = os.Remove(staging)
 		return nil, err
 	}
-	return inner, nil
+	if err := os.Chmod(staging, spec.SocketMode); err != nil {
+		return fail(fmt.Errorf("ipc: chmod socket %s: %w", spec.Path, err))
+	}
+	if err := chownIfRequested(staging, spec); err != nil {
+		return fail(err)
+	}
+	if err := os.Rename(staging, spec.Path); err != nil {
+		return fail(fmt.Errorf("ipc: publish socket %s: %w", spec.Path, err))
+	}
+	bound, err := os.Lstat(spec.Path)
+	if err != nil {
+		return fail(fmt.Errorf("ipc: inspect socket %s: %w", spec.Path, err))
+	}
+	return &publishedListener{UnixListener: unix, path: spec.Path, bound: bound}, nil
+}
+
+// publishedListener removes its socket on Close while the path is still the
+// socket it published, as Go's unlink-on-close would, but never a newer
+// listener's socket that replaced it.
+type publishedListener struct {
+	*net.UnixListener
+	path  string
+	bound os.FileInfo
+	once  sync.Once
+}
+
+func (l *publishedListener) Close() error {
+	l.once.Do(func() {
+		if current, err := os.Lstat(l.path); err == nil && os.SameFile(current, l.bound) {
+			_ = os.Remove(l.path)
+		}
+	})
+	return l.UnixListener.Close()
 }
 
 // chownIfRequested applies ownership when the caller asked for it, and

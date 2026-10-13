@@ -310,7 +310,7 @@ def test_restore_fails_closed_when_active_identity_is_ambiguous(app_context):
     _plugin(os.path.join(root, "second-alias"), "same-id", "second")
     quarantine_copy = os.path.join(app.cfg.quarantine_dir, "plugins", "codex", "same-id")
     _plugin(quarantine_copy, "same-id", "quarantined")
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     pe.quarantine_for_connector("plugin", "same-id", "codex", "test")
     pe.set_source_path("plugin", "same-id", os.path.join(root, "first-alias"), "codex")
 

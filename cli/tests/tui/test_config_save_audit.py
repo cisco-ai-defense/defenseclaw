@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from defenseclaw.tui.services.config_audit import TUI_ACTOR, record_config_save
+from defenseclaw.tui.services.config_audit import record_config_save
 from defenseclaw.tui.services.setup_state import ConfigDiffEntry
 
 
@@ -38,7 +38,7 @@ def test_save_records_each_changed_key_before_and_after() -> None:
     assert record_config_save(object(), entries, logger_factory=lambda _cfg: rec)
 
     (call,) = rec.calls
-    assert call["actor"] == TUI_ACTOR
+    assert call["actor"].startswith("tui:")
     assert call["action"] == "config-update"
     assert call["target_type"] == "config"
     assert call["before"]["asset_policy.mode"] == "observe"

@@ -65,7 +65,7 @@ def _copy_runtime_payload(source: Path, destination: Path) -> None:
     for name in ("package.json", "openclaw.plugin.json"):
         shutil.copy2(source / name, destination / name)
     shutil.copytree(source / "dist", destination / "dist")
-    for dependency in ("argparse", "js-yaml"):
+    for dependency in ("argparse", "js-yaml", "undici"):
         dependency_source = source / "node_modules" / dependency
         if dependency_source.is_dir():
             dependency_destination = destination / "node_modules" / dependency

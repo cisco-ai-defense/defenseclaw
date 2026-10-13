@@ -61,6 +61,48 @@ func TestRulePackValidateWireProtocol(t *testing.T) {
 	}
 }
 
+func TestRulePackValidateNamesCustomerToolCallRegexRule(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousErr := rulePackValidateCmd.OutOrStdout(), rulePackValidateCmd.ErrOrStderr()
+	previousProblem := rulePackServiceReadProblemFn
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "" }
+	rulePackValidateJSON = false
+	output, warnings := &strings.Builder{}, &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(warnings)
+	rulePackValidateDir = shippedRulePackForCLITest(t, "default")
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if warnings.Len() != 0 || strings.Contains(output.String(), "tool_call_only") {
+		t.Fatalf("shipped pack warned: %s%s", output.String(), warnings.String())
+	}
+
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := "version: 1\ncategory: command\nrules:\n  - id: CUSTOMER-MARKER\n    tool_call_only: true\n    pattern: marker\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n"
+	if err := os.WriteFile(filepath.Join(directory, "rules", "customer.yaml"), []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePackValidateDir = directory
+	warnings.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warnings.String(), "CUSTOMER-MARKER") || !strings.Contains(warnings.String(), "detection-only and cannot block") ||
+		strings.Contains(warnings.String(), "12 enabled") {
+		t.Fatalf("customer rule warning = %q", warnings.String())
+	}
+}
+
 func TestRulePackValidateFailureIsStructuredAndValueSafe(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(directory, "rules"), 0o755); err != nil {
@@ -233,5 +275,22 @@ func TestRulePackValidateMissingDirNamesTheDirectory(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "at "+missing+":") {
 		t.Fatalf("text output does not name the directory:\n%s", output)
+	}
+}
+
+func TestRulePackValidateSecureClientTextMatchesMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", path)
+	summary := guardrail.RulePackSummary{RuleFileCount: 2, RuleCount: 3, Digest: strings.Repeat("a", 64)}
+	output := &strings.Builder{}
+	if err := writeRulePackValidation(output, rulePackWireResponse{Valid: true, Summary: &summary}, false); err != nil {
+		t.Fatal(err)
+	}
+	want := "valid rule pack: 2 files, 3 rules, digest " + strings.Repeat("a", 64) + "\n"
+	if output.String() != want {
+		t.Fatalf("Secure Client validation = %q, want %q", output.String(), want)
 	}
 }

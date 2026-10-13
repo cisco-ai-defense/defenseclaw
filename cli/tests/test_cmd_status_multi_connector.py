@@ -94,11 +94,12 @@ class TestPrintAgentsRoster(unittest.TestCase):
         report = {
             "effective": "open",
             "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
-        self.assertIn("fail-mode=open", out)
+        self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
         self.assertIn("provenance=process-env", out)
 
     def test_zero_connectors_shows_no_active(self):
@@ -767,7 +768,8 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("not counted", result.output)
         self.assertIn("defenseclaw alerts", result.output)
         self.assertEqual(
-            self.app.store.get_counts.call_args.kwargs, {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS}
+            self.app.store.get_counts.call_args.kwargs,
+            {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS, "cfg": self.app.cfg},
         )
 
     def test_healthy_db_shows_counts(self):
@@ -810,6 +812,8 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("1 problem(s)", result.output)
         self.assertIn("Sidecar", result.output)
+        self.assertIn("not checked while config.yaml is invalid", result.output)
+        self.assertNotIn("not running; start it", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
@@ -927,6 +931,18 @@ class TestStatusJson(unittest.TestCase):
         doc = json.loads(result.output)
         by_name = {c["name"]: c for c in doc["connectors"]}
         self.assertEqual(by_name["codex"]["fail_mode"], report)
+
+    def test_json_invalid_config_does_not_query_runtime(self):
+        self.app.config_problems = ["invalid config.yaml"]
+        health = {"policy": {"effective_digest": "runtime-only-digest"}}
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=health) as fetch:
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        fetch.assert_not_called()
+        doc = json.loads(result.output)
+        self.assertIsNone(doc["sidecar"]["running"])
+        self.assertNotIn("policy", doc)
 
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
@@ -1056,3 +1072,12 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
     agents_row = next(line for line in out.splitlines() if "Agents" in line)
     assert "1 active, 1 not running" in agents_row
+
+
+def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    cfg = _cfg(["claudecode"])
+    out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    assert "not detected" in claude_row.lower()
+    assert "RUNNING" not in claude_row

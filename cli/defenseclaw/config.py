@@ -22,15 +22,20 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import codecs
 import copy
+import json
+import locale
 import logging
 import ntpath
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
-from collections.abc import Callable
+import urllib.parse
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -39,7 +44,8 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance, legacy_connector
+from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
+from defenseclaw.config_writer import ManagedConfigWriteError
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -67,15 +73,71 @@ from defenseclaw.connector_paths import (  # noqa: F401
 from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
-from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_lock import locked_file_update  # noqa: F401 - re-exported for setup and keys
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
-    atomic_write_text_secure,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
-    make_private_directory,
     read_regular_file_no_follow,
 )
+
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
+# than once (100 profiles and 2,000 assignments made each command take 7 to
+# 10 s). PyYAML builds without libyaml fall back to the pure-Python loader.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _GatewayBooleanLoader(YAML_LOADER):  # type: ignore[misc, valid-type]
+    """YAML_LOADER that reads only true/false as booleans, as the gateway does."""
+
+
+_GatewayBooleanLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in YAML_LOADER.yaml_implicit_resolvers.items()
+}
+_GatewayBooleanLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def read_config_text(path: str | os.PathLike[str]) -> str:
+    """Read config.yaml as text: UTF-8, a leading byte order mark dropped.
+
+    Windows editors (Notepad "UTF-8 with BOM", PowerShell 5 Set-Content
+    -Encoding UTF8) start the file with a BOM. Read with the locale
+    encoding (cp1252 on Windows) it became a ``\u00ef\u00bb\u00bf`` prefix on
+    the first key, so that key went missing and a save wrote the bogus key
+    back, which the validator refused (GAP-0386). The gateway reads the
+    file as UTF-8 and skips the mark; a file that is not UTF-8 is decoded
+    with the locale encoding, as before.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    data = data.removeprefix(codecs.BOM_UTF8)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False))
+
+
+def parse_config_yaml(text: str) -> Any:
+    """Parse config.yaml text the way the gateway reads it.
+
+    The gateway (yaml.v3, YAML 1.2 core schema) and the v8 source validator
+    read only true/false as booleans. PyYAML follows YAML 1.1, where yes, no,
+    on and off are booleans too, so a hand-written ``ide_inventory: off`` came
+    back as False: the CLI read it as ``all`` and a save wrote back a boolean
+    the v8 schema rejects. A pre-v8 document keeps the YAML 1.1 reading, the
+    one the v7 upgrade converter uses; v8 and v9 read the gateway's way.
+    """
+    raw = yaml.load(text, Loader=_GatewayBooleanLoader)
+    if not isinstance(raw, dict) or _exact_config_version(raw.get("config_version")) >= FIRST_CURRENT_CONFIG_VERSION:
+        return raw
+    return yaml.load(text, Loader=YAML_LOADER)
+
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -126,11 +188,60 @@ VALID_DEPLOYMENT_MODES = {
 class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
+    #: Process exit code when this error stops a command.
+    exit_code = 1
+
+
+class ManagedNotInitializedError(ConfigVersionError):
+    """No per-user config on a managed device: the administrator's config rules."""
+
+    exit_code = 3  # as a refused write on a managed device
+
+
+def not_initialized_error() -> ConfigVersionError:
+    """The error for a missing config.yaml. On a managed standalone device
+    nothing is initialized per user, so it says the device is managed instead
+    of sending the user to ``defenseclaw init``."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        return ManagedNotInitializedError(MANAGED_NOT_INITIALIZED)
+    return ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+
+
+def first_run_hint() -> str:
+    """What to tell an account that has no config.yaml: run init, except on a
+    managed standalone device, where the admin config rules and there is no
+    per-user setup."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        return "this device is managed, so DefenseClaw is configured in the admin config, not per user"
+    return "run 'defenseclaw init' or 'defenseclaw quickstart'"
+
+
+class ConfigSaveError(OSError):
+    """An atomic config.yaml save failed before replacing the prior file."""
+
+    def __init__(self, path: str, cause: OSError) -> None:
+        super().__init__(cause.errno, cause.strerror or str(cause), path)
+        self.path = path
+
+
 
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.
-CURRENT_CONFIG_VERSION = 8
+CURRENT_CONFIG_VERSION = 9
+#: The first config_version of the current schema family. A v8 file still
+#: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
+#: rewrites it as 9.
+FIRST_CURRENT_CONFIG_VERSION = 8
+
+
+def is_current_schema(version: Any) -> bool:
+    """Whether ``config_version`` is one this build loads and writes (8 or 9)."""
+    return type(version) is int and FIRST_CURRENT_CONFIG_VERSION <= version <= CURRENT_CONFIG_VERSION
 
 
 def source_config_version(*, path: str | None = None) -> int | None:
@@ -150,7 +261,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     cfg_file = path or str(config_path())
     try:
         with open(cfg_file, encoding="utf-8") as stream:
-            root = yaml.compose(stream)
+            root = yaml.compose(stream, Loader=YAML_LOADER)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -168,6 +279,29 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
+def _foreign_owner_fix(cfg_file: str) -> tuple[str, str] | None:
+    """(detail, fix) for a config.yaml another account owns, else None."""
+
+    try:
+        owner_uid = os.stat(cfg_file).st_uid
+        current_uid = os.geteuid()  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    if owner_uid == current_uid:
+        return None
+    try:
+        import pwd
+
+        owner = pwd.getpwuid(owner_uid).pw_name
+        user = pwd.getpwuid(current_uid).pw_name
+    except (ImportError, KeyError):
+        owner, user = str(owner_uid), str(current_uid)
+    return (
+        f"it is owned by {owner}, not by this account (as after a sudo defenseclaw run)",
+        f"Give it back to this account: sudo chown {user} {cfg_file}",
+    )
+
+
 def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     """Name the file, the problem and its position, and the next step."""
 
@@ -183,7 +317,10 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
         detail = "the file is not valid UTF-8 text"
     else:
         detail = getattr(exc, "strerror", None) or type(exc).__name__
-    if not isinstance(exc, yaml.YAMLError):
+    if isinstance(exc, PermissionError) and (owned := _foreign_owner_fix(cfg_file)):
+        # A stray sudo defenseclaw run leaves it root-owned (GAP-0398).
+        detail, fix = owned
+    elif not isinstance(exc, yaml.YAMLError):
         fix = "Fix the file"
     return (
         f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
@@ -223,6 +360,16 @@ def empty_config_message(path: str | None = None) -> str:
         f"{_previous_config_hint(home)}, "
         "or remove the empty file and run 'defenseclaw init'."
     )
+
+
+def config_damage_message(path: str | None = None) -> str:
+    """The repair text for an empty config.yaml, or "" for any other file."""
+
+    if config_is_empty(path):
+        return empty_config_message(path)
+    # source_config_version handles malformed YAML. A valid legacy config
+    # need not end with a newline, even if DefenseClaw's writer adds one.
+    return ""
 
 
 def _newest_config_backup(home: str) -> tuple[str, float] | None:
@@ -289,6 +436,13 @@ def _previous_config_hint(home: str) -> str:
     )
 
 
+def newer_config_message(version: int) -> str:
+    return (
+        f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
+        "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
+    )
+
+
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
     """Fail before full config loading unless the source is the current schema."""
 
@@ -296,16 +450,16 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if version is None and allow_missing:
         return
     if version is None:
-        raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+        raise not_initialized_error()
     if version > CURRENT_CONFIG_VERSION:
+        raise ConfigVersionError(newer_config_message(version))
+    if not is_current_schema(version):
+        if version == 0 and (damage := config_damage_message(path)):
+            raise ConfigVersionError(damage)
         raise ConfigVersionError(
-            f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
-            "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
         )
-    if version != CURRENT_CONFIG_VERSION:
-        if version == 0 and config_is_empty(path):
-            raise ConfigVersionError(empty_config_message(path))
-        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
 require_v8_config = require_current_config
@@ -410,6 +564,18 @@ def _expand(p: str) -> str:
     return p
 
 
+def _expand_home_policy_dir(doc: dict[str, Any]) -> str:
+    """Write a ``~/`` policy_dir as the folder it names; returns the new value
+    ("" when unchanged). The gateway reads policy_dir as written, so
+    ``~/team-policies`` named no folder and it refused every policy reload
+    with "read rego directory" (GAP-1033)."""
+    raw = doc.get("policy_dir")
+    if not isinstance(raw, str) or not raw.strip().startswith("~/"):
+        return ""
+    doc["policy_dir"] = _expand(raw.strip())
+    return doc["policy_dir"]
+
+
 # ---------------------------------------------------------------------------
 # Environment detection (mirrors config.DetectEnvironment)
 # ---------------------------------------------------------------------------
@@ -479,14 +645,78 @@ def _is_managed_enterprise_mode(value: str | None) -> bool:
         return False
 
 
-def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
-    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_doc(data)
-    if not managed:
+_DEPLOYMENT_PIN_ENVS = (DEPLOYMENT_MODE_ENV, "DEFENSECLAW_ENTERPRISE_PROFILE")
+_DECLARES_MANAGED = re.compile(r"""(?m)^deployment_mode:\s*["']?managed_enterprise""")
+_ignored_deployment_pins: list[str] = []
+
+
+def ignore_unmanaged_deployment_pins() -> list[str]:
+    """Drop the machine-wide deployment pins from this process's environment
+    when it loads a per-user config.
+
+    A managed service always loads a machine-owned config, never one under a
+    user's home, so a pin seen here is a stray export. Left in place it made
+    ``config set`` refuse as a managed device (or, with an invalid mode such as
+    ``oss``, broke validate and doctor); a per-user config that itself declares
+    managed_enterprise keeps its pins. Mirrors Go ``managed.IgnoreUnmanagedPins``.
+    Returns the names dropped, never the values (GAP-0091).
+    """
+    names = [name for name in _DEPLOYMENT_PIN_ENVS if os.environ.get(name, "").strip()]
+    if not names:
+        return []
+    try:
+        path = config_path().resolve()
+        path.relative_to(_home().resolve())
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            declares_managed = bool(_DECLARES_MANAGED.search(handle.read(1 << 20)))
+    except FileNotFoundError:
+        declares_managed = False
+    except (OSError, RuntimeError, ValueError):  # no home, or a config outside it
+        return []
+    if declares_managed:
+        return []
+    for name in names:
+        os.environ.pop(name, None)
+    _ignored_deployment_pins.extend(name for name in names if name not in _ignored_deployment_pins)
+    return names
+
+
+def ignored_deployment_pins() -> list[str]:
+    """Names of the deployment pins this process dropped at startup."""
+    return list(_ignored_deployment_pins)
+
+
+class ManagedStandaloneWriteError(ManagedConfigWriteError, PermissionError):
+    """The writer's managed refusal of a standalone managed config change,
+    also a PermissionError for the callers that report a refused save as one."""
+
+
+def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None, actor: str | None = None) -> None:
+    """Refuse a write the managed gate refuses.
+
+    A standalone managed document or host takes changes only from the
+    lifecycle and migrations, whoever runs the process (Go
+    ``configwrite.managedRefuses``). The Secure Client profile keeps its
+    administrator check.
+    """
+    from defenseclaw import config_writer
+
+    document = data if _is_managed_enterprise_doc(data) else None
+    if document is None:
         try:
-            managed = _is_managed_enterprise_doc(_load_existing_config_yaml(path))
+            existing = _load_existing_config_yaml(path)
         except Exception:
-            managed = False
-    if managed and not _is_admin_process():
+            existing = None
+        if _is_managed_enterprise_doc(existing):
+            document = existing
+    managed = document is not None or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+    if not managed and not config_writer.machine_managed_standalone():
+        return
+    if not config_writer.secure_client_document(document if document is not None else (data or {})):
+        if actor in (config_writer.ACTOR_LIFECYCLE, config_writer.ACTOR_MIGRATION):
+            return
+        raise ManagedStandaloneWriteError(config_writer.MANAGED_REFUSAL)
+    if not _is_admin_process():
         raise PermissionError(
             "managed_enterprise config changes require operating-system "
             "administrator privileges; use the enterprise managed config path "
@@ -654,7 +884,6 @@ class ClawConfig:
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
     workspace_dir: str = ""
-    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -757,6 +986,12 @@ _RECOGNIZED_LLM_PROVIDERS = frozenset(
 )
 
 _LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
+
+# Providers that speak the OpenAI chat-completions route (<base>/v1/chat/completions).
+# Keep in step with openAIStyleLLMProviders in internal/config/config.go.
+_OPENAI_STYLE_LLM_PROVIDERS = frozenset(
+    {"openai", "openai-compatible", "custom-openai", "vllm", "lm_studio", "lmstudio", "local"}
+)
 
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
@@ -965,6 +1200,24 @@ class LLMConfig:
         mode = (self.bedrock.auth_mode or "").strip().lower() or "api_key"
         return "" if mode == "api_key" else mode
 
+    def request_base_url(self) -> str:
+        """``base_url`` as LiteLLM and the Python scanners must send it.
+
+        The gateway's judge appends ``/v1/chat/completions`` to the host,
+        while LiteLLM appends only ``/chat/completions`` to what it is given,
+        so a bare host (``http://127.0.0.1:8000``) reached the two on
+        different paths. For an OpenAI-style provider a base URL with no path
+        gets ``/v1``; a URL with a path is used as written (GAP-0156). Mirrors
+        ``LLMConfig.RequestBaseURL`` in internal/config/config.go.
+        """
+        url = (self.base_url or "").strip()
+        if not url or self.provider_prefix() not in _OPENAI_STYLE_LLM_PROVIDERS:
+            return self.base_url
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and parts.netloc and parts.path in ("", "/") and not parts.query and not parts.fragment:
+            return url.rstrip("/") + "/v1"
+        return self.base_url
+
     def is_local_provider(self) -> bool:
         """Return True when the resolved provider runs on-box and
         doesn't need an API key (ollama, vllm, lm_studio) or when the
@@ -1038,47 +1291,219 @@ class CiscoAIDefenseConfig:
         return self.api_key
 
 
+# ---------------------------------------------------------------------------
+# config_version 9 (single source of truth) types. They mirror
+# internal/config/admission.go and internal/config/config_v9_types.go and the
+# canonical schema. Python only loads and serializes them; the gateway
+# compiles and enforces them.
+# ---------------------------------------------------------------------------
+
+CONFIG_VERSION_V9 = 9
+ADMISSION_SEVERITIES = ("critical", "high", "medium", "low", "info")
+ADMISSION_SHORTHANDS = ("block", "quarantine", "warn", "allow")
+
+
+@dataclass
+class AssetFileRef:
+    """A file referenced by path and pinned by ``sha256:<hex>`` digest."""
+
+    path: str = ""
+    digest: str = ""
+
+
+@dataclass
+class AdmissionFirstParty:
+    name: str = ""
+    source_path_contains: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
+class AdmissionAssetType:
+    """One ``admission.<type>`` block; ``None`` and empty inherit ``defaults``.
+
+    ``actions`` and each ``scanner_overrides`` value map a lower-case severity
+    to a shorthand (block, quarantine, warn, allow) or an
+    ``{install, file, runtime}`` mapping.
+    """
+
+    scan_on_install: bool | None = None
+    allow_list_bypass_scan: bool | None = None
+    actions: dict[str, Any] = field(default_factory=dict)
+    scanner_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``None`` inherits; an explicit ``[]`` allows nothing first party (as Go).
+    first_party_allow_list: list[AdmissionFirstParty] | None = None
+
+
+@dataclass
+class AdmissionConfig:
+    """``admission:``. Mirrors ``config.AdmissionConfig``."""
+
+    defaults: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    skill: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    mcp: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    plugin: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+
+
+@dataclass
+class CustomRulePack:
+    path: str = ""
+    digest: str = ""
+
+
+@dataclass
+class GuardrailRuleSuppression:
+    id: str = ""
+    finding_pattern: str = ""
+    entity_pattern: str = ""
+    reason: str = ""
+
+
+@dataclass
+class GuardrailSensitiveTool:
+    name: str = ""
+    result_inspection: bool | None = None
+    judge_result: bool | None = None
+    min_entities_for_alert: int = 0
+
+
+@dataclass
+class GuardrailRulesConfig:
+    """``guardrail[.connectors.C|.profiles.P].rules``. Mirrors
+    ``config.GuardrailRulesConfig``; applied on the rule pack in field order."""
+
+    protections: list[str] = field(default_factory=list)
+    enable: list[str] = field(default_factory=list)
+    disable: list[str] = field(default_factory=list)
+    severity_overrides: dict[str, str] = field(default_factory=dict)
+    suppressions: list[GuardrailRuleSuppression] = field(default_factory=list)
+    sensitive_tools: list[GuardrailSensitiveTool] = field(default_factory=list)
+
+
+@dataclass
+class LLMCustomProviderTLS:
+    ca_cert_file: str = ""
+    insecure_skip_verify: bool = False
+
+
+@dataclass
+class LLMCustomProvider:
+    """One ``llm_providers.custom`` entry; mirrors ``configs.Provider``."""
+
+    name: str = ""
+    domains: list[str] = field(default_factory=list)
+    profile_id: str = ""
+    env_keys: list[str] = field(default_factory=list)
+    base_provider_type: str = ""
+    base_url: str = ""
+    allowed_requests: list[str] = field(default_factory=list)
+    available_models: list[str] = field(default_factory=list)
+    request_path_overrides: dict[str, str] = field(default_factory=dict)
+    tls: LLMCustomProviderTLS | None = None
+    bedrock: BedrockKeyConfig | None = None
+    vertex: VertexKeyConfig | None = None
+    azure: AzureKeyConfig | None = None
+    extra_headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LLMProvidersConfig:
+    """``llm_providers:``; custom-providers.json is derived from it."""
+
+    custom: list[LLMCustomProvider] = field(default_factory=list)
+    ollama_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class UpdateConfig:
+    """``update:``. ``check`` ``None`` means on; ``source`` "" is the official
+    release feed, otherwise an HTTPS mirror (signatures are always verified
+    against the compiled release identity)."""
+
+    check: bool | None = None
+    channel: str = ""
+    source: str = ""
+
+
+@dataclass
+class SkillScannerVirusTotal:
+    enabled: bool = False
+    api_key_env: str = ""
+    upload_files: bool = False
+
+
+@dataclass
+class ScannerAnalyzerToggle:
+    enabled: bool = False
+
+
+@dataclass
+class SkillScannerAnalyzers:
+    virustotal: SkillScannerVirusTotal = field(default_factory=SkillScannerVirusTotal)
+    aidefense: ScannerAnalyzerToggle = field(default_factory=ScannerAnalyzerToggle)
+    osv: ScannerAnalyzerToggle = field(default_factory=ScannerAnalyzerToggle)
+
+
+@dataclass
+class SkillScannerTimeouts:
+    scan_s: int = 0
+
+
+@dataclass
+class MCPScannerYARAConfig:
+    include_bundled: bool | None = None
+    extra_rules: list[AssetFileRef] = field(default_factory=list)
+
+
 @dataclass
 class SkillScannerConfig:
-    binary: str = "skill-scanner"
-    use_llm: bool = False
+    # The recommended default: the quiet policy with the LLM judge (it runs
+    # when the top-level llm: block resolves a model; see scanner/settings.py).
+    use_llm: bool = True
     use_behavioral: bool = False
     enable_meta: bool = False
     use_trigger: bool = False
-    use_virustotal: bool = False
-    use_aidefense: bool = False
     llm_consensus_runs: int = 0
-    policy: str = "permissive"
+    policy: str = "quiet"
     lenient: bool = True
     # LLM overrides the top-level ``llm:`` block for the skill scanner.
     # Unset fields inherit from ``Config.llm`` via
     # ``Config.resolve_llm("scanners.skill")``.
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # config_version 9 scanner model (empty = unset; see the schema). The v8
+    # keys binary, use_virustotal, use_aidefense and virustotal_api_key_env
+    # are folded into ``analyzers`` for a version 8 source. Keep the literal
+    # v8 key for Secure Client scanning; version 9 never writes it.
     virustotal_api_key: str = ""
-    virustotal_api_key_env: str = ""
+    policy_file: AssetFileRef = field(default_factory=AssetFileRef)
+    judge_source: str = ""
+    fail_on_severity: str = ""
+    review_queue_min: str = ""
+    analyzers: SkillScannerAnalyzers = field(default_factory=SkillScannerAnalyzers)
+    timeouts: SkillScannerTimeouts = field(default_factory=SkillScannerTimeouts)
 
     def resolved_virustotal_api_key(self) -> str:
-        """Return VirusTotal key from env var (if set) or direct value.
-
-        An empty ``virustotal_api_key_env`` falls back to
-        ``VIRUSTOTAL_API_KEY``, the gateway's default and the name
-        ``defenseclaw keys set`` stores (GAP-1936).
-        """
-        val = os.environ.get(self.virustotal_api_key_env or "VIRUSTOTAL_API_KEY", "")
-        if val:
-            return val
-        return self.virustotal_api_key
+        """Return the VirusTotal key from the variable ``analyzers.virustotal.api_key_env``
+        names; an empty name falls back to ``VIRUSTOTAL_API_KEY``, the gateway's default
+        and the name ``defenseclaw keys set`` stores (GAP-1936)."""
+        return (
+            os.environ.get(self.analyzers.virustotal.api_key_env or "VIRUSTOTAL_API_KEY", "")
+            or self.virustotal_api_key
+        )
 
 
 @dataclass
 class MCPScannerConfig:
-    binary: str = "mcp-scanner"
     analyzers: str = "auto"
     scan_prompts: bool = False
     scan_resources: bool = False
     scan_instructions: bool = False
     # LLM overrides the top-level ``llm:`` block for the MCP scanner.
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # config_version 9 keys (empty = unset). ``analyzers`` stays the v8
+    # comma-separated string here; a v9 list loads joined with commas.
+    judge_source: str = ""
+    yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
 
 
 @dataclass
@@ -1092,8 +1517,6 @@ class ScannersConfig:
     plugin_llm: LLMConfig = field(default_factory=LLMConfig)
     codeguard: str = ""
 
-
-DEFAULT_SANDBOX_HOME = "/home/sandbox"
 
 # Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
 # internal/config/openshell.go).
@@ -1225,6 +1648,64 @@ class OpenShellAdminConfig:
     require_copy_for: list[str] = field(default_factory=list)
     max_resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
     locked: list[str] = field(default_factory=list)
+    # Managed identity-based sandbox floor keys (mirrors the Go fields of
+    # the same names). The same type is ``openshell.admin`` (the organization
+    # floor) and ``guardrail.profiles.<p>.sandbox`` (a tighten-only overlay).
+    # ``None`` is unset (no constraint); the schema refuses an explicit
+    # empty list.
+    allowed: bool | None = None
+    required_for: list[str] | None = None
+    when_unavailable: str = ""  # refuse | alert ("" = refuse)
+    user_approvals: str = ""  # none | session ("" = unset)
+    allowed_credentials: list[str] | None = None  # provider names or ["none"]
+    on_silence: str = ""  # stop | alert
+    max_silence_after: str = ""  # Go duration, >= 1m
+    process_tree: bool | None = None
+    foreign_sandboxes: str = ""  # stop | alert ("" = stop when managed)
+    allow_upstream_telemetry: bool | None = None
+    delete_stopped_after: str = ""  # Go duration or Nd, >= 1h
+    request_access: str = ""  # <= 512 printable bytes
+    # none refuses a Linux sandbox that wants the MicroVM driver where KVM
+    # is not available (no docker fallback); none wins, docker never loosens.
+    driver_fallback: str = ""  # docker | none ("" = unset)
+
+
+# The managed sandbox floor keys of OpenShellAdminConfig, unset when None or
+# "" (Go omitempty): a save never writes them unset.
+_OPENSHELL_ADMIN_FLOOR_KEYS = (
+    "allowed",
+    "required_for",
+    "when_unavailable",
+    "user_approvals",
+    "allowed_credentials",
+    "on_silence",
+    "max_silence_after",
+    "process_tree",
+    "foreign_sandboxes",
+    "allow_upstream_telemetry",
+    "delete_stopped_after",
+    "request_access",
+    "driver_fallback",
+)
+
+
+@dataclass
+class EnterpriseOpenShellConfig:
+    """``enterprise.openshell``: how the lifecycle provides and pins OpenShell.
+
+    Mirrors ``EnterpriseOpenShellConfig`` in internal/config/enterprise.go.
+    Every key is lifecycle (restart-required); DefenseClaw never ships
+    OpenShell.
+    """
+
+    install: str = ""  # prerequisite | setup ("" = prerequisite)
+    driver: str = ""  # docker | vm | auto ("" = vm on macOS, docker on Linux)
+    # Linux, driver vm or auto, KVM not available for the user: docker
+    # (the default) or none (refuse the sandbox).
+    driver_fallback: str = ""  # docker | none ("" = docker)
+    version: str = ""  # "0.1.3" or a range such as ">=0.1.1 <0.2.0"
+    gateway_port: int = 0  # 0 = 17670
+    e2fsprogs_dir: str = ""  # macOS only; absolute, root-owned chain
 
 
 @dataclass
@@ -1235,11 +1716,10 @@ class OpenShellConfig:
     sandbox policy pack governs (``profile``, ``yolo``, ``workdir.mode``, upload
     caps, egress lists, ``mcp.import``) stay empty unless the operator sets
     them, so they inherit the pack. The legacy openshell-sandbox (0.0.x)
-    sub-keys ``policy_dir``, ``version``, ``auto_pair`` and ``host_networking``
-    are accepted and ignored (the v8 save only writes modeled fields that
-    changed, so they stay on disk untouched). ``mode`` and ``sandbox_home`` are
-    read only by :func:`legacy_standalone_api_host` and ``defenseclaw sandbox
-    legacy-cleanup``.
+    sub-keys ``policy_dir``, ``version``, ``auto_pair``, ``host_networking``,
+    ``mode`` and ``sandbox_home`` are accepted and ignored (the v8 save only
+    writes modeled fields that changed, so they stay on disk untouched; the
+    config_version 9 migration drops ``mode`` and ``sandbox_home``).
     """
 
     enabled: bool = False
@@ -1269,15 +1749,6 @@ class OpenShellConfig:
     token_delivery: str = "provider"
     middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
-    # LEGACY(openshell-0.0.x): delete one release after cleanup.
-    mode: str = ""
-    sandbox_home: str = DEFAULT_SANDBOX_HOME
-
-    def is_standalone(self) -> bool:
-        return self.mode == "standalone"
-
-    def effective_sandbox_home(self) -> str:
-        return self.sandbox_home or DEFAULT_SANDBOX_HOME
 
     def effective_ingress_port(self, api_port: int) -> int:
         """Sandbox hook ingress port; 0 means ``api_port + 1``."""
@@ -1292,230 +1763,27 @@ class OpenShellConfig:
         return (api_port if api_port > 0 else 18970) + 2
 
 
-def legacy_standalone_configured(cfg: Any) -> bool:
-    """Whether *cfg* still records the removed openshell-sandbox standalone mode.
-
-    Mirrors ``IsLegacyStandalone`` in internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    openshell = getattr(cfg, "openshell", None)
-    is_standalone = getattr(openshell, "is_standalone", None)
-    if callable(is_standalone):
-        return bool(is_standalone())
-    return getattr(openshell, "mode", "") == "standalone"
-
-
-def legacy_standalone_api_host(cfg: Any) -> str | None:
-    """Return the API bind host of a legacy standalone install, or ``None``.
-
-    A host that still runs the removed openshell-sandbox mode keeps
-    ``openshell.mode: standalone`` and points ``guardrail.host`` at the host
-    end of the sandbox veth link. Until ``defenseclaw sandbox legacy-cleanup``
-    resets that, the gateway keeps its API on that host, so every CLI client
-    and health probe must dial it too. An explicit ``gateway.api_bind`` still
-    wins at each call site. Mirrors ``LegacyStandaloneAPIHost`` in
-    internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    if not legacy_standalone_configured(cfg):
-        return None
-    host = str(getattr(getattr(cfg, "guardrail", None), "host", "") or "").strip()
-    if not host or host == "localhost":
-        return None
-    return host
-
-
 def api_bind_host(cfg: Any) -> str:
     """Return the address the gateway REST API listens on.
 
-    An explicit ``gateway.api_bind`` wins, then the legacy standalone host,
-    then loopback. Mirrors ``APIBindHost`` in internal/config/config.go, so
-    every CLI caller agrees with the listener. Clients dial
+    An explicit ``gateway.api_bind``, else loopback. Mirrors ``APIBindHost``
+    in internal/config/config.go, so every CLI caller (the upgrade, watchdog
+    and status probes among them) agrees with the listener. Clients dial
     :func:`defenseclaw.gateway.gateway_api_client_host`, which maps an
     unspecified bind to a loopback address.
     """
     if cfg is None:
         return "127.0.0.1"
     bind = str(getattr(getattr(cfg, "gateway", None), "api_bind", "") or "").strip()
-    if bind:
-        return bind
-    return legacy_standalone_api_host(cfg) or "127.0.0.1"
+    return bind or "127.0.0.1"
 
 
 @dataclass
 class WatchConfig:
     debounce_ms: int = 500
     auto_block: bool = True
-    allow_list_bypass_scan: bool = True
     rescan_enabled: bool = True
     rescan_interval_min: int = 60
-
-
-@dataclass
-class SplunkConfig:
-    """Upgrade/credential-preview DTO for removed pre-v8 Splunk config.
-
-    Target commands must inspect canonical v8 destination status instead of
-    reading this projection. ``Config.save`` never writes it to an exact-v8
-    document.
-    """
-
-    hec_endpoint: str = "https://localhost:8088/services/collector/event"
-    hec_token: str = ""
-    hec_token_env: str = ""
-    index: str = "defenseclaw"
-    source: str = "defenseclaw"
-    sourcetype: str = "_json"
-    # (and parity with Go ): TLS verification is now ON by
-    # default. ``verify_tls`` is the LEGACY opt-in-to-security flag and
-    # is honoured when explicitly true (no-op against the new secure
-    # default); explicit false is silently IGNORED. Operators that
-    # genuinely need to bypass certificate validation (dev environments
-    # with self-signed HEC) must set ``insecure_skip_verify=True``.
-    verify_tls: bool = True
-    insecure_skip_verify: bool = False
-    enabled: bool = False
-    batch_size: int = 50
-    flush_interval_s: int = 5
-
-    def tls_verify_enabled(self) -> bool:
-        """Resolve effective TLS verification posture.
-
-        returns False only when ``insecure_skip_verify`` is
-        explicitly true. ``verify_tls=False`` no longer downgrades the
-        sink — operators must move the explicit opt-out to the new
-        ``insecure_skip_verify`` flag. Any other combination yields a
-        secure default of True so omitting the field never silently
-        leaks the HEC token to a MITM peer.
-
-        The flag is run through :func:`_coerce_bool` so a quoted
-        ``"false"`` persisted in ``config.yaml`` (a truthy non-empty
-        string under bare ``bool()``) cannot silently disable TLS
-        verification.
-        """
-        return not _coerce_bool(self.insecure_skip_verify)
-
-    def resolved_hec_token(self) -> str:
-        """Return HEC token from env var (if set) or direct value."""
-        if self.hec_token_env:
-            val = os.environ.get(self.hec_token_env, "")
-            if val:
-                return val
-        return self.hec_token
-
-
-@dataclass
-class OTelTLSConfig:
-    insecure: bool = False
-    ca_cert: str = ""
-
-
-@dataclass
-class OTelTracesConfig:
-    enabled: bool = True
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelLogsConfig:
-    enabled: bool = True
-    emit_individual_findings: bool = False
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelMetricsConfig:
-    enabled: bool = True
-    export_interval_s: int = 60
-    temporality: str = "delta"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelBatchConfig:
-    max_export_batch_size: int = 512
-    scheduled_delay_ms: int = 5000
-    max_queue_size: int = 2048
-
-
-@dataclass
-class OTelResourceConfig:
-    attributes: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class OTelSpanFilterOperationConfig:
-    name: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-
-
-@dataclass
-class OTelSpanFilterConfig:
-    require_operation: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-    operations: list[OTelSpanFilterOperationConfig] = field(default_factory=list)
-
-
-@dataclass
-class OTelDestinationConfig:
-    """Upgrade/credential-preview shape for a pre-v8 OTLP destination.
-
-    This is not the canonical v8 destination model. Target commands read the
-    validated observability graph through ``v8_status``/``v8_config``.
-    """
-
-    name: str = ""
-    preset: str = ""
-    enabled: bool = True
-    protocol: str = "grpc"
-    endpoint: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
-    tls: OTelTLSConfig = field(default_factory=OTelTLSConfig)
-    traces: OTelTracesConfig = field(default_factory=OTelTracesConfig)
-    logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
-    metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    span_filter: OTelSpanFilterConfig = field(default_factory=OTelSpanFilterConfig)
-
-
-@dataclass
-class OTelTracePolicyConfig:
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-
-
-@dataclass
-class OTelLogPolicyConfig:
-    emit_individual_findings: bool = False
-
-
-@dataclass
-class OTelMetricPolicyConfig:
-    export_interval_s: int = 60
-    temporality: str = "delta"
-
-
-@dataclass
-class OTelConfig:
-    """Upgrade/credential-preview DTO for the removed top-level ``otel`` block."""
-
-    enabled: bool = False
-    traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
-    logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
-    metrics: OTelMetricPolicyConfig = field(default_factory=OTelMetricPolicyConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
-    destinations: list[OTelDestinationConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -1620,82 +1888,6 @@ class SeverityAction:
 
 
 @dataclass
-class SkillActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class MCPActionsConfig:
-    critical: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    high: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class PluginActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
 class AssetRuntimeDetectionConfig:
     enabled: bool = True
     terminal_commands: bool = True
@@ -1712,6 +1904,21 @@ class AssetPolicyRule:
     args_prefix: list[str] = field(default_factory=list)
     transport: str = ""
     source_path_contains: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AssetPolicyToolRule:
+    name: str = ""
+    connector: str = ""
+    reason: str = ""
+
+
+@dataclass
+class AssetToolPolicy:
+    """``asset_policy.tool``: explicit tool allow/deny lists."""
+
+    allowed: list[AssetPolicyToolRule] = field(default_factory=list)
+    denied: list[AssetPolicyToolRule] = field(default_factory=list)
 
 
 @dataclass
@@ -1790,6 +1997,7 @@ class AssetPolicyConfig:
     mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
     skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
     plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+    tool: AssetToolPolicy = field(default_factory=AssetToolPolicy)
     # Per-connector overrides keyed by connector name (OTHER-7). Empty/absent
     # preserves the legacy global-only behavior. Only the scalar settings are
     # per-connector; rule lists + runtime_detection stay on the global per-type
@@ -1961,16 +2169,6 @@ class RegistrySource:
                                 the literal token. Empty disables auth.
     * ``enabled``             — when False the source is preserved in
                                 config but skipped by ``sync --all``.
-    * ``auto_sync``           — RESERVED. Scheduled sync is not yet
-                                implemented; setting this to True today
-                                does NOT cause periodic ingest.
-                                Persisted so a v1 -> v2 operator config
-                                doesn't lose the bit. Run
-                                ``defenseclaw registry sync --all`` (or
-                                schedule it via cron) until the v2
-                                scheduler ships.
-    * ``sync_interval_hours`` — RESERVED. Paired with ``auto_sync``;
-                                ignored at runtime today.
     * ``last_sync``           — ISO-8601 UTC timestamp; populated by
                                 the sync command on success.
     * ``last_status``         — ``ok`` or ``error: <reason>``.
@@ -1982,8 +2180,6 @@ class RegistrySource:
     content: str = "skill"
     auth_env: str = ""
     enabled: bool = True
-    auto_sync: bool = False
-    sync_interval_hours: int = 24
     last_sync: str = ""
     last_status: str = ""
 
@@ -2028,6 +2224,8 @@ class JudgeConfig:
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
+    trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
     # directly; the legacy ``model``/``api_key_env``/``api_base`` fields
@@ -2188,7 +2386,8 @@ class PerConnectorGuardrailConfig:
     hilt: HILTConfig | None = None
     hook_fail_mode: str = ""
     block_message: str = ""
-    rule_pack_dir: str = ""
+    rule_pack: str = ""
+    rules: GuardrailRulesConfig | None = None
     # Per-connector on/off switch toggled by
     # ``defenseclaw guardrail {enable,disable} --connector X``. ``None``
     # (the default) means "inherit the default (enabled)" — the connector
@@ -2206,6 +2405,57 @@ class PerConnectorGuardrailConfig:
     # :meth:`GuardrailConfig.effective_alert_at`.
     block_at: str = ""
     alert_at: str = ""
+
+
+@dataclass
+class GuardrailProfileMatch:
+    """Subjects one ``guardrail.profile_assignments`` entry selects.
+
+    Mirrors ``config.ProfileMatch`` in ``internal/config/guardrail_profiles.go``.
+    Set keys combine with AND, the values of one key with OR.
+    """
+
+    groups: list[str] = field(default_factory=list)
+    users: list[str] = field(default_factory=list)
+    connectors: list[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GuardrailProfileAssignment:
+    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+
+    Mirrors ``config.ProfileAssignment``.
+    """
+
+    profile: str = ""
+    match: GuardrailProfileMatch = field(default_factory=GuardrailProfileMatch)
+
+
+@dataclass
+class GuardrailProfile:
+    """One ``guardrail.profiles`` entry: identity-based guardrail overrides.
+
+    Mirrors ``config.GuardrailProfile``. Unset fields inherit. ``enabled`` and
+    ``hook_fail_mode`` are not allowed in a profile (the gateway rejects them
+    because both are baked into the installed hooks); they are modeled only
+    so a load/save round-trip preserves them for that check instead of
+    silently dropping them.
+    """
+
+    description: str = ""
+    mode: str = ""
+    block_at: str = ""
+    alert_at: str = ""
+    hilt: HILTConfig | None = None
+    rule_pack: str = ""
+    rules: GuardrailRulesConfig | None = None
+    block_message: str = ""
+    connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    # Tightens openshell.admin for subjects of this profile; None adds nothing.
+    sandbox: OpenShellAdminConfig | None = None
+    enabled: bool | None = None
+    hook_fail_mode: str = ""
 
 
 @dataclass
@@ -2247,7 +2497,12 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
-    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
+    # config_version 9: built-in pack name or a custom_packs key, the custom
+    # packs pinned by digest, and the in-memory rule customisation.
+    rule_pack: str = ""
+    custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
+    rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
+    cisco_trust_level: str = ""  # full | advisory | none ("" = full)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -2308,6 +2563,14 @@ class GuardrailConfig:
     # ``internal/config/config.go``; resolution goes through the
     # ``effective_*`` methods, never by reading the map directly.
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    # Identity-based guardrail profiles. Mirror ``GuardrailConfig.Profiles``,
+    # ``ProfileAssignments`` and ``DefaultProfile`` in
+    # ``internal/config/config.go``; all empty by default, which keeps the
+    # guardrail.* behaviour. The gateway validates them and rejects them
+    # under the Secure Client integration.
+    profiles: dict[str, GuardrailProfile] = field(default_factory=dict)
+    profile_assignments: list[GuardrailProfileAssignment] = field(default_factory=list)
+    default_profile: str = ""
 
     def _connector_override(self, connector: str) -> PerConnectorGuardrailConfig | None:
         """Return the override block for ``connector`` if configured.
@@ -2367,11 +2630,14 @@ class GuardrailConfig:
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Explicit connector posture > observe compatibility > global.
 
-        Existing observe-only installs remain fail-open when they only carry
-        the legacy global value. A connector-scoped value is an explicit
-        runtime response-integrity choice, however, and must not be collapsed
-        back to open merely because policy findings are being observed.
+        Cursor always follows its guardrail mode: action is closed and
+        observe is open. Other connector-scoped values remain explicit
+        runtime response-integrity choices in observe mode.
         """
+        # Cursor's native hook registration follows policy mode. A stored
+        # fail mode from an older setup cannot override that contract.
+        if str(connector).strip().lower() == "cursor":
+            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
@@ -2390,12 +2656,35 @@ class GuardrailConfig:
             return pc.block_message
         return self.block_message
 
-    def effective_rule_pack_dir(self, connector: str = "") -> str:
-        """Per-connector rule-pack dir when set, else the global one."""
+    def effective_rule_pack(self, connector: str = "") -> str:
+        """The config_version 9 ``rule_pack`` a connector uses: its own, else the global one ("" = default)."""
         pc = self._connector_override(connector)
-        if pc is not None and pc.rule_pack_dir.strip():
-            return pc.rule_pack_dir
-        return self.rule_pack_dir
+        if pc is not None and pc.rule_pack.strip():
+            return pc.rule_pack.strip()
+        return self.rule_pack.strip()
+
+    def effective_rule_pack_dir(self, connector: str = "") -> str:
+        """Directory of the rule pack a connector enforces, "" for the built-in default.
+
+        A connector scope that selects a pack wins over the global one. A scope
+        selects its ``rule_pack``: a preset under ``policy_dir`` or a
+        ``guardrail.custom_packs`` key (``policy_catalog.configured_pack_dir``).
+        """
+        from types import SimpleNamespace
+
+        from defenseclaw import policy_catalog
+
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is None or getattr(cfg, "guardrail", None) is not self:
+            # A guardrail block built on its own: presets resolve to the bundled copy.
+            cfg = SimpleNamespace(guardrail=self, policy_dir="", data_dir="")
+        pc = self._connector_override(connector)
+        if pc is not None:
+            selected = policy_catalog.configured_pack_dir(cfg, pc)
+            if selected:
+                return selected
+        return policy_catalog.configured_pack_dir(cfg, self)
 
     def effective_block_at(self, connector: str = "") -> str:
         """Tool-call block level: connector value > global value > "".
@@ -2467,6 +2756,410 @@ class GuardrailConfig:
                 _validate_guardrail_level("alert_at", pc.alert_at)
             except ValueError as exc:
                 raise ValueError(f"guardrail.connectors[{name!r}]: {exc}") from exc
+
+
+_GUARDRAIL_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_AGENT_IDENTITY_RE = re.compile(r"^agt-[0-9a-f]{16}$")
+_PROFILE_FORBIDDEN_KEY = (
+    "is not allowed in a guardrail profile (it is baked into the installed hooks); "
+    "set it on guardrail or guardrail.connectors instead"
+)
+
+
+def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
+    """Validate ``guardrail.profiles`` / ``profile_assignments`` / ``default_profile``.
+
+    Mirrors ``GuardrailConfig.validateProfiles`` in
+    ``internal/config/guardrail_profiles.go`` message for message. The
+    Secure Client rejection stays with the gateway, which knows the
+    deployment profile. Raises :class:`ValueError` on the first violation.
+    """
+    if not (gc.profiles or gc.profile_assignments or (gc.default_profile or "").strip()):
+        return
+    for name in sorted(gc.profiles):
+        if not _GUARDRAIL_PROFILE_NAME_RE.match(name):
+            raise ValueError(
+                f"guardrail.profiles: invalid profile name {name!r} "
+                "(want lowercase letters, digits, '-' or '_', at most 64)"
+            )
+        try:
+            _validate_guardrail_profile(gc.profiles[name])
+        except ValueError as exc:
+            raise ValueError(f"guardrail.profiles[{name!r}]: {exc}") from exc
+    for i, assignment in enumerate(gc.profile_assignments):
+        if assignment.profile not in gc.profiles:
+            raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
+        match = assignment.match
+        if not (match.groups or match.users or match.connectors or match.agents):
+            raise ValueError(
+                f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
+                "connectors or agents; use guardrail.default_profile for everyone else"
+            )
+        for agent in match.agents:
+            if not _AGENT_IDENTITY_RE.match(agent):
+                raise ValueError(
+                    f"guardrail.profile_assignments[{i}].match.agents: {agent!r} is not an agent "
+                    "identity (want agt- followed by 16 hex digits)"
+                )
+    default = (gc.default_profile or "").strip()
+    if default and default not in gc.profiles:
+        raise ValueError(f"guardrail.default_profile: unknown profile {default!r}")
+
+
+# --- Sandbox floors ---------------------------------------------------------
+#
+# openshell.admin is the organization floor and guardrail.profiles.<p>.sandbox
+# tightens it (Go TightenOpenShellAdmin). validate_sandbox_floors mirrors the Go
+# loader's refusals of the managed floor keys message for message (the shared
+# corpus internal/config/testdata/sandbox_floor_cases.yaml pins both). It reads
+# the raw document so an explicit empty list stays apart from an unset key.
+#
+# Python reports the first refusal where Go joins every refusal of a section;
+# the corpus checks that Go's text contains Python's. Only the Go loader (which
+# the gateway, ensure and verify run, so no such config takes effect) checks:
+# the older openshell.admin keys (required_pack_digest, min_profile, egress
+# patterns, require_copy_for, max_resources, locked) in openshell.admin and in
+# profile sandbox sections, the managed required_pack location rule, the pack
+# strictness hook, and enterprise.openshell (the lifecycle owns that block and
+# Python never writes it).
+
+_SANDBOX_INTERSECT_LISTS = ("required_for", "allowed_credentials", "allowed_harnesses", "egress_allow_only")
+_SANDBOX_CREDENTIAL_RE = re.compile(r"^(none|[a-z0-9][a-z0-9_-]{0,63})$")
+_SANDBOX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SANDBOX_DAYS_RE = re.compile(r"^([0-9]{1,6})d$")
+_GO_DURATION_RE = re.compile(r"^(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$")
+_GO_DURATION_PART_RE = re.compile(r"([0-9]*(?:\.[0-9]*)?)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)")
+_GO_DURATION_UNIT_NS = {
+    "ns": 1,
+    "us": 1_000,
+    "\u00b5s": 1_000,
+    "\u03bcs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60 * 1_000_000_000,
+    "h": 3600 * 1_000_000_000,
+}
+_SANDBOX_SECURE_CLIENT_PROFILES = (
+    "guardrail.profiles, guardrail.profile_assignments and guardrail.default_profile are not supported with "
+    "the Secure Client integration"
+)
+
+
+def _sandbox_floor_duration_ns(value: str) -> int | None:
+    """Nanoseconds of a floor duration (a Go duration or Nd), or None."""
+    from fractions import Fraction
+
+    v = value.strip()
+    days = _SANDBOX_DAYS_RE.match(v)
+    if days:
+        return int(days.group(1)) * 24 * 3600 * 1_000_000_000
+    if v == "0":
+        return 0
+    if not _GO_DURATION_RE.match(v):
+        return None
+    total = Fraction(0)
+    for number, unit in _GO_DURATION_PART_RE.findall(v):
+        total += Fraction(number) * _GO_DURATION_UNIT_NS[unit]
+    return int(total)
+
+
+def _sandbox_duration_error(field_name: str, value: Any, minimum_ns: int, minimum: str, example: str) -> str | None:
+    if value in (None, ""):
+        return None
+    ns = _sandbox_floor_duration_ns(str(value))
+    if ns is None:
+        return f"{field_name} {_go_quote(value)} must be a duration such as {example}"
+    if ns < minimum_ns:
+        return f"{field_name} {_go_quote(value)} must be at least {minimum}"
+    return None
+
+
+def _go_quote(value: Any) -> str:
+    """Go's %q of a plain string (the names these messages quote)."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
+    if value in (None, "") or value in allowed:
+        return None
+    return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
+
+
+def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of one floor section's managed keys (Go
+    validateManagedFloor), or None."""
+    for key in _SANDBOX_INTERSECT_LISTS:
+        if isinstance(section.get(key), list) and not section[key]:
+            return f"{prefix}.{key}: an empty list is refused; leave the key out for no constraint"
+    for key, allowed in (
+        ("when_unavailable", ("refuse", "alert")),
+        ("user_approvals", ("none", "session")),
+        ("on_silence", ("stop", "alert")),
+        ("foreign_sandboxes", ("stop", "alert")),
+        ("driver_fallback", ("docker", "none")),
+    ):
+        error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
+        if error:
+            return error
+    required_for = section.get("required_for") if isinstance(section.get("required_for"), list) else []
+    for index, name in enumerate(required_for):
+        if not _SANDBOX_NAME_RE.match(str(name).strip()):
+            return f"{prefix}.required_for[{index}]: invalid name {_go_quote(name)}"
+        if connector_paths.normalize(str(name)) not in connector_paths.KNOWN_CONNECTORS:
+            return f"{prefix}.required_for[{index}]: {_go_quote(name)} is not a known connector"
+    credentials = section.get("allowed_credentials") if isinstance(section.get("allowed_credentials"), list) else []
+    if len(credentials) > 64:
+        return f"{prefix}.allowed_credentials: at most 64 entries"
+    for index, name in enumerate(credentials):
+        if not isinstance(name, str) or not _SANDBOX_CREDENTIAL_RE.match(name):
+            return (
+                f"{prefix}.allowed_credentials[{index}]: {_go_quote(name)} must be none or a provider name "
+                '(lowercase letters, digits, "_" and "-")'
+            )
+    if len(credentials) > 1 and "none" in credentials:
+        return f"{prefix}.allowed_credentials: none cannot be combined with other credentials"
+    for error in (
+        _sandbox_duration_error(
+            f"{prefix}.max_silence_after", section.get("max_silence_after"), 60 * 10**9, "1m", "5m"
+        ),
+        _sandbox_duration_error(
+            f"{prefix}.delete_stopped_after", section.get("delete_stopped_after"), 3600 * 10**9, "1h", "12h or 14d"
+        ),
+    ):
+        if error:
+            return error
+    request_access = section.get("request_access")
+    if request_access not in (None, ""):
+        text = str(request_access)
+        if len(text.encode("utf-8", "surrogatepass")) > 512:
+            return f"{prefix}.request_access must be at most 512 bytes"
+        if not text.isprintable():
+            return f"{prefix}.request_access must be printable text on one line"
+    if section.get("allowed") is False and required_for:
+        return (
+            f"{prefix}: allowed: false contradicts required_for [{', '.join(str(n) for n in required_for)}]: "
+            "a required agent could not run anywhere"
+        )
+    harnesses = section.get("allowed_harnesses")
+    if isinstance(harnesses, list):
+        outside = _sandbox_connectors_outside(required_for, harnesses)
+        if outside:
+            return (
+                f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
+                f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
+            )
+    return None
+
+
+def _sandbox_connectors_outside(required: list[Any], allowed: list[Any]) -> list[str]:
+    """Go connectorsOutside: the names of required (as written, once each)
+    that allowed does not admit by the normalized connector name."""
+    admitted = {connector_paths.normalize(str(v)) for v in allowed}
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in required:
+        key = connector_paths.normalize(str(name))
+        if key not in admitted and key not in seen:
+            seen.add(key)
+            out.append(str(name))
+    return out
+
+
+def _sandbox_canonical_names(names: list[Any]) -> list[str]:
+    """Go canonicalConnectorNames: normalized names, each once, in order."""
+    out: list[str] = []
+    for name in names:
+        key = connector_paths.normalize(str(name))
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _sandbox_pack_key(ref: Any) -> str:
+    """Go sandboxPackKey: a pack name as written, a path cleaned with a
+    trailing pack.yaml dropped."""
+    text = str(ref or "").strip()
+    if "/" not in text and "\\" not in text:
+        return text
+    clean = os.path.normpath(text)
+    if os.sep == "/" and clean.startswith("//"):
+        clean = "/" + clean.lstrip("/")
+    if os.path.basename(clean) == "pack.yaml":
+        clean = os.path.dirname(clean)
+    return clean
+
+
+def _sandbox_egress_pattern(pattern: str) -> tuple[str, Any] | None:
+    """("net", ip_network) or ("wild" | "host", name) for an egress pattern
+    (Go ParseOpenShellEgressPattern, for coverage only), or None."""
+    import ipaddress
+
+    p = str(pattern).strip().lower()
+    if p.startswith("*."):
+        return ("wild", p[2:].removesuffix("."))
+    candidate = p[1:-1] if p.startswith("[") and p.endswith("]") else p
+    try:
+        net = ipaddress.ip_network(candidate, strict=False)
+    except ValueError:
+        return ("host", p.removesuffix(".")) if p and "*" not in p else None
+    if isinstance(net, ipaddress.IPv6Network) and net.network_address.ipv4_mapped is not None and net.prefixlen >= 96:
+        net = ipaddress.ip_network(f"{net.network_address.ipv4_mapped}/{net.prefixlen - 96}", strict=False)
+    return ("net", net)
+
+
+def _sandbox_egress_covers(outer: tuple[str, Any], inner: tuple[str, Any]) -> bool:
+    """Go OpenShellEgressPattern.Covers."""
+    if outer[0] == "net" or inner[0] == "net":
+        return (
+            outer[0] == "net"
+            and inner[0] == "net"
+            and outer[1].version == inner[1].version
+            and outer[1].prefixlen <= inner[1].prefixlen
+            and inner[1].network_address in outer[1]
+        )
+    if outer[0] == "wild":
+        return (inner[0] == "wild" and inner[1] == outer[1]) or inner[1].endswith("." + outer[1])
+    return inner[0] == "host" and inner[1] == outer[1]
+
+
+def _sandbox_union(base: list[Any], overlay: list[Any]) -> list[str]:
+    """Go unionStrings keyed by the normalized connector name."""
+    out = [str(v) for v in base]
+    seen = {connector_paths.normalize(v) for v in out}
+    for v in overlay:
+        key = connector_paths.normalize(str(v))
+        if key not in seen:
+            seen.add(key)
+            out.append(str(v))
+    return out
+
+
+def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> str | None:
+    """The contradiction Go TightenOpenShellAdmin reports for base tightened
+    by overlay, or None."""
+
+    def intersection_error(key: str, noun: str, left: list[Any], right: list[Any]) -> str:
+        return (
+            f"sandbox: combined with openshell.admin, {key} [{', '.join(str(v) for v in right)}] leaves no {noun} "
+            f"(openshell.admin allows [{', '.join(str(v) for v in left)}])"
+        )
+
+    pack, pin = str(overlay.get("required_pack") or "").strip(), str(overlay.get("required_pack_digest") or "")
+    base_pin = str(base.get("required_pack_digest") or "")
+    same_pack = _sandbox_pack_key(pack) == _sandbox_pack_key(base.get("required_pack"))
+    if pack and pin and base_pin and pin != base_pin and same_pack:
+        return (
+            f"sandbox: combined with openshell.admin, required_pack_digest {pin} contradicts {base_pin} "
+            f"for the same pack {_go_quote(pack)}: no pack content matches both"
+        )
+    harnesses_base, harnesses = base.get("allowed_harnesses"), overlay.get("allowed_harnesses")
+    if isinstance(harnesses_base, list) and isinstance(harnesses, list):
+        allowed = {connector_paths.normalize(str(v)) for v in harnesses}
+        if not any(connector_paths.normalize(str(v)) in allowed for v in harnesses_base):
+            return intersection_error("allowed_harnesses", "harness", harnesses_base, harnesses)
+    creds_base, creds = base.get("allowed_credentials"), overlay.get("allowed_credentials")
+    if isinstance(creds_base, list) and isinstance(creds, list) and "none" not in creds_base and "none" not in creds:
+        if not any(v in creds for v in creds_base):
+            return intersection_error("allowed_credentials", "credential", creds_base, creds)
+    egress_base, egress = base.get("egress_allow_only"), overlay.get("egress_allow_only")
+    if isinstance(egress_base, list) and isinstance(egress, list):
+        left = [p for p in (_sandbox_egress_pattern(v) for v in egress_base) if p]
+        right = [p for p in (_sandbox_egress_pattern(v) for v in egress) if p]
+        if not any(_sandbox_egress_covers(b, o) or _sandbox_egress_covers(o, b) for b in left for o in right):
+            return intersection_error("egress_allow_only", "destination", egress_base, egress)
+    required = _sandbox_union(base.get("required_for") or [], overlay.get("required_for") or [])
+    if (base.get("allowed") is False or overlay.get("allowed") is False) and required:
+        return (
+            f"sandbox: combined with openshell.admin, allowed: false contradicts required_for [{', '.join(required)}]: "
+            "a required agent could not run anywhere"
+        )
+    if isinstance(harnesses_base, list) and isinstance(harnesses, list):
+        admitted = {connector_paths.normalize(str(v)) for v in harnesses}
+        combined: list[Any] | None = [v for v in harnesses_base if connector_paths.normalize(str(v)) in admitted]
+    else:
+        combined = next((v for v in (harnesses_base, harnesses) if isinstance(v, list)), None)
+    if combined is not None:
+        allowed = _sandbox_canonical_names(combined)
+        outside = _sandbox_connectors_outside(_sandbox_canonical_names(required), allowed)
+        if outside:
+            return (
+                f"sandbox: combined with openshell.admin, required_for [{', '.join(outside)}] is outside "
+                f"allowed_harnesses [{', '.join(allowed)}]: a required agent could not run anywhere"
+            )
+    return None
+
+
+def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
+    """Refuse what the Go loader refuses in the sandbox floors of a raw
+    document: every profile ``sandbox`` section (alone and combined with
+    ``openshell.admin``), then ``openshell.admin``'s managed keys, and both
+    under the Secure Client integration. Raises :class:`ValueError` with the
+    Go message after its ``config: `` prefix."""
+    from defenseclaw import config_writer
+
+    if not isinstance(raw, Mapping):
+        return
+    openshell = raw.get("openshell") if isinstance(raw.get("openshell"), Mapping) else {}
+    admin = openshell.get("admin") if isinstance(openshell.get("admin"), Mapping) else {}
+    guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), Mapping) else {}
+    profiles = guardrail.get("profiles") if isinstance(guardrail.get("profiles"), Mapping) else {}
+    sections = {
+        str(name): entry["sandbox"]
+        for name, entry in profiles.items()
+        if isinstance(entry, Mapping) and isinstance(entry.get("sandbox"), Mapping)
+    }
+    floor_keys = [key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if admin.get(key) not in (None, "")]
+    if (sections or floor_keys) and config_writer.secure_client_document(dict(raw)):
+        if sections:
+            raise ValueError(f"guardrail: {_SANDBOX_SECURE_CLIENT_PROFILES}")
+        raise ValueError(
+            "openshell: admin."
+            + ", admin.".join(floor_keys)
+            + ": managed sandbox keys are not supported with the Secure Client integration"
+        )
+    for name in sorted(sections):
+        where = f"guardrail: guardrail.profiles[{_go_quote(name)}]: "
+        error = _sandbox_section_error(sections[name], "sandbox") or _sandbox_tighten_error(admin, sections[name])
+        if error:
+            raise ValueError(where + error)
+    error = _sandbox_section_error(admin, "admin")
+    if error:
+        raise ValueError("openshell: " + error)
+
+
+def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
+    if profile.enabled is not None:
+        raise ValueError("enabled " + _PROFILE_FORBIDDEN_KEY)
+    if profile.hook_fail_mode:
+        raise ValueError("hook_fail_mode " + _PROFILE_FORBIDDEN_KEY)
+    _validate_guardrail_mode(profile.mode)
+    _validate_guardrail_level("block_at", profile.block_at)
+    _validate_guardrail_level("alert_at", profile.alert_at)
+    if profile.hilt is not None:
+        _validate_guardrail_min_severity(profile.hilt.min_severity)
+    seen: dict[str, str] = {}
+    for name in sorted(profile.connectors):
+        if not name.strip():
+            raise ValueError("connectors: empty connector name is not allowed")
+        norm = connector_paths.normalize(name)
+        if norm in seen:
+            raise ValueError(
+                f"connectors: {seen[norm]!r} and {name!r} refer to the same connector {norm!r}; keep only one"
+            )
+        seen[norm] = name
+        pc = profile.connectors[name]
+        if pc.enabled is not None:
+            raise ValueError(f"connectors[{name!r}]: enabled {_PROFILE_FORBIDDEN_KEY}")
+        if pc.hook_fail_mode:
+            raise ValueError(f"connectors[{name!r}]: hook_fail_mode {_PROFILE_FORBIDDEN_KEY}")
+        try:
+            _validate_guardrail_mode(pc.mode)
+            _validate_guardrail_level("block_at", pc.block_at)
+            _validate_guardrail_level("alert_at", pc.alert_at)
+            if pc.hilt is not None:
+                _validate_guardrail_min_severity(pc.hilt.min_severity)
+        except ValueError as exc:
+            raise ValueError(f"connectors[{name!r}]: {exc}") from exc
 
 
 #: Values of ``guardrail.block_at`` / ``alert_at`` (global or per connector),
@@ -2551,10 +3244,8 @@ class NotificationsConfig:
     and ``hitl_approval`` are on so users see real blocks and real
     chat-side asks, while ``block_would_block`` is OFF so the
     observe-mode "would have blocked / would have asked" toasts
-    stay quiet by default. Keep these defaults in lockstep with
-    ``internal/config/notifications.go``'s
-    ``DefaultNotificationsConfig`` and the viper SetDefault calls
-    in ``internal/config/config.go``.
+    stay quiet by default. Keep these defaults in lockstep with the
+    viper SetDefault calls in ``internal/config/config.go``.
 
     Throttle defaults match the Go side
     (``dedup_window=30s``, ``max_per_minute=12``); zero values are
@@ -2611,24 +3302,6 @@ class RoutingConfig:
 
 
 @dataclass
-class PrivacyConfig:
-    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
-
-    ``disable_redaction`` is the persistent kill-switch documented in
-    the Go redaction package: when True the sidecar bypasses every
-    ForSink* helper at startup, including persistent sinks (audit DB,
-    OTel logs, Splunk HEC, webhooks). It violates the
-    unconditional-redaction contract documented in OBSERVABILITY.md
-    by design — only enable on single-tenant installs where every
-    downstream sink lives inside the same trust boundary.
-    The CLI emits a warning on flip, and config loaders emit a
-    once-per-process warning when they observe it.
-    """
-
-    disable_redaction: bool = False
-
-
-@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -2646,10 +3319,6 @@ class AIRuntimeConfig:
     enable_host_plane: bool = False
     dns_capture: bool = False
     chain_window_min: int = 0
-    # Where the privileged reads come from: "" (auto), "direct", or
-    # "helper". Mirrors Go's AIRuntimeConfig.Acquisition.
-    acquisition: str = ""
-    helper_socket: str = ""
     sanctioned_endpoints: list[str] = field(default_factory=list)
     # None means "not stated", which resolves to enabled. Distinguishing that
     # from an explicit false matters: disabling correlation removes the
@@ -2711,6 +3380,115 @@ def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, objec
     return changes
 
 
+def runtime_plane_c_selected(runtime: Any) -> bool:
+    """Whether Plane C runs: the runtime planes are enabled and Go's
+    ``AIRuntimeConfig.EffectivePlanes`` contains ``c`` (an empty ``planes``
+    list plus ``enable_host_plane``, or ``c`` listed with it)."""
+    if runtime is None or not bool(getattr(runtime, "enabled", False)):
+        return False
+    if not bool(getattr(runtime, "enable_host_plane", False)):
+        return False
+    planes = [str(plane).strip().lower() for plane in (getattr(runtime, "planes", None) or [])]
+    return not planes or "c" in planes
+
+
+# enterprise.tetragon: how the managed Linux sensor helper uses the Tetragon
+# the host already runs. Python has no enterprise mirror (only the lifecycle
+# acts on the block), so these read it as config.yaml writes it, for
+# `config get --effective`. They mirror Go's
+# EnterpriseTetragonConfig.Effective and Config.TetragonMode.
+TETRAGON_DEFAULTS: dict[str, str] = {
+    "mode": "consume",
+    "burn_in": "168h",
+    "enforce_ack": "",
+    "customer_events": "agent",
+}
+
+
+def tetragon_block(document: Any) -> dict[str, Any]:
+    """``enterprise.tetragon`` exactly as a config document writes it ({} when absent)."""
+    enterprise = document.get("enterprise") if isinstance(document, dict) else None
+    block = enterprise.get("tetragon") if isinstance(enterprise, dict) else None
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def _tetragon_text(value: Any) -> str:
+    # A YAML 1.1 loader (PyYAML's safe_load) reads an unquoted ``off`` as
+    # False; the Go loader and the v8 schema read the string "off".
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value).strip()
+
+
+def _tetragon_acks(value: Any) -> str | list[str]:
+    """``enforce_ack`` as Go's TetragonEnforceAcks marshals it: trimmed, without
+    empty items or repeats, in the order written; one digest is the string
+    (``""`` for none) and several are a list (a ring upgrade approves two
+    builds at once)."""
+    items = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for item in items:
+        text = _tetragon_text(item) if item is not None else ""
+        if text and text not in out:
+            out.append(text)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else out
+
+
+def effective_tetragon(
+    document: Any,
+    *,
+    deployment_mode: str,
+    runtime: Any,
+    os_name: str,
+) -> dict[str, tuple[str, str]]:
+    """Each ``enterprise.tetragon`` key as the managed sensor helper runs it,
+    with its source: ``config:enterprise.tetragon.<key>`` or ``builtin``.
+
+    The mode is capped at ``off`` where the helper does not use Tetragon:
+    macOS and Windows ignore the block, only a managed Linux deployment has
+    the helper, and Plane C must be selected. ``enforce_ack`` (one digest, or a
+    list during a ring upgrade) is marked inert unless the mode is
+    ``enforce``, and ``customer_events`` when the mode is ``off`` (no event
+    stream). The caps that need the helper's own state (a stale ack, the
+    Tetragon version) are reported by
+    ``sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify``.
+    """
+    written = tetragon_block(document)
+    view: dict[str, tuple[Any, str]] = {}
+    for key, default in TETRAGON_DEFAULTS.items():
+        value = written.get(key)
+        if value is None:
+            view[key] = (default, "builtin")
+        elif key == "enforce_ack":
+            view[key] = (_tetragon_acks(value), f"config:enterprise.tetragon.{key}")
+        elif key == "customer_events":
+            view[key] = (_tetragon_text(value).lower(), f"config:enterprise.tetragon.{key}")
+        else:
+            view[key] = (_tetragon_text(value), f"config:enterprise.tetragon.{key}")
+    mode, source = view["mode"]
+    mode = mode.lower()
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        deployment_mode
+    )
+    cap = ""
+    if os_name != "linux":
+        cap = "macOS and Windows ignore enterprise.tetragon"
+    elif not managed:
+        cap = "only the managed Linux sensor helper uses Tetragon"
+    elif not runtime_plane_c_selected(runtime):
+        cap = "Plane C is off (ai_discovery.runtime.enable_host_plane)"
+    view["mode"] = ("off", f"{source}, capped: {cap}") if cap and mode != "off" else (mode, source)
+    ack, ack_source = view["enforce_ack"]
+    if ack and view["mode"][0] != "enforce":
+        view["enforce_ack"] = (ack, f"{ack_source} (inert: the mode is not enforce)")
+    events, events_source = view["customer_events"]
+    if view["mode"][0] == "off":
+        view["customer_events"] = (events, f"{events_source} (inert: the mode is off)")
+    return view
+
+
 @dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
@@ -2719,6 +3497,8 @@ class AIDiscoveryConfig:
     process_interval_s: int = 60
     scan_roots: list[str] = field(default_factory=lambda: ["~"])
     signature_packs: list[str] = field(default_factory=list)
+    # sha256 pin of each signature pack by path; a pack that does not match is not loaded.
+    signature_pack_digests: dict[str, str] = field(default_factory=dict)
     allow_workspace_signatures: bool = False
     disabled_signature_ids: list[str] = field(default_factory=list)
     include_shell_history: bool = True
@@ -2729,6 +3509,15 @@ class AIDiscoveryConfig:
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
     include_user_email: bool = False
+    # Opt-in like include_user_email: the directory principal (UPN) and the
+    # session's Kerberos principal identify a person. When on they ride every
+    # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
+    include_user_principal: bool = False
+    # Child domains of the joined AD realm whose SSSD accounts are verified;
+    # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
+    trusted_ad_child_domains: list[str] = field(default_factory=list)
+    # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
+    ide_inventory: str = "all"
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -2943,12 +3732,9 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
-    splunk: SplunkConfig = field(default_factory=SplunkConfig)
-    otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
-    mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
-    plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
+    # config_version 9: admission replaces data.json.
+    admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
@@ -2956,7 +3742,6 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
-    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -2966,7 +3751,7 @@ class Config:
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     # Exact source version observed by load(). Ordinary saves of an already-v8
-    # document must never serialize the legacy audit_db/otel/privacy model over
+    # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -2974,6 +3759,13 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
+    # enterprise.openshell as loaded. Load only: Python never writes the
+    # enterprise block (the lifecycle owns it), so saves leave it alone.
+    enterprise_openshell: EnterpriseOpenShellConfig = field(
+        default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
+    )
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -2994,6 +3786,16 @@ class Config:
             return str(Path(raw).expanduser().resolve(strict=False))
         except OSError:
             return os.path.abspath(raw)
+
+    def __post_init__(self) -> None:
+        # GuardrailConfig.effective_rule_pack_dir resolves a rule_pack preset
+        # under this config's policy_dir.
+        import weakref
+
+        try:
+            object.__setattr__(self.guardrail, "_owner", weakref.ref(self))
+        except (AttributeError, TypeError):  # a test double without attributes
+            pass
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.
@@ -3274,7 +4076,9 @@ class Config:
         # play (the common case).
         if out.instance_name:
             try:
-                _apply_instance_overlay(out, self.data_dir)
+                from defenseclaw import derived_providers
+
+                _apply_instance_overlay(out, self.data_dir, derived_providers.configured_providers(self))
             except Exception:  # pragma: no cover - defensive
                 # Overlay merge must never take config loading offline.
                 _log.warning(
@@ -3317,80 +4121,138 @@ class Config:
             llm.max_retries = base.effective_max_retries()
         return llm
 
-    def save(self) -> None:
-        """Persist this :class:`Config` to ``~/.defenseclaw/config.yaml``.
+    def check_saveable(self) -> None:
+        """Raise ConfigUnparseableError when a save would be refused because
+        config.yaml on disk no longer parses (GAP-0370); a missing file is fine."""
+        path = str(config_path_for_data_dir(self.data_dir))
+        try:
+            with open(path, "rb") as handle:
+                current = handle.read()
+        except FileNotFoundError:
+            return
+        _existing_document_for_save(path, current)
 
-        A v8 document preserves the canonical ``observability`` graph and
-        applies only modeled values that changed since load. This keeps the
-        Go-owned routing/redaction graph authoritative while allowing Python
-        setup commands to update their own modeled sections safely. Legacy
-        documents use the compatibility merge only inside the upgrade input
-        boundary; target-runtime commands reject them before mutation.
+    def save(self, *, actor: str | None = None, reason: str = "") -> Any:
+        """Persist this :class:`Config` through the single config writer.
 
-        Write is atomic via ``tmp + os.replace`` (matches the
-        canonical config writer) so a crash mid-write cannot
-        leave a half-written ``config.yaml`` that the Go gateway
-        refuses to reload.
+        Only modeled values that changed since load are applied to the file
+        on disk, so the Go-owned observability graph and anything this
+        dataclass does not model stay as they are; comments and key order
+        are kept where the comment-preserving patcher can express the edit.
+        The writer locks ``config.yaml.lock``, validates the candidate with
+        the canonical validator, replaces the file durably and advances
+        ``config.generation.json``. ``actor`` defaults to ``cli:<os user>``.
+        Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        with locked_config_yaml(path):
-            self._save_locked(path)
+        try:
+            return self._write(path, actor=actor, reason=reason)
+        except ConfigSaveError:
+            raise
+        except OSError as exc:
+            if exc.errno is None:
+                # A refusal (a managed_enterprise change without admin
+                # rights), not a failed write: keep its own error.
+                raise
+            raise ConfigSaveError(path, exc) from exc
 
-    def save_verified(self, verify: Callable[[str], None]) -> None:
+    def save_verified(self, verify: Callable[[str], None], *, actor: str | None = None, reason: str = "") -> Any:
         """Persist, verify the exact written generation, and roll back on failure.
 
-        Verification runs while the canonical per-config lock is held. If it
-        fails after the atomic replacement, the prior v8 document is restored
-        atomically before the original error is re-raised.
+        Verification runs while the writer lock is held. If it fails, the
+        prior document is restored (as a new generation) before the original
+        error is re-raised.
         """
         path = str(config_path_for_data_dir(self.data_dir))
         previous_source_version = self._source_config_version
         previous_snapshot = copy.deepcopy(self._loaded_v8_modeled_snapshot)
-        with locked_config_yaml(path):
-            existed = os.path.exists(path)
-            existing = _load_existing_config_yaml(path)
-            self._save_locked(path)
-            try:
-                verify(path)
-            except Exception as verify_error:
-                self._source_config_version = previous_source_version
-                self._loaded_v8_modeled_snapshot = previous_snapshot
-                try:
-                    if existed:
-                        write_config_yaml_secure(path, existing)
-                    else:
-                        os.unlink(path)
-                except Exception as rollback_error:
-                    raise RuntimeError(
-                        "config verification failed and the previous configuration "
-                        f"could not be restored: {rollback_error}"
-                    ) from verify_error
-                raise
+        try:
+            return self._write(path, actor=actor, reason=reason, verify=verify)
+        except Exception:
+            self._source_config_version = previous_source_version
+            self._loaded_v8_modeled_snapshot = previous_snapshot
+            raise
 
-    def _save_locked(self, path: str) -> None:
-        """Persist using an already-held config lock."""
+    def _save_locked(self, path: str) -> Any:
+        """Persist while the caller already holds :func:`locked_config_yaml`."""
+        return self._write(path)
 
-        if self._source_config_version == 0 and not os.path.lexists(path):
+    def _write(
+        self,
+        path: str,
+        *,
+        actor: str | None = None,
+        reason: str = "",
+        verify: Callable[[str], None] | None = None,
+    ) -> Any:
+        from defenseclaw import config_writer
+
+        dataclass_data = _config_to_dict(self)
+
+        def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
+            merged = self._merged_document(path, dataclass_data, current)
+            expanded = _expand_home_policy_dir(merged)
+            if expanded:
+                self.policy_dir = expanded
+            _assert_config_write_allowed(path, merged, actor)
+            candidate = config_writer.render_document(current, merged, source_name)
+            return candidate, config_writer.diff_documents(current, candidate)
+
+        result = config_writer.write_with(
+            mutate,
+            actor or config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+            reason or "config save",
+            path=path,
+            verify=verify,
+        )
+        if self._source_config_version == 0:
+            self._source_config_version = CURRENT_CONFIG_VERSION
+        self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
+        return result
+
+    def _merged_document(self, path: str, dataclass_data: dict[str, Any], current: bytes) -> dict[str, Any]:
+        """The on-disk document (``current``) with this Config's changed modeled values."""
+
+        version = self._source_config_version
+        baseline = self._loaded_v8_modeled_snapshot
+        if version == 0 and not os.path.lexists(path):
             # A programmatically constructed Config with no source file is a
             # fresh target configuration, not a legacy document. Use the
             # canonical defaults as its structural baseline so explicit
             # caller choices are persisted while removed v7 fields remain
             # excluded. Existing unversioned/v7 files still fail closed below.
-            self._source_config_version = 8
-            self._loaded_v8_modeled_snapshot = _config_to_dict(default_config())
-        if self._source_config_version != 8:
-            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
-        dataclass_data = _config_to_dict(self)
-        existing = _load_existing_config_yaml(path)
+            version = CURRENT_CONFIG_VERSION
+            baseline = _config_to_dict(default_config())
+        if not is_current_schema(version):
+            raise ConfigVersionError(
+                "This configuration was written by an older DefenseClaw"
+                " — run 'defenseclaw migrate' first."
+            )
+        existing = _existing_document_for_save(path, current)
+        # Lists are replaced as a unit by the modeled delta. If another
+        # process changed registry sources after this Config was loaded, a
+        # whole-list save would silently discard that process's source.
+        from dataclasses import asdict
+
+        from defenseclaw.config_writer import ConfigConflictError
+
+        baseline_sources = baseline.get("registries", {}).get("sources", [])
+        edited_sources = dataclass_data.get("registries", {}).get("sources", [])
+        if edited_sources != baseline_sources:
+            disk_sources = asdict(_merge_registries(existing.get("registries")))["sources"]
+            if disk_sources != baseline_sources:
+                raise ConfigConflictError(
+                    "registries.sources changed since it was loaded; reload config.yaml and retry"
+                )
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
-            _baseline_keeping_migrated_llm_slots(dataclass_data, self._loaded_v8_modeled_snapshot),
+            _baseline_with_default_asset_policy(_baseline_keeping_migrated_llm_slots(dataclass_data, baseline)),
         )
-        merged["config_version"] = 8
+        merged["config_version"] = version
         merged.setdefault("observability", {})
         # The Go runtime requires an explicit profile selector whenever ACP is
         # enabled. A literal ``default`` value otherwise looks unchanged from
@@ -3401,11 +4263,9 @@ class Config:
             if not isinstance(acp_document, dict):
                 raise ConfigVersionError("acp must be a mapping")
             acp_document["default_profile"] = self.acp.default_profile
-        from defenseclaw.observability.v8_config import load_validate_v8
-
-        load_validate_v8(merged, source_name=path)
-        write_config_yaml_secure(path, merged)
-        self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
+        if version >= CONFIG_VERSION_V9:
+            _project_v9_modeled_keys(merged)
+        return merged
 
 
 # ---------------------------------------------------------------------------
@@ -3415,43 +4275,65 @@ class Config:
 
 @contextmanager
 def locked_config_yaml(path: str):
-    """Hold an exclusive per-config lock for a read/merge/write cycle."""
-    directory = os.path.dirname(path) or "."
-    # On elevated Windows accounts, a directory created with bare
-    # ``os.makedirs`` can inherit the token's default owner (for example the
-    # Administrators group) instead of the interactive user's SID.  The
-    # subsequent fail-closed config/audit writers then correctly refuse to
-    # mutate that foreign-owned directory.  Apply the private creation DACL at
-    # creation time so the config lock is never exposed in a permissive or
-    # ambiguously owned parent.
-    make_private_directory(directory)
-    with locked_file_update(path):
+    """Hold the config writer lock for a read/merge/write cycle.
+
+    It is the same ``config.yaml.lock`` the writer (``config_writer``) and
+    the Go ``configwrite`` package take, and it is reentrant in this thread,
+    so a ``Config.save`` inside the block joins it instead of waiting.
+    """
+    from defenseclaw import config_writer
+
+    config_writer.refuse_when_managed(path)
+    with config_writer.hold_lock(path, timeout_s=None):
         yield
 
 
-def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
-    """Atomically write YAML without widening config.yaml permissions."""
-    _assert_config_write_allowed(path, data)
+def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | None = None, reason: str = "") -> Any:
+    """Write a whole config document through the single writer.
 
-    def write_yaml(stream) -> None:
-        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
+    The document is validated before the write and the generation advances;
+    comments are kept where the patcher can express the change.
+    """
+    from defenseclaw import config_writer
 
-    atomic_write_text_secure(
-        path,
-        write_yaml,
-        prefix=f".{os.path.basename(path)}.",
+    _assert_config_write_allowed(path, data, actor)
+
+    def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
+        document = data
+        if not current.strip() and "config_version" not in document:
+            # A writer creating config.yaml writes a current-schema document.
+            document = {"config_version": CURRENT_CONFIG_VERSION, **document}
+            document.setdefault("observability", {})
+        candidate = config_writer.render_document(current, document, source_name)
+        return candidate, config_writer.diff_documents(current, candidate)
+
+    return config_writer.write_with(
+        mutate,
+        actor or config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+        reason or "config write",
+        path=path,
     )
-    try:
-        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    except OSError:
+
+
+def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
+    """Write v8-modeled fields a caller changed in their config_version 9 keys.
+
+    Setup commands that still set the v8 comma-separated
+    ``scanners.mcp_scanner.analyzers`` string would otherwise write a value
+    config_version 9 rejects. This maps it the way the Go migration does; it
+    goes away as each caller moves to the v9 list.
+    """
+    scanners = merged.get("scanners")
+    if not isinstance(scanners, dict):
         return
-    try:
-        try:
-            os.fsync(dir_fd)
-        except OSError as exc:
-            _log.warning("config.save: directory fsync failed after atomic replace of %s: %s", path, exc)
-    finally:
-        os.close(dir_fd)
+    mcp = scanners.get("mcp_scanner")
+    if isinstance(mcp, dict):
+        if isinstance(mcp.get("analyzers"), str):
+            items = [a.strip().lower() for a in mcp["analyzers"].split(",") if a.strip()]
+            rest = [a for a in dict.fromkeys(items) if a != "auto"]
+            if "auto" in items and rest and "yara" not in rest:
+                rest.insert(0, "yara")
+            mcp["analyzers"] = rest
 
 
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
@@ -3566,33 +4448,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
-    otel = d.get("otel") or {}
-    destinations = otel.get("destinations") or []
-    for destination in destinations:
-        if not isinstance(destination, dict):
-            continue
-        span_filter = destination.get("span_filter")
-        if not isinstance(span_filter, dict):
-            continue
-        if span_filter.get("operations"):
-            span_filter.pop("require_operation", None)
-            span_filter.pop("require_attributes", None)
-        else:
-            span_filter.pop("operations", None)
-            if not span_filter.get("require_operation"):
-                span_filter.pop("require_operation", None)
-            if not span_filter.get("require_attributes"):
-                span_filter.pop("require_attributes", None)
-        if not span_filter:
-            destination.pop("span_filter", None)
-    # Named destinations are the only transport/signal source of truth.
-    # Serialize only process-wide policy outside destinations.
-    traces = otel.get("traces") or {}
-    otel["traces"] = {key: value for key, value in traces.items() if key in {"sampler", "sampler_arg"}}
-    logs = otel.get("logs") or {}
-    otel["logs"] = {key: value for key, value in logs.items() if key == "emit_individual_findings"}
-    metrics = otel.get("metrics") or {}
-    otel["metrics"] = {key: value for key, value in metrics.items() if key in {"export_interval_s", "temporality"}}
+    d.pop("enterprise_openshell", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -3629,6 +4485,9 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
+    _serialize_v9_scanner_keys(scanners)
+    if cfg._source_config_version != FIRST_CURRENT_CONFIG_VERSION:
+        scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
@@ -3636,6 +4495,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_unset_levels(guardrail)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
+    _serialize_v9_guardrail_keys(guardrail)
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
     # config that never opted into the hook-lane judge stays
     # byte-identical after a load/save round-trip.
@@ -3678,10 +4538,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 if entry.get("hilt") is None:
                     entry.pop("hilt", None)
                 _strip_unset_levels(entry)
-    # The compatibility dataclass can preview a retired ``splunk:`` source for
-    # upgrade/credential recovery, but exact-v8 serialization must never write
-    # it. Splunk forwarding is a canonical observability destination.
-    d.pop("splunk", None)
+                _serialize_v9_rules_scope(entry)
+    _serialize_guardrail_profiles(cfg, guardrail)
     # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
     # operator hasn't set a cooldown (tri-state None), drop the key so
     # the YAML stays minimal and the gateway falls back to
@@ -3690,6 +4548,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
     _prune_ai_runtime(d.get("ai_discovery"))
+    _strip_ai_discovery_omitempty(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3710,6 +4569,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("asset_policy", None)
     else:
         _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
+        _prune_v9_block(d["asset_policy"], "tool")
+        _prune_asset_policy_rules(d["asset_policy"])
+    for key in ("admission", "llm_providers", "update"):
+        _prune_v9_block(d, key)
     # Per-connector observability (D5b): drop the empty block (omitempty),
     # or serialize it with inherited (None) dimensions + webhook omitempty
     # stripped. Mirrors the asset_policy.connectors handling.
@@ -3725,6 +4588,173 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _serialize_openshell(d)
     _serialize_routing(d)
     return d
+
+
+def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
+    """Recursively drop ``None``, ``""``, empty lists/maps (Go ``omitempty``),
+    plus ``False`` and ``0`` when ``drop_false`` (plain, non tri-state keys).
+    Returns ``_V8_MISSING`` when nothing is left."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            pruned = _prune_unset(item, drop_false=drop_false)
+            if pruned is not _V8_MISSING:
+                out[key] = pruned
+            elif key == "first_party_allow_list" and item == []:
+                # An explicit empty list disables Go's built-in exemptions.
+                out[key] = []
+        return out or _V8_MISSING
+    if isinstance(value, list):
+        items = [_prune_unset(item, drop_false=drop_false) for item in value]
+        items = [item for item in items if item is not _V8_MISSING]
+        return items or _V8_MISSING
+    if value is None or value == "":
+        return _V8_MISSING
+    is_zero = isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    if drop_false and (value is False or is_zero):
+        return _V8_MISSING
+    return value
+
+
+def _prune_v9_block(parent: Any, key: str, *, drop_false: bool = False) -> None:
+    """Replace ``parent[key]`` by its pruned form, or drop it when empty."""
+    if not isinstance(parent, dict) or key not in parent:
+        return
+    pruned = _prune_unset(parent[key], drop_false=drop_false)
+    if pruned is _V8_MISSING:
+        parent.pop(key, None)
+    else:
+        parent[key] = pruned
+
+
+def _serialize_v9_rules_scope(block: Any) -> None:
+    """Drop an unset ``rule_pack`` / ``rules`` on a guardrail scope."""
+    if not isinstance(block, dict):
+        return
+    if not block.get("rule_pack"):
+        block.pop("rule_pack", None)
+    _prune_v9_block(block, "rules")
+
+
+def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
+    if not isinstance(guardrail, dict):
+        return
+    _serialize_v9_rules_scope(guardrail)
+    _prune_v9_block(guardrail, "custom_packs")
+    if not guardrail.get("cisco_trust_level"):
+        guardrail.pop("cisco_trust_level", None)
+    judge = guardrail.get("judge")
+    if isinstance(judge, dict) and not judge.get("trace"):
+        judge.pop("trace", None)
+
+
+def _serialize_v9_scanner_keys(scanners: Any) -> None:
+    if not isinstance(scanners, dict):
+        return
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        for key in ("judge_source", "fail_on_severity", "review_queue_min"):
+            if not skill.get(key):
+                skill.pop(key, None)
+        for key in ("policy_file", "analyzers", "timeouts"):
+            _prune_v9_block(skill, key, drop_false=True)
+    mcp = scanners.get("mcp_scanner")
+    if isinstance(mcp, dict):
+        if not mcp.get("judge_source"):
+            mcp.pop("judge_source", None)
+        _prune_v9_block(mcp, "virustotal", drop_false=True)
+        _prune_v9_block(mcp, "yara")
+
+
+def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
+    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
+    set them stay byte-identical."""
+    if not isinstance(ai_discovery, dict):
+        return
+    if not ai_discovery.get("include_user_principal"):
+        ai_discovery.pop("include_user_principal", None)
+    if not ai_discovery.get("trusted_ad_child_domains"):
+        ai_discovery.pop("trusted_ad_child_domains", None)
+    if ai_discovery.get("ide_inventory") in (None, "", "all"):
+        ai_discovery.pop("ide_inventory", None)
+
+
+def _strip_empty_keys(block: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if block.get(key) in (None, ""):
+            block.pop(key, None)
+
+
+def _strip_unset_sandbox_keys(section: dict[str, Any]) -> None:
+    """Drop the unset keys of a profile sandbox section, as Go's omitempty
+    tags do: an unset tri-state (None), string, list or max_resources value
+    and block_large_uploads false. An explicit tri-state false stays."""
+    resources = section.get("max_resources")
+    if isinstance(resources, dict):
+        _strip_empty_keys(resources, ("cpu", "memory"))
+        if not resources:
+            section.pop("max_resources", None)
+    for key in list(section):
+        value = section[key]
+        if value is None or value == "" or value == [] or (key == "block_large_uploads" and value is False):
+            section.pop(key, None)
+
+
+def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
+    """Mirror Go's ``omitempty`` tags on the guardrail profile fields.
+
+    Empty profiles, assignments and default profile are dropped so existing
+    configs stay byte-identical, and unset profile fields are dropped so the
+    serialized profile only spells what the operator set (the v8 schema
+    rejects ``enabled`` and ``hook_fail_mode`` inside a profile, so an unset
+    one must not be written as an empty value). Like ``guardrail.connectors``,
+    a map that was populated at load and is now empty is written as ``{}`` so
+    the v8 structural delta clears it on disk.
+    """
+    if not isinstance(guardrail, dict):
+        return
+    profiles = guardrail.get("profiles")
+    if not profiles:
+        if (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("guardrail.profiles"):
+            guardrail["profiles"] = {}
+        else:
+            guardrail.pop("profiles", None)
+    elif isinstance(profiles, dict):
+        for profile in profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            _strip_empty_keys(
+                profile,
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox"),
+            )
+            if isinstance(profile.get("sandbox"), dict):
+                _strip_unset_sandbox_keys(profile["sandbox"])
+            _strip_unset_levels(profile)
+            _serialize_v9_rules_scope(profile)
+            connectors = profile.get("connectors")
+            if not connectors:
+                profile.pop("connectors", None)
+                continue
+            for entry in connectors.values():
+                if isinstance(entry, dict):
+                    _strip_empty_keys(
+                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "enabled")
+                    )
+                    _strip_unset_levels(entry)
+                    _serialize_v9_rules_scope(entry)
+    assignments = guardrail.get("profile_assignments")
+    if not assignments:
+        guardrail.pop("profile_assignments", None)
+    elif isinstance(assignments, list):
+        for assignment in assignments:
+            match = assignment.get("match") if isinstance(assignment, dict) else None
+            if isinstance(match, dict):
+                for key in ("groups", "users", "connectors", "agents"):
+                    if not match.get(key):
+                        match.pop(key, None)
+    if not guardrail.get("default_profile"):
+        guardrail.pop("default_profile", None)
 
 
 def _strip_unset_levels(block: Any) -> None:
@@ -3780,73 +4810,69 @@ def _serialize_routing(d: dict[str, Any]) -> None:
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
-    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+    """Best-effort read of an existing ``config.yaml`` (the managed check).
 
-    Returns ``{}`` when the file is missing (first save), unreadable, or
-    malformed. On parse failure we log a warning but do NOT raise — the
-    operator's previous file may be partially corrupt and we still want
-    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
-    cleanly. Worst-case the on-disk file is replaced with the
-    dataclass-only view, which is exactly the pre-fix behaviour, so we
-    cannot regress relative to the old serializer.
+    Returns ``{}`` when the file is missing, unreadable, malformed or not a
+    mapping, with a warning for the last three. A save never merges into
+    this: it reads the file with :func:`_existing_document_for_save`.
     """
     try:
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        _log.warning(
-            "config.save: cannot read existing %s (%s); writing dataclass-only view (any unmodelled keys will be lost)",
-            path,
-            exc,
-        )
+        _log.warning("config: cannot read existing %s (%s)", path, exc)
         return {}
     except yaml.YAMLError as exc:
-        backup = _backup_unparseable_config(path)
-        _log.warning(
-            "config.save: existing %s failed to parse (%s); writing dataclass-only view (backup=%s)",
-            path,
-            exc,
-            backup or "unavailable",
-        )
+        _log.warning("config: existing %s failed to parse (%s)", path, exc)
         return {}
     if not isinstance(raw, dict):
-        _log.warning(
-            "config.save: existing %s is not a YAML mapping (got %s); writing dataclass-only view",
-            path,
-            type(raw).__name__,
-        )
+        _log.warning("config: existing %s is not a YAML mapping (got %s)", path, type(raw).__name__)
         return {}
+    from defenseclaw.observability.v8_config import drop_retired_scanner_keys
+
+    # A save leaves out the scanner keys no scan read (GAP-0295, GAP-0301).
+    drop_retired_scanner_keys(raw)
     return raw
 
 
-def _backup_unparseable_config(path: str) -> str:
+def _existing_document_for_save(path: str, current: bytes) -> dict[str, Any]:
+    """The on-disk document a save merges into; ``{}`` for an empty file.
+
+    A file that does not parse, or is not a mapping, is refused as the CLI
+    writer refuses it: a save used to fall back to a document of only the
+    changed fields and replace the file with it, which dropped every other
+    setting (listeners, connectors, pack pins) and the protection with them
+    (GAP-0370). Nothing is written, and the error names the line.
+    """
+    from defenseclaw.config_writer import ConfigUnparseableError
+
     try:
-        with open(path, "rb") as src:
-            data = src.read()
-    except OSError:
-        return ""
-    backup = f"{path}.bak"
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(backup, flags, 0o600)
-    except FileExistsError:
-        backup = f"{path}.bak.{os.getpid()}"
-        try:
-            fd = os.open(backup, flags, 0o600)
-        except OSError:
-            return ""
-    except OSError:
-        return ""
-    try:
-        with os.fdopen(fd, "wb") as dst:
-            dst.write(data)
-            dst.flush()
-            os.fsync(dst.fileno())
-    except OSError:
-        return ""
-    return backup
+        text = current.removeprefix(codecs.BOM_UTF8).decode("utf-8")
+        raw = parse_config_yaml(text) if text.strip() else {}
+    except UnicodeDecodeError as exc:
+        raise ConfigUnparseableError(
+            f"{path} is not UTF-8 text (byte {exc.start}); nothing was saved. "
+            "Save it as UTF-8, then run 'defenseclaw config validate'"
+        ) from exc
+    except yaml.YAMLError as exc:
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        raise ConfigUnparseableError(
+            f"{path} is not valid YAML ({where}{problem}); nothing was saved. "
+            "Fix that line, then run 'defenseclaw config validate'"
+        ) from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigUnparseableError(
+            f"{path} is a YAML {type(raw).__name__}, not a mapping of settings; nothing was saved. "
+            "Fix the file, then run 'defenseclaw config validate'"
+        )
+    return raw
 
 
 # Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
@@ -3859,9 +4885,8 @@ def _backup_unparseable_config(path: str) -> str:
 # dataclass introspection) because not every nested dataclass field
 # typed as ``dict[str, str]`` is dataclass-authoritative — some
 # carry user-supplied free-form keys we want to preserve. Any new
-# secret-bearing modeled dict added to ``OTelConfig`` (or
-# elsewhere) MUST be added here so a clear-on-save honours the
-# operator's intent.
+# secret-bearing modeled dict added to a config dataclass MUST be added
+# here so a clear-on-save honours the operator's intent.
 #
 # Format: dotted YAML path from the top-level config dict.
 _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
@@ -3876,6 +4901,9 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         # deleted/cleared connector propagate to disk, which is the whole
         # point of the removal.
         "guardrail.connectors",
+        # Identity-based guardrail profiles map: fully modeled, so a removed
+        # profile must not be resurrected from the prior file.
+        "guardrail.profiles",
         # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
         # guardrail.connectors: the dataclass is the single source of truth for
         # the configured per-connector set, so clearing an override in-memory and
@@ -3922,12 +4950,17 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Identity-based guardrail profile selection: empty = no profiles.
+        "guardrail.profile_assignments",
+        "guardrail.default_profile",
+        # AI discovery identity/IDE opt-ins: stripped at their defaults.
+        "ai_discovery.include_user_principal",
+        "ai_discovery.trusted_ad_child_domains",
+        "ai_discovery.ide_inventory",
     }
 )
 
-_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
-    {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
-)
+_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset({"audit_db", "observability"})
 _V8_MISSING = object()
 
 # v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.
@@ -4076,6 +5109,54 @@ def _default_asset_policy_dict() -> dict[str, Any]:
     return asdict(AssetPolicyConfig())
 
 
+def _prune_asset_policy_rules(asset_policy: Any) -> None:
+    """Drop the unset fields of every ``asset_policy.<type>`` rule (Go ``omitempty``).
+
+    A blocked skill is a name and a reason; the empty connector, url, command,
+    args_prefix, transport and source_path_contains of the dataclass are not
+    written (GAP-0060).
+    """
+    if not isinstance(asset_policy, dict):
+        return
+    for type_key in ("mcp", "plugin", "skill"):
+        block = asset_policy.get(type_key)
+        if not isinstance(block, dict):
+            continue
+        for list_key in ("registry", "allowed", "denied"):
+            rules = block.get(list_key)
+            if isinstance(rules, list):
+                block[list_key] = [
+                    {key: value for key, value in rule.items() if value not in ("", None, [])}
+                    if isinstance(rule, dict)
+                    else rule
+                    for rule in rules
+                ]
+
+
+def _baseline_with_default_asset_policy(baseline: dict[str, Any]) -> dict[str, Any]:
+    """The save baseline, with the default ``asset_policy`` a load leaves out.
+
+    A config with no ``asset_policy`` loads as the all-default block, which the
+    serializer omits, so the load snapshot has no such key. Without it the first
+    rule added (``skill block``) looked like a brand-new tree and the whole
+    default block was written to config.yaml. Taking the defaults as the baseline
+    writes only what changed (GAP-0060).
+    """
+    if "asset_policy" in baseline:
+        return baseline
+    return {**baseline, "asset_policy": default_asset_policy_baseline()}
+
+
+def default_asset_policy_baseline() -> dict[str, Any]:
+    """The all-default ``asset_policy`` in the form the serializer would write it."""
+    default = _default_asset_policy_dict()
+    if not default.get("connectors"):
+        default.pop("connectors", None)
+    _prune_v9_block(default, "tool")
+    _prune_asset_policy_rules(default)
+    return default
+
+
 def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
     """In-place YAML cleanup for ``asset_policy.connectors`` (OTHER-7).
 
@@ -4208,9 +5289,6 @@ def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
     for field_name in ("planes", "sanctioned_endpoints"):
         if not runtime.get(field_name):
             runtime.pop(field_name, None)
-    for field_name in ("acquisition", "helper_socket"):
-        if not runtime.get(field_name):
-            runtime.pop(field_name, None)
     if runtime.get("correlate") is None:
         runtime.pop("correlate", None)
 
@@ -4265,6 +5343,7 @@ def _disabled_ai_discovery_dict() -> dict[str, Any]:
     # "is this just the default?" comparison stays an equality check on one
     # shape rather than drifting every time a nested block gains a field.
     _prune_ai_runtime(disabled)
+    _strip_ai_discovery_omitempty(disabled)
     return disabled
 
 
@@ -4324,42 +5403,6 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
             asset = entry.get("asset_policy")
             if isinstance(asset, dict) and not any(asset.values()):
                 entry.pop("asset_policy", None)
-
-
-def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
-    if not raw:
-        return SeverityAction()
-    return SeverityAction(
-        file=raw.get("file", "none"),
-        runtime=raw.get("runtime", "enable"),
-        install=raw.get("install", "none"),
-    )
-
-
-def _merge_skill_actions(raw: dict[str, Any] | None) -> SkillActionsConfig:
-    defaults = SkillActionsConfig()
-    if not raw:
-        return defaults
-    return SkillActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
-def _merge_mcp_actions(raw: dict[str, Any] | None) -> MCPActionsConfig:
-    defaults = MCPActionsConfig()
-    if not raw:
-        return defaults
-    return MCPActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
 
 
 def _merge_inspect_llm(raw: dict[str, Any] | None) -> InspectLLMConfig:
@@ -4558,17 +5601,11 @@ def _derive_instance_name_from_base_url(cfg: Config) -> None:
     block(s) so the overlay's value (with its TLS settings) is the
     only thing the gateway resolves at runtime.
     """
-    data_dir = getattr(cfg, "data_dir", "") or os.path.expanduser("~/.defenseclaw")
-    overlay_path = os.path.join(data_dir, "custom-providers.json")
+    from defenseclaw import derived_providers
+
     try:
-        with open(overlay_path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
-    except (FileNotFoundError, PermissionError, OSError):
-        return
-    if not isinstance(raw, dict):
-        return
-    providers = raw.get("providers") or []
-    if not isinstance(providers, list):
+        providers = derived_providers.configured_providers(cfg)
+    except Exception:  # noqa: BLE001 - loading must not fail on the overlay
         return
     by_url: dict[str, str] = {}
     for p in providers:
@@ -4601,19 +5638,6 @@ def _derive_instance_name_from_base_url(cfg: Config) -> None:
     _maybe_apply(cfg.scanners.plugin_llm)
 
 
-def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
-    defaults = PluginActionsConfig()
-    if not raw:
-        return defaults
-    return PluginActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
 def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
     if not isinstance(raw, dict):
         return AssetPolicyConfig()
@@ -4623,6 +5647,7 @@ def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
         mcp=_merge_asset_type_policy(raw.get("mcp"), runtime=True),
         skill=_merge_asset_type_policy(raw.get("skill"), runtime=False),
         plugin=_merge_asset_type_policy(raw.get("plugin"), runtime=False),
+        tool=_merge_asset_tool_policy(raw.get("tool")),
         connectors=_merge_asset_policy_connectors(raw.get("connectors")),
     )
 
@@ -4762,11 +5787,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 ", ".join(REGISTRY_CONTENT_TYPES),
             )
             content = "skill"
-        sync_interval = entry.get("sync_interval_hours", 24)
-        try:
-            sync_interval_int = max(0, int(sync_interval))
-        except (TypeError, ValueError):
-            sync_interval_int = 24
         sources.append(
             RegistrySource(
                 id=sid,
@@ -4775,8 +5795,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 content=content,
                 auth_env=str(entry.get("auth_env", "") or ""),
                 enabled=bool(entry.get("enabled", True)),
-                auto_sync=bool(entry.get("auto_sync", False)),
-                sync_interval_hours=sync_interval_int,
                 last_sync=str(entry.get("last_sync", "") or ""),
                 last_status=str(entry.get("last_status", "") or ""),
             )
@@ -4838,6 +5856,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),
@@ -4851,8 +5870,6 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     if not raw:
         return GuardrailConfig()
     hilt_raw = raw.get("hilt")
-    if hilt_raw is None:
-        hilt_raw = raw.get("hitl")
     private_upstreams_raw = raw.get("allow_private_upstreams", [])
     private_upstreams = (
         [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
@@ -4879,7 +5896,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
-        rule_pack_dir=raw.get("rule_pack_dir", ""),
+        rule_pack=str(raw.get("rule_pack", "") or ""),
+        custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
+        rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
+        cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -4887,11 +5907,14 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
         llm_role=_normalize_llm_role(raw.get("llm_role", "")),
         connectors=_merge_guardrail_connectors(raw.get("connectors")),
+        profiles=_merge_guardrail_profiles(raw.get("profiles")),
+        profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
+        default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
 
 
 def _merge_guardrail_connectors(
-    raw: Any,
+    raw: Any, *, profile: bool = False,
 ) -> dict[str, PerConnectorGuardrailConfig]:
     """Parse the optional ``guardrail.connectors`` map.
 
@@ -4907,8 +5930,6 @@ def _merge_guardrail_connectors(
     for name, entry in raw.items():
         entry = entry if isinstance(entry, dict) else {}
         hilt_entry = entry.get("hilt")
-        if hilt_entry is None:
-            hilt_entry = entry.get("hitl")
         # ``enabled`` is parsed only when present so an absent key stays
         # ``None`` ("inherit default") rather than collapsing to a concrete
         # bool. A non-bool value is ignored (treated as unset) to match Go's
@@ -4917,13 +5938,70 @@ def _merge_guardrail_connectors(
         enabled = enabled_raw if isinstance(enabled_raw, bool) else None
         out[str(name)] = PerConnectorGuardrailConfig(
             mode=entry.get("mode", ""),
-            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
+            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None and (not profile or bool(hilt_entry)) else None,
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
-            rule_pack_dir=entry.get("rule_pack_dir", ""),
+            rule_pack=str(entry.get("rule_pack", "") or ""),
+            rules=_merge_guardrail_rules(entry.get("rules")),
             enabled=enabled,
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
+        )
+    return out
+
+
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
+    """Parse ``guardrail.profiles`` (mirrors the Go unmarshal of
+    ``map[string]GuardrailProfile``). Load only: validation is the gateway's."""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, GuardrailProfile] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        hilt_entry = entry.get("hilt")
+        enabled_raw = entry.get("enabled")
+        out[str(name)] = GuardrailProfile(
+            description=str(entry.get("description", "") or ""),
+            mode=str(entry.get("mode", "") or ""),
+            block_at=normalize_guardrail_level(entry.get("block_at")),
+            alert_at=normalize_guardrail_level(entry.get("alert_at")),
+            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) and hilt_entry else None,
+            rule_pack=str(entry.get("rule_pack", "") or ""),
+            rules=_merge_guardrail_rules(entry.get("rules")),
+            block_message=str(entry.get("block_message", "") or ""),
+            connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
+            sandbox=_merge_openshell_admin(entry["sandbox"]) if isinstance(entry.get("sandbox"), dict) else None,
+            enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+            hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
+        )
+    return out
+
+
+def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssignment]:
+    """Parse the ordered ``guardrail.profile_assignments`` list."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[GuardrailProfileAssignment] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        match = entry.get("match") if isinstance(entry.get("match"), dict) else {}
+        out.append(
+            GuardrailProfileAssignment(
+                profile=str(entry.get("profile", "") or ""),
+                match=GuardrailProfileMatch(
+                    groups=_string_list(match.get("groups")),
+                    users=_string_list(match.get("users")),
+                    connectors=_string_list(match.get("connectors")),
+                    agents=_string_list(match.get("agents")),
+                ),
+            )
         )
     return out
 
@@ -4967,130 +6045,237 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
 
 
 def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
-    """Parse mcp_scanner config with backward compat for bare-string values."""
-    if raw is None:
-        return MCPScannerConfig()
-    if isinstance(raw, str):
-        return MCPScannerConfig(binary=raw)
+    """Parse the mcp_scanner block."""
     if isinstance(raw, dict):
         return MCPScannerConfig(
-            binary=raw.get("binary", "mcp-scanner"),
-            analyzers=raw.get("analyzers", "auto"),
+            analyzers=_mcp_analyzers_text(raw.get("analyzers", "auto")),
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
             scan_instructions=raw.get("scan_instructions", False),
             llm=_merge_llm(raw.get("llm")),
+            judge_source=str(raw.get("judge_source", "") or ""),
+            yara=_merge_mcp_scanner_yara(raw.get("yara")),
         )
     return MCPScannerConfig()
 
 
-def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
-    if not isinstance(raw, dict) or not raw:
-        return OTelConfig()
-    traces_raw = _as_mapping(raw.get("traces"))
-    logs_raw = _as_mapping(raw.get("logs"))
-    metrics_raw = _as_mapping(raw.get("metrics"))
-    batch_raw = _as_mapping(raw.get("batch"))
-    resource_raw = _as_mapping(raw.get("resource"))
-    destinations: list[OTelDestinationConfig] = []
-    for item in raw.get("destinations") or []:
-        if not isinstance(item, dict):
-            continue
-        dest_traces = _as_mapping(item.get("traces"))
-        dest_logs = _as_mapping(item.get("logs"))
-        dest_metrics = _as_mapping(item.get("metrics"))
-        dest_batch = _as_mapping(item.get("batch"))
-        dest_tls = _as_mapping(item.get("tls"))
-        dest_span_filter = _as_mapping(item.get("span_filter"))
-        required_filter_attrs = dest_span_filter.get("require_attributes", [])
-        if not isinstance(required_filter_attrs, (list, tuple)):
-            required_filter_attrs = []
-        filter_operations: list[OTelSpanFilterOperationConfig] = []
-        for operation in dest_span_filter.get("operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_attrs = operation.get("require_attributes", [])
-            if not isinstance(operation_attrs, (list, tuple)):
-                operation_attrs = []
-            filter_operations.append(
-                OTelSpanFilterOperationConfig(
-                    name=str(operation.get("name", "") or ""),
-                    require_attributes=[str(value) for value in operation_attrs if str(value).strip()],
+# ---------------------------------------------------------------------------
+# config_version 9 loaders (load only: the gateway validates and compiles).
+# ---------------------------------------------------------------------------
+
+
+def _mapping(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
+
+
+def _int_or_zero(raw: Any) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+
+
+def _optional_bool(raw: Any) -> bool | None:
+    return raw if isinstance(raw, bool) else None
+
+
+def _merge_asset_file_ref(raw: Any) -> AssetFileRef:
+    raw = _mapping(raw)
+    return AssetFileRef(path=str(raw.get("path", "") or ""), digest=str(raw.get("digest", "") or ""))
+
+
+def _merge_admission_actions(raw: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for severity, action in _mapping(raw).items():
+        if isinstance(action, str):
+            out[str(severity)] = action
+        elif isinstance(action, dict):
+            out[str(severity)] = {str(k): str(v) for k, v in action.items()}
+    return out
+
+
+def _merge_admission_scanner_overrides(raw: Any) -> dict[str, dict[str, Any]]:
+    return {str(name): _merge_admission_actions(actions) for name, actions in _mapping(raw).items()}
+
+
+def _merge_admission_asset_type(raw: Any) -> AdmissionAssetType:
+    raw = _mapping(raw)
+    first_party: list[AdmissionFirstParty] | None = None if raw.get("first_party_allow_list") is None else []
+    for entry in raw.get("first_party_allow_list") or []:
+        if isinstance(entry, dict):
+            first_party.append(
+                AdmissionFirstParty(
+                    name=str(entry.get("name", "") or ""),
+                    source_path_contains=_string_list(entry.get("source_path_contains")),
+                    reason=str(entry.get("reason", "") or ""),
                 )
             )
-        destinations.append(
-            OTelDestinationConfig(
-                name=str(item.get("name", "") or ""),
-                preset=str(item.get("preset", "") or ""),
-                enabled=_coerce_bool(item.get("enabled", True), default=True),
-                protocol=str(item.get("protocol", "grpc") or "grpc"),
-                endpoint=str(item.get("endpoint", "") or ""),
-                headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
-                tls=OTelTLSConfig(
-                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
-                    ca_cert=str(dest_tls.get("ca_cert", "") or ""),
-                ),
-                traces=OTelTracesConfig(
-                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
-                    endpoint=str(dest_traces.get("endpoint", "") or ""),
-                    protocol=str(dest_traces.get("protocol", "") or ""),
-                    url_path=str(dest_traces.get("url_path", "") or ""),
-                ),
-                logs=OTelLogsConfig(
-                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
-                    endpoint=str(dest_logs.get("endpoint", "") or ""),
-                    protocol=str(dest_logs.get("protocol", "") or ""),
-                    url_path=str(dest_logs.get("url_path", "") or ""),
-                ),
-                metrics=OTelMetricsConfig(
-                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
-                    export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
-                    temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
-                    endpoint=str(dest_metrics.get("endpoint", "") or ""),
-                    protocol=str(dest_metrics.get("protocol", "") or ""),
-                    url_path=str(dest_metrics.get("url_path", "") or ""),
-                ),
-                batch=OTelBatchConfig(
-                    max_export_batch_size=_as_int(dest_batch.get("max_export_batch_size", 512), 512),
-                    scheduled_delay_ms=_as_int(dest_batch.get("scheduled_delay_ms", 5000), 5000),
-                    max_queue_size=_as_int(dest_batch.get("max_queue_size", 2048), 2048),
-                ),
-                span_filter=OTelSpanFilterConfig(
-                    require_operation=str(dest_span_filter.get("require_operation", "") or ""),
-                    require_attributes=[str(value) for value in required_filter_attrs if str(value).strip()],
-                    operations=filter_operations,
-                ),
-            )
-        )
-    return OTelConfig(
-        enabled=_coerce_bool(raw.get("enabled", False)),
-        traces=OTelTracePolicyConfig(
-            sampler=traces_raw.get("sampler", "always_on"),
-            sampler_arg=traces_raw.get("sampler_arg", "1.0"),
-        ),
-        logs=OTelLogPolicyConfig(
-            emit_individual_findings=_coerce_bool(logs_raw.get("emit_individual_findings", False)),
-        ),
-        metrics=OTelMetricPolicyConfig(
-            export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),
-            temporality=metrics_raw.get("temporality", "delta"),
-        ),
-        batch=OTelBatchConfig(
-            max_export_batch_size=_as_int(batch_raw.get("max_export_batch_size", 512), 512),
-            scheduled_delay_ms=_as_int(batch_raw.get("scheduled_delay_ms", 5000), 5000),
-            max_queue_size=_as_int(batch_raw.get("max_queue_size", 2048), 2048),
-        ),
-        resource=OTelResourceConfig(
-            attributes=_as_mapping(resource_raw.get("attributes")),
-        ),
-        destinations=destinations,
+    return AdmissionAssetType(
+        scan_on_install=_optional_bool(raw.get("scan_on_install")),
+        allow_list_bypass_scan=_optional_bool(raw.get("allow_list_bypass_scan")),
+        actions=_merge_admission_actions(raw.get("actions")),
+        scanner_overrides=_merge_admission_scanner_overrides(raw.get("scanner_overrides")),
+        first_party_allow_list=first_party,
     )
 
 
-def _as_mapping(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
+def _merge_admission(raw: Any) -> AdmissionConfig:
+    raw = _mapping(raw)
+    return AdmissionConfig(
+        defaults=_merge_admission_asset_type(raw.get("defaults")),
+        skill=_merge_admission_asset_type(raw.get("skill")),
+        mcp=_merge_admission_asset_type(raw.get("mcp")),
+        plugin=_merge_admission_asset_type(raw.get("plugin")),
+    )
+
+
+def _merge_custom_rule_packs(raw: Any) -> dict[str, CustomRulePack]:
+    out: dict[str, CustomRulePack] = {}
+    for name, entry in _mapping(raw).items():
+        entry = _mapping(entry)
+        out[str(name)] = CustomRulePack(
+            path=str(entry.get("path", "") or ""),
+            digest=str(entry.get("digest", "") or ""),
+        )
+    return out
+
+
+def _merge_guardrail_rules(raw: Any) -> GuardrailRulesConfig | None:
+    """Parse a ``rules`` block; ``None`` when absent (inherit)."""
+    if not isinstance(raw, dict):
+        return None
+    suppressions = [
+        GuardrailRuleSuppression(
+            id=str(entry.get("id", "") or ""),
+            finding_pattern=str(entry.get("finding_pattern", "") or ""),
+            entity_pattern=str(entry.get("entity_pattern", "") or ""),
+            reason=str(entry.get("reason", "") or ""),
+        )
+        for entry in raw.get("suppressions") or []
+        if isinstance(entry, dict)
+    ]
+    sensitive_tools = [
+        GuardrailSensitiveTool(
+            name=str(entry.get("name", "") or ""),
+            result_inspection=_optional_bool(entry.get("result_inspection")),
+            judge_result=_optional_bool(entry.get("judge_result")),
+            min_entities_for_alert=_int_or_zero(entry.get("min_entities_for_alert")),
+        )
+        for entry in raw.get("sensitive_tools") or []
+        if isinstance(entry, dict)
+    ]
+    return GuardrailRulesConfig(
+        protections=_string_list(raw.get("protections")),
+        enable=_string_list(raw.get("enable")),
+        disable=_string_list(raw.get("disable")),
+        severity_overrides={str(k): str(v) for k, v in _mapping(raw.get("severity_overrides")).items()},
+        suppressions=suppressions,
+        sensitive_tools=sensitive_tools,
+    )
+
+
+def _merge_asset_tool_policy(raw: Any) -> AssetToolPolicy:
+    raw = _mapping(raw)
+
+    def rules(value: Any) -> list[AssetPolicyToolRule]:
+        return [
+            AssetPolicyToolRule(
+                name=str(entry.get("name", "") or ""),
+                connector=str(entry.get("connector", "") or ""),
+                reason=str(entry.get("reason", "") or ""),
+            )
+            for entry in value or []
+            if isinstance(entry, dict)
+        ]
+
+    return AssetToolPolicy(allowed=rules(raw.get("allowed")), denied=rules(raw.get("denied")))
+
+
+def _merge_llm_providers(raw: Any) -> LLMProvidersConfig:
+    raw = _mapping(raw)
+    custom = []
+    for entry in raw.get("custom") or []:
+        if not isinstance(entry, dict):
+            continue
+        tls_raw = entry.get("tls")
+        custom.append(
+            LLMCustomProvider(
+                name=str(entry.get("name", "") or ""),
+                domains=_string_list(entry.get("domains")),
+                profile_id=str(entry.get("profile_id", "") or ""),
+                env_keys=_string_list(entry.get("env_keys")),
+                base_provider_type=str(entry.get("base_provider_type", "") or ""),
+                base_url=str(entry.get("base_url", "") or ""),
+                allowed_requests=_string_list(entry.get("allowed_requests")),
+                available_models=_string_list(entry.get("available_models")),
+                request_path_overrides={
+                    str(k): str(v) for k, v in _mapping(entry.get("request_path_overrides")).items()
+                },
+                tls=(
+                    LLMCustomProviderTLS(
+                        ca_cert_file=str(tls_raw.get("ca_cert_file", "") or ""),
+                        insecure_skip_verify=tls_raw.get("insecure_skip_verify") is True,
+                    )
+                    if isinstance(tls_raw, dict)
+                    else None
+                ),
+                bedrock=_merge_bedrock(entry.get("bedrock")),
+                vertex=_merge_vertex(entry.get("vertex")),
+                azure=_merge_azure(entry.get("azure")),
+                extra_headers={str(k): str(v) for k, v in _mapping(entry.get("extra_headers")).items()},
+            )
+        )
+    ports = [port for port in raw.get("ollama_ports") or [] if isinstance(port, int) and not isinstance(port, bool)]
+    return LLMProvidersConfig(custom=custom, ollama_ports=ports)
+
+
+def _merge_update(raw: Any) -> UpdateConfig:
+    raw = _mapping(raw)
+    return UpdateConfig(
+        check=_optional_bool(raw.get("check")),
+        channel=str(raw.get("channel", "") or ""),
+        source=str(raw.get("source", "") or ""),
+    )
+
+
+def _merge_skill_scanner_analyzers(skill_raw: Any) -> SkillScannerAnalyzers:
+    """``scanners.skill_scanner.analyzers``, with the v8 spellings a config_version 8
+    source still holds (``use_virustotal``, ``use_aidefense``, ``virustotal_api_key_env``)
+    folded in. Gateway-managed files are migrated on upgrade; a Secure Client document
+    stays version 8. An ``analyzers`` key that is written wins. A version 9 source cannot
+    carry the v8 keys."""
+    skill_raw = _mapping(skill_raw)
+    raw = _mapping(skill_raw.get("analyzers"))
+    vt = _mapping(raw.get("virustotal"))
+    aid = _mapping(raw.get("aidefense"))
+    return SkillScannerAnalyzers(
+        virustotal=SkillScannerVirusTotal(
+            enabled=(vt["enabled"] if "enabled" in vt else skill_raw.get("use_virustotal")) is True,
+            api_key_env=str(vt.get("api_key_env") or skill_raw.get("virustotal_api_key_env") or ""),
+            upload_files=vt.get("upload_files") is True,
+        ),
+        aidefense=ScannerAnalyzerToggle(
+            enabled=(aid["enabled"] if "enabled" in aid else skill_raw.get("use_aidefense")) is True
+        ),
+        osv=ScannerAnalyzerToggle(enabled=_mapping(raw.get("osv")).get("enabled") is True),
+    )
+
+
+def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
+    raw = _mapping(raw)
+    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")))
+
+
+def _mcp_analyzers_text(raw: Any) -> str:
+    """The v8 comma-separated analyzers string; a v9 list is joined."""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(item) for item in raw)
+    return str(raw) if raw is not None else ""
+
+
+def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
+    raw = _mapping(raw)
+    return MCPScannerYARAConfig(
+        include_bundled=_optional_bool(raw.get("include_bundled")),
+        extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
+    )
 
 
 def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -5325,7 +6510,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     approvals = _openshell_mapping(raw.get("approvals"))
     mcp = _openshell_mapping(raw.get("mcp"))
     middleware = _openshell_mapping(raw.get("middleware"))
-    admin = _openshell_mapping(raw.get("admin"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
@@ -5380,25 +6564,64 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
         token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
         middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
-        admin=OpenShellAdminConfig(
-            required_pack=_openshell_str(admin.get("required_pack")),
-            required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
-            min_profile=_openshell_str(admin.get("min_profile")),
-            allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
-            allow_mount=_openshell_optional_bool(admin.get("allow_mount")),
-            allow_host_ports=_openshell_optional_bool(admin.get("allow_host_ports")),
-            allow_unblock=_openshell_optional_bool(admin.get("allow_unblock")),
-            allow_learn_mode=_openshell_optional_bool(admin.get("allow_learn_mode")),
-            allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
-            egress_block=_openshell_str_list(admin.get("egress_block")),
-            egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
-            block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
-            require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
-            max_resources=_merge_openshell_resources(admin.get("max_resources")),
-            locked=_openshell_str_list(admin.get("locked")),
-        ),
-        mode=_openshell_str(raw.get("mode")),
-        sandbox_home=_openshell_str(raw.get("sandbox_home")) or DEFAULT_SANDBOX_HOME,
+        admin=_merge_openshell_admin(raw.get("admin")),
+    )
+
+
+def _openshell_optional_str_list(value: Any) -> list[str] | None:
+    """A list whose absence means "no constraint": None when unset, the
+    entries (possibly none) otherwise."""
+    if value is None:
+        return None
+    return _openshell_str_list(value)
+
+
+def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
+    """Parse ``openshell.admin`` or a profile's ``sandbox`` section (one type,
+    as Go ``OpenShellAdminConfig``)."""
+    admin = _openshell_mapping(raw)
+    return OpenShellAdminConfig(
+        required_pack=_openshell_str(admin.get("required_pack")),
+        required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
+        min_profile=_openshell_str(admin.get("min_profile")),
+        allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
+        allow_mount=_openshell_optional_bool(admin.get("allow_mount")),
+        allow_host_ports=_openshell_optional_bool(admin.get("allow_host_ports")),
+        allow_unblock=_openshell_optional_bool(admin.get("allow_unblock")),
+        allow_learn_mode=_openshell_optional_bool(admin.get("allow_learn_mode")),
+        allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
+        egress_block=_openshell_str_list(admin.get("egress_block")),
+        egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
+        block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
+        require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
+        max_resources=_merge_openshell_resources(admin.get("max_resources")),
+        locked=_openshell_str_list(admin.get("locked")),
+        allowed=_openshell_optional_bool(admin.get("allowed")),
+        required_for=_openshell_optional_str_list(admin.get("required_for")),
+        when_unavailable=_openshell_str(admin.get("when_unavailable")),
+        user_approvals=_openshell_str(admin.get("user_approvals")),
+        allowed_credentials=_openshell_optional_str_list(admin.get("allowed_credentials")),
+        on_silence=_openshell_str(admin.get("on_silence")),
+        max_silence_after=_openshell_str(admin.get("max_silence_after")),
+        process_tree=_openshell_optional_bool(admin.get("process_tree")),
+        foreign_sandboxes=_openshell_str(admin.get("foreign_sandboxes")),
+        allow_upstream_telemetry=_openshell_optional_bool(admin.get("allow_upstream_telemetry")),
+        delete_stopped_after=_openshell_str(admin.get("delete_stopped_after")),
+        request_access=str(admin.get("request_access") or ""),
+        driver_fallback=_openshell_str(admin.get("driver_fallback")),
+    )
+
+
+def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
+    """Parse ``enterprise.openshell`` (load only; Go validates it)."""
+    section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
+    return EnterpriseOpenShellConfig(
+        install=_openshell_str(section.get("install")),
+        driver=_openshell_str(section.get("driver")),
+        version=_openshell_str(section.get("version")),
+        gateway_port=_openshell_int(section.get("gateway_port")),
+        e2fsprogs_dir=_openshell_str(section.get("e2fsprogs_dir")),
+        driver_fallback=_openshell_str(section.get("driver_fallback")),
     )
 
 
@@ -5410,6 +6633,9 @@ def _serialize_openshell(d: dict[str, Any]) -> None:
     mcp = openshell.get("mcp")
     if isinstance(mcp, dict) and "import_" in mcp:
         mcp["import"] = mcp.pop("import_")
+    admin = openshell.get("admin")
+    if isinstance(admin, dict):
+        _strip_empty_keys(admin, _OPENSHELL_ADMIN_FLOOR_KEYS)
 
 
 def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
@@ -5459,11 +6685,12 @@ def _normalize_gateway_config_reload_mode(value: Any) -> str:
     return mode
 
 
-def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
-    """Fold a custom-providers.json instance entry into a resolved LLMConfig.
+def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[str, Any]] | None = None) -> None:
+    """Fold a custom-provider instance entry into a resolved LLMConfig.
 
-    Reads the overlay at ``<data_dir>/custom-providers.json`` (the
-    same file ``defenseclaw setup provider`` writes) and merges the
+    ``providers`` are the entries config.yaml ``llm_providers`` declares
+    (``derived_providers.configured_providers``); without them the overlay
+    at ``<data_dir>/custom-providers.json`` is read. Merges the
     matching instance's defaults UNDER ``out``. Only blanks are
     filled; explicit role-level values always win. Silent no-op when
     the overlay file is missing, malformed, or has no matching
@@ -5486,21 +6713,24 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
     * ``tls``                — TLS sub-block (ca_cert_pem, insecure_skip_verify)
     * ``bedrock``/``vertex``/``azure`` — provider-typed sub-blocks
     """
-    if not out.instance_name or not data_dir:
+    if not out.instance_name:
         return
-    overlay_path = os.path.join(data_dir, "custom-providers.json")
-    try:
-        import json as _json
+    if providers is None:
+        # No config at hand: the overlay file at <data_dir>.
+        if not data_dir:
+            return
+        try:
+            import json as _json
 
-        with open(overlay_path, encoding="utf-8") as f:
-            data = _json.load(f)
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict):
-        return
-    providers = data.get("providers") or []
-    if not isinstance(providers, list):
-        return
+            with open(os.path.join(data_dir, "custom-providers.json"), encoding="utf-8") as f:
+                data = _json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        providers = data.get("providers") or []
+        if not isinstance(providers, list):
+            return
     target_name = out.instance_name.strip().lower()
     entry: dict[str, Any] | None = None
     for p in providers:
@@ -5546,6 +6776,7 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     env_path = os.path.join(data_dir, ".env")
     credential_provenance.begin_dotenv_load(data_dir, env_path)
     seen_keys: set[str] = set()
+    managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
         for raw_line in body.splitlines():
@@ -5566,8 +6797,16 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 _log.warning("config: ignored malformed dotenv entry from %s", env_path)
                 continue
             if dotenv_key_is_process_control(key):
-                _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
+                # Said on every command, with no fix, it was noise; doctor and
+                # the upgrade's migration name it with the replacement (GAP-0387).
+                _log.debug("config: ignored process-control key %s from %s", key, env_path)
                 continue
+            # A managed standalone host skips what the registry ignores there.
+            if envvars.managed_policy(key) == envvars.MANAGED_IGNORE:
+                if managed_host is None:
+                    managed_host = envvars.managed_standalone()
+                if managed_host:
+                    continue
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                 value = value[1:-1]
             if key and key not in seen_keys:
@@ -5586,6 +6825,39 @@ def _load_dotenv_into_os(data_dir: str) -> None:
         pass
     except OSError as exc:
         _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
+
+
+def ignored_dotenv_control_keys(data_dir: str) -> list[str]:
+    """Each process-control key the data dir's .env sets, with what replaces it.
+
+    A .env never sets one of those (dotenv_key_is_process_control): a 0.8.x
+    workaround such as DEFENSECLAW_FAIL_MODE=open there is ignored, and
+    fail-open hooks became fail-closed without a word (GAP-0387).
+    """
+    try:
+        body = read_regular_file_no_follow(os.path.join(data_dir, ".env"), max_bytes=MAX_DOTENV_BYTES)
+    except OSError:
+        return []
+    found: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        raw_key, separator, raw_value = raw_line.strip().partition(b"=")
+        try:
+            key = raw_key.strip().decode("ascii")
+            value = raw_value.strip().decode("utf-8").strip("\"'").strip().lower()
+        except UnicodeError:
+            continue
+        if not separator or not dotenv_key_is_valid(key) or not dotenv_key_is_process_control(key) or key in found:
+            continue
+        if key.upper() == "DEFENSECLAW_FAIL_MODE" and value in ("open", "closed"):
+            found[key] = f"set it in config.yaml instead: defenseclaw guardrail fail-mode {value}"
+        elif key.upper() == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT":
+            found[key] = (
+                "to accept a newer agent, export it for one restart instead: "
+                "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            )
+        else:
+            found[key] = "export it in the shell of the command that needs it instead"
+    return [f"{key} ({fix})" for key, fix in found.items()]
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:
@@ -5611,16 +6883,54 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
     if cfg.scanners.skill_scanner.virustotal_api_key:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-    if cfg._source_config_version != 8 and cfg.splunk.hec_token:
-        _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
-def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
+#: The Linux and macOS managed standalone layouts: config path -> the
+#: root-owned vendor policy folder an omitted policy_dir resolves to there,
+#: as in Go (managed.StandaloneLayoutFor, applyRuntimeV8DataDirDefaults).
+_STANDALONE_VENDOR_POLICY_DIRS = {
+    "/etc/defenseclaw/config.yaml": "/opt/defenseclaw/share/policies",
+    "/opt/cisco/defenseclaw/etc/config.yaml": "/opt/cisco/defenseclaw/share/policies",
+}
+
+
+def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
+    """policy_dir when the config omits it: ``<data_dir>/policies``, or the
+    vendor policy folder the gateway loads on a managed standalone layout."""
+    import posixpath
+
+    vendor = _STANDALONE_VENDOR_POLICY_DIRS.get(posixpath.normpath(cfg_file)) if cfg_file.startswith("/") else None
+    if vendor:
+        from defenseclaw.config_writer import standalone_managed
+
+        try:
+            with open(cfg_file, "rb") as handle:
+                raw = handle.read(4 * 1024 * 1024)
+        except OSError:
+            raw = b""
+        if standalone_managed(raw):
+            return vendor
+    return os.path.join(data_dir, "policies")
+
+
+def load(
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    without_guardrail_profiles: bool = False,
+    parsed_source: dict[str, Any] | None = None,
+) -> Config:
     """Load config from the active config path, applying defaults.
 
     ``data_dir`` scopes transactional reloads (notably upgrades) to the
     installation that is actually being mutated.  ``DEFENSECLAW_CONFIG``
     remains authoritative when set, including for a scoped load.
+
+    ``without_guardrail_profiles`` leaves guardrail.profiles,
+    profile_assignments and default_profile out: a read-only view for a
+    command that reads a key outside them. Building and validating 1,000
+    profiles doubled ``config get`` (GAP-0276). Never save such a view.
+    ``parsed_source`` is config.yaml as the caller already parsed it (the v8
+    source loader), so the file is not parsed again; load may change it.
     """
     data_dir = str(Path(data_dir) if data_dir is not None else default_data_path())
     _load_dotenv_into_os(data_dir)
@@ -5628,56 +6938,26 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
 
     raw: dict[str, Any] = {}
     try:
-        with open(cfg_file) as f:
-            raw = yaml.safe_load(f) or {}
-    except OSError:
+        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
+    except (FileNotFoundError, NotADirectoryError):
         pass
+    except OSError as exc:
+        # An unreadable file (root-owned after a sudo run) is not a missing
+        # one: never judge the install against built-in defaults (GAP-0398).
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     _warn_untrusted_managed_config(cfg_file, raw)
     # Move the retired Desktop connector ID to devin before any connector key
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    if without_guardrail_profiles:
+        raw = _without_guardrail_profiles(raw)
 
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
-    splunk_raw = raw.get("splunk", {}) or {}
     source_config_version = _exact_config_version(raw.get("config_version"))
-    audit_db = _audit_database_path(raw, data_dir, source_config_version)
-
-    # Upgrade/credential-preview compatibility: mirror the first enabled v7
-    # Splunk sink into the legacy DTO in memory. Target v8 commands must never
-    # use this projection; they read the canonical destination graph instead.
-    # The explicit upgrade converter owns translation, and Config.save never
-    # writes this block into an exact-v8 document.
-    if not splunk_raw:
-        for sink in raw.get("audit_sinks") or []:
-            if not isinstance(sink, dict):
-                continue
-            if sink.get("kind") != "splunk_hec":
-                continue
-            if sink.get("enabled") is False:
-                continue
-            hec = sink.get("splunk_hec") or {}
-            if not isinstance(hec, dict) or not hec.get("endpoint"):
-                continue
-            splunk_raw = {
-                "enabled": True,
-                "hec_endpoint": hec.get("endpoint", ""),
-                "hec_token": hec.get("token", ""),
-                "hec_token_env": hec.get("token_env", ""),
-                "index": hec.get("index", "defenseclaw"),
-                "source": hec.get("source", "defenseclaw"),
-                "sourcetype": hec.get("sourcetype", "_json"),
-                # default verify_tls to True so promoting an
-                # audit_sinks declaration into the legacy SplunkConfig
-                # block never silently downgrades verification. The
-                # explicit opt-out lives on the new
-                # ``insecure_skip_verify`` field.
-                "verify_tls": _coerce_bool(hec.get("verify_tls", True), default=True),
-                "insecure_skip_verify": _coerce_bool(hec.get("insecure_skip_verify", False)),
-            }
-            break
+    audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
@@ -5687,7 +6967,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         audit_db=audit_db,
         quarantine_dir=raw.get("quarantine_dir", os.path.join(data_dir, "quarantine")),
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),
-        policy_dir=raw.get("policy_dir", os.path.join(data_dir, "policies")),
+        policy_dir=raw["policy_dir"] if "policy_dir" in raw else _default_policy_dir(cfg_file, data_dir),
         environment=raw.get("environment", detect_environment()),
         tenant_id=raw.get("tenant_id", ""),
         workspace_id=raw.get("workspace_id", ""),
@@ -5698,26 +6978,31 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
-            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
-                binary=ss_raw.get("binary", "skill-scanner"),
-                use_llm=ss_raw.get("use_llm", False),
+                use_llm=ss_raw.get("use_llm", source_config_version != FIRST_CURRENT_CONFIG_VERSION),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
-                use_virustotal=ss_raw.get("use_virustotal", False),
-                use_aidefense=ss_raw.get("use_aidefense", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
-                policy=ss_raw.get("policy", "permissive"),
+                policy=ss_raw.get(
+                    "policy",
+                    "permissive" if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "quiet",
+                ),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
-                virustotal_api_key=ss_raw.get("virustotal_api_key", ""),
-                virustotal_api_key_env=ss_raw.get("virustotal_api_key_env", ""),
+                virustotal_api_key=ss_raw.get("virustotal_api_key", "")
+                if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "",
+                policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),
+                judge_source=str(ss_raw.get("judge_source", "") or ""),
+                fail_on_severity=str(ss_raw.get("fail_on_severity", "") or ""),
+                review_queue_min=str(ss_raw.get("review_queue_min", "") or ""),
+                analyzers=_merge_skill_scanner_analyzers(ss_raw),
+                timeouts=_merge_skill_scanner_timeouts(ss_raw.get("timeouts")),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
             plugin_llm=_merge_llm(scanners_raw.get("plugin_llm")),
@@ -5727,7 +7012,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
-            allow_list_bypass_scan=raw.get("watch", {}).get("allow_list_bypass_scan", True),
             rescan_enabled=raw.get("watch", {}).get("rescan_enabled", True),
             rescan_interval_min=raw.get("watch", {}).get("rescan_interval_min", 60),
         ),
@@ -5737,24 +7021,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             anchor_name=raw.get("firewall", {}).get("anchor_name", "com.defenseclaw"),
         ),
         guardrail=_merge_guardrail(raw.get("guardrail"), data_dir),
-        splunk=SplunkConfig(
-            hec_endpoint=splunk_raw.get("hec_endpoint", "https://localhost:8088/services/collector/event"),
-            hec_token=splunk_raw.get("hec_token", ""),
-            hec_token_env=splunk_raw.get("hec_token_env", ""),
-            index=splunk_raw.get("index", "defenseclaw"),
-            source=splunk_raw.get("source", "defenseclaw"),
-            sourcetype=splunk_raw.get("sourcetype", "_json"),
-            # default verify_tls to True so callers that load a
-            # legacy config without the new field still get certificate
-            # verification. The explicit dev-mode opt-out lives on
-            # ``insecure_skip_verify`` and is wired separately.
-            verify_tls=_coerce_bool(splunk_raw.get("verify_tls", True), default=True),
-            insecure_skip_verify=_coerce_bool(splunk_raw.get("insecure_skip_verify", False)),
-            enabled=splunk_raw.get("enabled", False),
-            batch_size=splunk_raw.get("batch_size", 50),
-            flush_interval_s=splunk_raw.get("flush_interval_s", 5),
-        ),
-        otel=_merge_otel(raw.get("otel")),
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),
@@ -5772,9 +7038,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
             watchdog=_merge_gateway_watchdog(gw_raw.get("watchdog")),
         ),
-        skill_actions=_merge_skill_actions(raw.get("skill_actions")),
-        mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
-        plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
@@ -5783,6 +7046,10 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        admission=_merge_admission(raw.get("admission")),
+        llm_providers=_merge_llm_providers(raw.get("llm_providers")),
+        update=_merge_update(raw.get("update")),
+        enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(
@@ -5800,6 +7067,8 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    validate_guardrail_profiles(cfg.guardrail)
+    validate_sandbox_floors(raw)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.
@@ -5809,9 +7078,21 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # validated by their respective writers at write time.
     cfg.observability.validate()
     cfg.application_protection.validate()
-    if source_config_version == 8:
+    if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+_GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")
+
+
+def _without_guardrail_profiles(raw: dict[str, Any]) -> dict[str, Any]:
+    """raw without the guardrail profile keys (a shallow copy when it has any)."""
+    guardrail = raw.get("guardrail")
+    if not isinstance(guardrail, dict) or not any(key in guardrail for key in _GUARDRAIL_PROFILE_KEYS):
+        return raw
+    trimmed = {key: value for key, value in guardrail.items() if key not in _GUARDRAIL_PROFILE_KEYS}
+    return {**raw, "guardrail": trimmed}
 
 
 def _exact_config_version(value: Any) -> int:
@@ -5824,35 +7105,35 @@ def _exact_config_version(value: Any) -> int:
     return 0
 
 
-def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
+def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
     """Resolve Python readers/writers to the same local store as config v8."""
 
-    if source_version == 8:
-        observability = raw.get("observability")
-        local = observability.get("local") if isinstance(observability, dict) else None
-        configured = local.get("path") if isinstance(local, dict) else None
-        path = configured.strip() if isinstance(configured, str) else ""
-        if not path:
-            path = os.path.join(data_dir, AUDIT_DB_NAME)
-        elif not os.path.isabs(path):
-            path = os.path.join(data_dir, path)
-        return os.path.normpath(os.path.expanduser(path))
-    configured = raw.get("audit_db")
-    if isinstance(configured, str) and configured.strip():
-        return configured
-    return os.path.join(data_dir, AUDIT_DB_NAME)
+    observability = raw.get("observability")
+    local = observability.get("local") if isinstance(observability, dict) else None
+    configured = local.get("path") if isinstance(local, dict) else None
+    path = configured.strip() if isinstance(configured, str) else ""
+    if not path:
+        path = os.path.join(data_dir, AUDIT_DB_NAME)
+    elif not os.path.isabs(path):
+        path = os.path.join(data_dir, path)
+    return os.path.normpath(os.path.expanduser(path))
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
     if not isinstance(raw, dict):
         return AIDiscoveryConfig(enabled=False)
     return AIDiscoveryConfig(
-        enabled=bool(raw.get("enabled", True)),
+        # Go defaults ai_discovery.enabled to false (viper), so a block that
+        # omits the key is disabled there too. Defaulting to true here made the
+        # CLI report discovery as on while the gateway kept it off, and a later
+        # save never wrote the flag because it already matched the loaded value.
+        enabled=_coerce_bool(raw.get("enabled", False)),
         mode=str(raw.get("mode", "enhanced") or "enhanced"),
         scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
         scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
         signature_packs=list(raw.get("signature_packs", []) or []),
+        signature_pack_digests={str(k): str(v) for k, v in (raw.get("signature_pack_digests") or {}).items()},
         allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
         disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
         include_shell_history=bool(raw.get("include_shell_history", True)),
@@ -5860,6 +7141,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
+        include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
+        ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
@@ -5869,6 +7153,12 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
         runtime=_merge_ai_runtime(raw.get("runtime")),
     )
+
+
+def _normalize_ide_inventory(value: Any) -> str:
+    """Coerce ``ai_discovery.ide_inventory`` to all | ai_only | off (default all)."""
+    scope = str(value or "").strip().lower()
+    return scope if scope in {"ai_only", "off"} else "all"
 
 
 def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
@@ -5885,13 +7175,6 @@ def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
         chain_window_min=int(raw.get("chain_window_min", 0) or 0),
         sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
         correlate=None if correlate is None else _coerce_bool(correlate),
-        # Reconstructed explicitly, like every other field: this merge
-        # rebuilds the block from a whitelist, so a key absent here is a key
-        # silently erased on the next save. An operator who pinned
-        # acquisition to "direct" while diagnosing would have found it gone
-        # after the next CLI write, with the gateway quietly back on auto.
-        acquisition=str(raw.get("acquisition", "") or ""),
-        helper_socket=str(raw.get("helper_socket", "") or ""),
     )
 
 
@@ -5950,15 +7233,12 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
     if not isinstance(raw, dict):
         return PerConnectorGuardrailConfig()
     hilt_entry = raw.get("hilt")
-    if hilt_entry is None:
-        hilt_entry = raw.get("hitl")
     enabled_raw = raw.get("enabled")
     return PerConnectorGuardrailConfig(
         mode=str(raw.get("mode", "") or ""),
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
-        rule_pack_dir=str(raw.get("rule_pack_dir", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
@@ -6090,15 +7370,16 @@ def default_config() -> Config:
 
 
 def prepare_fresh_v8_config(cfg: Config) -> Config:
-    """Mark a never-persisted default config as a canonical v8 source.
+    """Mark a never-persisted default config as a current-schema source.
 
-    Capturing dataclass defaults as the v8 baseline means the first save writes
-    only explicit first-run choices, plus ``config_version`` and the canonical
+    Capturing dataclass defaults as the baseline means the first save writes
+    only explicit first-run choices, plus ``config_version`` (the current one,
+    so a fresh install has nothing to migrate) and the canonical
     ``observability`` block.
     """
 
     if cfg is None or cfg._source_config_version != 0:
         raise ValueError("fresh v8 configuration requires an unversioned default")
-    cfg._source_config_version = 8
+    cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

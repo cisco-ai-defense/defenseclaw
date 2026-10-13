@@ -18,9 +18,11 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -36,15 +38,26 @@ import (
 //
 // DefenseClaw adds, only where the administrator has not set them:
 //   - enabledPlugins["defenseclaw@defenseclaw"] = true while its per-user
-//     plugin is deployed (managed_hooks_only enforce, local_harness govern);
+//     plugin is deployed (managed_hooks_only enforce, local_harness govern)
+//     and every VS Code found is a version whose plugin store DefenseClaw
+//     writes (copilotVSCodePluginStoreGate). The Copilot CLI reads this file
+//     too and, from 1.0.92, waits forever on a plugin whose marketplace it
+//     does not know, so the key is never written for a host without a VS Code
+//     that reads it (GAP-0192);
 //   - allowManagedHooksOnly = true (VS Code Local only) once every enrolled
 //     user holds the plugin and every VS Code found is a version whose
 //     plugin store DefenseClaw writes (copilotLocalLockGate);
 //   - sandbox.enabled = true for local_harness retire.
 //
-// The ownership record lists the keys DefenseClaw added; removal deletes
-// only those that still hold DefenseClaw's value. An administrator's value,
-// including a different one, is kept and reported.
+// The ownership record lists the keys DefenseClaw added and the folders it
+// created for the file; removal deletes only the keys that still hold
+// DefenseClaw's value, then the file and those folders once empty. An
+// administrator's value, including a different one, is kept and reported.
+// The plugin key names DefenseClaw's own plugin, so it is DefenseClaw's
+// whenever it holds true, recorded or not: a build before 1.0.0 wrote it
+// without a record, and that key outlived every later reconcile and
+// uninstall, leaving the Copilot CLI to warn at every start that the
+// marketplace "defenseclaw" is not found (GAP-1245).
 
 const copilotManagedSettingsRecord = "copilot-managed-settings"
 
@@ -99,13 +112,21 @@ func copilotPluginRoute(opts Options) bool {
 
 // CopilotVSCodeUserWant is what each enrolled user's home should hold for
 // opts: the Local hook file while Copilot is governed and the Local
-// harness is not retired, and the plugin on the plugin route.
+// harness is not retired, and the plugin on the plugin route where a VS
+// Code that reads it is installed. The plugin follows the same gate as
+// its enabledPlugins key (copilotVSCodePluginStoreGate): without that key
+// nothing loads it, so on a host without such a VS Code it would only be a
+// stray folder in every enrolled home (GAP-1245).
 func CopilotVSCodeUserWant(opts Options) (hookFile, plugin bool) {
 	policy := opts.PolicyFor(copilotConnector)
 	if policy.Ownership == config.MachinePolicyOwnershipOff || opts.copilotLocalHarness() != config.CopilotLocalHarnessGovern {
 		return false, false
 	}
-	return true, copilotPluginRoute(opts)
+	if !copilotPluginRoute(opts) {
+		return true, false
+	}
+	gate, _ := copilotVSCodePluginStoreGate(opts)
+	return true, gate
 }
 
 // VSCodeInstall is one VS Code installation DefenseClaw found.
@@ -183,6 +204,14 @@ func copilotLocalLockGate(opts Options) (bool, string) {
 			return false, fmt.Sprintf("DefenseClaw's Copilot plugin is not yet in place under %s", home)
 		}
 	}
+	return copilotVSCodePluginStoreGate(opts)
+}
+
+// copilotVSCodePluginStoreGate reports whether VS Code is on this host and
+// every installation found is a version whose plugin store DefenseClaw
+// writes. The enabledPlugins key is read by VS Code and by the Copilot CLI
+// (the same file); without such a VS Code nothing needs it.
+func copilotVSCodePluginStoreGate(opts Options) (bool, string) {
 	installs := DiscoverVSCode(opts)
 	if len(installs) == 0 {
 		return false, "no VS Code installation was found to check its plugin store version"
@@ -205,6 +234,12 @@ func copilotWantedSettings(opts Options, state *State) []string {
 		return []string{copilotSettingSandbox}
 	}
 	if copilotPluginRoute(opts) {
+		if ok, reason := copilotVSCodePluginStoreGate(opts); !ok {
+			if state != nil {
+				state.detail("vscode: %s not set: %s; the Copilot CLI reads the same file and would wait on a plugin marketplace DefenseClaw does not write", copilotSettingPlugin, reason)
+			}
+			return wanted
+		}
 		wanted = append(wanted, copilotSettingPlugin)
 		if ok, reason := copilotLocalLockGate(opts); ok {
 			wanted = append(wanted, copilotSettingHooksOnly)
@@ -316,7 +351,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	if err != nil {
 		return err
 	}
-	owned := map[string]bool{}
+	owned := map[string]bool{copilotSettingPlugin: true}
 	if record != nil {
 		for _, key := range record.OwnedKeys {
 			owned[key] = true
@@ -360,7 +395,14 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 		for _, key := range drop {
 			copilotSettingDelete(doc, key)
 		}
-		if err := writeCopilotManagedSettings(opts, path, doc); err != nil {
+		created, err := writeCopilotManagedSettings(opts, path, doc)
+		if len(created) > 0 {
+			if record == nil {
+				record = &ownershipRecord{Connector: copilotManagedSettingsRecord}
+			}
+			record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
+		}
+		if err != nil {
 			return err
 		}
 		state.Changed = true
@@ -373,6 +415,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	}
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {
+		removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(drop) > 0)
 		if record != nil {
 			return deleteRecord(opts, copilotManagedSettingsRecord)
 		}
@@ -386,52 +429,93 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	return saveRecord(opts, record)
 }
 
-func writeCopilotManagedSettings(opts Options, path string, doc *object) error {
+// writeCopilotManagedSettings writes doc to path, or removes the file once
+// doc is empty. It returns the folders it created for the file.
+func writeCopilotManagedSettings(opts Options, path string, doc *object) ([]string, error) {
 	if doc.len() == 0 {
-		return removePolicyFile(opts, path)
+		return nil, removePolicyFile(opts, path)
 	}
 	rendered, err := encodeOrdered(doc)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = writePolicyFile(opts, path, rendered)
-	return err
+	return writePolicyFile(opts, path, rendered)
+}
+
+// removeCopilotManagedSettingsDirs removes, once the managed settings file
+// is gone, the folders DefenseClaw recorded creating for it, deepest first,
+// and with recordless (an older build's file DefenseClaw just emptied) the
+// file's own folder. Only an empty folder goes.
+func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord, recordless bool) {
+	if _, err := os.Lstat(platformPath(opts, path)); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var dirs []string
+	if record != nil {
+		dirs = append(dirs, record.CreatedDirs...)
+	}
+	if recordless {
+		dirs = appendUnique(dirs, dirFor(opts, path))
+	}
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		_ = removeDirIfEmpty(opts, dir)
+	}
 }
 
 // removeCopilotManagedSettings deletes the keys DefenseClaw added that
-// still hold its value.
+// still hold its value, and the plugin key whether recorded or not
+// (GAP-1245), then the file and the folders DefenseClaw created for it once
+// they are empty.
 func removeCopilotManagedSettings(opts Options, state *State) error {
 	record, err := loadRecord(opts, copilotManagedSettingsRecord)
-	if err != nil || record == nil {
+	if err != nil {
 		return err
 	}
 	path, err := CopilotManagedSettingsPath(opts)
 	if err != nil || opts.goos() == "darwin" {
+		if record == nil {
+			return nil
+		}
 		return deleteRecord(opts, copilotManagedSettingsRecord)
+	}
+	keys := []string{copilotSettingPlugin}
+	if record != nil {
+		keys = appendUnique(append([]string(nil), record.OwnedKeys...), copilotSettingPlugin)
 	}
 	data, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return err
 	}
+	var removed []string
 	if exists && !blank(data) {
 		doc, err := decodeOrderedObject(data)
 		if err != nil {
+			if record == nil {
+				// Nothing recorded: DefenseClaw left nothing it knows of in
+				// a file it cannot read.
+				state.detail("vscode: Copilot managed settings %s is not valid JSON; left unchanged: %v", path, err)
+				return nil
+			}
 			return fmt.Errorf("copilot managed settings %s: %w", path, err)
 		}
-		var removed []string
-		for _, key := range record.OwnedKeys {
+		for _, key := range keys {
 			if value, present := copilotSettingGet(doc, key); present && value == true {
 				copilotSettingDelete(doc, key)
 				removed = append(removed, key)
 			}
 		}
 		if len(removed) > 0 {
-			if err := writeCopilotManagedSettings(opts, path, doc); err != nil {
+			if _, err := writeCopilotManagedSettings(opts, path, doc); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("vscode: removed %s from %s", strings.Join(removed, ", "), path)
 		}
+	}
+	removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(removed) > 0)
+	if record == nil {
+		return nil
 	}
 	return deleteRecord(opts, copilotManagedSettingsRecord)
 }
@@ -458,6 +542,16 @@ func copilotVSCodeStatus(opts Options, state *State) {
 		}
 		if plugin {
 			plugins++
+		} else if wantPlugin {
+			// The plugin is DefenseClaw's as well: a missing or earlier copy
+			// is rewritten on the guardian's next pass, while one holding
+			// hooks DefenseClaw did not write stays, and the foreign-hook
+			// guard denies that user's calls (GAP-1232).
+			if kept := copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary); len(kept) > 0 {
+				state.UserFileForeign = append(state.UserFileForeign, kept...)
+			} else {
+				state.UserFileDrift = append(state.UserFileDrift, CopilotPluginHooksPath(home))
+			}
 		}
 	}
 	state.detail("vscode: Local hook file in place for %d of %d enrolled users (wanted: %t); plugin for %d (wanted: %t)",

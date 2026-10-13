@@ -24,8 +24,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const canonicalTraceRepresentationID = "defenseclaw-otlp-v1"
-
 // canonicalTraceProjectedBuilder implements the generated defenseclaw-otlp-v1
 // direct-span representation. Its input is already destination-routed and
 // redacted immutable bytes; it has no path back to a canonical producer record.
@@ -308,7 +306,7 @@ func (wire canonicalTraceWire) otlp() (canonicalProjectedSpan, bool) {
 
 func canonicalResourceKeyValues(family observability.EventName, resource map[string]any) ([]*commonpb.KeyValue, bool) {
 	attributes, ok := object(resource, "attributes")
-	if !ok || observability.ValidateTelemetryResourceAttributes(attributes) != nil {
+	if !ok || observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(attributes) != nil {
 		return nil, false
 	}
 	return canonicalKeyValues(attributes, func(key string) (observability.OTLPValueKind, bool) {

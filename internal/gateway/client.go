@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -48,15 +49,19 @@ type Client struct {
 	dataDir string
 	debug   bool
 
-	conn        *websocket.Conn
-	mu          sync.Mutex
-	closed      bool
-	seqMu       sync.Mutex
-	lastSeq     int
-	pending     map[string]chan *ResponseFrame
-	hello       *HelloOK
-	disconnCh   chan struct{}
-	disconnOnce sync.Once
+	// mu guards conn, pending, hello, disconnCh and readDone. Connect
+	// replaces conn and disconnCh only after the readLoop of the previous
+	// connection has exited (readDone), so a reader that is still unwinding
+	// never touches the state of the next connection.
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	closed    atomic.Bool
+	seqMu     sync.Mutex
+	lastSeq   int
+	pending   map[string]chan *ResponseFrame
+	hello     *HelloOK
+	disconnCh chan struct{}
+	readDone  chan struct{}
 
 	// While the connect RPC is in flight, inbound events are queued here so
 	// readLoop never blocks on OnEvent (handlers may call Client.request).
@@ -114,7 +119,7 @@ func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
 		cfg:     cfg,
 		device:  device,
 		dataDir: dataDir,
-		debug:   os.Getenv("DEFENSECLAW_DEBUG") == "1",
+		debug:   envvars.Getenv("DEFENSECLAW_DEBUG") == "1",
 		pending: make(map[string]chan *ResponseFrame),
 		lastSeq: -1,
 	}, nil
@@ -148,16 +153,20 @@ func (c *Client) Connect(ctx context.Context) error {
 			InsecureSkipVerify: c.cfg.TLSSkipVerify,
 		}
 	}
+	if err := c.joinPreviousReader(ctx); err != nil {
+		return err
+	}
 	conn, resp, err := dialer.DialContext(ctx, target, nil)
 	if err != nil {
 		return fmt.Errorf("gateway: dial %s: %w", target, err)
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] websocket connected (%s, http %d)\n",
 		time.Since(t0).Round(time.Millisecond), resp.StatusCode)
+	c.mu.Lock()
 	c.conn = conn
-	c.closed = false
 	c.disconnCh = make(chan struct{})
-	c.disconnOnce = sync.Once{}
+	c.mu.Unlock()
+	c.closed.Store(false)
 
 	fmt.Fprintf(os.Stderr, "[gateway] waiting for connect.challenge ...\n")
 	nonce, err := c.waitForChallenge(ctx)
@@ -170,7 +179,11 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	fmt.Fprintf(os.Stderr, "[gateway] starting read loop before connect handshake\n")
 	c.startHandshakeEventBuffer()
-	go c.readLoop()
+	readDone := make(chan struct{})
+	c.mu.Lock()
+	c.readDone = readDone
+	c.mu.Unlock()
+	go c.readLoop(conn, readDone)
 
 	fmt.Fprintf(os.Stderr, "[gateway] sending connect (protocol=%d..%d, role=operator, device=%s) ...\n",
 		openClawMinProtocol, openClawMaxProtocol, c.device.DeviceID)
@@ -182,11 +195,40 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] handshake complete (%s elapsed)\n", time.Since(t0).Round(time.Millisecond))
 
+	c.mu.Lock()
 	c.hello = hello
+	c.mu.Unlock()
 	for _, evt := range buf {
 		c.dispatchEvent(evt)
 	}
 	return nil
+}
+
+// joinPreviousReader closes the previous connection, if its readLoop is
+// still running, and waits for that readLoop to exit. Its deferred
+// drainPending and signalDisconnect then cannot clear or close the state
+// that this Connect is about to install.
+func (c *Client) joinPreviousReader(ctx context.Context) error {
+	c.mu.Lock()
+	prevConn, prevDone := c.conn, c.readDone
+	c.mu.Unlock()
+	if prevDone == nil {
+		return nil
+	}
+	select {
+	case <-prevDone:
+		return nil
+	default:
+	}
+	if prevConn != nil {
+		_ = prevConn.Close()
+	}
+	select {
+	case <-prevDone:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("gateway: previous connection still closing: %w", ctx.Err())
+	}
 }
 
 func (c *Client) startHandshakeEventBuffer() {
@@ -361,14 +403,17 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 	return &hello, nil
 }
 
-func (c *Client) readLoop() {
+// readLoop reads frames from conn until it fails. readDone is closed last,
+// after the pending requests are drained and the disconnect is signalled.
+func (c *Client) readLoop(conn *websocket.Conn, readDone chan struct{}) {
+	defer close(readDone)
 	defer c.signalDisconnect()
 	defer c.drainPending()
 
 	for {
-		_, raw, err := c.conn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			if !c.closed {
+			if !c.closed.Load() {
 				readLoopLogf("[gateway] read error: %v", err)
 			}
 			return
@@ -473,14 +518,15 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 
 	ch := make(chan *ResponseFrame, 1)
 	c.mu.Lock()
-	if c.conn == nil {
+	conn := c.conn
+	if conn == nil {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("gateway: not connected")
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -504,12 +550,29 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 
 // Close shuts down the WebSocket connection.
 func (c *Client) Close() error {
-	c.closed = true
+	c.closed.Store(true)
 	c.signalDisconnect()
-	if c.conn != nil {
-		return c.conn.Close()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
+}
+
+// disconnectForReload closes the current WebSocket without announcing a
+// disconnect before its reader has drained. The fleet loop waits on the
+// returned channel before a later reload may reuse this Client.
+func (c *Client) disconnectForReload() <-chan struct{} {
+	done := c.Disconnected()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return done
 }
 
 // Disconnected returns a channel that is closed when the underlying WebSocket
@@ -523,12 +586,19 @@ func (c *Client) Disconnected() <-chan struct{} {
 	return c.disconnCh
 }
 
+// signalDisconnect closes the disconnect channel of the current connection
+// once.
 func (c *Client) signalDisconnect() {
-	c.disconnOnce.Do(func() {
-		if c.disconnCh != nil {
-			close(c.disconnCh)
-		}
-	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.disconnCh == nil {
+		return
+	}
+	select {
+	case <-c.disconnCh:
+	default:
+		close(c.disconnCh)
+	}
 }
 
 // drainPending closes all pending response channels and nils out the
@@ -546,6 +616,8 @@ func (c *Client) drainPending() {
 
 // Hello returns the hello-ok payload from the initial handshake.
 func (c *Client) Hello() *HelloOK {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.hello
 }
 
@@ -590,20 +662,17 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 //
 // OpenClaw auth checks the shared gateway.auth.token first; the per-device
 // token in device-auth.json is a Node.js client-side cache irrelevant here.
-//
-// Only activates in standalone sandbox mode (cfg.SandboxHome != "").
 // ---------------------------------------------------------------------------
 
 // tryAuthRepair attempts to repair device pairing and refresh the shared
-// gateway token when a connect attempt fails with an auth-related error.
-// Uses SandboxHome in sandbox mode, otherwise falls back to ClawHome
-// (the user's real home directory) so auth repair works everywhere.
+// gateway token when a connect attempt fails with an auth-related error,
+// in the OpenClaw home under ClawHome (the user's real home directory).
 func (c *Client) tryAuthRepair(connectErr error) {
 	if !c.shouldAutoRepair(connectErr) {
 		return
 	}
 
-	home := c.authRepairHome()
+	home := c.cfg.ClawHome
 	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token (home=%s) ...\n", home)
 
 	if err := c.device.RepairPairing(home); err != nil {
@@ -727,17 +796,7 @@ func updateEnvFileToken(path, newToken string) error {
 
 // shouldAutoRepair returns true when auth auto-repair should be attempted.
 func (c *Client) shouldAutoRepair(err error) bool {
-	return c.authRepairHome() != "" && isAuthError(err)
-}
-
-// authRepairHome returns the home directory used for pairing repair.
-// Prefers SandboxHome (standalone sandbox mode), falls back to ClawHome
-// (regular installs).
-func (c *Client) authRepairHome() string {
-	if c.cfg.SandboxHome != "" {
-		return c.cfg.SandboxHome
-	}
-	return c.cfg.ClawHome
+	return c.cfg.ClawHome != "" && isAuthError(err)
 }
 
 // isAuthError returns true if the error message indicates the OpenClaw

@@ -255,6 +255,26 @@ def test_gateway_5xx_does_not_blame_a_busy_database() -> None:
     assert "is busy or slow" not in message
 
 
+def test_gateway_400_is_an_invalid_request_not_a_retry_hint() -> None:
+    # GAP-0070: a rejected scan finding read "try again in a minute".
+    response = requests.Response()
+    response.status_code = 400
+    response._content = b'{"error":"invalid canonical observability request","reason":"invalid finding fields"}'
+
+    class RejectingRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise requests.HTTPError("400", response=response)
+
+        def close(self) -> None:
+            return
+
+    with pytest.raises(CanonicalObservabilityError) as caught:
+        Logger(RejectingRecorder()).log_action("init", "/data", "environment=linux")
+    message = str(caught.value)
+    assert "invalid request (invalid finding fields)" in message
+    assert "Try again" not in message
+
+
 def test_from_config_is_lazy_and_builds_authenticated_gateway_client_on_emit() -> None:
     gateway = SimpleNamespace(
         api_bind="0.0.0.0",

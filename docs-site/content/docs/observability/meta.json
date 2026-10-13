@@ -5,6 +5,7 @@
     "local-observability",
     "grafana-dashboards",
     "agent360",
+    "sandbox-telemetry",
     "galileo",
     "splunk",
     "webhooks",

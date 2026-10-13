@@ -209,6 +209,10 @@ KEYS_LOADER_NEED_NOT_CONSUME = {
     # `app.cfg.scanners` is updated. Tracked in the docs-site policy
     # creator roadmap.
     "scanners",
+    # enforcement.max_enforcement_delay_seconds had no reader in Go, Rego or
+    # TS; config_version 9 dropped it with data.json (the docs-site emit is
+    # a follow-up).
+    "enforcement",
 }
 
 

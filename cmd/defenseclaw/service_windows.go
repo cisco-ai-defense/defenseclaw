@@ -41,6 +41,7 @@ const (
 
 var (
 	isWindowsService        = svc.IsWindowsService
+	adoptGatewayFileOwner   = managed.AdoptWindowsGatewayServiceFileOwner
 	runSCMService           = svc.Run
 	terminateWindowsService = func(code uint32) { os.Exit(int(code)) }
 	windowsServiceStopWait  = 30 * time.Second
@@ -77,6 +78,14 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 	}
 	if execute == nil {
 		fmt.Fprintln(os.Stderr, "defenseclaw: Windows service executor is unavailable")
+		return true, 1
+	}
+	// Before the gateway creates its first file (the service log): as
+	// LocalSystem it owns what it writes as its service SID, as the 1.0.0
+	// virtual account did, so its write-restricted token can secure its own
+	// audit database and logs. A no-op for every other service.
+	if err := adoptGatewayFileOwner(); err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", err)
 		return true, 1
 	}
 
@@ -223,7 +232,6 @@ func (service *defenseClawWindowsService) Execute(
 			return false, 0
 		case request, ok := <-requests:
 			if !ok {
-				stopRequested = true
 				stopOnce.Do(cancel)
 				return false, 0
 			}

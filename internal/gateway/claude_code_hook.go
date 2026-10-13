@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -132,7 +133,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
-	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode())
+	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -140,10 +141,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
+		// The project's skill folders are admitted before the first prompt
+		// can load one (GAP-1063).
+		a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -189,16 +194,21 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 			},
-			LegacyText:         string(toolArgs),
-			Connector:          "claudecode",
-			EnforcementCapable: true,
-			record:             toolChainRecorderFromContext(ctx),
+			LegacyText:                    string(toolArgs),
+			Connector:                     "claudecode",
+			EnforcementCapable:            true,
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
 		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
@@ -208,6 +218,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
+		}
 	case "MessageDisplay":
 		// Anthropic sends the displayed assistant text incrementally in delta.
 		// DefenseClaw registers this event async, so findings are observation
@@ -216,7 +229,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
@@ -275,12 +288,18 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the verdict on multi-step attack flows. scanner="hook-rules".
 	// Done before finalization so the eventual OS toast, audit row, and HTTP
 	// response carry the same evaluation_id + rule_ids.
-	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
-		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
-	resp := claudeCodeResponseFor(
-		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
-	)
+	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
+	// A configured block message (the guardrail profile of the request, then
+	// the global guardrail) replaces the agent-facing reason on blocks, as on
+	// the generic hook path. Secure Client keeps the verdict reason (issue
+	// #1092).
+	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if !a.managedAIDOnly() {
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
+	}
+	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -317,9 +336,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(ctx context.Context, req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
@@ -402,17 +421,10 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
 }
 
-func (a *APIServer) claudeCodeMode() string {
-	mode := "observe"
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
-		hookCfg := cfg.ConnectorHookConfig("claudecode")
-		mode = strings.TrimSpace(hookCfg.Mode)
-		if mode == "" || mode == "inherit" {
-			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("claudecode"))
-		}
-	}
-	return normalizeAgentHookMode(mode)
+func (a *APIServer) claudeCodeMode(ctx context.Context) string {
+	// The request's guardrail profile, when one applies, replaces the live
+	// configuration (see guardrail_profile.go).
+	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "claudecode")
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
@@ -866,9 +878,12 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if !filepath.IsAbs(target) && req.CWD != "" {
 		target = filepath.Join(req.CWD, target)
 	}
+	if req.sandboxView == nil && managed.RequireWindowsGatewayPathOutsideUserProfiles(target) != nil {
+		return nil
+	}
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var result *scanner.ScanResult
 	if req.sandboxView != nil {
@@ -929,8 +944,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -979,8 +994,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("claudecode").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -1002,8 +1017,8 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("claudecode").ScanPaths {
 			add(p)
 		}
 	}
@@ -1032,13 +1047,16 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {
+	if !req.ScanComponents && !a.claudeCodeComponentScanDue(ctx) {
 		return 0
 	}
 	targets := claudeCodeComponentTargets(req.CWD)
 	count := 0
 	for component, paths := range targets {
 		for _, p := range paths {
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+				continue
+			}
 			if _, err := os.Stat(p); err != nil {
 				continue
 			}
@@ -1050,10 +1068,10 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 	return count
 }
 
-func (a *APIServer) claudeCodeComponentScanDue() bool {
+func (a *APIServer) claudeCodeComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.claudeCodeMu.Lock()
 	defer a.claudeCodeMu.Unlock()
@@ -1089,7 +1107,10 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 	// into protected HookRuntime evidence. The host semantic inventory owns
 	// marketplace installed/version/enable attribution.
 	targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(userSkills)...)
-	targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(filepath.Join(claudeHome, "agents"))...)
+	userAgents := filepath.Join(claudeHome, "agents")
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(userAgents) == nil {
+		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(userAgents)...)
+	}
 	targets["command"] = append(targets["command"], userCommands...)
 	targets["mcp"] = append(targets["mcp"], existingFiles(gatewayconnector.ClaudeCodeMCPStatePath())...)
 	targets["config"] = append(targets["config"], existingFiles(
@@ -1098,15 +1119,24 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		filepath.Join(claudeHome, "rules"),
 	)...)
 	targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
-	memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
-	targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
-	targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
-	for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
-		targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
-		targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(claudeHome) == nil &&
+		(cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil) {
+		memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
+		if memory.Path != "" && managed.RequireWindowsGatewayPathOutsideUserProfiles(memory.Path) == nil {
+			targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
+			targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
+		}
 	}
-	for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
-		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
+	if cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil {
+		for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
+			targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
+			targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+		}
+		for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(projectAgents) == nil {
+				targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
+			}
+		}
 	}
 	for _, root := range workspaceCodexRoots(cwd) {
 		claudeDir := filepath.Join(root, ".claude")
@@ -1135,9 +1165,17 @@ func claudePluginManifestPath(root string) string {
 }
 
 func claudeSkillsPluginDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	var plugins []string
 	for _, candidate := range claudecodepath.SkillDirs(root) {
-		if info, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil &&
+		manifest := claudePluginManifestPath(candidate)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(candidate) != nil ||
+			managed.RequireWindowsGatewayPathOutsideUserProfiles(manifest) != nil {
+			continue
+		}
+		if info, err := os.Lstat(manifest); err == nil &&
 			info.Mode().IsRegular() {
 			plugins = append(plugins, candidate)
 		}
@@ -1146,9 +1184,17 @@ func claudeSkillsPluginDirs(root string) []string {
 }
 
 func claudePlainSkillDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	var skills []string
 	for _, candidate := range claudecodepath.SkillDirs(root) {
-		if _, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil {
+		manifest := claudePluginManifestPath(candidate)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(candidate) != nil ||
+			managed.RequireWindowsGatewayPathOutsideUserProfiles(manifest) != nil {
+			continue
+		}
+		if _, err := os.Lstat(manifest); err == nil {
 			continue
 		}
 		skills = append(skills, candidate)
@@ -1157,6 +1203,9 @@ func claudePlainSkillDirs(root string) []string {
 }
 
 func claudeCommandFiles(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -1167,6 +1216,9 @@ func claudeCommandFiles(root string) []string {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
+			continue
+		}
 		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
 			commands = append(commands, path)
 		}
@@ -1182,30 +1234,36 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
 	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
-			a.scannerCfg.Scanners.SkillScanner,
-			a.scannerCfg.ResolveLLM("scanners.skill"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
-		ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		ps.Connector = "claudecode"
+		ps.LLM = cfg.ResolveLLM("scanners.plugin")
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(
-			a.scannerCfg.Scanners.MCPScanner,
-			a.scannerCfg.ResolveLLM("scanners.mcp"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "claudecode")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		rulesDir := ""
-		if a.scannerCfg != nil {
-			rulesDir = a.scannerCfg.Scanners.CodeGuard
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			rulesDir = cfg.Scanners.CodeGuard
 		}
 		cg := scanner.NewCodeGuardScanner(rulesDir)
 		result, err = cg.Scan(scanCtx, target)

@@ -126,6 +126,8 @@ A dry run shows the payload and the headers without sending anything:
 
 A connector-hook block names the rule that fired. The event's `details` carry `rule=<id>` next to the redacted reason, and `defenseclaw_rule` gives the same label the agent sees, for example `rule VB2-MARKER-BLOCK: Marker command`. Titles appear only for compiled-in and loaded rule-pack rules; the matched content stays redacted.
 
+Every payload also says where an alert came from, so a receiver that collects alerts from many hosts can attribute them. The generic `event` carries `host` (the gateway's host name) and, for connector-hook blocks, `user_id` and `user_name` (the account running the agent), `agent_identity_id` (the `agt-` ID) and `guardrail_profile` (when the request matched a profile). Slack, Webex and PagerDuty show the same fields. The directory principal (`alice@CORP.EXAMPLE.COM`) is never added; the managed Secure Client posture keeps the historical payload without them.
+
 </Tab>
 
 </Tabs>

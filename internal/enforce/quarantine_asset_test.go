@@ -6,10 +6,14 @@
 package enforce
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAssetQuarantineAndRestorePreserveHashAndOwnership(t *testing.T) {
@@ -61,6 +65,39 @@ func TestAssetQuarantineAndRestorePreserveHashAndOwnership(t *testing.T) {
 	}
 	if _, err := os.Lstat(plan.QuarantinePath); !os.IsNotExist(err) {
 		t.Fatalf("quarantine remains after restore: %v", err)
+	}
+}
+
+// GAP-0826: a quarantine copy that failed (the disk was full) could leave its
+// .pending stage beside the destination; the next attempt, under another
+// journal id, removes it first.
+func TestAssetQuarantineRemovesTheStageOfAnEarlierAttempt(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	source := filepath.Join(skillsRoot, "crit-k")
+	if err := os.MkdirAll(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := NewAssetQuarantinePlan(filepath.Join(root, "quarantine"), []string{skillsRoot}, "skill", "crit-k", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := plan.QuarantinePath + ".pending-rec-earlier"
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pad6.dat"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	RemoveStaleQuarantineStages(plan, "rec-retry")
+	if err := ExecuteAssetQuarantine(plan, "rec-retry"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("the earlier stage is still there: %v", err)
 	}
 }
 
@@ -191,5 +228,137 @@ func TestAssetRestoreRejectsRelativePathsBeforeFilesystemMutation(t *testing.T) 
 	}
 	if _, err := os.Lstat(restorePath); !os.IsNotExist(err) {
 		t.Fatalf("relative restore plan created destination: %v", err)
+	}
+}
+
+// GAP-0202: a source the process may only read (a managed Windows gateway in
+// an enrolled user's folder) is removed by the hook guardian on request, and
+// the guardian refuses a source outside the watched folders.
+func TestQuarantineSourceTheProcessMayNotDeleteIsRemovedByTheGuardian(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the test process may not delete in")
+	}
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "user", "skills")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	source := filepath.Join(skillsRoot, "bad-skill")
+	if err := os.MkdirAll(skillsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := NewAssetQuarantinePlan(quarantineRoot, []string{skillsRoot}, "skill", "bad-skill", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skillsRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	channel := QuarantineRemovalChannelFor(filepath.Join(root, "data"), filepath.Join(root, "guardian"))
+	SetQuarantineSourceRemover(channel.Remover(10 * time.Second))
+	t.Cleanup(func() { SetQuarantineSourceRemover(nil) })
+	refused := make(chan error, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			channel.ServeOnce(func(request QuarantineRemovalRequest) error {
+				outside := request
+				outside.SourcePath = filepath.Join(root, "elsewhere", "bad-skill")
+				_, _, err := VerifyQuarantineRemoval(outside, []string{skillsRoot}, quarantineRoot)
+				select {
+				case refused <- err:
+				default:
+				}
+				found, _, err := VerifyQuarantineRemoval(request, []string{skillsRoot}, quarantineRoot)
+				if err != nil {
+					return err
+				}
+				_ = os.Chmod(skillsRoot, 0o755)
+				return os.Remove(found)
+			})
+		}
+	}()
+
+	if err := ExecuteAssetQuarantine(plan, "rec-gap0202"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatalf("source still present: %v", err)
+	}
+	if err := requireAssetHash(plan.QuarantinePath, plan.ContentHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-refused; err == nil {
+		t.Fatal("the guardian accepted a source outside the watched folders")
+	}
+}
+
+// GAP-0414: the guardian could not remove the source of a signed-out
+// Microsoft Entra ID user (no S4U logon); it answered with an error and
+// forgot the request, so the skill stayed in the profile. A deferred removal
+// is kept and retried until it succeeds.
+func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
+	root := t.TempDir()
+	channel := QuarantineRemovalChannelFor(filepath.Join(root, "data"), filepath.Join(root, "guardian"))
+	request := QuarantineRemovalRequest{
+		Version: quarantineRemovalVersion, ID: "rec-gap0414", Nonce: "n1", TargetType: "skill",
+		SourcePath: filepath.Join(root, "skills", "bad"), QuarantinePath: filepath.Join(root, "quarantine", "bad"),
+		ContentHash: strings.Repeat("a", 64),
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(channel.RequestDir, request.ID+".json")
+	if err := os.MkdirAll(channel.RequestDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	channel.ServeOnce(func(QuarantineRemovalRequest) error {
+		return fmt.Errorf("%w: the owner is signed out", ErrQuarantineRemovalDeferred)
+	})
+	var result QuarantineRemovalResult
+	if err := readQuarantineRemovalFile(filepath.Join(channel.ResultDir, request.ID+".json"), &result); err != nil || result.OK ||
+		!strings.Contains(result.Error, "deferred") {
+		t.Fatalf("deferred answer = %+v, %v", result, err)
+	}
+	// GAP-0795: the deferred request keeps why, for enterprise windows status.
+	if deferred := channel.DeferredRemovals(); len(deferred) != 1 || deferred[0].Deferred != "the owner is signed out" {
+		t.Fatalf("deferred removals %+v, want one saying why", deferred)
+	}
+	if err := os.Remove(requestPath); err != nil { // the gateway collected its answer
+		t.Fatal(err)
+	}
+	signedIn, retries := false, 0
+	retry := func(got QuarantineRemovalRequest) error {
+		retries++
+		if got.ID != request.ID || got.SourcePath != request.SourcePath {
+			t.Fatalf("retried %+v", got)
+		}
+		if !signedIn {
+			return ErrQuarantineRemovalDeferred
+		}
+		if retries == 2 {
+			return fmt.Errorf("sharing violation")
+		}
+		return nil
+	}
+	channel.ServeDeferred(retry)
+	signedIn = true
+	channel.ServeDeferred(retry)
+	channel.ServeDeferred(retry)
+	channel.ServeDeferred(retry)
+	if retries != 3 || len(channel.DeferredRemovals()) != 0 {
+		t.Fatalf("deferred removal ran %d times, want 3 (kept after transient error, dropped once removed)", retries)
 	}
 }

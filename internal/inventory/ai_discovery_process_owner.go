@@ -25,6 +25,18 @@ func CurrentProcessOwner() (name, uid string) {
 	return current.Username, current.Uid
 }
 
+// perUserAccount is the account a per-user, unmanaged install belongs to,
+// and so the owner of every signal its scans find; its process detector
+// already reports only this account's processes. It is zero where scans
+// attribute through profile owners or per-user scans (managed and
+// standalone enterprise) and under the Secure Client integration.
+func perUserAccount(opts AIDiscoveryOptions) ideOwner {
+	if opts.ManagedEnterprise || opts.StandaloneEnterprise || opts.UserScanDir != "" || opts.SecureClient {
+		return ideOwner{}
+	}
+	return currentIDEOwner()
+}
+
 // perUserProcessOwners is the processOwners filter of a per-user install, or
 // nil when every visible process is in scope (managed and standalone
 // enterprise, per-user scans).

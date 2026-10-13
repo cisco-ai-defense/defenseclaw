@@ -3462,21 +3462,24 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 	if !hasMode {
 		mode, hasMode = parsed.values["--mode"]
 	}
-	if !parsed.complete || !hasMode || !dangerousInstallMode(mode) ||
-		len(parsed.positionals) < 2 {
+	if !parsed.complete || len(parsed.positionals) < 2 {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	addOperation(command, OperationPermissionChange)
+	if _, directory := parsed.seen["-d"]; directory {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
 		appendCommandPath(out, command, PathAccessRead, source)
 	}
-	appendCommandPath(
-		out,
-		command,
-		PathAccessMetadata,
-		parsed.positionals[len(parsed.positionals)-1],
-	)
+	destination := parsed.positionals[len(parsed.positionals)-1]
+	addOperation(command, OperationCopy)
+	appendCommandPath(out, command, PathAccessWrite, destination)
+	if hasMode && dangerousInstallMode(mode) {
+		addOperation(command, OperationPermissionChange)
+		appendCommandPath(out, command, PathAccessMetadata, destination)
+	}
 }
 
 func dangerousInstallMode(mode string) bool {
@@ -11302,6 +11305,13 @@ func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 		_, longDecode := parsed.seen["--decode"]
 		decode := shortDecode || darwinDecode || longDecode || decodeBundle
 		if !decode {
+			if complete && len(parsed.positionals) == 1 {
+				addOperation(command, OperationRead)
+				appendPath(out, command.ID, PathAccessRead, parsed.positionals[0])
+				appendFileToProcessFlow(out, command.ID)
+			} else if len(parsed.positionals) > 1 {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
 			return
 		}
 		addOperation(command, OperationDecode)

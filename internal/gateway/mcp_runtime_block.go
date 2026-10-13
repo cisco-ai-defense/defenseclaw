@@ -24,23 +24,15 @@ import (
 )
 
 // mcpServerRuntimeBlock decides whether a runtime tool call must be denied
-// because it belongs to an MCP server the operator has blocked via
-// `defenseclaw mcp block <server>` (global) or `... --connector <c>` (scoped).
+// because it belongs to a denied MCP server: asset_policy.mcp.denied (written
+// by `defenseclaw mcp block <server> [--connector <c>]`) or a server the
+// watcher's scan verdict runtime-disabled (the actions journal).
 //
-// This is the Go-gateway runtime enforcement point for an MCP-server block.
-// Previously the gateway honored the PolicyEngine block store only for the
-// `tool` target type (IsToolBlockedForConnector); an `mcp` block was written to
-// the audit DB and enforced by the Python CLI / admission gate but never
-// consulted when the blocked server's tools were actually invoked at Go
-// runtime — a fail-open affecting BOTH global and per-connector blocks. We
-// resolve the owning MCP server from the explicit hook payload field when
+// We resolve the owning MCP server from the explicit hook payload field when
 // present, otherwise from the tool name (`mcp__<server>__<tool>` /
-// `mcp:<server>:<tool>`), and consult IsBlockedForConnector("mcp", server,
-// connector), which resolves
-// most-specific-wins (connector-scoped entry, then the bare global entry): a
-// global block denies every connector while a `--connector` block denies only
-// its peer. Mirrors the Python admission gate's is_blocked_for_connector
-// consumption (cli/defenseclaw/enforce/admission.py).
+// `mcp:<server>:<tool>`). A connector-scoped rule decides before an unscoped
+// one, so a global block denies every connector while a `--connector` block
+// denies only its peer. Mirrors the Python admission gate.
 //
 // Security posture: fail CLOSED and degrade LOUDLY. A store lookup error
 // returns deny=true with an error reason rather than silently allowing the
@@ -59,13 +51,50 @@ func mcpServerRuntimeBlock(pe *enforce.PolicyEngine, toolName, connector, explic
 	if server == "" {
 		return false, "", ""
 	}
-	blocked, err := pe.IsBlockedForConnector("mcp", server, connector)
+	blocked, err := mcpServerDenied(pe, server, connector)
 	if err != nil {
 		// Fail closed: an ambiguous / errored lookup must deny, never allow.
 		return true, server, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
 	}
 	if blocked {
+		if note := mcpRuntimeDisableNote(pe, server, connector); note != "" {
+			return true, server, note
+		}
 		return true, server, fmt.Sprintf("mcp server %q is blocked", server)
 	}
 	return false, server, ""
+}
+
+// mcpRuntimeDisableNote says that a server is refused because its install
+// admission rejected it (a scan that failed or found a blocking finding), with
+// the journal's reason. A bare "is blocked" next to an asset-policy row that
+// allows the server in mode observe read as asset_policy blocking it
+// (GAP-0963). "" for an operator block, and on Secure Client, which keeps the
+// message of main (issue #1092).
+func mcpRuntimeDisableNote(pe *enforce.PolicyEngine, server, connector string) string {
+	if pe.SecureClient() {
+		return ""
+	}
+	if operator, err := pe.IsMCPBlockedForConnector(server, connector); err != nil || operator {
+		return ""
+	}
+	reason, disabled, err := pe.RuntimeDisableReason("mcp", server, connector)
+	if err != nil || !disabled {
+		return ""
+	}
+	note := fmt.Sprintf("mcp server %q is disabled because its install admission rejected it", server)
+	if reason = strings.TrimSpace(reason); reason != "" {
+		note += " (" + reason + ")"
+	}
+	return note + "; asset_policy.mode does not apply to admission verdicts"
+}
+
+// mcpServerDenied reports an operator block (asset_policy.mcp.denied) or a
+// scan-verdict runtime disable (journal) of server for connector.
+func mcpServerDenied(pe *enforce.PolicyEngine, server, connector string) (bool, error) {
+	blocked, err := pe.IsMCPBlockedForConnector(server, connector)
+	if err != nil || blocked {
+		return blocked, err
+	}
+	return pe.IsDisabledForConnector("mcp", server, connector)
 }

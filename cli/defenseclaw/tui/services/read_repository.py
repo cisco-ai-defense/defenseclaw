@@ -30,12 +30,14 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
+from typing import Any
 
 from defenseclaw.db import Store
+from defenseclaw.enforce.policy import tool_rule_entries
 from defenseclaw.models import ActionEntry, Counts, Event
 from defenseclaw.tui.panels.activity import (
     activity_mutations_from_v8_history,
@@ -94,6 +96,8 @@ class TUIReadSnapshot:
     session_scan_since: datetime | None = None
     connector_hook_events: tuple[Event, ...] = ()
     connector_hook_stats: tuple[ConnectorHookStat, ...] = ()
+    # Detection-only findings of the last 24 hours, which Alerts leaves out.
+    detection_only: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,9 +110,10 @@ class TUIReadResult:
 class TUIReadRepository:
     """Own a read connection and serialize all work onto one thread."""
 
-    def __init__(self, db_path: str | Path, *, timeout: float = 0.25) -> None:
+    def __init__(self, db_path: str | Path, *, timeout: float = 0.25, config: Any = None) -> None:
         self.db_path = str(db_path)
         self.timeout = timeout
+        self._config = config
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="defenseclaw-tui-read",
@@ -257,14 +262,21 @@ class TUIReadRepository:
             slow_error_count = len(errors)
             tool_actions = self._component(
                 "tools",
-                lambda: tuple(store.list_actions_by_type("tool")),
+                lambda: tuple(tool_rule_entries(self._config, store)),
                 previous.tool_actions if previous else (),
                 errors,
             )
             enforcement_counts = self._component(
                 "counts",
-                store.get_enforcement_counts,
+                lambda: store.get_enforcement_counts(cfg=self._config),
                 previous.enforcement_counts if previous else Counts(),
+                errors,
+            )
+            count_detection_only = getattr(store, "count_detection_only_findings", None)
+            detection_only = self._component(
+                "detection-only findings",
+                lambda: count_detection_only(datetime.now(timezone.utc) - timedelta(hours=24)) if count_detection_only else 0,
+                previous.detection_only if previous else 0,
                 errors,
             )
             if len(errors) == slow_error_count:
@@ -272,6 +284,7 @@ class TUIReadRepository:
         else:
             tool_actions = previous.tool_actions if previous else ()
             enforcement_counts = previous.enforcement_counts if previous else Counts()
+            detection_only = previous.detection_only if previous else 0
         if scan_since is None:
             session_scan_count = enforcement_counts.total_scans
         elif slow_components_due or previous is None or previous.session_scan_since != scan_since:
@@ -311,6 +324,7 @@ class TUIReadRepository:
             session_scan_since=scan_since,
             connector_hook_events=connector_hook_events,
             connector_hook_stats=connector_hook_stats,
+            detection_only=detection_only,
         )
         changed = candidate != previous
         if changed:
@@ -336,10 +350,10 @@ class TUIReadRepository:
     def _refresh_slow_components(self, store: Store, previous: TUIReadSnapshot, now: float) -> TUIReadResult:
         errors: list[str] = []
         tool_actions = self._component(
-            "tools", lambda: tuple(store.list_actions_by_type("tool")), previous.tool_actions, errors
+            "tools", lambda: tuple(tool_rule_entries(self._config, store)), previous.tool_actions, errors
         )
         enforcement_counts = self._component(
-            "counts", store.get_enforcement_counts, previous.enforcement_counts, errors
+            "counts", lambda: store.get_enforcement_counts(cfg=self._config), previous.enforcement_counts, errors
         )
         if not errors:
             self._slow_components_loaded_at = now

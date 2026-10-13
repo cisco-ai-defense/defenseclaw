@@ -509,7 +509,7 @@ func (wire projectedWire) otlp(destination string) (
 }
 
 func requiredResourceAttributes(input map[string]any) ([]*commonpb.KeyValue, bool) {
-	if observability.ValidateTelemetryResourceAttributes(input) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(input) != nil {
 		return nil, false
 	}
 	keys := make([]string, 0, len(input))

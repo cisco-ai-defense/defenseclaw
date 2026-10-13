@@ -14,10 +14,17 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // hookedServices runs a callback before the fake service manager stops or
@@ -71,22 +78,31 @@ func writeOnce(t *testing.T, h *testHost, unit, canonical string, data []byte) f
 // had planned from back over the change (or leave a later write on disk
 // unapplied, with the apply trigger stopped), and the next ensure was a
 // no-op: the change was silently lost. The run now keeps the newer bytes and
-// applies them in a follow-up transaction before it releases the lock.
+// applies them in a follow-up transaction before it releases the lock. A
+// run given --config is no different: it wrote its own file over one
+// written in place while it ran, and the later writer lost (GAP-0745).
 func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, moment := range []string{"quiesce", "activation"} {
+		for _, moment := range []string{"quiesce", "activation", "quiesce-with-config-flag"} {
 			t.Run(goos+"-"+moment, func(t *testing.T) {
 				h := newTestHost(t, goos)
 				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 				edited := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
 				hooked := &hookedServices{fakeServices: h.services}
-				if moment == "quiesce" {
+				if strings.HasPrefix(moment, "quiesce") {
 					hooked.onStop = writeOnce(t, h, unitOf(goos, "enumerator"), h.env.Layout.ConfigPath, edited)
 				} else {
 					hooked.onStart = writeOnce(t, h, unitOf(goos, "gateway"), h.env.Layout.ConfigPath, edited)
 				}
 				h.env.Services = hooked
-				r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})
+				opts := Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}
+				if moment == "quiesce-with-config-flag" {
+					opts.ConfigFile = filepath.Join(t.TempDir(), "pushed.yaml")
+					if err := os.WriteFile(opts.ConfigFile, append(DefaultConfig(h.env.Layout), "# pushed\n"...), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := h.run(opts)
 				requireOK(t, r)
 				if !strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
 					t.Fatal("the transaction wrote its planned config over the administrator's change")
@@ -106,6 +122,232 @@ func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A push left config.yaml 0666 after the run planned and a standard user
+// switched enforcement before applyFiles ran. The run restored the managed
+// owner and mode of the edited file, and its follow-up transaction applied
+// the edit as administrator policy (GAP-1501). Bytes written while another
+// account could write the file are refused when the run applies them and
+// never kept for a follow-up, for a --config run and for an in-place edit.
+// On macOS a write ACL entry does it without a mode change: the transaction
+// removes the entry, and the rollback must not keep the bytes written
+// through it as a newer config (GAP-1518).
+func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		goos       string
+		configFlag bool
+	}{{"linux", true}, {"linux", false}, {"darwin", true}, {"darwin", false}} {
+		goos, configFlag := tc.goos, tc.configFlag
+		t.Run(fmt.Sprintf("%s-config-flag-%v", goos, configFlag), func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			installed := h.read(h.env.Layout.ConfigPath)
+			path := h.env.P(h.env.Layout.ConfigPath)
+			admin := append(DefaultConfig(h.env.Layout), "# pushed\n"...)
+			opts := Options{Action: ActionEnsure}
+			if configFlag {
+				opts.ConfigFile = filepath.Join(t.TempDir(), "pushed.yaml")
+				if err := os.WriteFile(opts.ConfigFile, admin, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, admin, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			edited := []byte(strings.Replace(string(admin), "mode: observe", "mode: action", 1))
+			done := false
+			h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+				if name != unitOf(goos, "enumerator") || done {
+					return
+				}
+				done = true
+				if goos == "darwin" {
+					h.runner.mu.Lock()
+					h.runner.acls = map[string][]string{path: {"user:standard allow write"}}
+					h.runner.mu.Unlock()
+				} else if err := os.Chmod(path, 0o666); err != nil {
+					t.Error(err)
+				}
+				if err := os.WriteFile(path, edited, 0o640); err != nil {
+					t.Error(err)
+				}
+			}}
+			requireError(t, h.run(opts), codeConfig)
+			if got := h.read(h.env.Layout.ConfigPath); got != installed {
+				t.Fatalf("after the rollback config.yaml is not the last applied config (edit kept: %v)", got == string(edited))
+			}
+			h.env.Services = h.services
+			_ = h.run(Options{Action: ActionEnsure})
+			record, _ := h.env.loadDeployment()
+			if h.read(h.env.Layout.ConfigPath) == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+				t.Fatalf("the edit written while another account could write config.yaml was kept or applied (%04o)", h.mode(h.env.Layout.ConfigPath))
+			}
+		})
+	}
+}
+
+// GAP-1535: removing the ACL entries can fail before the transaction gets
+// to the entry on config.yaml: chmod -N fails on config.yaml or on a path
+// listed before it, ls fails, or an entry on a folder above a vendor
+// machine-policy folder refuses the run first. Bytes written through the
+// entry on config.yaml are still not kept for a follow-up, for a --config
+// run and for an in-place edit. Without a write entry on config.yaml the
+// newer config is kept as before.
+func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
+	denied := fakeReply{result: CommandResult{ExitCode: 1}, err: errors.New("chmod: Operation not permitted")}
+	for _, tc := range []struct {
+		name  string
+		entry string // the entry on config.yaml
+		fail  func(h *testHost, config, binDir string)
+		kept  bool
+	}{
+		{"chmod-config", "user:standard allow write", func(h *testHost, config, _ string) {
+			h.runner.replies["chmod -h -N "+config] = denied
+		}, false},
+		{"chmod-earlier", "user:standard allow write", func(h *testHost, _, binDir string) {
+			h.runner.replies["chmod -h -N "+binDir] = denied
+		}, false},
+		{"ls", "user:standard allow write", func(h *testHost, config, _ string) {
+			h.env.Runner = failingLsRunner{Runner: h.runner, path: config}
+		}, false},
+		{"ancestor", "user:standard allow write", func(h *testHost, _, _ string) {
+			h.runner.acls[h.env.P("/Library/Application Support")] = []string{"user:developer allow add_subdirectory"}
+		}, false},
+		{"read-entry", "user:standard allow read", func(h *testHost, config, _ string) {
+			h.runner.replies["chmod -h -N "+config] = denied
+		}, true},
+	} {
+		for _, configFlag := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s-config-flag-%v", tc.name, configFlag), func(t *testing.T) {
+				h := newTestHost(t, "darwin")
+				pushed := machinePolicyConfig(t, h, "claudecode")
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: pushed}))
+				installed := h.read(h.env.Layout.ConfigPath)
+				path := h.env.P(h.env.Layout.ConfigPath)
+				binDir := h.env.P(h.env.Layout.BinDir)
+				admin := []byte(installed + "# pushed\n")
+				opts := Options{Action: ActionEnsure}
+				if configFlag {
+					opts.ConfigFile = pushed
+					if err := os.WriteFile(pushed, admin, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(path, admin, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				edited := []byte(strings.Replace(string(admin), "mode: observe", "mode: action", 1))
+				done := false
+				h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+					if name != unitOf("darwin", "enumerator") || done {
+						return
+					}
+					done = true
+					h.runner.mu.Lock()
+					h.runner.acls = map[string][]string{path: {tc.entry}, binDir: {"user:standard allow add_file"}}
+					h.runner.replies = map[string]fakeReply{}
+					h.runner.mu.Unlock()
+					tc.fail(h, path, binDir)
+					if err := os.WriteFile(path, edited, 0o640); err != nil {
+						t.Error(err)
+					}
+				}}
+				requireError(t, h.run(opts), codeApply)
+				// A new file stands for config.yaml from here on.
+				h.env.Services, h.env.Runner, h.runner.acls, h.runner.replies = h.services, h.runner, nil, nil
+				if got := h.read(h.env.Layout.ConfigPath); (got == string(edited)) != tc.kept {
+					t.Fatalf("after the rollback config.yaml holds the edit: %v, want %v", got == string(edited), tc.kept)
+				}
+				if tc.kept {
+					return
+				}
+				_ = h.run(Options{Action: ActionEnsure})
+				if record, _ := h.env.loadDeployment(); h.read(h.env.Layout.ConfigPath) == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+					t.Fatal("the edit written through a macOS ACL entry was kept or applied")
+				}
+			})
+		}
+	}
+	// GAP-1553: the ACL is already present when the run plans. A --config
+	// ensure reaches replaceWritableConfig, while an in-place edit is
+	// refused by buildPlan. Neither path may leave the edited bytes for
+	// the next ensure to record as administrator policy.
+	for _, failure := range []string{"chmod-config", "chmod-etc", "ls-recheck"} {
+		for _, configFlag := range []bool{true, false} {
+			t.Run(fmt.Sprintf("plan-time-%s-config-flag-%v", failure, configFlag), func(t *testing.T) {
+				h := newTestHost(t, "darwin")
+				pushed := machinePolicyConfig(t, h, "claudecode")
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: pushed}))
+				installed := h.read(h.env.Layout.ConfigPath)
+				config := h.env.P(h.env.Layout.ConfigPath)
+				etc := h.env.P(h.env.Layout.ConfigDir)
+				edited := []byte(strings.Replace(installed, "mode: observe", "mode: action", 1))
+				if err := os.WriteFile(config, edited, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				h.runner.acls = map[string][]string{
+					etc:    {"user:standard allow add_file"},
+					config: {"user:standard allow write"},
+				}
+				h.runner.replies = map[string]fakeReply{}
+				opts := Options{Action: ActionEnsure}
+				if configFlag {
+					opts.ConfigFile = pushed
+				}
+				switch failure {
+				case "chmod-config":
+					h.runner.replies["chmod -h -N "+config] = denied
+				case "chmod-etc":
+					h.runner.replies["chmod -h -N "+etc] = denied
+				case "ls-recheck":
+					h.env.Runner = &failingACLRecheckRunner{Runner: h.runner, path: config}
+				}
+				requireError(t, h.run(opts), codeConfig)
+
+				if configFlag {
+					if failure == "ls-recheck" {
+						if !h.env.Runner.(*failingACLRecheckRunner).failed {
+							t.Fatal("the ACL ls re-check did not fail")
+						}
+					} else {
+						target := map[string]string{"chmod-config": config, "chmod-etc": etc}[failure]
+						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -N "+target) {
+							t.Fatal("the intended chmod -N failure was not reached")
+						}
+					}
+				}
+
+				if got := h.read(h.env.Layout.ConfigPath); got != installed {
+					t.Fatalf("after rejected plan-time ACL cleanup, config.yaml holds edited bytes: %v", got == string(edited))
+				}
+				h.env.Runner, h.runner.acls, h.runner.replies = h.runner, nil, nil
+				requireOK(t, h.run(Options{Action: ActionEnsure}))
+				record, _ := h.env.loadDeployment()
+				if got := h.read(h.env.Layout.ConfigPath); got == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+					t.Fatal("the next ensure kept or applied config written through a macOS ACL")
+				}
+			})
+		}
+	}
+}
+
+// failingACLRecheckRunner fails the first ls of config.yaml after chmod -N.
+type failingACLRecheckRunner struct {
+	Runner
+	path    string
+	removed bool
+	failed  bool
+}
+
+func (r *failingACLRecheckRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if name == "ls" && r.removed && !r.failed && strings.Contains(strings.Join(args, "\x00"), r.path) {
+		r.failed = true
+		return CommandResult{ExitCode: 1}, errors.New("ls: permission denied")
+	}
+	result, err := r.Runner.Run(ctx, name, args...)
+	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-N" {
+		r.removed = true
+	}
+	return result, err
 }
 
 // A protected credential written during a transaction is applied the same
@@ -152,6 +394,79 @@ func TestConfigWrittenDuringAFailedTransactionRetriggersApply(t *testing.T) {
 			}
 			if !found || !hasWarning(failed, "input_changed") {
 				t.Fatalf("the apply trigger was not started (%v): %+v", found, failed.Warnings)
+			}
+		})
+	}
+}
+
+// GAP-1379: configuration management pushes config.yaml while a failed
+// --config run restarts the previous deployment, after the rollback put the
+// previous file back. The push is a newer input: the apply trigger is
+// started for it, and putting back a config.yaml written earlier in the run
+// must not overwrite it.
+func TestConfigPushedAfterAFailedConfigRollbackIsKeptAndRetriggersApply(t *testing.T) {
+	trigger := "systemctl start --no-block " + unitApplyService
+	for _, earlier := range []bool{false, true} {
+		t.Run(map[bool]string{false: "push-after-restore", true: "earlier-push-kept"}[earlier], func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			applied := h.read(h.env.Layout.ConfigPath)
+			early := []byte(applied + "# early push\n")
+			late := []byte(applied + "# push after the rollback restored config.yaml\n")
+			configPath := h.env.P(h.env.Layout.ConfigPath)
+			replace := func(data []byte) {
+				tmp := configPath + ".push"
+				if err := os.WriteFile(tmp, data, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, configPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hooked := &hookedServices{fakeServices: h.services}
+			if earlier {
+				pushed := false
+				hooked.onStop = func(unit string) {
+					if unit == unitEnumerator && !pushed {
+						pushed = true
+						replace(early)
+					}
+				}
+			}
+			// The rollback's restart is the first gateway start that sees
+			// the restored file after the transaction's own.
+			sawOwn, done := false, false
+			hooked.onStart = func(unit string) {
+				if unit != unitGateway || done {
+					return
+				}
+				if h.read(h.env.Layout.ConfigPath) != applied {
+					sawOwn = true
+				} else if sawOwn {
+					done = true
+					replace(late)
+				}
+			}
+			h.env.Services = hooked
+			h.healthy = false
+			configFile := filepath.Join(t.TempDir(), "pushed.yaml")
+			if err := os.WriteFile(configFile, []byte(applied+"# --config\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			failed := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0"), ConfigFile: configFile})
+			requireError(t, failed, codeActivate)
+			if !done {
+				t.Fatal("the rollback did not restart the gateway with the restored config.yaml")
+			}
+			if got := h.read(h.env.Layout.ConfigPath); got != string(late) {
+				t.Fatalf("the push made after the restore was overwritten:\n%s", got)
+			}
+			found := false
+			for _, call := range h.runner.calls {
+				found = found || call == trigger
+			}
+			if !found || !hasWarning(failed, "input_changed") {
+				t.Fatalf("the apply trigger was not started for the push (%v): %+v", found, failed.Warnings)
 			}
 		})
 	}
@@ -211,13 +526,222 @@ func TestConfigPushedDuringAFailedInPlaceEditIsAppliedNext(t *testing.T) {
 	}
 }
 
+// GAP-1412: configuration management writes the rejected edit's bytes
+// again after the failed run reverted them, while the rollback restarts the
+// previous deployment. That is a fresh push of the same desired config: the
+// apply trigger is started for it, so the retry is not left unapplied.
+func TestRejectedEditPushedAgainDuringTheRollbackRetriggersApply(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edit := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	if err := os.WriteFile(configPath, edit, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// The rollback's restart is the first gateway start that sees the
+	// reverted file after the transaction's own.
+	sawOwn, pushed := false, false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != unitGateway || pushed {
+			return
+		}
+		if h.read(h.env.Layout.ConfigPath) != applied {
+			sawOwn = true
+		} else if sawOwn {
+			pushed = true
+			tmp := configPath + ".push"
+			if err := os.WriteFile(tmp, edit, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, configPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}}
+	h.healthy = false
+	failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, failed, codeActivate)
+	if !pushed || !hasWarning(failed, codeConfigReverted) {
+		t.Fatalf("premise: the edit was reverted and pushed again during the rollback (%v): %+v", pushed, failed.Warnings)
+	}
+	found := false
+	for _, call := range h.runner.calls {
+		found = found || call == "systemctl start --no-block "+unitApplyService
+	}
+	if !found || !hasWarning(failed, codeInputChanged) {
+		t.Fatalf("the apply trigger was not started for the same-byte push (%v): %+v", found, failed.Warnings)
+	}
+}
+
+// When the failed run is the apply trigger itself (the path unit runs
+// ensure --reason path), starting that oneshot again from inside it is a
+// no-op, so the same-byte push stayed unapplied (GAP-1412). The run
+// schedules one deferred start from a transient timer, with a growing delay,
+// and stops at the bound with a status line; a healthy run resets the count.
+func TestRejectedEditPushedAgainDuringTheTriggerRunIsRetriedBounded(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edit := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	push := func() {
+		tmp := configPath + ".push"
+		if err := os.WriteFile(tmp, edit, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, configPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sawOwn, pushed := false, false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != unitGateway || pushed {
+			return
+		}
+		if h.read(h.env.Layout.ConfigPath) != applied {
+			sawOwn = true
+		} else if sawOwn {
+			pushed = true
+			push()
+		}
+	}}
+	h.env.SelfUnit = unitApplyService
+	h.healthy = false
+	push()
+	// A systemd-run that fails schedules nothing, so it keeps no count and
+	// the next run still waits the first delay.
+	first := fmt.Sprintf("systemd-run --quiet --collect --unit=%s --on-active=%ds --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no systemctl start --no-block %s",
+		unitApplyRetry, int(applyRetryDelay/time.Second), unitApplyService)
+	h.runner.replies = map[string]fakeReply{first: {result: CommandResult{ExitCode: 1}, err: errors.New("exit 1")}}
+	failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, failed, codeActivate)
+	if !pushed || exists(h.env.applyRetryPath()) {
+		t.Fatalf("a failed systemd-run kept a retry count (pushed again: %v): %+v", pushed, failed.Warnings)
+	}
+	h.runner.replies = nil
+	for attempt := 1; attempt <= maxApplyRetries+1; attempt++ {
+		sawOwn, pushed = false, false
+		before := len(h.runner.calls)
+		failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireError(t, failed, codeActivate)
+		if !pushed {
+			t.Fatalf("premise: run %d reverted the edit and it was pushed again: %+v", attempt, failed.Warnings)
+		}
+		var scheduled []string
+		for _, call := range h.runner.calls[before:] {
+			if strings.HasPrefix(call, "systemd-run ") || strings.HasPrefix(call, "systemctl start") {
+				scheduled = append(scheduled, call)
+			}
+		}
+		limit := false
+		for _, warning := range failed.Warnings {
+			limit = limit || (warning.Code == codeInputChanged && strings.Contains(warning.Message, "retry limit reached"))
+		}
+		if attempt > maxApplyRetries {
+			if len(scheduled) != 0 || !limit {
+				t.Fatalf("run %d: retried past the bound (%v) or no retry-limit status: %v %+v", attempt, limit, scheduled, failed.Warnings)
+			}
+			continue
+		}
+		delay := fmt.Sprintf("--on-active=%ds", int(applyRetryDelay/time.Second)<<(attempt-1))
+		if len(scheduled) != 1 || !strings.Contains(scheduled[0], delay) || !strings.HasSuffix(scheduled[0], " systemctl start --no-block "+unitApplyService) || limit {
+			t.Fatalf("run %d: want one deferred apply start %s, got %v %+v", attempt, delay, scheduled, failed.Warnings)
+		}
+	}
+	h.healthy = true
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	if exists(h.env.applyRetryPath()) {
+		t.Fatal("a healthy apply kept the retry count")
+	}
+}
+
+// Every host tool the package runs by name needs a commandCandidates entry:
+// the production runner resolves names only through that table, and the
+// fake runner of the other tests accepts any name. systemd-run had none, so
+// the apply-trigger retry was never scheduled on a real host (GAP-1412).
+// Every entry is also run somewhere, so the table keeps no dead names.
+func TestEveryCommandRunByNameHasACandidate(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := map[string]string{}
+	fset := token.NewFileSet()
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			index := map[string]int{"Run": 1, "RunEnv": 2}[selector.Sel.Name]
+			if index == 0 || len(call.Args) <= index {
+				return true
+			}
+			if literal, ok := call.Args[index].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				if name, err := strconv.Unquote(literal.Value); err == nil {
+					called[name] = fset.Position(literal.Pos()).String()
+				}
+			}
+			return true
+		})
+	}
+	if _, ok := called["systemd-run"]; !ok || len(called) < 10 {
+		t.Fatalf("premise: the scan found too few commands run by name: %v", called)
+	}
+	for name, at := range called {
+		if len(commandCandidates[name]) == 0 {
+			t.Errorf("%s runs %q, which has no commandCandidates entry", at, name)
+		}
+	}
+	for name := range commandCandidates {
+		if _, ok := called[name]; !ok {
+			t.Errorf("commandCandidates[%q] is never run", name)
+		}
+	}
+}
+
+// The production resolver finds systemd-run where the supported
+// distributions install it, and only there.
+func TestSystemdRunResolvesFromItsInstalledPaths(t *testing.T) {
+	want := []string{"/usr/bin/systemd-run", "/bin/systemd-run"}
+	if got := commandCandidates["systemd-run"]; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("systemd-run candidates = %v, want %v", got, want)
+	}
+	path, err := resolveCommand("systemd-run")
+	for _, candidate := range want {
+		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() {
+			if err != nil || path != candidate {
+				t.Fatalf("resolveCommand(systemd-run) = %q, %v; want %s", path, err, candidate)
+			}
+			return
+		}
+	}
+	if !errors.Is(err, ErrCommandNotFound) {
+		t.Fatalf("resolveCommand(systemd-run) on a host without it = %q, %v", path, err)
+	}
+}
+
 // A follow-up transaction describes the deployment again; a standing
 // warning such as a failed oneshot is reported once in the one result, not
 // once per pass.
 func TestAFollowUpTransactionReportsEachWarningOnce(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.services.failed[unitVerifyService] = true
+	// The guardian reconcile oneshot: a committing run clears a failed apply
+	// or verify oneshot (GAP-0423), not this one.
+	h.services.failed[unitGuardianOneshot] = true
 	edited := []byte(strings.Replace(h.read(h.env.Layout.ConfigPath), "mode: observe", "mode: action", 1))
 	h.env.Services = &hookedServices{fakeServices: h.services, onStart: writeOnce(t, h, unitOf("linux", "gateway"), h.env.Layout.ConfigPath, edited)}
 	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})

@@ -745,6 +745,25 @@ def test_splunk_acknowledgement_requires_successful_http_status() -> None:
     assert connection.closed
 
 
+def test_splunk_probe_reports_rejected_index_without_echoing_remote_body() -> None:
+    response = _DummyHTTPResponse(400, b'{"code":7,"text":"Incorrect index"}')
+    connection = _DummyHTTPConnection(response)
+    target = destination_test._parse_target(
+        "http://8.8.8.8/ingest", "http", "", destination_test._NetworkSafety(),
+        destination_test._TLSSettings(),
+    )
+    with (
+        patch.object(destination_test.http.client, "HTTPConnection", return_value=connection),
+        pytest.raises(destination_test.DestinationTestError) as captured,
+    ):
+        destination_test._request_over_socket(
+            _DummySocket(), target, method="POST", body=b"{}", headers={}, inspect_hec=True,
+        )
+    assert captured.value.failure_class == "remote_rejected"
+    assert "index" in str(captured.value).lower()
+    assert connection.closed
+
+
 def test_splunk_acknowledgement_accepts_code_zero_with_successful_http_status() -> None:
     response = _DummyHTTPResponse(200, b'{"code":0}')
     connection = _DummyHTTPConnection(response)
@@ -854,6 +873,35 @@ def test_top_level_command_fails_before_network_when_local_only_audit_seam_is_un
     assert "defenseclaw-gateway start" in result.output
     assert "v8" not in result.output
     assert "collector.example.test" not in result.output
+
+
+def test_a_local_file_destination_is_skipped_not_failed(tmp_path: Path) -> None:
+    # GAP-0270: a jsonl file destination read "Error: destination test failed
+    # (unsupported)", a skip reported as a failure.
+    from defenseclaw.main import cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
+    wire = ConfigV8WireResult(
+        wire_version=1,
+        kind="effective",
+        config_version=8,
+        source=str(config_path),
+        data_dir=str(tmp_path),
+        plan_digest="destination-test-plan",
+        network_validation="offline_syntax_and_literal_policy_only",
+        effective=_effective({"name": "soc-strict", "kind": "jsonl"}),
+    )
+    with (
+        patch.object(cmd_observability.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_observability, "inspect_v8_config", return_value=wire),
+        patch.object(cmd_observability, "canonical_local_compliance_recorder", return_value=_Compliance()),
+    ):
+        result = CliRunner().invoke(cli, ["observability", "destination", "test", "soc-strict"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("result: SKIPPED - jsonl destinations are not connectivity-tested")
+    assert "failed" not in result.output
+    assert destination_test.untestable_kind(_effective(_destination("soc")), "soc") == ""
 
 
 def test_gateway_local_compliance_recorder_uses_stdin_and_accepts_exact_acknowledgement(tmp_path: Path) -> None:

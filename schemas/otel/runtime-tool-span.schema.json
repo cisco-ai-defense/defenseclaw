@@ -152,16 +152,7 @@
         "workspace.id": {
           "type": "string"
         },
-        "deployment.environment": {
-          "type": "string"
-        },
-        "deployment.mode": {
-          "type": "string"
-        },
         "discovery.source": {
-          "type": "string"
-        },
-        "defenseclaw.device.id": {
           "type": "string"
         },
         "gen_ai.operation.name": {

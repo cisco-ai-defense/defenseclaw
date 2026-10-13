@@ -174,7 +174,7 @@ func TestSecuritySuiteRegex(t *testing.T) {
 						rf := ScanAllRules(c.Content, c.ToolName)
 						sev, findings = HighestSeverity(rf), ruleFindingStrings(rf)
 					case "inspector":
-						g := NewGuardrailInspector("local", nil, nil, "")
+						g := NewGuardrailInspector("local", nil, nil)
 						g.SetDetectionStrategy("regex_only", "", "", "", false)
 						v := g.Inspect(context.Background(), c.Direction, c.Content, nil, "model", "observe")
 						if v == nil {

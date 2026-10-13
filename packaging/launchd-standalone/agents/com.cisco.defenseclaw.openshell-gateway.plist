@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenShell gateway for DefenseClaw sandboxes (both install modes of
+  enterprise.openshell.install): a LaunchAgent, one per account, in
+  /Library/LaunchAgents. launchd loads it at every login but never starts it
+  there: it has neither RunAtLoad nor KeepAlive (KeepAlive's SuccessfulExit
+  implies RunAtLoad), so an account that only logs in never holds the
+  OpenShell gateway port. It is started on demand (launchctl bootstrap and
+  kickstart) by the account's sandbox daemon, which registers the gateway
+  with the account's openshell CLI (in setup mode it first installs the
+  pinned OpenShell into ~/.local), and stopped by it when the daemon exits
+  with no sandbox running.
+
+  DefenseClaw's exec shim expands the account's home (a plist cannot), sets
+  umask 0022, the administrator's rendered gateway configuration
+  (/opt/cisco/defenseclaw/etc/openshell/gateway.toml), the account's MicroVM
+  identity, the per-user TLS directory (generating the account's local PKI
+  owner-only) and a pinned PATH with the trusted e2fsprogs first, then execs
+  the openshell-gateway of the install mode: the administrator's in
+  /usr/local/bin (prerequisite) or ~/.local/bin/openshell-gateway (setup). It
+  exits 78 when that OpenShell is not there or not trusted.
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.cisco.defenseclaw.openshell-gateway</string>
+	<key>LimitLoadToSessionType</key>
+	<array>
+		<string>Aqua</string>
+		<string>Background</string>
+	</array>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/cisco/defenseclaw/bin/defenseclaw-gateway</string>
+		<string>sandbox-openshell-exec</string>
+	</array>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>Umask</key>
+	<integer>18</integer>
+</dict>
+</plist>

@@ -390,7 +390,13 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		return false
 	}
 	if start >= 0 && end >= start && end <= len(text) {
-		tail := strings.TrimLeft(text[end:], " \t\r\n\"'`")
+		if gitUserEmailPlaceholder(text[:start], matchLower) {
+			return false
+		}
+		// Only what is glued to the address can make it a locator: a
+		// following word and colon on the same or the next line is the next
+		// field of a label: value record (GAP-0234).
+		tail := strings.TrimLeft(text[end:], "\"'`")
 		if strings.HasPrefix(tail, ":") {
 			return false
 		}
@@ -398,7 +404,7 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		// email regex may stop early at an apparent TLD in a locator such as
 		// git@github.com-work:cisco/repo.git. Treat a contiguous host suffix
 		// followed by ':' as a remote locator rather than a person address.
-		if colon := strings.IndexByte(tail, ':'); colon > 0 {
+		if colon := strings.IndexByte(tail, ':'); colon > 0 && (tail[0] == '.' || tail[0] == '-') {
 			hostSuffix := tail[:colon]
 			if strings.IndexFunc(hostSuffix, func(char rune) bool {
 				return !((char >= 'a' && char <= 'z') ||
@@ -410,6 +416,25 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		}
 	}
 	return true
+}
+
+// gitUserEmailPlaceholder reports a documentation-domain address given as
+// git's user.email, as git's own "Author identity unknown" hint prints it
+// (git config --global user.email "you@example.com"): setup text, not a
+// person's address. The hint usually arrives inside a JSON-encoded tool
+// response, where the quote before the address is escaped (\"), so the
+// backslash is trimmed along with the quotes.
+func gitUserEmailPlaceholder(before, email string) bool {
+	key := strings.TrimRight(strings.ToLower(before), " \t\"'=\\")
+	if !strings.HasSuffix(key, "user.email") {
+		return false
+	}
+	_, domain, _ := strings.Cut(email, "@")
+	switch domain {
+	case "example.com", "example.net", "example.org":
+		return true
+	}
+	return strings.HasSuffix(domain, ".example")
 }
 
 func emailDomainLooksLikeNumericHost(email string) bool {

@@ -30,6 +30,7 @@ import stat
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from typing import Any
 from defenseclaw.alert_semantics import (
     ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
+    ALERT_AUDIT_ONLY_DECISION_CODES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
@@ -262,15 +264,6 @@ _ACTIONABLE_EVENT_WHERE = """(
             details LIKE '%severity=CRITICAL%'
             OR details LIKE '%severity=HIGH%'
         )
-    )
-)"""
-_ALERT_EVENT_ELIGIBILITY_SQL = """(
-    bucket IS NULL
-    OR (bucket = 'security.finding' AND event_name = 'finding.observed')
-    OR (
-        action = 'connector-hook'
-        AND COALESCE(enforced, 0) = 1
-        AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
     )
 )"""
 
@@ -1016,9 +1009,11 @@ class Store:
         structured = "structured_json" if "structured_json" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
         decision = f"dc_hook_decision({details}, {structured}, enforced)"
+        may_block = hook_decision_may_block_sql(details, structured, "enforced")
         return f"""(
             LOWER(COALESCE(action, '')) = 'connector-hook'
             AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+            AND {may_block}
             AND {decision} = 'block'
         )"""
 
@@ -1116,10 +1111,17 @@ class Store:
                         AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
                     )
                 )"""
+            audit_only = "1 = 1"
+            if "payload_json" in columns:
+                decision_code = self._safe_json_extract("payload_json", '$."defenseclaw.network.decision_code"')
+                audit_only = (
+                    f"COALESCE({decision_code}, '') NOT IN ({self._sql_string_values(ALERT_AUDIT_ONLY_DECISION_CODES)})"
+                )
             canonical_action = f"""(
                 bucket IN ('enforcement.action', 'network.egress')
                 AND {canonical_outcome} IN ({outcome_values})
                 AND {canonical_priority}
+                AND {audit_only}
             )"""
             health_failure = f"""(
                 bucket IN ('platform.health', 'diagnostic')
@@ -1131,9 +1133,18 @@ class Store:
                 bucket IS NULL
                 AND ({legacy_finding} OR {legacy_explicit})
             )"""
+            # A current gateway files the legacy finding actions (for example
+            # tool-result-pii-alert) under security.finding with a
+            # legacy.audit.* event name, so they are alerts like the
+            # bucket-less rows older gateways wrote.
+            compat_finding = f"""(
+                bucket = 'security.finding'
+                AND event_name LIKE 'legacy.audit.%'
+                AND {legacy_finding}
+            )"""
             eligible = (
                 f"({finding} OR {canonical_action} OR {connector_hook} "
-                f"OR {health_failure} OR {legacy})"
+                f"OR {health_failure} OR {legacy} OR {compat_finding})"
             )
         else:
             eligible = f"({legacy_finding} OR {legacy_explicit})"
@@ -1157,39 +1168,7 @@ class Store:
                 )"""
             )
         if "payload_json" in columns:
-            predicates.append(
-                """NOT EXISTS (
-                    SELECT 1
-                    FROM json_each(
-                        CASE
-                            WHEN json_valid(COALESCE(payload_json, ''))
-                             AND json_type(
-                                     payload_json,
-                                     '$."defenseclaw.finding.tags"'
-                                 ) = 'array'
-                            THEN json_extract(
-                                payload_json,
-                                '$."defenseclaw.finding.tags"'
-                            )
-                            ELSE '[]'
-                        END
-                    ) AS finding_tag
-                    WHERE LOWER(TRIM(
-                        CAST(finding_tag.value AS TEXT),
-                        CHAR(9, 10, 11, 12, 13, 32)
-                    )) = 'detection-only'
-                )"""
-            )
-            safe_text_tags = self._safe_json_extract(
-                "payload_json",
-                '$."defenseclaw.finding.tags"',
-            )
-            predicates.append(
-                f"""LOWER(TRIM(
-                    COALESCE({safe_text_tags}, ''),
-                    CHAR(9, 10, 11, 12, 13, 32)
-                )) <> 'detection-only'"""
-            )
+            predicates.append(f"NOT {self._detection_only_clause()}")
         if "alert_acknowledgement_projection" in tables:
             predicates.append(
                 """NOT EXISTS (
@@ -1199,6 +1178,62 @@ class Store:
                 )"""
             )
         return " AND ".join(f"({predicate})" for predicate in predicates)
+
+    def _detection_only_clause(self) -> str:
+        """SQL true for a finding tagged detection-only (an array tag or the
+        whole scalar, any case or padding): a rule matched but could not decide
+        the call. It needs the payload_json column."""
+
+        safe_text_tags = self._safe_json_extract(
+            "payload_json",
+            '$."defenseclaw.finding.tags"',
+        )
+        return f"""(
+            EXISTS (
+                SELECT 1
+                FROM json_each(
+                    CASE
+                        WHEN json_valid(COALESCE(payload_json, ''))
+                         AND json_type(
+                                 payload_json,
+                                 '$."defenseclaw.finding.tags"'
+                             ) = 'array'
+                        THEN json_extract(
+                            payload_json,
+                            '$."defenseclaw.finding.tags"'
+                        )
+                        ELSE '[]'
+                    END
+                ) AS finding_tag
+                WHERE LOWER(TRIM(
+                    CAST(finding_tag.value AS TEXT),
+                    CHAR(9, 10, 11, 12, 13, 32)
+                )) = 'detection-only'
+            )
+            OR LOWER(TRIM(
+                COALESCE({safe_text_tags}, ''),
+                CHAR(9, 10, 11, 12, 13, 32)
+            )) = 'detection-only'
+        )"""
+
+    def count_detection_only_findings(self, since: datetime) -> int:
+        """Count the detection-only findings recorded at or after since.
+
+        Alerts leave them out (#693), so ``defenseclaw alerts`` says how many
+        there are and where to read them (GAP-0176)."""
+
+        columns, _ = self._audit_projection_schema()
+        if "payload_json" not in columns:
+            return 0
+        cutoff = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        row = self.db.execute(
+            f"""SELECT COUNT(*) FROM audit_events
+               WHERE timestamp >= ?
+                 AND COALESCE(payload_json, '') LIKE '%detection-only%'
+                 AND {self._detection_only_clause()}""",
+            (cutoff,),
+        ).fetchone()
+        return int(row[0] or 0)
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         where = self._alert_where_clause(actionable=False)
@@ -1438,6 +1473,72 @@ class Store:
         )
         return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
+    _ALERT_AGENT_KEYS = (
+        "defenseclaw.user.name", "user.id", "defenseclaw.agent.identity.id", "defenseclaw.agent.depth",
+        "gen_ai.conversation.id",
+    )
+
+    def agent_facts_for_alerts(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
+        """Map alert IDs to who the alert is about (GAP-0381).
+
+        The user, the agent identity (``agt-``), the agent instance (``ais-``),
+        the session and the sub-agent depth come from the alert row and from
+        the hook-decision row of the same request; the alert row's own value
+        wins.
+        """
+        ids = [alert_id for alert_id in alert_ids if alert_id]
+        columns, _tables = self._audit_projection_schema()
+        if not ids or "structured_json" not in columns:
+            return {}
+
+        def row_facts(alias: str) -> str:
+            cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
+            cols += [
+                self._safe_json_extract(f"{alias}.structured_json", f'$."{key}"') for key in self._ALERT_AGENT_KEYS
+            ]
+            return ", ".join(cols)
+
+        width = 2 + len(self._ALERT_AGENT_KEYS)
+        join, hook_cols = "", ", ".join(["NULL"] * width)
+        if "request_id" in columns:
+            # Request IDs are client supplied. Borrow hook facts only when
+            # both records identify the same user independently of that ID.
+            f_user = self._safe_json_extract("f.structured_json", '$."user.id"')
+            h_user = self._safe_json_extract("h.structured_json", '$."user.id"')
+            join = (
+                "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
+                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
+            )
+            hook_cols = row_facts("h")
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.db.execute(
+            f"SELECT f.id, {row_facts('f')}, {hook_cols} FROM audit_events AS f {join} WHERE f.id IN ({placeholders})",
+            ids,
+        )
+        names = ("session", "agent_instance", "user_name", "user_id", "agent_identity", "depth", "conversation")
+        found: dict[str, dict[str, str]] = {}
+        for row in cur.fetchall():
+            facts = found.setdefault(row[0], {})
+            for values in (row[1:1 + width], row[1 + width:]):
+                for name, value in zip(names, values):
+                    text = "" if value is None else str(value).strip()
+                    if text and not facts.get(name):
+                        facts[name] = text
+        out: dict[str, dict[str, str]] = {}
+        for alert_id, facts in found.items():
+            shown = {
+                "user": facts.get("user_name") or facts.get("user_id", ""),
+                "agent_identity": facts.get("agent_identity", ""),
+                "agent_instance": facts.get("agent_instance", ""),
+                "session": facts.get("session") or facts.get("conversation", ""),
+                "depth": facts.get("depth", "").split(".", 1)[0],
+            }
+            shown = {key: value for key, value in shown.items() if value}
+            if shown:
+                out[alert_id] = shown
+        return out
+
     def hook_details_for_alerts(self, alert_ids: list[str]) -> dict[str, list[str]]:
         """Map alert IDs to the details of connector-hook rows of the same request.
 
@@ -1464,7 +1565,7 @@ class Store:
             self._safe_json_extract(payload, f'$."defenseclaw.{key}"')
             for key in (
                 "guardrail.effective_action", "guardrail.would_block", "guardrail.mode", "acp.method", "acp.client",
-                "guardrail.raw_action",
+                "guardrail.raw_action", "sandbox.name",
             )
         )
         cur = self.db.execute(
@@ -1479,7 +1580,13 @@ class Store:
             ids,
         )
         out: dict[str, list[str]] = {}
-        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw in cur.fetchall():
+        rows = cur.fetchall()
+        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox in rows:
+            # Only the hook decision of the request names the sandbox whose
+            # session raised the finding (GAP-0232); names hold no spaces.
+            sandbox = str(sandbox or "").strip()
+            if sandbox and not any(ch.isspace() for ch in sandbox):
+                out.setdefault(alert_id, []).append(f"sandbox={sandbox}")
             if action == "connector-hook":
                 out.setdefault(alert_id, []).append(details or "")
             elif action.startswith("inspect-tool-"):
@@ -1719,31 +1826,6 @@ class Store:
         )
         return cur.fetchone()[0] > 0
 
-    def list_by_action(self, field: str, value: str) -> list[ActionEntry]:
-        _validate(field, value)
-        cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-                FROM actions WHERE json_extract(actions_json, '$.{field}') = ?
-                ORDER BY updated_at DESC""",
-            (value,),
-        )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
-    def list_by_action_and_type(
-        self,
-        field: str,
-        value: str,
-        target_type: str,
-    ) -> list[ActionEntry]:
-        _validate(field, value)
-        cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-                FROM actions WHERE json_extract(actions_json, '$.{field}') = ? AND target_type = ?
-                ORDER BY updated_at DESC""",
-            (value, target_type),
-        )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
     def list_actions_by_type(
         self,
         target_type: str,
@@ -1768,13 +1850,6 @@ class Store:
                    FROM actions WHERE target_type = ? AND connector = ? ORDER BY updated_at DESC""",
                 (target_type, connector),
             )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
-    def list_all_actions(self) -> list[ActionEntry]:
-        cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-               FROM actions ORDER BY updated_at DESC"""
-        )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     # -- Physical quarantine provenance --
@@ -2016,12 +2091,29 @@ class Store:
             connectors=connectors,
         )
 
-    def get_counts(self, *, alert_count_seconds: float | None = None) -> Counts:
+    def _with_operator_lists(self, counts: Counts, cfg: Any) -> Counts:
+        """``counts`` with the skill and MCP block/allow counts of the list
+        views: the operator decisions in asset_policy are not audit.db rows."""
+        if cfg is None:
+            return counts
+        from defenseclaw.enforce.asset_lists import install_counts
+
+        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = install_counts(self, cfg)
+        return replace(
+            counts,
+            blocked_skills=blocked_skills,
+            allowed_skills=allowed_skills,
+            blocked_mcps=blocked_mcps,
+            allowed_mcps=allowed_mcps,
+        )
+
+    def get_counts(self, *, alert_count_seconds: float | None = None, cfg: Any = None) -> Counts:
         """Return status counters.
 
         With ``alert_count_seconds``, ``alerts`` is None when counting them
         takes longer: the alert predicate reads every audit row, which takes
-        minutes on a large or not yet migrated audit database.
+        minutes on a large or not yet migrated audit database. With ``cfg``,
+        the block/allow counts include the operator lists in its asset_policy.
         """
 
         def _count(sql: str) -> int:
@@ -2030,14 +2122,19 @@ class Store:
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
         alert_where = self._alert_where_clause(actionable=False)
-        return Counts(
-            blocked_skills=_count(q_skill + "'block'"),
-            allowed_skills=_count(q_skill + "'allow'"),
-            blocked_mcps=_count(q_mcp + "'block'"),
-            allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=self._count_within(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds),
-            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+        return self._with_operator_lists(
+            Counts(
+                blocked_skills=_count(q_skill + "'block'"),
+                allowed_skills=_count(q_skill + "'allow'"),
+                blocked_mcps=_count(q_mcp + "'block'"),
+                allowed_mcps=_count(q_mcp + "'allow'"),
+                alerts=self._count_within(
+                    f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds
+                ),
+                total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+                blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+            ),
+            cfg,
         )
 
     def _count_within(self, sql: str, seconds: float | None) -> int | None:
@@ -2056,7 +2153,7 @@ class Store:
         finally:
             self.db.set_progress_handler(None, 0)
 
-    def get_enforcement_counts(self) -> Counts:
+    def get_enforcement_counts(self, cfg: Any = None) -> Counts:
         """Return cheap Overview enforcement counters.
 
         This intentionally leaves ``alerts`` at zero. Exact alert counts scan
@@ -2090,13 +2187,16 @@ class Store:
                WHERE target_type IN ('skill', 'mcp')"""
         ).fetchone()
         blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
-        return Counts(
-            blocked_skills=blocked_skills,
-            allowed_skills=allowed_skills,
-            blocked_mcps=blocked_mcps,
-            allowed_mcps=allowed_mcps,
-            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+        return self._with_operator_lists(
+            Counts(
+                blocked_skills=blocked_skills,
+                allowed_skills=allowed_skills,
+                blocked_mcps=blocked_mcps,
+                allowed_mcps=allowed_mcps,
+                total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+                blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+            ),
+            cfg,
         )
 
     # -- Row converters --

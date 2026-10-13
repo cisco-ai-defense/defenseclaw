@@ -898,6 +898,9 @@ func TestAtomicTransformV2BoundProtocolLockResistsAliasesAndRename(t *testing.T)
 			}
 		}
 		lockPointer, pointerErr := windows.UTF16PtrFromString(lockPath)
+		if pointerErr != nil {
+			return pointerErr
+		}
 		deleteHandle, deleteErr := windows.CreateFile(
 			lockPointer, windows.DELETE,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,

@@ -205,3 +205,82 @@ func TestHermesNotesOnlyFolderIsACategory(t *testing.T) {
 		t.Fatalf("events = %v, want notes2/vb14n", got)
 	}
 }
+
+// GAP-0900: a skill folder with no SKILL.md yet (just made with mkdir)
+// is not admitted, so it is not scanned and quarantined while the user is
+// creating it; it is waited on and admitted once its SKILL.md lands.
+func TestIncompleteSkillFolderWaitsForSkillMD(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	atStart, live := filepath.Join(skillDir, "at-start"), filepath.Join(skillDir, "new-skill")
+	for _, dir := range []string{atStart, filepath.Join(live, "scripts")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(live, "notes.txt"), []byte("draft\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.watchIncompleteSkillFolders(skillDir)
+	if _, ok := w.pluginWaiting[atStart]; !ok {
+		t.Fatalf("existing empty skill folder is not waited on: %v", w.pluginWaiting)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 0 {
+		t.Fatalf("incomplete skill folder events = %v, want none", events)
+	}
+	for _, evt := range w.enumerateTargets() {
+		if evt.Type == InstallSkill {
+			t.Fatalf("rescan enumerates incomplete skill folder %s", evt.Path)
+		}
+	}
+	skillMD := filepath.Join(live, "SKILL.md")
+	// GAP-1105: an editor's empty new SKILL.md is still waited on, and the
+	// write that fills it re-checks the folder.
+	if err := os.WriteFile(skillMD, []byte("\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 0 {
+		t.Fatalf("skill folder with an empty SKILL.md events = %v, want none", events)
+	}
+	if err := os.WriteFile(skillMD, []byte("---\nname: new-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if queued, ok := w.changedSkillFolder(skillMD); !ok || queued != live {
+		t.Fatalf("write to SKILL.md in waiting skill folder = %q, %v; want %q", queued, ok, live)
+	}
+	if queued, ok := w.waitingPluginEvent(skillMD); !ok || queued != live {
+		t.Fatalf("SKILL.md in waiting skill folder = %q, %v; want %q", queued, ok, live)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 1 || events[0].Type != InstallSkill || events[0].Path != live {
+		t.Fatalf("completed skill folder events = %v, want one skill", events)
+	}
+	if _, ok := w.pluginWaiting[live]; ok {
+		t.Fatal("admitted skill folder is still waited on")
+	}
+}
+
+// GAP-1573 review: the Codex plugin cache is read at its version depth, so
+// its marketplace folders are not waited on as category folders; a
+// <marketplace>/<plugin> folder created later is not admitted as a plugin.
+func TestWatcherDoesNotWaitOnCodexCacheMarketplaceFolders(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	marketplace := filepath.Join(cache, "openai-curated-remote")
+	if err := os.MkdirAll(filepath.Join(marketplace, "github", "1.2.0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	w.addWatch = func(string) {}
+	w.watchExistingPluginFolders(cache)
+	if len(w.pluginWaiting) != 0 {
+		t.Fatalf("codex cache folders waited on as category folders: %v", w.pluginWaiting)
+	}
+	later := filepath.Join(marketplace, "slack")
+	if err := os.MkdirAll(later, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if queued, ok := w.waitingPluginEvent(later); ok {
+		t.Fatalf("<marketplace>/<plugin> folder %s admitted as a plugin", queued)
+	}
+}

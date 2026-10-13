@@ -763,14 +763,18 @@ func TestParsePOSIXRedirectedCommandSubstitutionDoesNotFlowToParent(t *testing.T
 }
 
 func TestParsePOSIXStaticShellWrapper(t *testing.T) {
-	out := parsePOSIX(`sh -c 'rm -rf /tmp/cache'`, 1, 0)
-	if out.status != StatusComplete {
-		t.Fatalf("status = %s issues=%v", out.status, out.issues)
-	}
-	if len(out.commands) != 2 || out.commands[1].Executable != "rm" ||
-		out.commands[1].ParentCommandID != out.commands[0].ID ||
-		len(out.commands[1].Wrappers) != 1 {
-		t.Fatalf("commands = %#v", out.commands)
+	for _, source := range []string{
+		`sh -c 'rm -rf /tmp/cache'`,
+		`sudo sh -c 'rm -rf /tmp/cache'`,
+		`sudo -- bash -c 'rm -rf /tmp/cache'`,
+	} {
+		out := parsePOSIX(source, 1, 0)
+		if out.status != StatusComplete || len(out.commands) < 2 ||
+			out.commands[len(out.commands)-1].Executable != "rm" ||
+			out.commands[len(out.commands)-1].ParentCommandID != out.commands[len(out.commands)-2].ID ||
+			len(out.commands[len(out.commands)-1].Wrappers) != len(out.commands)-1 {
+			t.Errorf("%s: status = %s, commands = %#v", source, out.status, out.commands)
+		}
 	}
 }
 
@@ -901,7 +905,6 @@ func TestParsePOSIXContextChangingWrappersFailClosed(t *testing.T) {
 		{name: "sudo assignment", source: `sudo MODE=check rm -rf /tmp/victim`},
 		{name: "sudo nonidentifier assignment", source: `sudo A-B=check rm -rf /tmp/victim`},
 		{name: "sudo assignment after separator", source: `sudo -- MODE=check rm -rf /tmp/victim`},
-		{name: "sudo shell after separator", source: `sudo -- bash -c 'rm -rf /tmp/victim'`},
 	}
 	for _, test := range tests {
 		test := test

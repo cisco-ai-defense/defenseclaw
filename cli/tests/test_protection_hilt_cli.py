@@ -28,7 +28,6 @@ from tests.environment import isolated_home_env
 def app(tmp_path, monkeypatch):
     for key, value in isolated_home_env(tmp_path / "home").items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setattr("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", lambda *a, **k: None)
     cfg = default_config()
     cfg.data_dir = str(tmp_path / "dc")
     cfg.policy_dir = str(tmp_path / "dc" / "policies")

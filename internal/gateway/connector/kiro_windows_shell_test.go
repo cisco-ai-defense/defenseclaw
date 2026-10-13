@@ -13,10 +13,8 @@
 package connector
 
 import (
-	"context"
 	"debug/pe"
 	"encoding/binary"
-	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -213,83 +211,4 @@ func TestKiroWindowsHookCommandsBlockThroughTheShell(t *testing.T) {
 			t.Fatalf("Constrained Language mode: exit %d, want 2 (Kiro's block)", code)
 		}
 	})
-}
-
-// Earlier builds wrote the `& '<launcher>' hook --connector kiro` command
-// into the CLI 2.x agent files, whose entries are matched by exact command.
-// Setup must replace that entry with the current command instead of adding
-// a second one, and teardown must remove it, keeping the user's own entries.
-func TestKiroWindowsSetupReplacesTheCallOperatorAgentHooks(t *testing.T) {
-	home := t.TempDir()
-	t.Cleanup(func() { KiroHomeOverride = "" })
-	KiroHomeOverride = home
-	launcher := filepath.Join(t.TempDir(), windowsHookBinaryName)
-	t.Cleanup(PinNativeHookExecutableForTest(launcher))
-	legacy := "& " + powershellQuoteLiteral(launcher) + " hook --connector kiro"
-	userEntry := map[string]interface{}{"command": `C:\tools\audit.exe`, "matcher": "*"}
-	agent := filepath.Join(home, "agents", kiroManagedAgentName+".json")
-	body, err := json.Marshal(map[string]interface{}{
-		"name": kiroManagedAgentName,
-		"hooks": map[string]interface{}{
-			"preToolUse": []interface{}{
-				map[string]interface{}{"command": legacy, "matcher": ".*", "description": "DefenseClaw tool-use inspection"},
-				userEntry,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(agent), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(agent, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	conn := NewKiroConnector()
-	opts := SetupOpts{DataDir: t.TempDir(), HookFailMode: "closed"}
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	commands := kiroAgentCommands(t, agent, "preToolUse")
-	if len(commands) != 2 || commands[0] != `C:\tools\audit.exe` || commands[1] != conn.hookCommand(opts) {
-		t.Fatalf("preToolUse commands after Setup = %q, want the user's entry and the current DefenseClaw command", commands)
-	}
-
-	// Teardown's removal (after the backup restore declines) and its
-	// verification recognize the older command too.
-	if err := os.WriteFile(agent, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if present, err := kiroV2AgentReferencesAnyHook(agent, conn.hookCommand(opts)); err != nil || !present {
-		t.Fatalf("teardown verification misses the older command: %v %v", present, err)
-	}
-	if err := removeKiroV2AgentHooks(agent, conn.hookCommand(opts)); err != nil {
-		t.Fatal(err)
-	}
-	if commands := kiroAgentCommands(t, agent, "preToolUse"); len(commands) != 1 || commands[0] != `C:\tools\audit.exe` {
-		t.Fatalf("preToolUse commands after removal = %q, want only the user's entry", commands)
-	}
-}
-
-func kiroAgentCommands(t *testing.T, path, event string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	hooks, _ := cfg["hooks"].(map[string]interface{})
-	list, _ := hooks[event].([]interface{})
-	var commands []string
-	for _, item := range list {
-		entry, _ := item.(map[string]interface{})
-		command, _ := entry["command"].(string)
-		commands = append(commands, command)
-	}
-	return commands
 }

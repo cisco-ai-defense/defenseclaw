@@ -22,6 +22,7 @@
 package catalog
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -121,6 +122,8 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	for _, hostname := range []string{
 		"llm-gateway.internal.corp",
 		"api.someai.example",
+		"api.my-ai-gateway.example",
+		"api.example.ai",
 		"inference.acme.test",
 		"my-openai-proxy.example.net",
 		"models.chat.example",
@@ -131,9 +134,27 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	}
 	for _, hostname := range []string{
 		"api.github.com", "www.example.com", "cdn.jsdelivr.net", "", "   ",
+		// "ai" inside another word is no sign of a model service.
+		"api.mailgun.net", "api.airtable.com", "api.domain.com", "api.braintreegateway.com",
 	} {
 		if InferenceShaped(hostname) {
 			t.Errorf("InferenceShaped(%q) = true, want false", hostname)
+		}
+	}
+}
+
+func TestVendorWebsiteIsNoUnknownAIEndpoint(t *testing.T) {
+	t.Parallel()
+	// GAP-0214: a vendor's docs and help sites are no AI endpoint for its
+	// name alone; a host of anyone else with the name, or another sign, is.
+	for _, hostname := range []string{"developers.openai.com", "help.openai.com", "openai.com", "docs.anthropic.com"} {
+		if InferenceShaped(hostname) {
+			t.Errorf("InferenceShaped(%q) = true, want false", hostname)
+		}
+	}
+	for _, hostname := range []string{"x.openai.azure.com", "openai.com.example.net", "inference.openai.com", "chat.openai.com"} {
+		if !InferenceShaped(hostname) {
+			t.Errorf("InferenceShaped(%q) = false, want true", hostname)
 		}
 	}
 }
@@ -163,5 +184,48 @@ func TestFirstWriterWinsForADomain(t *testing.T) {
 	provider, _ := catalog.Lookup("shared.example")
 	if provider.ID != "first" || provider.Category != CategoryFrontier {
 		t.Fatalf("Lookup = %+v, want the first writer's frontier classification", provider)
+	}
+}
+
+// TestMultiVendorHostsAreTheirVendors pins that every host of a signature
+// that lists several vendors' APIs (AI SDKs) is named, priced and keyed by
+// its own vendor (GAP-0119).
+func TestMultiVendorHostsAreTheirVendors(t *testing.T) {
+	t.Parallel()
+	signatures, err := inventory.LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := FromSignatures(signatures)
+	for _, signature := range signatures {
+		if !strings.EqualFold(signature.Vendor, multiVendor) {
+			continue
+		}
+		for _, pattern := range signature.DomainPatterns {
+			domain := normalizeDomain(pattern)
+			if apiVendors[domain] == "" {
+				t.Errorf("%s lists %s, which apiVendors names no vendor for", signature.ID, domain)
+			}
+		}
+	}
+	if p, ok := shared.Lookup("api.mistral.ai"); !ok || p.DisplayName != "Mistral AI" || p.Category != CategoryFrontier ||
+		p.ID != "ai-sdks/api.mistral.ai" {
+		t.Errorf("Lookup(api.mistral.ai) = %+v, %v", p, ok)
+	}
+}
+
+// TestProviderNamesItsConnector pins that a connector's own signature says
+// which connector it is, which tells a sandbox harness's vendor from shadow
+// AI, and that the bundled catalog maps the harnesses' model APIs so.
+func TestProviderNamesItsConnector(t *testing.T) {
+	t.Parallel()
+	shared, err := Shared()
+	if err != nil {
+		t.Fatalf("Shared(): %v", err)
+	}
+	for host, connector := range map[string]string{"api.anthropic.com": "claudecode", "api.openai.com": "codex", "openrouter.ai": ""} {
+		if provider, ok := shared.Lookup(host); !ok || provider.SupportedConnector != connector {
+			t.Errorf("Lookup(%q) = %+v, %v; want supported connector %q", host, provider, ok, connector)
+		}
 	}
 }

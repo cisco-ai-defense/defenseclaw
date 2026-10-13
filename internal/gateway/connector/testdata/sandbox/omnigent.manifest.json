@@ -22,8 +22,8 @@
     "/usr/local/lib/defenseclaw/omnigent/defenseclaw_omnigent_policy.py": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 26955,
-      "sha256": "7cd352f7393a05be64122eed716d1caa3ca0b233302d5506cfabed221f59d1ae"
+      "size": 31226,
+      "sha256": "638c28d59ddb1f24b95df1cc45fd29d88dbdd53c3f87b2fcf54f431579e7d4cd"
     }
   }
 }

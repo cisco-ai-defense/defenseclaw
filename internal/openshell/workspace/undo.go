@@ -68,6 +68,9 @@ type UndoResult struct {
 	BranchBefore string      `json:"branch_before,omitempty"`
 	BranchAfter  string      `json:"branch_after,omitempty"`
 	RefChanges   []RefChange `json:"ref_changes,omitempty"`
+	// RefsKept is set when UndoOptions.KeepRefs leaves HEAD and RefChanges
+	// as the session made them.
+	RefsKept bool `json:"refs_kept,omitempty"`
 	// ControlChanges are agent-writable git control files that are reset.
 	ControlChanges []string `json:"control_changes,omitempty"`
 	// PinnedChanges are read-only-mounted git files that changed anyway,
@@ -106,9 +109,10 @@ type UndoResult struct {
 // Empty reports whether undo has nothing to put back: the folder matches
 // the snapshot, apart from any Unrestored changes.
 func (r *UndoResult) Empty() bool {
-	return len(r.Changes) == 0 && len(r.RefChanges) == 0 && len(r.ControlChanges) == 0 &&
-		len(r.NestedRepos) == 0 && len(r.LostObjects) == 0 &&
-		r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter && !r.removesIgnored()
+	// Under KeepRefs the branches, tags and HEAD stay as they are.
+	refs := r.RefsKept || (len(r.RefChanges) == 0 && r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter)
+	return len(r.Changes) == 0 && refs && len(r.ControlChanges) == 0 &&
+		len(r.NestedRepos) == 0 && len(r.LostObjects) == 0 && !r.removesIgnored()
 }
 
 // Unrestored are the changes undo cannot put back (see Ignored).
@@ -364,16 +368,14 @@ func newUnreadable(rec *SnapshotRecord, now *sentinelScan) []string {
 	return out
 }
 
-// undoIgnored fills res.Ignored from the snapshot's ignored manifest, if it
-// has one, and returns the manifest; nowRoots are the ignored places now and
-// changes the snapshot's own comparison.
+// undoIgnored fills res.Ignored from the snapshot's ignored manifest and
+// returns the manifest (nil, with a warning, when it cannot be read);
+// nowRoots are the ignored places now and changes the snapshot's own
+// comparison.
 func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) *ignoredManifest {
 	man, err := loadIgnored(dataDir, rec.Name)
 	if err != nil {
 		res.Warnings = append(res.Warnings, "the record of the files the undo point does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
-		return nil
-	}
-	if man == nil {
 		return nil
 	}
 	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, changedPaths(changes))
@@ -397,11 +399,14 @@ func restoreIgnored(rec *SnapshotRecord, dataDir string, man *ignoredManifest, r
 	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
 }
 
+// skipList is what the snapshot's walks left out. A git snapshot recorded
+// none, and the review then saw each masked secret file (absent from the
+// snapshot's sentinels) as created during the session (GAP-0257).
 func skipList(rec *SnapshotRecord) []string {
-	if rec.Copy != nil {
-		return rec.Copy.Skipped
+	if rec.Skipped != nil || rec.Copy == nil {
+		return rec.Skipped
 	}
-	return nil
+	return rec.Copy.Skipped
 }
 
 func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
@@ -431,6 +436,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		res.Changes = append(res.Changes, c)
 	}
 	res.RefChanges = refChanges(gs.Refs, st.refs)
+	res.RefsKept = opts.KeepRefs
 	if res.ControlChanges, err = controlChanges(gs); err != nil {
 		return err
 	}
@@ -964,10 +970,6 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 	res.NestedRepos = nested
 	if capped {
 		res.Warnings = append(res.Warnings, "the folder is too large to check completely for new nested git repositories")
-	}
-	if man, _ := loadIgnored(opts.DataDir, rec.Name); man == nil && len(rec.Copy.Opaque) > 0 {
-		// A snapshot from before the ignored manifest: say what undo skips.
-		res.Warnings = append(res.Warnings, "left as the session left them: "+strings.Join(firstN(rec.Copy.Opaque, 5), ", "))
 	}
 	man := undoIgnored(rec, opts.DataDir, now.heavy, changes, res)
 	if opts.Preview {

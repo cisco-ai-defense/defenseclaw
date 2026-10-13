@@ -45,6 +45,16 @@ store. Fetch those secrets before startup and expose them through the process
 environment using the syntax for your shell.
 </Callout>
 
+<Callout title="Credentials on a managed device">
+On a managed standalone device, credential variables stay readable, but
+`keys set`, `keys remove`, and `keys fill-missing` refuse local writes with exit
+code `3`. They only manage a per-user `.env`, which the managed gateway
+does not use for its enterprise credentials. An administrator rotates the
+configured credential with `defenseclaw-gateway enterprise secret set --name
+<configured-credential> --from-stdin`. See
+[Managed hosts and the environment](/docs/reference/env-vars#managed-hosts-and-the-environment).
+</Callout>
+
 ## Resolution order
 
 1. Process environment — highest priority.
@@ -137,9 +147,8 @@ The static baseline is registered in
 `cli/defenseclaw/credentials.py::CREDENTIALS`; its order is the initial order
 rendered by `keys list`. Classification then appends independently named
 Splunk/Galileo environment references from enabled observability-v8
-destinations and `env_keys` declared by
-`~/.defenseclaw/custom-providers.json`, plus every non-empty
-`routing.models[].api_key_env`. Duplicate environment names are collapsed;
+destinations and the `env_keys` of every `llm_providers.custom` entry in
+`config.yaml`, plus every non-empty `routing.models[].api_key_env`. Duplicate environment names are collapsed;
 multiple routed aliases may deliberately share one key.
 
 | Env name and feature | Required when… | Notes |
@@ -148,7 +157,7 @@ multiple routed aliases may deliberately share one key.
 | `OPENCLAW_GATEWAY_TOKEN`<br/>`gateway` | OpenClaw is a configured connector, or a connector-less legacy config falls back to OpenClaw. Not required when only `claw.mode`'s `openclaw` default names OpenClaw and OpenClaw is not installed ([OpenClaw fleet link](/docs/reference/configuration#openclaw-fleet-link)). | Upstream OpenClaw gateway token, auto-detected from `~/.openclaw/openclaw.json` when available. |
 | `JUDGE_API_KEY`<br/>`guardrail.judge` | The judge is enabled, uses a hosted provider, and `guardrail.judge.llm.api_key_env` names a key other than `DEFENSECLAW_LLM_KEY`. | Without that override the row folds into `DEFENSECLAW_LLM_KEY`. |
 | `CISCO_AI_DEFENSE_API_KEY`<br/>`guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
-| `VIRUSTOTAL_API_KEY`<br/>`skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal` is `true`. | Used when the skill scanner asks VirusTotal. |
+| `VIRUSTOTAL_API_KEY`<br/>`skill-scanner.virustotal` | `scanners.skill_scanner.analyzers.virustotal.enabled` is `true`. | Used when the skill scanner asks VirusTotal. The variable name is `analyzers.virustotal.api_key_env`; the key itself belongs in `.env`, never in `config.yaml`. The [v9 migration](/docs/reference/migrate-v9#scanner-keys) moves an inline v8 `virustotal_api_key` there. |
 | `SPLUNK_ACCESS_TOKEN`<br/>`observability.splunk` | An enabled Splunk destination references it. | The HEC or Observability Cloud token. |
 | `GALILEO_API_KEY`<br/>`observability.galileo` | An enabled observability destination with `preset: galileo` references it. | Galileo Cloud and authenticated self-hosted trace export. `setup observability list` shows the destinations. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY`<br/>`skill-scanner.llm` | The skill scanner uses an LLM with a hosted provider and `scanners.skill_scanner.llm.api_key_env` overrides the default key. | Without that override the row folds into `DEFENSECLAW_LLM_KEY`. |
@@ -157,7 +166,7 @@ multiple routed aliases may deliberately share one key.
 The names you see in `keys list` are the **effective** ones. If you set
 `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows
 `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. Additional enabled Splunk/Galileo
-destinations, custom-provider overlay entries, and routed model backends can
+destinations, `llm_providers.custom` entries, and routed model backends can
 add more rows after the baseline entries. Rows whose effective name is the same
 collapse into one, so a default install shows six rows: the judge and
 skill-scanner keys appear only when they are overridden.

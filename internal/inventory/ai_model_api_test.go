@@ -947,6 +947,11 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
+	// The durable snapshot must exist before a cancelled scan can be said
+	// to keep it (GAP-0823: an elevated Windows run never wrote it).
+	if detail := first.Summary.DetectorErrors["state_store"]; detail != "" {
+		t.Fatalf("first scan did not persist the inventory: %s", detail)
+	}
 	durable := findModelSignal(t, first.Signals, "model_api", "durable-model")
 
 	observability := &captureAIDiscoveryV8{}

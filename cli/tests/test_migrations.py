@@ -44,6 +44,7 @@ from defenseclaw.migrations import (
     _yaml_scalar,
 )
 
+from tests.environment import source_package_env
 from tests.permissions import assert_owner_only_file, grant_everyone
 
 
@@ -79,7 +80,7 @@ sys.modules["defenseclaw.config"] = legacy_config
 import defenseclaw.migrations
 assert not hasattr(legacy_config, "locked_file_update")
 """
-        subprocess.run([sys.executable, "-c", script], check=True)
+        subprocess.run([sys.executable, "-c", script], check=True, env=source_package_env())
 
 
 class TestYAMLScalarRendering(unittest.TestCase):
@@ -1798,6 +1799,31 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
         assert_owner_only_file(path)
 
+
+class TestRefreshGuardrailProfilesNamesTheRebasedCopy(unittest.TestCase):
+    """GAP-1480: an edited default pack that the v9 migration gave a 1.0 copy
+    was reported as kept without this release's rules."""
+
+    def test_names_the_copy_the_config_selects(self):
+        from defenseclaw.guardrail_profiles import ProfileRefreshResult
+        from defenseclaw.migrations import _refresh_guardrail_profiles
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        guardrail_dir = os.path.join(tmp, "policies", "guardrail")
+        copy = os.path.join(guardrail_dir, "default-1.0")
+        config_path = os.path.join(tmp, "config.yaml")
+        with open(config_path, "w") as f:
+            yaml.safe_dump({"config_version": 9, "guardrail": {"rule_pack": "custom-default", "custom_packs": {
+                "custom-default": {"path": copy, "digest": "sha256:" + "b" * 64}}}}, f)
+        kept = ProfileRefreshResult(kept_modified=["default", "strict"])
+        with patch("defenseclaw.guardrail_profiles.refresh_stock_profiles", return_value=kept), \
+                patch("defenseclaw.migrations.ux.warn") as warn:
+            _refresh_guardrail_profiles(tmp, config_path)
+        lines = [call.args[0] for call in warn.call_args_list]
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn(f"its 1.0 copy {copy} (guardrail.custom_packs.custom-default)", lines[0])
+        self.assertTrue(lines[1].startswith("kept edited guardrail rule packs strict in"), lines[1])
 
 
 if __name__ == "__main__":

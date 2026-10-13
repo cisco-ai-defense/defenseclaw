@@ -44,6 +44,17 @@ def test_api_key_env_refuses_a_pasted_key_and_saves_nothing() -> None:
     assert saved == "AID_KEY"
 
 
+def test_analyzers_names_the_ones_the_mcp_scanner_has() -> None:
+    # GAP-0055: virustotal is a skill-scanner analyzer; it used to reach the schema check and a traceback.
+    result, _ = _run(["--analyzers", "yara,virustotal"])
+    assert result.exit_code == 2, result.output
+    flat = " ".join(result.output.split())
+    assert "virustotal is not an MCP scanner analyzer; use api, yara, llm, behavioral, readiness or auto." in flat
+    assert "Traceback" not in result.output
+    result, _ = _run(["--analyzers", "yara,behavioral"])
+    assert result.exit_code == 0, result.output
+
+
 def test_pasted_key_in_api_key_env_stays_redacted_in_the_tui() -> None:
     args = ("setup", "mcp-scanner", "--non-interactive", "--api-key-env", _PASTED_KEY)
     assert mask_argv(("defenseclaw", *args))[-1] == "<redacted>"

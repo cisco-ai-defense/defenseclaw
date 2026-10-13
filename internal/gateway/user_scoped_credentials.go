@@ -38,8 +38,8 @@ import (
 // connector.UserScopedHookAPIToken. The gateway derives the same credentials
 // for every protected target in the guardian's root-owned authorization
 // ledger. A request that presents one is attributed to the identity it is
-// bound to, and a request whose identity headers name anyone else is
-// refused, so user A cannot post an event attributed to user B. The
+// bound to. On Linux and macOS the TCP peer's kernel UID must also match
+// that identity, and conflicting identity headers are refused. The
 // connector-wide credentials of other profiles are not accepted here:
 // before per-user credentials existed every user of a connector held the
 // same one.
@@ -61,7 +61,11 @@ import (
 // are revalidated on the request path.
 const userScopedCredentialRefreshInterval = time.Second
 
-const userScopedIdentityMismatchReason = "user_scoped_identity_mismatch"
+const (
+	userScopedIdentityMismatchReason        = "user_scoped_identity_mismatch"
+	userScopedCallerAccountMismatchReason   = "user_scoped_caller_account_mismatch"
+	userScopedCallerAccountUnverifiedReason = "user_scoped_caller_account_unverified"
+)
 
 type userScopedCredential struct {
 	kind     string
@@ -295,9 +299,12 @@ var (
 
 // bindUserScopedIdentity makes identity the only user identity downstream
 // layers see. It refuses the request (false) when an identity header names
-// another uid or SID, or another account name than the one the identity
-// resolves to. Header values are never trusted beyond that comparison: they
-// are replaced by the bound identity and its resolved account name.
+// another uid or SID, or the name of another account. A name no account has
+// now is the name the account had when its user signed in: a renamed account
+// (Rename-LocalUser) is the same SID, so it is served, not refused until its
+// user signs out (GAP-0907). Header values are never trusted beyond that:
+// they are replaced by the bound identity and its current account name,
+// which records then carry (GAP-0702).
 func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bool) {
 	for _, header := range userScopedIdentityIDHeaders {
 		for _, value := range r.Header.Values(header) {
@@ -318,8 +325,14 @@ func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bo
 			if value == "" || name == "" {
 				continue
 			}
-			if !userScopedNamesEqual(identity, value, name) {
-				return r, false
+			if userScopedNamesEqual(identity, value, name) {
+				continue
+			}
+			if other, known := userScopedIdentityForName(value); !known || other != identity {
+				if known {
+					return r, false
+				}
+				noteRenamedUserScopedAccount(identity, value, name)
 			}
 		}
 	}
@@ -339,12 +352,34 @@ func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bo
 }
 
 // userScopedNamesEqual compares an account name the way the platform does:
-// Windows account names are case-insensitive, POSIX names are not.
+// Windows account names are case-insensitive, POSIX names are not. Both
+// sides compare by their bare account, because the host may name a
+// directory account qualified (alice@realm, CORP\alice) while the caller
+// sends the bare name (GAP-0290).
 func userScopedNamesEqual(identity, presented, resolved string) bool {
+	presented = useridentity.BareAccountName(presented)
+	resolved = useridentity.BareAccountName(resolved)
 	if useridentity.KindForID(identity) == useridentity.KindWindowsSID {
 		return strings.EqualFold(presented, resolved)
 	}
 	return presented == resolved
+}
+
+// renamedUserScopedAccounts remembers the renamed accounts already logged,
+// so their hooks leave one gateway log line, not one per call.
+var renamedUserScopedAccounts = &boundedNameSet{max: 256}
+
+// noteRenamedUserScopedAccount logs, once per identity and old name, that a
+// caller still sends a name the account no longer has.
+func noteRenamedUserScopedAccount(identity, presented, current string) {
+	key := identity + "/" + sanitizeLLMEventUser(useridentity.BareAccountName(presented))
+	if slices.Contains(renamedUserScopedAccounts.list(), key) {
+		return
+	}
+	renamedUserScopedAccounts.add(key)
+	fmt.Fprintf(os.Stderr, "[sidecar-api] per-user credential identity=%s sends the account name %q, which no account has "+
+		"now (renamed to %q?); served by its identity under the current name until its user signs in again\n",
+		identity, sanitizeLLMEventUser(presented), current)
 }
 
 // userScopedCredentialsRequired reports whether connector credentials on the
@@ -371,6 +406,30 @@ func (a *APIServer) lookupUserScopedCredential(kind, scope, presented string) (s
 	return a.userScopedCredentialStore().lookup(kind, scope, presented)
 }
 
+// userScopedCallerAccountRefusal binds a standalone user credential to the
+// account that opened the loopback TCP connection. Windows has no kernel UID
+// lookup for a TCP peer, so its SID-bound credential remains the authority.
+func (a *APIServer) userScopedCallerAccountRefusal(r *http.Request, identity string) string {
+	if runtime.GOOS == "windows" || !a.userScopedCredentialsRequired() {
+		return ""
+	}
+	want, err := strconv.Atoi(identity)
+	if err != nil || want < 0 {
+		return userScopedCallerAccountUnverifiedReason
+	}
+	got, err := acpLoopbackPeerUID(r)
+	if err != nil || got < 0 {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] per-user credential caller account unavailable: %v\n", err)
+		}
+		return userScopedCallerAccountUnverifiedReason
+	}
+	if got != want {
+		return userScopedCallerAccountMismatchReason
+	}
+	return ""
+}
+
 // serveUserScoped runs next for a request authenticated by a per-user
 // credential bound to identity, after binding that identity to the request.
 func (a *APIServer) serveUserScoped(
@@ -380,6 +439,11 @@ func (a *APIServer) serveUserScoped(
 	next http.Handler,
 	mark func(context.Context) context.Context,
 ) {
+	if reason := a.userScopedCallerAccountRefusal(r, identity); reason != "" {
+		a.emitHTTPAuthFailure(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+		writeManagedHookRefusal(w, http.StatusForbidden, reason)
+		return
+	}
 	r, release := a.admitHookCaller(w, r, identity, route)
 	if release == nil {
 		return
@@ -387,6 +451,7 @@ func (a *APIServer) serveUserScoped(
 	defer release()
 	ctx := PromoteSessionIfAuthenticated(r.Context())
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity, sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
 	if mark != nil {
 		ctx = mark(ctx)
 	}

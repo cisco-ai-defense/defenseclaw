@@ -351,6 +351,13 @@ func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
 			entries[0].(map[string]interface{})["matcher"] = " * "
 		},
+		"block-bypassing-command-suffix": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			command := handler["command"].(string)
+			handler["command"] = claudeCodeUnguardedHookCommand(command) + claudeCodeMissingHookGuardSeparator +
+				"exit 0; exit 2; }"
+		},
 		"asynchronous-block-handler": func(settings map[string]interface{}) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
 			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
@@ -610,6 +617,13 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 			}
 			mutateCodexConfig(t, configPath, mutate)
 			present, err := OwnedHooksPresent(conn, opts)
+			if strings.HasSuffix(name, "hooks-feature-disabled") {
+				// The user's switch is reported at once, not repaired (GAP-1094).
+				if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+					t.Fatalf("OwnedHooksPresent = %v, %v; want the turned-off error", present, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("OwnedHooksPresent: %v", err)
 			}

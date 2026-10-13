@@ -69,7 +69,7 @@ bands:
 `), 0o600); err != nil {
 		t.Fatalf("write override: %v", err)
 	}
-	p, err := LoadConfidencePolicyFromFile(override)
+	p, _, err := loadPinnedConfidencePolicy(override, "", false)
 	if err != nil {
 		t.Fatalf("load override: %v", err)
 	}
@@ -196,7 +196,7 @@ detectorz:
 			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			_, err := LoadConfidencePolicyFromFile(path)
+			_, _, err := loadPinnedConfidencePolicy(path, "", false)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
 			}
@@ -214,7 +214,7 @@ detectorz:
 func TestPolicyMissingOverrideFileIsNotAnError(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "does-not-exist.yaml")
-	p, err := LoadConfidencePolicyFromFile(missing)
+	p, _, err := loadPinnedConfidencePolicy(missing, "", false)
 	if err != nil {
 		t.Fatalf("missing override file should fall back to default, got error: %v", err)
 	}

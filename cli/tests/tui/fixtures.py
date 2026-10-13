@@ -62,7 +62,7 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
             mode="observe",
             connector="openclaw",
             scanner_mode="local",
-            rule_pack_dir="",
+            rule_pack="",
             port=4141,
             model="gpt-5-mini",
             strategy="default",
@@ -73,7 +73,6 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
         llm=SimpleNamespace(provider="openai", model="gpt-5-mini"),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connector=lambda: "openclaw",
     )
 
@@ -142,6 +141,17 @@ def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClaw
                 "agents": [{"id": "default", "model": "gpt-5", "source": "openclaw", "is_default": True}],
                 "model_providers": [{"id": "openai", "default_model": "gpt-5", "status": "ready"}],
                 "memory": [{"id": "mem", "backend": "sqlite", "files": 1, "chunks": 3}],
+                "ide_plugins": [
+                    {
+                        "fingerprint": "fp1",
+                        "user": "dev",
+                        "ide_product": "vscode",
+                        "plugin_id": "github.copilot",
+                        "version": "1.250.0",
+                        "enabled": "enabled",
+                        "is_ai": True,
+                    },
+                ],
                 "summary": {"total_items": 6, "skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 1}},
             }
         )

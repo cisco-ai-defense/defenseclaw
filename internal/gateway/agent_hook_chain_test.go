@@ -2567,15 +2567,3 @@ func assertToolChainStep(
 		t.Fatalf("projection %+v enforcement=%v, want %v", projection, got, enforced)
 	}
 }
-
-func cloneHookMap(input map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(input))
-	for key, value := range input {
-		if child, ok := value.(map[string]interface{}); ok {
-			out[key] = cloneHookMap(child)
-			continue
-		}
-		out[key] = value
-	}
-	return out
-}

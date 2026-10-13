@@ -146,19 +146,23 @@ func testFourStepEvents(
 	base time.Time,
 	definition ToolChainDefinition,
 ) (ToolChainWindowEvent, ToolChainWindowEvent, ToolChainWindowEvent, ToolChainWindowEvent) {
-	return ToolChainWindowEvent{
-			SemanticEventID: "first", Sequence: 1, ReceivedAt: base,
-			Projection: testFourStepProjection(definition.Step1Bit, "", "a", true),
-		}, ToolChainWindowEvent{
-			SemanticEventID: "second", Sequence: 3, ReceivedAt: base.Add(3 * time.Second),
-			Projection: testFourStepProjection(definition.Step2Bit, "a", "b", true),
-		}, ToolChainWindowEvent{
-			SemanticEventID: "third", Sequence: 6, ReceivedAt: base.Add(6 * time.Second),
-			Projection: testFourStepProjection(definition.Step3Bit, "b", "c", true),
-		}, ToolChainWindowEvent{
-			SemanticEventID: "final", Sequence: 8, ReceivedAt: base.Add(8 * time.Second),
-			Projection: testFourStepProjection(definition.Step4Bit, "c", "", true),
-		}
+	first := ToolChainWindowEvent{
+		SemanticEventID: "first", Sequence: 1, ReceivedAt: base,
+		Projection: testFourStepProjection(definition.Step1Bit, "", "a", true),
+	}
+	second := ToolChainWindowEvent{
+		SemanticEventID: "second", Sequence: 3, ReceivedAt: base.Add(3 * time.Second),
+		Projection: testFourStepProjection(definition.Step2Bit, "a", "b", true),
+	}
+	third := ToolChainWindowEvent{
+		SemanticEventID: "third", Sequence: 6, ReceivedAt: base.Add(6 * time.Second),
+		Projection: testFourStepProjection(definition.Step3Bit, "b", "c", true),
+	}
+	final := ToolChainWindowEvent{
+		SemanticEventID: "final", Sequence: 8, ReceivedAt: base.Add(8 * time.Second),
+		Projection: testFourStepProjection(definition.Step4Bit, "c", "", true),
+	}
+	return first, second, third, final
 }
 
 func testFourStepProjection(step uint64, input, output string, enforce bool) ToolChainProjection {

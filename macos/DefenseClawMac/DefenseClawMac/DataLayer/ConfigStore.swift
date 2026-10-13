@@ -18,7 +18,7 @@
 // truth the CLI/TUI use.
 // Minimal YAML subset parser (nested block mappings, scalars, simple lists),
 // sufficient for the keys the app consumes. Writes never go through this
-// store; they go via the gateway (/config/patch) or the defenseclaw CLI.
+// store; they go through the defenseclaw CLI.
 
 import Darwin
 import Foundation
@@ -71,8 +71,6 @@ struct DefenseClawConfig: Sendable {
         var url: String
         var authEnv: String
         var enabled: Bool
-        var autoSync: Bool
-        var syncIntervalHours: Int
         var lastSync: String
         var lastStatus: String
     }
@@ -973,7 +971,11 @@ actor ConfigStore {
         c.guardrailEnabled = root["guardrail.enabled"]?.bool ?? false
         c.guardrailMode = root["guardrail.mode"]?.string
         c.guardrailPort = root["guardrail.port"]?.int
-        if let packDir = root["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
+        // config_version 9 names the pack (guardrail.rule_pack); a v8 file
+        // carries its folder.
+        if let pack = root["guardrail.rule_pack"]?.string, !pack.isEmpty {
+            c.guardrailRulePack = pack
+        } else if let packDir = root["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
             c.guardrailRulePack = (packDir as NSString).lastPathComponent
         }
         // Source baseline only. Bucket and route overrides belong to the
@@ -998,7 +1000,9 @@ actor ConfigStore {
             for (name, node) in roster {
                 guard let fields = node.mapping else { continue }
                 c.connectorModes[name] = fields["mode"]?.string ?? ""
-                if let packDir = fields["rule_pack_dir"]?.string, !packDir.isEmpty {
+                if let pack = fields["rule_pack"]?.string, !pack.isEmpty {
+                    c.connectorRulePacks[name] = pack
+                } else if let packDir = fields["rule_pack_dir"]?.string, !packDir.isEmpty {
                     c.connectorRulePacks[name] = (packDir as NSString).lastPathComponent
                 }
                 // Only an explicit false disables (default true).
@@ -1020,8 +1024,6 @@ actor ConfigStore {
                     url: fields["url"]?.string ?? "",
                     authEnv: fields["auth_env"]?.string ?? "",
                     enabled: fields["enabled"]?.bool ?? true,
-                    autoSync: fields["auto_sync"]?.bool ?? false,
-                    syncIntervalHours: fields["sync_interval_hours"]?.int ?? 24,
                     lastSync: fields["last_sync"]?.string ?? "",
                     lastStatus: fields["last_status"]?.string ?? ""
                 )

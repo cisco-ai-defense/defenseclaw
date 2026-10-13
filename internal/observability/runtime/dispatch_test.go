@@ -273,6 +273,57 @@ func TestQueueOnlyDispatcherSeparatesProjectedQueueBytesFromEncodedWriteBytes(t 
 	}
 }
 
+func TestSecureClientDispatcherKeepsMainRetryAndCircuit(t *testing.T) {
+	destination := config.ObservabilityV8EffectiveDestination{
+		Name: config.ObservabilityV8ManagedAIDDestinationName, Kind: config.ObservabilityV8DestinationOTLP,
+		Enabled: true, SelectedSignals: []observability.Signal{observability.SignalLogs},
+		Transport: config.ObservabilityV8TransportPlan{
+			Batch: &config.ObservabilityV8BatchSource{MaxQueueSize: 8, MaxQueueBytes: 4096},
+		},
+	}
+	legacy, ok := CompiledDispatcherConfigForProfile(destination, 1, observability.SignalLogs, nil, true)
+	if !ok || legacy.Retry.MaxAttempts != 3 || legacy.Retry.InitialBackoff != 100*time.Millisecond ||
+		legacy.Retry.MaxBackoff != 5*time.Second || !legacy.LegacyCircuit {
+		t.Fatalf("secure client dispatcher=%+v, valid=%v", legacy, ok)
+	}
+	current, ok := CompiledDispatcherConfigForProfile(destination, 1, observability.SignalLogs, nil, false)
+	if !ok || current.Retry.MaxAttempts != 24 || current.LegacyCircuit {
+		t.Fatalf("standalone dispatcher=%+v, valid=%v", current, ok)
+	}
+	adapter := newRuntimeRecordingAdapter(1)
+	adapter.outcome = delivery.OutcomeAuthentication
+	dispatcher, err := delivery.NewDispatcher(legacy, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	payload, err := delivery.NewPayload([]byte("{}"), delivery.RoutingIdentity{
+		RecordID: "first", Bucket: "model.io", Signal: "logs", EventName: "model.response",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dispatcher.Enqueue(payload); !got.Accepted() {
+		t.Fatalf("first enqueue=%+v", got)
+	}
+	deadline := time.Now().Add(time.Second)
+	for dispatcher.DeliveryHealthSnapshot().CircuitState != delivery.CircuitOpen {
+		if time.Now().After(deadline) {
+			t.Fatal("circuit did not open")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := dispatcher.Enqueue(payload); got.Disposition != delivery.EnqueueRejected ||
+		got.Reason != delivery.ReasonCircuitOpen {
+		t.Fatalf("open circuit enqueue=%+v, want legacy rejection", got)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeEmitLocalOnlyPersistsWithoutOptionalProjectionOrFanout(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
@@ -610,11 +661,10 @@ func TestRuntimeRemovedDestinationDrainsOldGenerationAndCancellationDoesNotFanou
 
 func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
-	makePlan := func(generation string, aliases bool) *config.ObservabilityV8Plan {
+	makePlan := func(generation string) *config.ObservabilityV8Plan {
 		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
 			func(source *config.ObservabilityV8Source) {
 				source.Resource.Attributes = map[string]string{"team.generation": generation}
-				source.TracePolicy.CompatibilityAliases = &aliases
 				source.Destinations = []config.ObservabilityV8DestinationSource{
 					runtimeOTLPLogDestination("otel-logs"),
 				}
@@ -643,7 +693,7 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 		mutex.Unlock()
 		return adapter, func(context.Context) error { return nil }, nil
 	})
-	initial := makePlan("generation-one", true)
+	initial := makePlan("generation-one")
 	options := dependencies.options()
 	options.DestinationAdapterFactory = factory
 	options.TelemetryProviderFactory = telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
@@ -673,7 +723,7 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 	reloadDone := make(chan error, 1)
 	go func() {
 		result, graphErr := runtime.Reload(
-			context.Background(), runtimegraph.ConfigFromPlan(makePlan("generation-two", false), false),
+			context.Background(), runtimegraph.ConfigFromPlan(makePlan("generation-two"), false),
 		)
 		var reloadErr error
 		if graphErr != nil {
@@ -703,13 +753,12 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 	newAdapter := adapters[1]
 	mutex.Unlock()
 	if oldValues["team.generation"] != "generation-one" ||
-		oldValues["deployment.environment"] != oldValues["deployment.environment.name"] ||
-		oldDropped != 0 {
+		oldValues["deployment.environment.name"] == "" || oldDropped != 0 {
 		t.Fatalf("old OTLP resource=%+v", oldValues)
 	}
 	if newValues["team.generation"] != "generation-two" ||
-		newValues["deployment.environment"] != "" || newValues["deployment.mode"] != "" ||
-		newValues["defenseclaw.device.id"] != "" || newDropped != 0 {
+		newValues["deployment.environment.name"] == "" || newValues["deployment.environment"] != "" ||
+		newValues["deployment.mode"] != "" || newValues["defenseclaw.device.id"] != "" || newDropped != 0 {
 		t.Fatalf("new OTLP resource=%+v", newValues)
 	}
 	if _, err := runtime.Emit(
@@ -1006,3 +1055,62 @@ func TestRuntimeDispatchConcurrentStressPreservesExactlyOnceLocalAndFanout(t *te
 
 var _ DestinationAdapterFactory = runtimeAdapterFactoryFunc(nil)
 var _ delivery.Adapter = (*runtimeRecordingAdapter)(nil)
+
+// GAP-1096: records still queued when the shutdown flush deadline passes are
+// counted per destination signal, and the next runtime reports them as dropped.
+func TestRuntimeCloseCountsAbandonedRecordsForTheNextRuntime(t *testing.T) {
+	blockedPlan := func(dependencies runtimeTestDependencies) *config.ObservabilityV8Plan {
+		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+			func(source *config.ObservabilityV8Source) {
+				source.Destinations = []config.ObservabilityV8DestinationSource{
+					runtimeConsoleDestination("blocked", "none", 8),
+				}
+			},
+		)
+	}
+	factoryFor := func(adapter delivery.Adapter) DestinationAdapterFactory {
+		return runtimeAdapterFactoryFunc(func(
+			context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+		) (delivery.Adapter, DestinationAdapterCleanup, error) {
+			return adapter, func(context.Context) error { return nil }, nil
+		})
+	}
+	dependencies := newRuntimeTestDependencies(t)
+	unreachable := newRuntimeRecordingAdapter(8)
+	unreachable.release = make(chan struct{}) // never answers until cancelled
+	runtime := runtimeWithAdapterFactory(t, dependencies, blockedPlan(dependencies), factoryFor(unreachable), nil)
+	for index := 0; index < 3; index++ {
+		builder := runtimeContentRecordBuilder(fmt.Sprintf("runtime-shutdown-%d", index), "queued")
+		if _, err := runtime.Emit(t.Context(), diagnosticMetadata(t), builder); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-unreachable.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the destination never received a delivery attempt")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_ = runtime.Close(ctx)
+	cancel()
+	losses := runtime.ShutdownLosses()
+	if len(losses) != 1 || losses[0].Destination != "blocked" || losses[0].Signal != observability.SignalLogs ||
+		losses[0].Records != 3 {
+		t.Fatalf("shutdown losses = %+v, want blocked logs 3", losses)
+	}
+
+	nextDependencies := newRuntimeTestDependencies(t)
+	next := runtimeWithAdapterFactory(
+		t, nextDependencies, blockedPlan(nextDependencies), factoryFor(newRuntimeRecordingAdapter(8)), nil,
+	)
+	if applied, err := next.CarryShutdownLosses(t.Context(), losses); err != nil || len(applied) != 1 {
+		t.Fatalf("carry applied=%+v err=%v", applied, err)
+	}
+	snapshot, err := next.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped := destinationHealthByName(t, snapshot, "blocked").Counters.Dropped; dropped != 3 {
+		t.Fatalf("next runtime dropped = %d, want the 3 records the last shutdown abandoned", dropped)
+	}
+}

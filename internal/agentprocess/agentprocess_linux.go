@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -87,6 +88,28 @@ func executablePath(pid int) string {
 		return ""
 	}
 	return strings.TrimSuffix(exe, " (deleted)")
+}
+
+// commandLine reads /proc/<pid>/cmdline, NUL-separated arguments, and the
+// process's working directory.
+func commandLine(pid int) ([]string, string, error) {
+	file, err := os.Open(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxCommandLineBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > maxCommandLineBytes {
+		return nil, "", fmt.Errorf("the command line of process %d exceeds %d bytes", pid, maxCommandLineBytes)
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("process %d has no command line", pid)
+	}
+	dir, _ := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	return strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00"), dir, nil
 }
 
 func parseStat(pid int, data []byte) (Process, error) {

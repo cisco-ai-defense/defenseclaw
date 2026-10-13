@@ -401,7 +401,7 @@ class ScanAllConcurrencyTests(unittest.TestCase):
         llm = LLMConfig(model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
         on = _scan_ui.LLM_SCAN_WORKERS
         self.assertEqual(_scan_ui.scan_batch_workers(SkillScannerWrapper(SkillScannerConfig(use_llm=True))), on)
-        self.assertEqual(_scan_ui.scan_batch_workers(SkillScannerWrapper(SkillScannerConfig())), 1)
+        self.assertEqual(_scan_ui.scan_batch_workers(SkillScannerWrapper(SkillScannerConfig(use_llm=False))), 1)
         self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper(llm=llm), use_llm=None), on)
         self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper(llm=llm), use_llm=False), 1)
         self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper()), 1)

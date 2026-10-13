@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -530,4 +531,56 @@ func testFileSHA256(t *testing.T, path string) string {
 	}
 	digest := sha256.Sum256(body)
 	return hex.EncodeToString(digest[:])
+}
+
+func TestPowerShellPerUserHookStartsItsGateway(t *testing.T) {
+	// GAP-0377: an install.ps1 hook has no protected hook runtime, so a
+	// per-user gateway that ended with the sign-in session was never started.
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return hookruntime.State{}, false, nil
+	})
+	t.Setenv("DEFENSECLAW_GATEWAY_AUTOSTART", "")
+	commandDir := filepath.Join(t.TempDir(), ".local", "bin")
+	dataRoot := filepath.Join(t.TempDir(), ".defenseclaw")
+	for _, dir := range []string{commandDir, dataRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(commandDir, nativeHookLauncherName)
+	gateway := filepath.Join(commandDir, nativeHookGatewayName)
+	for _, file := range []string{executable, gateway} {
+		if err := os.WriteFile(file, []byte("test binary"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := json.Marshal(nativeHookInstallState{
+		SchemaVersion: 1, InstallKind: "powershell-windows", InstallScope: "user",
+		InstallRoot: commandDir, CommandDir: commandDir, DataRoot: dataRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(commandDir, powerShellHookStateName), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable, previousRunner := hookExecutableOverride, perUserGatewayStartRunner
+	hookExecutableOverride = executable
+	var started []string
+	perUserGatewayStartRunner = func(_ context.Context, path, root string) error {
+		started = append(started, path, root)
+		return nil
+	}
+	t.Cleanup(func() { hookExecutableOverride, perUserGatewayStartRunner = previousExecutable, previousRunner })
+
+	opts := buildHookOptionsForRuntime("claudecode", "UserPromptSubmit", "", "", false)
+	if opts.GatewayRecovery == nil {
+		t.Fatal("the per-user hook has no gateway cold start")
+	}
+	if err := opts.GatewayRecovery(context.Background(), syscall.ECONNREFUSED); err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != 2 || !sameWindowsHookPath(started[0], gateway) || !sameWindowsHookPath(started[1], dataRoot) {
+		t.Fatalf("started %q, want %s for %s", started, gateway, dataRoot)
+	}
 }

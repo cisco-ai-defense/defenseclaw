@@ -19,11 +19,13 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,5 +197,67 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	}
 	if audited != 2 {
 		t.Fatalf("connector-hook rows after the grace expired = %d, want 2", audited)
+	}
+}
+
+// GAP-0832: a hook call from an exempt_users account is visible in the audit
+// store: its hook_decision row says defenseclaw.user.enrollment exempt, and
+// an enterprise-exempt-user row is written once per account and connector
+// each ten minutes.
+func TestExemptUserCallsAreInTheAuditStore(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, api, fixture.runtime)
+
+	peer := managedHookPeer{UID: 516, Name: "dcm-w3i1"}
+	now := time.Now()
+	ctx := withEnterpriseExemptUser(t.Context())
+	if !api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now) ||
+		api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now.Add(time.Minute)) ||
+		!api.auditEnterpriseExemptUser(ctx, peer, "claudecode", "/api/v1/claudecode/hook", now.Add(enterpriseExemptAuditInterval)) {
+		t.Fatal("enterprise-exempt-user rows must be written once per account and connector each interval")
+	}
+	body, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "session_id": "s-exempt", "cwd": t.TempDir(),
+		"tool_name": "Bash", "tool_use_id": "toolu-exempt", "tool_input": map[string]any{"command": "ls"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)).WithContext(ctx)
+	api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+
+	events, err := fixture.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exempt := 0
+	for _, ev := range events {
+		if ev.Action == string(audit.ActionEnterpriseExemptUser) {
+			exempt++
+		}
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var raw string
+	if err := database.QueryRow(`SELECT projected_record_json FROM audit_events WHERE event_name = 'hook_decision' ORDER BY rowid DESC LIMIT 1`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if exempt != 2 || !strings.Contains(raw, "defenseclaw.user.enrollment") || !strings.Contains(raw, `"exempt"`) {
+		t.Fatalf("enterprise-exempt-user rows = %d (want 2); hook_decision = %s", exempt, raw)
 	}
 }

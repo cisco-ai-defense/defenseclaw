@@ -19,7 +19,8 @@ import (
 )
 
 // ensureWindowsTargetOwnedDirectoryTree creates only missing descendants of
-// the authenticated target profile. Each directory receives its target owner
+// the authenticated target profile: %USERPROFILE%\.defenseclaw, and its hooks
+// folder when path names that. Each directory receives its target owner
 // and exact protected canonical DACL in the native create call, so an elevated
 // target token's Administrators default owner cannot leak into the managed
 // runtime and no weaker staging descriptor is ever published. The still-bound
@@ -69,10 +70,12 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 	}
 	homeAbs = filepath.Clean(homeAbs)
 	pathAbs = filepath.Clean(pathAbs)
-	canonicalHookDir := filepath.Join(homeAbs, ".defenseclaw", "hooks")
-	if !sameWindowsEnterprisePath(pathAbs, canonicalHookDir) {
+	canonicalDataDir := filepath.Join(homeAbs, ".defenseclaw")
+	canonicalHookDir := filepath.Join(canonicalDataDir, "hooks")
+	if !sameWindowsEnterprisePath(pathAbs, canonicalHookDir) && !sameWindowsEnterprisePath(pathAbs, canonicalDataDir) {
 		return fmt.Errorf(
-			"enterprise hooks: managed directory creation requires canonical hook path %s, got %s",
+			"enterprise hooks: managed directory creation requires canonical data path %s or hook path %s, got %s",
+			canonicalDataDir,
 			canonicalHookDir,
 			pathAbs,
 		)
@@ -142,7 +145,7 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 		if wasCreated {
 			created = append(created, currentPath)
 			switch {
-			case sameWindowsEnterprisePath(currentPath, filepath.Dir(canonicalHookDir)):
+			case sameWindowsEnterprisePath(currentPath, canonicalDataDir):
 				creation.createdDataDir = true
 			case sameWindowsEnterprisePath(currentPath, canonicalHookDir):
 				creation.createdHookDir = true
@@ -160,7 +163,7 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 		} else if err := validateWindowsTargetOwnedDirectoryHandle(child, currentPath, target); err != nil {
 			adopted, adoptErr := adoptWindowsAccountCreatedDataDir(
 				currentHandle, child, part, currentPath,
-				sameWindowsEnterprisePath(currentPath, filepath.Dir(canonicalHookDir)), target,
+				sameWindowsEnterprisePath(currentPath, canonicalDataDir), target,
 			)
 			_ = windows.CloseHandle(child)
 			if adoptErr != nil || adopted == 0 {

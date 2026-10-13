@@ -111,7 +111,14 @@ func removeWindowsUserBinariesIn(home, binDir string) ([]string, bool, error) {
 	}
 	// The account can rename or replace its own folder: the pin (which
 	// shares no delete access) holds it, and the root must be that folder.
-	pin, err := openWindowsUserStatePin(binDir)
+	rel, err := filepath.Rel(home, binDir)
+	if err != nil {
+		return nil, false, err
+	}
+	pin, err := openWindowsUserStatePin(home, rel)
+	if errors.Is(err, errInventoryDACLLink) {
+		return nil, false, fmt.Errorf("enterprise hooks: refusing to clean %s, which is reached through a link or junction", binDir)
+	}
 	if err != nil {
 		return nil, false, err
 	}

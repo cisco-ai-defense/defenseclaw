@@ -155,10 +155,9 @@ func openClawReplyText(content string) string {
 
 // applyOpenClawPromptBlock marks the turn of a blocked prompt: its agent and
 // chat spans get a blocked outcome with the block's rule and severity
-// (GAP-2332), and the user when the stream named none.
-// Every other turn names the gateway's own OS user on an unmanaged install
-// (the OpenClaw stream sends no identity), so allowed turns are attributed as
-// the blocked ones and the other connectors' turns are (GAP-2287).
+// (GAP-2332), and the user when the stream named none. The stream meta
+// already names the gateway's own user on an unmanaged install
+// (streamLLMEventMeta).
 func applyOpenClawPromptBlock(observation *hookModelV8Observation) {
 	if observation == nil {
 		return
@@ -172,10 +171,5 @@ func applyOpenClawPromptBlock(observation *hookModelV8Observation) {
 					entry.userID, entry.userIDKind, entry.userName
 			}
 		}
-	}
-	if observation.meta.UserID == "" && observation.meta.UserName == "" {
-		userID, userName := localProcessUser()
-		observation.meta.UserID, observation.meta.UserName = userID, userName
-		observation.meta.UserIDKind = useridentity.KindForID(userID)
 	}
 }

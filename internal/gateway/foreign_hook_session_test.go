@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,8 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	aliceToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", alice)
 	bobToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", bob)
 	path := "/api/v1/foreign-hook-session/claudecode"
+	// The loopback caller account each per-user credential belongs to.
+	peerUIDs := map[string]int{aliceToken: 1001, bobToken: 1002}
 	call := func(h http.Handler, token string, update map[string]any, claimedID string) (int, foreignSessionResult) {
 		t.Helper()
 		data, err := json.Marshal(update)
@@ -62,6 +65,9 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
 		req.Header.Set("Authorization", "Bearer "+token)
+		if uid, ok := peerUIDs[token]; ok {
+			req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: uid, known: true}))
+		}
 		if claimedID != "" {
 			req.Header.Set(llmEventUserIDHeader, claimedID)
 		}

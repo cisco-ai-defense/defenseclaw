@@ -119,17 +119,6 @@ defenseclaw setup local-observability up \
 
 The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. To use `http/protobuf`, configure that protocol on the named `local-observability` destination.
 
-<Accordions>
-
-<Accordion title="Upgrading from v7: --with-audit-sink">
-Older releases exposed `--with-audit-sink/--no-audit-sink` because logs and OTel
-signals used separate `audit_sinks` and `otel` blocks. Config v8 has one
-destination capable of logs, traces, and metrics, so new configuration does not
-need or write a second audit sink.
-</Accordion>
-
-</Accordions>
-
 <Callout title="No-password mode is local trust, not authentication">
 `--no-password` gives every process on the workstation anonymous Grafana Admin
 access. The managed controller still rejects any effective Grafana port bind
@@ -146,7 +135,7 @@ The example below is the result of the sample `up` command using
 `defenseclaw`.
 
 ```yaml title="~/.defenseclaw/config.yaml (after the sample command)"
-config_version: 8
+config_version: 9
 observability:
   destinations:
     - name: local-observability
@@ -210,7 +199,7 @@ this gateway sends.
 
 ## Bundled Grafana dashboards
 
-The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
+The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
 
 <Files>
   <Folder name="grafana/dashboards" defaultOpen>
@@ -230,6 +219,8 @@ The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/das
     <File name="defenseclaw-blocked-events.json" />
     <File name="defenseclaw-ai-discovery.json" />
     <File name="defenseclaw-ai-runtime.json" />
+    <File name="defenseclaw-identity.json" />
+    <File name="defenseclaw-sandboxes.json" />
   </Folder>
 </Files>
 
@@ -248,9 +239,10 @@ The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/das
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, v8 destination/exporter, queue, and canonical gateway-error health. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
 | **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
-| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. On Linux with Tetragon it also shows kernel denials and blocks by your own Tetragon policies. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
-| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. |
+| **Sandboxes** (`defenseclaw-sandboxes`) | OpenShell sandboxes: active count, phase changes, egress by source and outcome, top blocked and allowed hosts, bytes per destination, shadow-AI findings, integration health. `$sandbox` reads Loki structured metadata added by the Collector. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. On Linux with Tetragon: the kernel-controls fleet table, the burn-in table, and the events of your own Tetragon policies. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
 for the owner and purpose of every board, the drill-down map, backend usage,

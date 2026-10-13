@@ -1,0 +1,31 @@
+config_version: 8
+deployment_mode: managed_enterprise
+
+observability:
+  defaults:
+    redaction_profile: sensitive
+
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+  watcher:
+    enabled: false
+
+guardrail:
+  enabled: true
+  rule_pack_dir: ""
+  mode: observe
+  scanner_mode: both
+  detection_strategy: regex_only
+  judge:
+    enabled: false
+  connector: codex
+
+ai_discovery:
+  enabled: true
+
+asset_policy:
+  enabled: false
+
+application_protection:
+  enabled: false

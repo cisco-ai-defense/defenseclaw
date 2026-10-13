@@ -12,9 +12,13 @@
   "full_normalized_inventory_sha256": "183e280c15e0d55155cb6997a33c0b0097b2112315ecfb6c1a59f61aa75cfae6",
   "selection": {
     "policy": "authored-extension-closure-v1",
-    "attribute_ids_sha256": "d23b4aa1a9faa2d44ea0d7f90f332873993e4866d620625fc878eee8faf37eab"
+    "attribute_ids_sha256": "72b8565ff37173abf3c212a19c33c3ff427bab600d97a4b409a89974cab9cfc9"
   },
   "source_files": [
+    {
+      "path": "model/client/registry.yaml",
+      "sha256": "d394ad8c6ae62bb24ca3081af25525d4e38feb94ad23364be9a04c4c9ca335a5"
+    },
     {
       "path": "model/db/registry.yaml",
       "sha256": "aea21c24780d0ad69854aadbf977bad6bc074f0f0c9276708ae790bc750462a7"
@@ -65,6 +69,18 @@
     }
   ],
   "attributes": [
+    {
+      "id": "client.address",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/client/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
     {
       "id": "db.collection.name",
       "allowed_types": [

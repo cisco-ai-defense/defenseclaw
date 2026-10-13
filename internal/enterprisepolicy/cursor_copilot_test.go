@@ -131,6 +131,34 @@ func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
 	}
 }
 
+// GAP-1406: a policy tool deployed DefenseClaw's hook with a shorter
+// timeoutSec. Copilot lets the tool call proceed when the hook times out, so
+// verification must report the timeout and not count the hook as coverage.
+func TestCopilotShortenedHookTimeoutIsAConflict(t *testing.T) {
+	opts := testOptions(t)
+	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := copilotDropInPath(opts)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)["timeoutSec"] = 1
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(edited))
+	state, err := copilotTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, `event preToolUse has timeoutSec "1"`) {
+		t.Fatalf("a shortened hook timeout must fail verification: %+v", state)
+	}
+}
+
 func TestCopilotWindowsRendering(t *testing.T) {
 	opts := Options{GOOS: "windows", HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, WindowsProgramFiles: `C:\Program Files`, WindowsProgramData: `C:\ProgramData`}
 	data, err := renderCopilotDropIn(opts)

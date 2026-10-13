@@ -17,11 +17,31 @@
     "splunk"
   ],
   "x-defenseclaw-coverage": "closed",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "config_version": {
+            "const": 9
+          }
+        },
+        "required": [
+          "config_version"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/v9SourceConstraints"
+      }
+    }
+  ],
   "properties": {
     "config_version": {
       "type": "integer",
-      "const": 8,
-      "description": "Required configuration schema version."
+      "enum": [
+        8,
+        9
+      ],
+      "description": "Required configuration schema version. 9 is the single-source-of-truth layout: the v8 keys marked x-defenseclaw-removed-in: 9 are migration input only."
     },
     "llm": {
       "$ref": "#/$defs/llm"
@@ -35,6 +55,9 @@
       "type": "string",
       "maxLength": 1024,
       "description": "Deprecated pre-v5 model retained by the existing configuration contract."
+    },
+    "llm_providers": {
+      "$ref": "#/$defs/llmProviders"
     },
     "data_dir": {
       "$ref": "#/$defs/pathString"
@@ -112,14 +135,26 @@
     "cloud_auth": {
       "$ref": "#/$defs/cloudAuth"
     },
+    "admission": {
+      "$ref": "#/$defs/admission"
+    },
     "skill_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "mcp_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "plugin_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "asset_policy": {
       "$ref": "#/$defs/assetPolicy"
@@ -152,7 +187,9 @@
     "privacy": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Reserved non-observability privacy section. privacy.disable_redaction is a v7 field and is intentionally rejected in v8."
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: the reserved empty section is read only as v8 migration input and rejected in a v9 source."
     },
     "ai_discovery": {
       "$ref": "#/$defs/aiDiscovery"
@@ -171,6 +208,9 @@
     },
     "routing": {
       "$ref": "#/$defs/routing"
+    },
+    "update": {
+      "$ref": "#/$defs/update"
     }
   },
   "$defs": {
@@ -279,6 +319,7 @@
     },
     "boundedString": {
       "type": "string",
+      "description": "At most 4096 characters.",
       "maxLength": 4096
     },
     "stringList": {
@@ -568,7 +609,10 @@
       "additionalProperties": false,
       "properties": {
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "use_llm": {
           "type": "boolean"
@@ -583,10 +627,16 @@
           "type": "boolean"
         },
         "use_virustotal": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "use_aidefense": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "llm_consensus_runs": {
           "type": "integer",
@@ -594,20 +644,51 @@
           "maximum": 1000
         },
         "policy": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "description": "strict, balanced, permissive, low-noise, quiet or custom (with policy_file). A v8 source may hold a policy file path; v9 accepts only the names."
+        },
+        "policy_file": {
+          "$ref": "#/$defs/assetFileRef",
+          "description": "Custom scan policy, required when policy is custom. Passed to the scanner only when its digest matches."
         },
         "lenient": {
           "type": "boolean"
+        },
+        "judge_source": {
+          "$ref": "#/$defs/scannerJudgeSource",
+          "description": "inherit uses the top-level llm block; override uses scanners.skill_scanner.llm."
+        },
+        "fail_on_severity": {
+          "$ref": "#/$defs/severityName",
+          "default": "HIGH",
+          "description": "Findings at or above this severity block (applied by DefenseClaw, never passed to the scanner)."
+        },
+        "review_queue_min": {
+          "$ref": "#/$defs/severityName",
+          "default": "MEDIUM",
+          "description": "Findings in [review_queue_min, fail_on_severity) are review (warn) findings."
+        },
+        "analyzers": {
+          "$ref": "#/$defs/skillScannerAnalyzers"
+        },
+        "timeouts": {
+          "$ref": "#/$defs/skillScannerTimeouts"
         },
         "llm": {
           "$ref": "#/$defs/llm"
         },
         "virustotal_api_key": {
           "type": "string",
-          "maxLength": 65536
+          "maxLength": 65536,
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "virustotal_api_key_env": {
-          "$ref": "#/$defs/envNameOrEmpty"
+          "$ref": "#/$defs/envNameOrEmpty",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         }
       }
     },
@@ -616,10 +697,21 @@
       "additionalProperties": false,
       "properties": {
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "analyzers": {
-          "$ref": "#/$defs/boundedString"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/boundedString"
+            },
+            {
+              "$ref": "#/$defs/mcpScannerAnalyzerList"
+            }
+          ],
+          "description": "v9: a list of analyzers ([] = auto). A v8 source holds a comma-separated string."
         },
         "scan_prompts": {
           "type": "boolean"
@@ -630,8 +722,28 @@
         "scan_instructions": {
           "type": "boolean"
         },
+        "judge_source": {
+          "$ref": "#/$defs/scannerJudgeSource"
+        },
         "llm": {
           "$ref": "#/$defs/llm"
+        },
+        "yara": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include_bundled": {
+              "type": "boolean",
+              "default": true
+            },
+            "extra_rules": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "$ref": "#/$defs/assetFileRef"
+              }
+            }
+          }
         }
       }
     },
@@ -1090,13 +1202,15 @@
           ]
         },
         "allowed_harnesses": {
-          "$ref": "#/$defs/openShellNameList"
+          "$ref": "#/$defs/openShellNameList",
+          "minItems": 1
         },
         "egress_block": {
           "$ref": "#/$defs/openShellEgressPatternList"
         },
         "egress_allow_only": {
-          "$ref": "#/$defs/openShellEgressPatternList"
+          "$ref": "#/$defs/openShellEgressPatternList",
+          "minItems": 1
         },
         "block_large_uploads": {
           "description": "Block large uploads to first-seen destinations for every sandbox, whatever its pack and the user's openshell.egress.block_large_uploads say; a pack's large_upload_mb of 0 then takes the default threshold. false imposes nothing.",
@@ -1126,6 +1240,103 @@
               "yolo"
             ]
           }
+        },
+        "allowed": {
+          "description": "false refuses sandboxes for the subject; unset allows them.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "required_for": {
+          "description": "Connectors that run only in a sandbox: their host runs are refused. Unset = none; an empty list is refused.",
+          "$ref": "#/$defs/openShellNameList",
+          "minItems": 1
+        },
+        "when_unavailable": {
+          "description": "What a required_for host run does where sandboxes can't run: refuse (also empty) or alert.",
+          "type": "string",
+          "enum": [
+            "",
+            "refuse",
+            "alert"
+          ]
+        },
+        "user_approvals": {
+          "description": "Which asks the user may approve: none, session, or empty (allow_unblock decides).",
+          "type": "string",
+          "enum": [
+            "",
+            "none",
+            "session"
+          ]
+        },
+        "allowed_credentials": {
+          "description": "Provider names a sandbox may receive, or [none] (alone) for no credentials. Unset = no constraint; an empty list is refused.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(none|[a-z0-9][a-z0-9_-]{0,63})$"
+          }
+        },
+        "on_silence": {
+          "description": "What happens when a user-tier harness's hooks fall silent: stop or alert.",
+          "type": "string",
+          "enum": [
+            "",
+            "stop",
+            "alert"
+          ]
+        },
+        "max_silence_after": {
+          "description": "Longest hook silence of a user-tier harness (a Go duration, at least 1m).",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "process_tree": {
+          "description": "true turns the process tree on for every sandbox.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "foreign_sandboxes": {
+          "description": "What happens to sandboxes DefenseClaw did not register: stop (also empty on a managed host) or alert.",
+          "type": "string",
+          "enum": [
+            "",
+            "stop",
+            "alert"
+          ]
+        },
+        "allow_upstream_telemetry": {
+          "description": "true lets OpenShell's own telemetry on; unset is false on a managed host.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "delete_stopped_after": {
+          "description": "Delete a sandbox stopped this long (a Go duration or Nd, at least 1h).",
+          "type": "string",
+          "pattern": "^(|[0-9]+d|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "request_access": {
+          "description": "The contact sandbox refusals end with (at most 512 printable bytes). A profile's value replaces the base's.",
+          "type": "string",
+          "maxLength": 512
+        },
+        "driver_fallback": {
+          "description": "none refuses a Linux sandbox that wants the MicroVM driver where KVM is not available for the user, instead of falling back to docker (enterprise.openshell.driver_fallback). Tighten only: none wins, docker never loosens it.",
+          "type": "string",
+          "enum": [
+            "",
+            "docker",
+            "none"
+          ]
         }
       }
     },
@@ -1145,7 +1356,10 @@
         },
         "allow_list_bypass_scan": {
           "type": "boolean",
-          "default": true
+          "default": true,
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "rescan_enabled": {
           "type": "boolean",
@@ -1305,6 +1519,11 @@
           "minimum": 0,
           "maximum": 86400,
           "default": 5
+        },
+        "trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log judge prompts and responses for debugging (was DEFENSECLAW_JUDGE_TRACE). Refused in managed mode."
         }
       }
     },
@@ -1330,7 +1549,16 @@
           "$ref": "#/$defs/boundedString"
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "block_at": {
           "$ref": "#/$defs/guardrailLevelOrInherit"
@@ -1340,6 +1568,152 @@
         },
         "enabled": {
           "type": "boolean"
+        }
+      }
+    },
+    "guardrailProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Named guardrail policy overrides for the subjects guardrail.profile_assignments selects. Precedence: profile.connectors[c], then the profile field, then guardrail.connectors[c], then the application_protection overlay, then guardrail.*. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "connectors": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/guardrailProfileConnector"
+          }
+        },
+        "sandbox": {
+          "description": "Tightens openshell.admin for the subjects of this profile; only request_access overrides.",
+          "$ref": "#/$defs/openShellAdmin"
+        }
+      }
+    },
+    "guardrailProfileConnector": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-connector overrides inside one guardrail profile. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        }
+      }
+    },
+    "guardrailProfileAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "match"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/stableName"
+        },
+        "match": {
+          "$ref": "#/$defs/guardrailProfileMatch"
+        }
+      }
+    },
+    "guardrailProfileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Subjects an assignment selects. Keys combine with AND, the values of one key with OR. Only verified identity facts are compared; headers, hook payloads and claimed facts never select a profile.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "connectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "pattern": "^agt-[0-9a-f]{16}$"
+          }
         }
       }
     },
@@ -1415,7 +1789,27 @@
           "maximum": 1073741824
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName",
+          "description": "Built-in pack (default, strict, permissive) or a key of custom_packs. Unset uses the default pack."
+        },
+        "custom_packs": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/rulePackName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/customRulePack"
+          }
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "judge": {
           "$ref": "#/$defs/judge"
@@ -1428,6 +1822,15 @@
         },
         "alert_at": {
           "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "cisco_trust_level": {
+          "type": "string",
+          "enum": [
+            "full",
+            "advisory",
+            "none"
+          ],
+          "default": "full"
         },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
@@ -1494,6 +1897,31 @@
           "additionalProperties": {
             "$ref": "#/$defs/perConnectorGuardrail"
           }
+        },
+        "profiles": {
+          "type": "object",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "$ref": "#/$defs/stableName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/guardrailProfile"
+          },
+          "description": "Identity-based guardrail profiles keyed by profile name. Not supported with the Secure Client integration."
+        },
+        "profile_assignments": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/guardrailProfileAssignment"
+          },
+          "description": "Ordered profile assignments; the first match wins."
+        },
+        "default_profile": {
+          "type": "string",
+          "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
+          "default": "",
+          "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
         }
       }
     },
@@ -1921,6 +2349,9 @@
           "additionalProperties": {
             "$ref": "#/$defs/perConnectorAssetPolicy"
           }
+        },
+        "tool": {
+          "$ref": "#/$defs/assetToolPolicy"
         }
       }
     },
@@ -2101,7 +2532,7 @@
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -2368,6 +2799,20 @@
             "maxLength": 256
           }
         },
+        "signature_pack_digests": {
+          "type": "object",
+          "description": "sha256 digest of each signature pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load.",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
         "allow_workspace_signatures": {
           "type": "boolean"
         },
@@ -2398,6 +2843,33 @@
           "default": false,
           "description": "Opt in to attaching the end-user email address a connector reports to identity telemetry. Off by default: unlike the uid or SID it accompanies, the address identifies a person across systems and is emitted as plaintext."
         },
+        "include_user_principal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to attaching the end-user directory principal (UPN) and the session's Kerberos principal to every identity-carrying record: hook decisions, guardrail evaluations, tool activity, agent, model, tool and guardrail spans, and inventory records. Off by default: like the email address, the principal identifies a person across systems."
+        },
+        "trusted_ad_child_domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "default": [],
+          "description": "Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux, for example emea.corp.example.com on a host joined to corp.example.com. An account of a child domain that is not listed gets no domain, realm, directory or principal, so no users assignment or profile matches it. Empty trusts the joined domain only.",
+          "items": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\\.?$"
+          }
+        },
+        "ide_inventory": {
+          "type": "string",
+          "enum": [
+            "all",
+            "ai_only",
+            "off"
+          ],
+          "default": "all",
+          "description": "IDE extension and plugin inventory: all lists every plugin, ai_only lists only plugins that match an AI signature, off disables the inventory. Plugin lists can reveal personal tooling."
+        },
         "lookup_model_provenance_online": {
           "type": "boolean",
           "default": false,
@@ -2419,6 +2891,11 @@
         "confidence_policy_path": {
           "type": "string",
           "maxLength": 4096
+        },
+        "confidence_policy_digest": {
+          "type": "string",
+          "description": "sha256 digest of confidence_policy_path. When set the file applies only when it matches; on a managed standalone device a present file without one does not apply.",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
         },
         "require_trusted_binary_paths": {
           "type": "boolean"
@@ -2595,7 +3072,9 @@
         },
         "compatibility_aliases": {
           "type": "boolean",
-          "default": true
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: telemetry carries only canonical attribute names. A config_version 8 source may still hold the key and it is ignored; a v9 source may not."
         },
         "limits": {
           "$ref": "#/$defs/traceLimits"
@@ -4198,7 +4677,7 @@
     },
     "acpPairName": {
       "type": "string",
-      "description": "Per-pair binding key, \"<client>/<agent>\" — the identifier `defenseclaw acp status` prints.",
+      "description": "Per-pair binding key, \"<client>/<agent>\" \u2014 the identifier `defenseclaw acp status` prints.",
       "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
     },
     "acpPairBindings": {
@@ -4354,6 +4833,17 @@
                 "enabled": {
                   "type": "boolean"
                 },
+                "credential": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+                }
+              }
+            },
+            "llm": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Standalone profile: the protected credential (enterprise secret set) that carries the API key of the llm: block for the LLM judge and the scanners' LLM analyzers.",
+              "properties": {
                 "credential": {
                   "type": "string",
                   "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
@@ -4600,6 +5090,742 @@
             },
             "no_proxy": {
               "$ref": "#/$defs/boundedString"
+            }
+          }
+        },
+        "tetragon": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Linux standalone only: use the Tetragon this host already runs. consume reads its events in the root sensor helper; observe also loads DefenseClaw's built-in kernel controls in monitor mode; enforce lets them deny once enforce_ack matches. macOS and Windows ignore it.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "consume",
+                "observe",
+                "enforce"
+              ]
+            },
+            "burn_in": {
+              "description": "Covered agent time each enrolled user needs before its uid is enforced: 0, or whole hours from 24h to 2160h. Default 168h.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(0|[0-9]{1,4}h)$"
+                },
+                {
+                  "type": "integer",
+                  "const": 0
+                }
+              ]
+            },
+            "enforce_ack": {
+              "description": "The kernel_policy digests you approved for mode enforce: one digest, or a list of at most 4 while a ring upgrade runs two builds. Each is sha256: and 12 lowercase hex digits, as `enterprise linux tetragon verify --ready-for enforce` prints it.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(|sha256:[0-9a-f]{12})$"
+                },
+                {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{12}$"
+                  }
+                }
+              ]
+            },
+            "customer_events": {
+              "description": "The kprobe and LSM events of your own Tetragon policies: agent (default) forwards those under an AI agent, attributed to the agent, the user and the hook decision; off only counts them. DefenseClaw never changes your policies.",
+              "type": "string",
+              "enum": [
+                "agent",
+                "off"
+              ]
+            }
+          }
+        },
+        "openshell": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "How the lifecycle provides and pins OpenShell for managed sandboxes (standalone profile). DefenseClaw never ships OpenShell.",
+          "properties": {
+            "install": {
+              "type": "string",
+              "enum": [
+                "",
+                "prerequisite",
+                "setup"
+              ]
+            },
+            "driver": {
+              "description": "docker, vm or auto (empty: vm on macOS, docker on Linux). auto is the MicroVM driver where the user's KVM probe passes at sandbox start, else docker; macOS is MicroVM only.",
+              "type": "string",
+              "enum": [
+                "",
+                "docker",
+                "vm",
+                "auto"
+              ]
+            },
+            "driver_fallback": {
+              "description": "What a Linux sandbox gets when driver is vm or auto and KVM is not available for the user: docker (the default; same docker access checks and profile floors) or none (refuse with the reason and the request-access contact).",
+              "type": "string",
+              "enum": [
+                "",
+                "docker",
+                "none"
+              ]
+            },
+            "version": {
+              "description": "An exact version (0.1.3) or a range such as \">=0.1.1 <0.2.0\"; setup needs an exact version.",
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^(|[0-9]+\\.[0-9]+\\.[0-9]+|>=[0-9]+\\.[0-9]+\\.[0-9]+( <[0-9]+\\.[0-9]+\\.[0-9]+)?)$"
+            },
+            "gateway_port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "e2fsprogs_dir": {
+              "description": "macOS only: the administrator's e2fsprogs directory (absolute, root-owned chain).",
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    "severityName": {
+      "type": "string",
+      "enum": [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "INFO"
+      ]
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "assetFileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A file referenced by path and pinned by sha256 digest. Both empty means unset.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
+        }
+      }
+    },
+    "admissionAction": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "block",
+            "quarantine",
+            "warn",
+            "allow"
+          ]
+        },
+        {
+          "$ref": "#/$defs/severityAction",
+          "required": [
+            "install",
+            "file",
+            "runtime"
+          ]
+        }
+      ],
+      "description": "Shorthand (block, quarantine, warn, allow) or the exact install/file/runtime triple. block = {install: block, file: none, runtime: disable}; quarantine = {install: block, file: quarantine, runtime: disable}; warn and allow = {install: none, file: none, runtime: enable}."
+    },
+    "admissionActionMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "critical": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "high": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "medium": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "low": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "info": {
+          "$ref": "#/$defs/admissionAction"
+        }
+      }
+    },
+    "admissionFirstParty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source_path_contains"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "source_path_contains": {
+          "$ref": "#/$defs/stringList",
+          "minItems": 1
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "admissionScannerOverrides": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "enum": [
+          "skill-scanner",
+          "mcp-scanner",
+          "plugin-scanner",
+          "codeguard",
+          "clawshield-injection",
+          "clawshield-malware",
+          "clawshield-pii",
+          "clawshield-secrets",
+          "clawshield-vuln"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/admissionActionMap"
+      },
+      "description": "Per-scanner action maps keyed by the scanner that produced the result (scan_result.scanner_name, for example skill-scanner). VirusTotal and the other analyzers run inside skill-scanner, so their findings use the skill-scanner key."
+    },
+    "admissionAssetType": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scan_on_install": {
+          "type": "boolean"
+        },
+        "allow_list_bypass_scan": {
+          "type": "boolean"
+        },
+        "actions": {
+          "$ref": "#/$defs/admissionActionMap"
+        },
+        "scanner_overrides": {
+          "$ref": "#/$defs/admissionScannerOverrides"
+        },
+        "first_party_allow_list": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/admissionFirstParty"
+          }
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Install-time admission policy (replaces policies/rego/data.json and the *_actions keys). Every asset type inherits defaults field by field. When admission.skill.actions is unset it is derived from the scanner gate (scanners.skill_scanner); only skills have a scanner gate, so every other asset type takes its actions from its own admission block or admission.defaults.",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "skill": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "mcp": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "plugin": {
+          "$ref": "#/$defs/admissionAssetType"
+        }
+      }
+    },
+    "ruleId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "rulePackName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "customRulePack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/pathString"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256Digest"
+        }
+      }
+    },
+    "guardrailSuppression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "finding_pattern",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ruleId"
+        },
+        "finding_pattern": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "entity_pattern": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "guardrailSensitiveTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "result_inspection": {
+          "type": "boolean"
+        },
+        "judge_result": {
+          "type": "boolean"
+        },
+        "min_entities_for_alert": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "guardrailRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Customisation layered on rule_pack in this order: protections, enable/disable, severity_overrides, suppressions, sensitive_tools.",
+      "properties": {
+        "protections": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/rulePackName"
+          }
+        },
+        "enable": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        },
+        "disable": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        },
+        "severity_overrides": {
+          "type": "object",
+          "maxProperties": 4096,
+          "propertyNames": {
+            "$ref": "#/$defs/ruleId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/severityName"
+          }
+        },
+        "suppressions": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/guardrailSuppression"
+          }
+        },
+        "sensitive_tools": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/guardrailSensitiveTool"
+          }
+        }
+      }
+    },
+    "assetPolicyToolRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "connector": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "assetToolPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": {
+            "$ref": "#/$defs/assetPolicyToolRule"
+          }
+        },
+        "denied": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": {
+            "$ref": "#/$defs/assetPolicyToolRule"
+          }
+        }
+      }
+    },
+    "llmCustomProviderTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Mirrors configs.ProviderTLS with a CA file reference instead of inline PEM.",
+      "properties": {
+        "ca_cert_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "insecure_skip_verify": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "llmCustomProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "description": "One custom LLM provider; mirrors configs.Provider (custom-providers.json is derived from it).",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "profile_id": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "env_keys": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/envName"
+          }
+        },
+        "base_provider_type": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "allowed_requests": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "available_models": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "request_path_overrides": {
+          "$ref": "#/$defs/stringMap"
+        },
+        "tls": {
+          "$ref": "#/$defs/llmCustomProviderTLS"
+        },
+        "bedrock": {
+          "$ref": "#/$defs/bedrock"
+        },
+        "vertex": {
+          "$ref": "#/$defs/vertex"
+        },
+        "azure": {
+          "$ref": "#/$defs/azure"
+        },
+        "extra_headers": {
+          "$ref": "#/$defs/stringMap"
+        }
+      }
+    },
+    "llmProviders": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Custom LLM providers and local model ports; the input custom-providers.json is derived from.",
+      "properties": {
+        "custom": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/llmCustomProvider"
+          }
+        },
+        "ollama_ports": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Self-update settings. source only changes where release bytes are fetched; signature verification always uses the compiled release identity.",
+      "properties": {
+        "check": {
+          "type": "boolean",
+          "default": true
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "stable"
+          ],
+          "default": "stable"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(|https://[^\\s]+)$",
+          "maxLength": 2056,
+          "default": ""
+        }
+      }
+    },
+    "scannerJudgeSource": {
+      "type": "string",
+      "enum": [
+        "inherit",
+        "override"
+      ],
+      "default": "inherit"
+    },
+    "skillScannerPolicy": {
+      "type": "string",
+      "enum": [
+        "strict",
+        "balanced",
+        "permissive",
+        "low-noise",
+        "quiet",
+        "custom"
+      ]
+    },
+    "skillScannerAnalyzers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "virustotal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "api_key_env": {
+              "$ref": "#/$defs/envNameOrEmpty",
+              "default": "VIRUSTOTAL_API_KEY"
+            },
+            "upload_files": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "aidefense": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "osv": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    },
+    "skillScannerTimeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scan_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 300
+        }
+      }
+    },
+    "mcpScannerAnalyzer": {
+      "type": "string",
+      "enum": [
+        "api",
+        "yara",
+        "llm",
+        "behavioral",
+        "readiness"
+      ]
+    },
+    "mcpScannerAnalyzerList": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/mcpScannerAnalyzer"
+      },
+      "description": "Analyzers to run; an empty list lets the scanner choose (auto)."
+    },
+    "v9SourceConstraints": {
+      "description": "Additional constraints for a config_version 9 source: removed v8 keys and v9-only value shapes.",
+      "properties": {
+        "skill_actions": false,
+        "mcp_actions": false,
+        "plugin_actions": false,
+        "privacy": false,
+        "registries": {
+          "properties": {
+            "sources": {
+              "items": {
+                "properties": {
+                  "auto_sync": false,
+                  "sync_interval_hours": false
+                }
+              }
+            }
+          }
+        },
+        "observability": {
+          "properties": {
+            "trace_policy": {
+              "properties": {
+                "compatibility_aliases": false
+              }
+            }
+          }
+        },
+        "watch": {
+          "properties": {
+            "allow_list_bypass_scan": false
+          }
+        },
+        "guardrail": {
+          "properties": {
+            "rule_pack_dir": false,
+            "connectors": {
+              "additionalProperties": {
+                "properties": {
+                  "rule_pack_dir": false
+                }
+              }
+            },
+            "profiles": {
+              "additionalProperties": {
+                "properties": {
+                  "rule_pack_dir": false,
+                  "connectors": {
+                    "additionalProperties": {
+                      "properties": {
+                        "rule_pack_dir": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "scanners": {
+          "properties": {
+            "skill_scanner": {
+              "properties": {
+                "binary": false,
+                "use_virustotal": false,
+                "use_aidefense": false,
+                "virustotal_api_key": false,
+                "virustotal_api_key_env": false,
+                "policy": {
+                  "$ref": "#/$defs/skillScannerPolicy"
+                }
+              }
+            },
+            "mcp_scanner": {
+              "properties": {
+                "binary": false,
+                "analyzers": {
+                  "$ref": "#/$defs/mcpScannerAnalyzerList"
+                }
+              }
             }
           }
         }

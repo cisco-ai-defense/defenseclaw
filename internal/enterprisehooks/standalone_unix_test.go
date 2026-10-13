@@ -41,7 +41,7 @@ func TestUnixManifestDeferredRowsOnlyInStandalone(t *testing.T) {
 		t.Fatal(err)
 	}
 	withStandaloneUnix(t, false, nil)
-	if _, err := LoadManifest(path); err == nil || !strings.Contains(err.Error(), "Windows-only deferred") {
+	if _, err := LoadManifest(path); err == nil || !strings.Contains(err.Error(), "which only a standalone deployment records") {
 		t.Fatalf("Secure Client/legacy Unix manifests must keep rejecting deferred rows, got %v", err)
 	}
 	SetStandaloneUnix(true)

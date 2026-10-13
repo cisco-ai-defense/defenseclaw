@@ -16,7 +16,9 @@ package enterprisestatus
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
+	"strings"
 )
 
 // SchemaVersion is the lifecycle result schema. Version 1 is the Secure
@@ -45,7 +47,7 @@ const (
 // Service is one managed service or unit.
 type Service struct {
 	Name      string `json:"name"`
-	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path
+	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path, sandbox
 	State     string `json:"state"`
 	StartMode string `json:"start_mode,omitempty"`
 	PID       int    `json:"pid,omitempty"`
@@ -118,6 +120,20 @@ type Message struct {
 	Message string `json:"message"`
 }
 
+// Destination is one observability destination the installed config.yaml
+// compiles to, as status reports it (GAP-1105).
+type Destination struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Enabled bool     `json:"enabled"`
+	Preset  string   `json:"preset,omitempty"`
+	Signals []string `json:"signals"`
+	// RedactionProfiles are the distinct effective profiles of the
+	// destination's send routes; empty for a destination that sends only
+	// metrics.
+	RedactionProfiles []string `json:"redaction_profiles"`
+}
+
 // Result is the lifecycle result document.
 type Result struct {
 	SchemaVersion      int                           `json:"schema_version"`
@@ -147,8 +163,122 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
-	LogPath        string       `json:"log_path,omitempty"`
-	ExitCode       int          `json:"exit_code"`
+	// Policy is the effective policy state; nil (omitted) under the Secure
+	// Client integration and when the gateway did not report it.
+	Policy *PolicyState `json:"policy,omitempty"`
+	// Scanners is the standalone Windows scanner runtime (skill, MCP and
+	// plugin scanners); nil (omitted) everywhere else.
+	Scanners *ScannerRuntime `json:"scanners,omitempty"`
+	// Destinations lists, for status, the observability destinations of the
+	// installed config.yaml with their effective redaction profiles, from the
+	// compiler `defenseclaw observability plan` uses (GAP-1105).
+	Destinations []Destination `json:"destinations,omitempty"`
+	LogPath      string        `json:"log_path,omitempty"`
+	ExitCode     int           `json:"exit_code"`
+	// ConfigRefused marks a run that refused the submitted config before it
+	// changed anything: the policy, services and advisories it reports are
+	// the running deployment's. Text output only (GAP-0564).
+	ConfigRefused bool `json:"-"`
+	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
+	// shape for an unelevated macOS lifecycle command.
+	PreserveNotRootDeploymentState bool `json:"-"`
+}
+
+// ScannerRuntime reports the scanners a standalone Windows deployment runs.
+type ScannerRuntime struct {
+	// State: ready, not_prepared (installed but not unpacked), untrusted
+	// (not the executable the payload trust policy admitted, so not run),
+	// missing.
+	State string `json:"state"`
+	// Versions of the pinned components (skill-scanner, mcp-scanner,
+	// litellm, python, ...).
+	Versions map[string]string `json:"versions,omitempty"`
+	// Policy is scanners.skill_scanner.policy; JudgeModel the resolved
+	// scanner LLM judge model ("" when no judge is configured).
+	Policy     string `json:"policy,omitempty"`
+	JudgeModel string `json:"judge_model,omitempty"`
+	// Problem names the unpacked file that is missing or changed when a
+	// prepared runtime is damaged (State not_prepared).
+	Problem string `json:"problem,omitempty"`
+}
+
+// PolicyState reports the effective policy a lifecycle step left in place.
+type PolicyState struct {
+	// EffectiveDigest is effective_policy_digest computed from the
+	// committed config and its assets ("sha256:<hex>").
+	EffectiveDigest string `json:"effective_digest"`
+	// ConfigGeneration is config_generation from config.generation.json.
+	ConfigGeneration uint64 `json:"config_generation"`
+	// Applied is true when the gateway reports the same digest.
+	Applied bool `json:"applied"`
+	// GatewayReportedDigest is the digest /health reported; empty when the
+	// gateway was not reachable.
+	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+	// LastReloadError is policy.last_reload_error from /health: why the
+	// gateway rejected its last reload. While it is set the gateway enforces
+	// an older policy than the installed config, so Applied is false.
+	LastReloadError string `json:"last_reload_error,omitempty"`
+	// ConfigUnrecorded is true when config.yaml was changed outside the
+	// lifecycle: its generation is not the one config.generation.json
+	// records, and the running gateway may already enforce it.
+	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
+}
+
+// ShortDigest is "sha256:" and the first 12 hex digits of a digest, or "none".
+func ShortDigest(digest string) string {
+	if digest == "" {
+		return "none"
+	}
+	if len(digest) > len("sha256:")+12 {
+		return digest[:len("sha256:")+12]
+	}
+	return digest
+}
+
+// Line is the one human-readable line status, verify and ensure print for the
+// policy: the config generation, the effective digest and whether the gateway
+// enforces it. The same facts are in --json under "policy".
+func (p *PolicyState) Line() string {
+	line := fmt.Sprintf("policy: config generation %d, effective digest %s", p.ConfigGeneration, ShortDigest(p.EffectiveDigest))
+	switch {
+	case p.LastReloadError != "":
+		line += "; the gateway rejected its last reload (" + p.LastReloadError + ") and keeps enforcing the policy it last built"
+	case p.Applied:
+		line += "; applied by the gateway"
+	case p.GatewayReportedDigest == "":
+		line += "; the gateway did not report a policy, so it is not confirmed as applied"
+	default:
+		line += "; the gateway reports " + ShortDigest(p.GatewayReportedDigest) + " and applies this one on its next reload"
+	}
+	if p.ConfigUnrecorded {
+		line += "; config.yaml was changed outside the lifecycle"
+	}
+	return line
+}
+
+// PolicyLine is Policy.Line(), labelled as the running deployment's when the
+// run refused the submitted config (ConfigRefused); "" without a policy.
+func (r *Result) PolicyLine() string {
+	if r == nil || r.Policy == nil {
+		return ""
+	}
+	line := r.Policy.Line()
+	if r.ConfigRefused {
+		line = "running policy (the refused config changed nothing)" + strings.TrimPrefix(line, "policy")
+	}
+	return line
+}
+
+// PolicyStateFileName is the lifecycle state file holding the last applied
+// policy state (PolicyStateRecord), next to deployment.json.
+const PolicyStateFileName = "policy-state.json"
+
+// PolicyStateRecord is policy-state.json.
+type PolicyStateRecord struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+	// AppliedAt is RFC 3339 UTC.
+	AppliedAt string `json:"applied_at"`
 }
 
 // New returns a result with the schema version and empty collections set,
@@ -211,6 +341,28 @@ func InvalidArgsExitCode(goos string) int {
 	return UnixExitInvalidArgs
 }
 
+// notRootCode is the refusal of a Linux or macOS action run without root.
+const notRootCode = "not_root"
+
+// deploymentStateFields report the deployment. A not_root result checked
+// nothing (a standard user cannot read the root-only deployment record), so
+// it leaves them out instead of reporting installed: false, no services and
+// every readiness flag false, which a script that ignores the error code read
+// as "not installed" (GAP-0279).
+var deploymentStateFields = []string{
+	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
+	"destinations",
+}
+
+func (r Result) refusedNotRoot() bool {
+	for _, e := range r.Errors {
+		if e.Code == notRootCode {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalJSON renders services in a stable order.
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result
@@ -233,6 +385,20 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	if !r.refusedNotRoot() || r.PreserveNotRootDeploymentState {
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range deploymentStateFields {
+		delete(fields, name)
+	}
+	buf.Reset()
+	if err := encoder.Encode(fields); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

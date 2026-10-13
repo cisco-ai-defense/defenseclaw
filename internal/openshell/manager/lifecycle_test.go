@@ -377,6 +377,10 @@ func TestCreateRollsBackEachStep(t *testing.T) {
 		}, sandboxapi.CodeUpstream, true, true, true},
 		// The failed create collects the --credential profile it imported, too.
 		{"sandbox create fails", fail(openshelltest.MethodCreateSandbox, types.ErrorInvalidArgument), sandboxapi.CodeInvalid, true, true, true},
+		// Bind mounts off in gateway.toml: the error names the fix, not OpenShell's conflict.
+		{"bind mounts off", func(e *harnessEnv) {
+			e.fake.FailNext(openshelltest.MethodCreateSandbox, &types.StatusError{Code: types.ErrorConflict, Message: "caller driver config is disabled"})
+		}, sandboxapi.CodeUnavailable, true, true, true},
 		{"wait ready fails", fail(openshelltest.MethodWaitReady, types.ErrorInternal), sandboxapi.CodeUpstream, true, true, true},
 		{"configuration rejected", func(e *harnessEnv) {
 			e.fake.Intercept(func(method string) error {
@@ -794,6 +798,7 @@ func TestStartRefusesLimitsAboveALowerMaximum(t *testing.T) {
 			e.create(sandboxapi.CreateRequest{Name: "resbox", Memory: tc.memory})
 			e.stopBox("resbox")
 			e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MaxResources = tc.max })
+			e.m.refreshEgress() // the config loop's re-resolution: the view judges the sandbox's own floor
 			warned := findWarning(e.get("resbox").Warnings, "your organization now caps sandbox") != ""
 			_, err := e.m.Start(t.Context(), "resbox", sandboxapi.StartRequest{})
 			if !tc.refuse {
@@ -826,7 +831,7 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		note("exec")
 		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
 	})
@@ -843,12 +848,12 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	if len(got) < 2 || got[0] != "exec" || !slices.Contains(got, "stop") {
 		t.Fatalf("calls = %v, want the harness asked to exit before the stop", got)
 	}
-	if calls := e.fake.ExecCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
+	if calls := e.execCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
 		!slices.Contains(calls[0].Command, harness.RunDir) || calls[0].Timeout <= harnessExitWait {
 		t.Fatalf("exec calls = %+v", calls)
 	}
 	e.startBox("stopbox", sandboxapi.StartRequest{})
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 	})
 	e.stopBox("stopbox")
@@ -1179,7 +1184,8 @@ func TestGatewayUnavailable(t *testing.T) {
 	e.connErr = errors.New("connection refused")
 	_, err := e.tryCreate(sandboxapi.CreateRequest{})
 	wantCode(t, err, sandboxapi.CodeUnavailable)
-	if st, err := e.m.Status(t.Context()); err != nil || st.Available || !strings.Contains(st.Reason, "connection refused") || !st.Enabled {
+	// The reason is in words (GAP-0317), the client's text in the log.
+	if st, err := e.m.Status(t.Context()); err != nil || st.Available || st.Reason != "the OpenShell gateway is not running (nothing listens on its port)" || !st.Enabled {
 		t.Fatalf("status = %+v, %v", st, err)
 	}
 	e.connErr = nil
@@ -1282,6 +1288,37 @@ func TestOperationsLeaveASandboxThatTookTheName(t *testing.T) {
 	}
 }
 
+// delete_stopped_after deletes a sandbox stopped, or completed (its main
+// process ended, which on the MicroVM driver keeps the VM running), longer
+// than the floor allows, and leaves the running one (GAP-0012).
+func TestDeleteStoppedAfterCountsStoppedAndCompleted(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Admin.DeleteStoppedAfter = "2h" })
+	_, advance := e.fakeClock(time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC))
+	e.create(sandboxapi.CreateRequest{Name: "stopbox"})
+	e.create(sandboxapi.CreateRequest{Name: "donebox", Project: e.otherProject("done")})
+	e.create(sandboxapi.CreateRequest{Name: "upbox", Project: e.otherProject("up")})
+	e.stopBox("stopbox")
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "donebox", types.SandboxCompleted))
+	must(t, e.m.Reconcile(t.Context()))
+	advance(time.Hour)
+	must(t, e.m.Reconcile(t.Context()))
+	for _, name := range []string{"stopbox", "donebox", "upbox"} {
+		if e.boxOf(name) == nil {
+			t.Fatalf("%s went before delete_stopped_after", name)
+		}
+	}
+	advance(90 * time.Minute)
+	must(t, e.m.Reconcile(t.Context()))
+	for name, kept := range map[string]bool{"stopbox": false, "donebox": false, "upbox": true} {
+		if _, err := e.client.GetSandbox(t.Context(), name); (err == nil) != kept {
+			t.Errorf("%s in OpenShell: %v, want kept %v", name, err, kept)
+		}
+	}
+	if len(e.events("donebox", sandboxapi.ActivityLifecycle, "delete_stopped_after")) != 1 {
+		t.Error("no feed line says why donebox went")
+	}
+}
+
 // replaceOutside deletes a sandbox outside DefenseClaw and creates another
 // under its name, with labels, in phase. The fake gateway gives sandboxes no
 // IDs: the box records one and the new sandbox gets another.
@@ -1352,6 +1389,25 @@ func TestDeleteFailureKeepsWatching(t *testing.T) {
 	})
 }
 
+// GAP-0601: a stop or a delete whose connection to the OpenShell gateway
+// closed under the call (the gateway restarted, or another call dropped the
+// connection) goes again on a fresh connection instead of ending the session
+// with gRPC's words.
+func TestStopAndDeleteGoAgainOnAClosedConnection(t *testing.T) {
+	e := liveEnv(t, "flaky", nil)
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorUnavailable, Message: "error reading from server: EOF"})
+	if _, err := e.m.Stop(t.Context(), "flaky"); err != nil {
+		t.Fatalf("stop after a closed connection: %v", err)
+	}
+	if got := e.get("flaky").Phase; got != "stopped" {
+		t.Fatalf("phase after the stop = %s", got)
+	}
+	e.fake.FailNext(openshelltest.MethodDeleteSandbox, &types.StatusError{Code: types.ErrorUnavailable, Message: "error reading from server: EOF"})
+	if _, err := e.m.Delete(t.Context(), "flaky", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatalf("delete after a closed connection: %v", err)
+	}
+}
+
 func findWarning(warnings []string, prefix string) string {
 	for _, w := range warnings {
 		if strings.HasPrefix(w, prefix) {
@@ -1359,4 +1415,47 @@ func findWarning(warnings []string, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// TestStartRenewsTheModelCredential (GAP-0080): a sandbox kept the model
+// key it was created with, so after a Bedrock key expired every model call
+// of the next session failed (401) until the sandbox was deleted. A start
+// gives the provider the key the caller's environment holds now, for the
+// profile the sandbox was created with only, and only its own variables.
+// The gateway never returns a provider's values (the first fix compared
+// with them and so never updated anything live), so the fake withholds
+// them as well, and the key the provider already holds changes nothing.
+func TestStartRenewsTheModelCredential(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fake.WithholdProviderCredentials()
+	e.live(sandboxapi.CreateRequest{Name: "keybox", LLM: anthropicLLM})
+	key := func() map[string]string {
+		p, err := e.fake.SDK().Providers().Get(t.Context(), e.client.Workspace(), "keybox-llm")
+		must(t, err)
+		return p.Spec.Credentials
+	}
+	// start reports the provider updates the start made.
+	start := func(profile string, creds map[string]string) int {
+		e.stopBox("keybox")
+		before := e.fake.Calls(openshelltest.MethodUpdateProvider)
+		e.startBox("keybox", sandboxapi.StartRequest{LLM: &sandboxapi.LLMCredential{Profile: profile, Credentials: creds}})
+		return e.fake.Calls(openshelltest.MethodUpdateProvider) - before
+	}
+	start(profiles.OpenAIID, map[string]string{"ANTHROPIC_API_KEY": "sk-other"})
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-test-secret" {
+		t.Fatalf("another profile's credential replaced the key: %v", got)
+	}
+	unchanged := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"})
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed", "OTHER_KEY": "x"}); n != unchanged+1 {
+		t.Fatalf("a renewed key made %d provider updates, a start %d", n, unchanged)
+	}
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-renewed" || got["OTHER_KEY"] != "" {
+		t.Fatalf("provider credentials = %v", got)
+	}
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed"}); n != unchanged {
+		t.Fatalf("the key the provider holds made %d provider updates, a start %d", n, unchanged)
+	}
+	if ev := e.events("keybox", sandboxapi.ActivityLifecycle, "model_credential_updated"); len(ev) != 1 {
+		t.Fatalf("feed = %+v", ev)
+	}
 }

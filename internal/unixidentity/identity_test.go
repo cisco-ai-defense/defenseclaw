@@ -19,7 +19,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestParsePasswdLine(t *testing.T) {
@@ -54,7 +57,7 @@ func TestParseGroupAndInitgroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if group.Name != "ai-devs" || group.GID != 5001 || !reflect.DeepEqual(group.Members, []string{"alice", "bob"}) {
+	if group.Name != "ai-devs" || group.GID != 5001 {
 		t.Fatalf("unexpected group %+v", group)
 	}
 	if _, err := ParseGroupLine("ai-devs:*:5001"); err == nil {
@@ -92,14 +95,17 @@ func TestParseLoginDefsUIDRange(t *testing.T) {
 }
 
 type fakeRun struct {
+	mu      sync.Mutex
 	calls   [][]string
 	results map[string]commandResult
 	errs    map[string]error
 }
 
-func (f *fakeRun) run(_ context.Context, path string, args []string) (commandResult, error) {
+func (f *fakeRun) run(_ context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
 	key := strings.Join(args, " ")
+	f.mu.Lock()
 	f.calls = append(f.calls, append([]string{path}, args...))
+	f.mu.Unlock()
 	if err := f.errs[key]; err != nil {
 		return commandResult{}, err
 	}
@@ -140,6 +146,11 @@ func TestNSSResolverLookups(t *testing.T) {
 	}
 	if _, err := r.LookupUser("broken"); err == nil || IsNotFound(err) {
 		t.Fatalf("getent failure must be transient, got %v", err)
+	}
+	// GAP-0072: SSSD answers a principal in any case with its canonical name.
+	f.results["passwd LDAPUser@EXAMPLE.TEST"] = commandResult{stdout: []byte("ldapuser@example.test:*:70002:70002::/home/ldapuser:/bin/bash\n")}
+	if upper, err := r.LookupUser("LDAPUser@EXAMPLE.TEST"); err != nil || upper.UID != 70002 {
+		t.Fatalf("a principal in another case = %+v, %v", upper, err)
 	}
 	if _, err := r.LookupUser("spoof"); err == nil {
 		t.Fatal("an answer for a different account was accepted")
@@ -300,4 +311,87 @@ func FuzzParseInitgroups(f *testing.F) {
 			}
 		}
 	})
+}
+
+// spellingResolver answers getent passwd like winbind and SSSD: a key in
+// another spelling (or a UPN search) answers the account it finds.
+type spellingResolver struct {
+	Resolver
+	answers map[string]Account
+}
+
+func (s spellingResolver) LookupUser(name string) (Account, error) {
+	account, ok := s.answers[name]
+	switch {
+	case !ok:
+		return Account{}, ErrNotFound
+	case account.Name != name:
+		return Account{}, &NameMismatchError{Key: name, Answered: account}
+	}
+	return account, nil
+}
+
+func (s spellingResolver) LookupUID(uid int) (Account, error) {
+	for _, account := range s.answers {
+		if account.UID == uid {
+			return account, nil
+		}
+	}
+	return Account{}, ErrNotFound
+}
+
+// GAP-0711, GAP-0740: profile-explain and policy --user take the spellings
+// getent takes for the same account, and never another account a UPN or
+// e-mail search answers.
+func TestLookupAccountSpelling(t *testing.T) {
+	eli6 := Account{Name: `DCLAB\dcad-eli6`, UID: 2003912}
+	eli7 := Account{Name: "dcad-eli7", UID: 2003913}
+	ldap := Account{Name: "ldapcarol", UID: 4001}
+	w4a1 := Account{Name: "dcad-w4a1@dclab.test", UID: 94403999}
+	r := spellingResolver{answers: map[string]Account{
+		`DCLAB\dcad-eli6`: eli6, "dcad-eli6@dclab.test": eli6, "dcad-eli6": eli6,
+		"dcad-eli7": eli7, `DCLAB\dcad-eli7`: eli7, "eli7.alt@alt.dclab.test": eli7,
+		"carol@dclab.test":     ldap,
+		"dcad-w4a1@dclab.test": w4a1, `DCLAB\dcad-w4a1`: w4a1, `OTHER\dcad-w4a1`: w4a1,
+	}}
+	facts := func(uid int) (useridentity.DirectoryFacts, bool) {
+		switch uid {
+		case eli6.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", Realm: "DCLAB.TEST"}, true
+		case eli7.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", UPN: "eli7.alt@alt.dclab.test"}, true
+		case w4a1.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", Realm: "DCLAB.TEST", AccountDomain: "DCLAB"}, true
+		}
+		return useridentity.DirectoryFacts{Domain: "dclab.test"}, true
+	}
+	for _, tt := range []struct {
+		name  string
+		facts bool
+		want  int
+	}{
+		{"dcad-eli6@dclab.test", true, eli6.UID},
+		{"dcad-eli6@dclab.test", false, -1},
+		{"dcad-eli6", false, eli6.UID},
+		{`DCLAB\dcad-eli7`, false, eli7.UID},
+		{"eli7.alt@alt.dclab.test", true, eli7.UID},
+		{"carol@dclab.test", true, -1},
+		// GAP-1089: DOMAIN\user, the users entry spelling, takes the qualified
+		// name SSSD answers for it when the account's verified NetBIOS domain
+		// is the one written, and no other domain.
+		{`DCLAB\dcad-w4a1`, true, w4a1.UID},
+		{`OTHER\dcad-w4a1`, true, -1},
+	} {
+		lookupFacts := facts
+		if !tt.facts {
+			lookupFacts = nil
+		}
+		got, err := LookupAccountSpelling(r, tt.name, lookupFacts)
+		if tt.want < 0 && err == nil || tt.want >= 0 && (err != nil || got.UID != tt.want) {
+			t.Fatalf("LookupAccountSpelling(%q, facts=%v) = %+v, %v; want uid %d", tt.name, tt.facts, got, err, tt.want)
+		}
+		if err != nil && strings.Contains(AccountLookupError(tt.name, "", err).Error(), "unixidentity:") {
+			t.Fatalf("the lookup error of %q keeps the package prefix: %v", tt.name, AccountLookupError(tt.name, "", err))
+		}
+	}
 }

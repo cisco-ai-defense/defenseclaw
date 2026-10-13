@@ -25,12 +25,14 @@ import (
 // out run is retried at once; the warm run answers.
 func TestExecUnixAgentVersionRetriesATimedOutColdStart(t *testing.T) {
 	old := unixAgentVersionAttemptTimeout
-	unixAgentVersionAttemptTimeout = 300 * time.Millisecond
+	// Long enough for a loaded host to start the script both times; the cold
+	// run sleeps well past it.
+	unixAgentVersionAttemptTimeout = 3 * time.Second
 	t.Cleanup(func() { unixAgentVersionAttemptTimeout = old })
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "warm")
 	script := filepath.Join(dir, "agy")
-	body := "#!/bin/sh\nif [ ! -e " + marker + " ]; then : > " + marker + "; exec sleep 5; fi\necho 'agy 1.30.2'\n"
+	body := "#!/bin/sh\nif [ ! -e " + marker + " ]; then : > " + marker + "; exec sleep 30; fi\necho 'agy 1.30.2'\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}

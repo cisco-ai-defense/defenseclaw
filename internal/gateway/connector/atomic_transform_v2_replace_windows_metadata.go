@@ -230,14 +230,6 @@ func atomicTransformV2WindowsOwnerGroupFromOpen(file *os.File) (string, string, 
 	return canonical, atomicTransformDigest([]byte(canonical)), nil
 }
 
-func atomicTransformV2WindowsDACLFromOpen(file *os.File) (string, error) {
-	sddl, err := atomicTransformV2WindowsDACLCanonicalFromOpen(file)
-	if err != nil {
-		return "", err
-	}
-	return atomicTransformDigest([]byte(sddl)), nil
-}
-
 type atomicTransformV2WindowsBasicInfo struct {
 	CreationTime   uint64
 	LastAccessTime uint64
@@ -492,11 +484,6 @@ func atomicTransformV2WindowsMetadataFromOpen(
 	_ = binary.Write(stageOwned, binary.LittleEndian, witness.LastWriteTime)
 	witness.StageOwnedDigest = hex.EncodeToString(stageOwned.Sum(nil))
 	return witness, nil
-}
-
-func atomicTransformV2WindowsMetadataDigestFromOpen(file *os.File) (string, error) {
-	witness, err := atomicTransformV2WindowsMetadataFromOpen(file)
-	return witness.Digest, err
 }
 
 func atomicTransformV2WindowsPreservedComparison(
