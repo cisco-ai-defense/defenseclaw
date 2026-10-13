@@ -195,7 +195,7 @@ func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "config.generation.json"), encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	in, generation, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, 2, true)
+	in, generation, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 2, true)
 	if !ok || generation != 3 || in.Bundle == nil || in.Bundle.ID != testBundleID || in.Bundle.Version != 4 ||
 		in.Bundle.SignerKeyID != "fleet-2026-10" || in.Bundle.ChangeSummary != "tighten egress" || in.After["bundle_id"] != testBundleID {
 		t.Fatalf("activity = %+v bundle=%+v", in, in.Bundle)
@@ -205,11 +205,11 @@ func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "config.generation.json"), encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if applied, _, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, 2, true); !ok ||
+	if applied, _, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 2, true); !ok ||
 		applied.Actor != "os:uid:0:root" || applied.Principal != "control-plane:acme/alice" {
 		t.Fatalf("bundle actor/principal = %+v, ok=%v", applied, ok)
 	}
-	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, 1, true); in.Bundle == nil ||
+	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 1, true); in.Bundle == nil ||
 		in.Actor != "os:uid:0:root" || in.Principal != "control-plane:acme/alice" || len(in.Diff) != 0 || in.After["coalesced"] != true {
 		t.Fatalf("coalesced signed bundle lost its final policy identity or attributed the aggregate diff: %+v", in)
 	}

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -199,7 +198,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 // the running gateway, rebuild its policy, and emit the attributed audit row.
 func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte("config_version: 8\nguardrail:\n  mode: action\nobservability: {}\n")
+	raw := []byte("config_version: 9\nguardrail:\n  mode: action\nobservability: {}\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -258,16 +257,7 @@ func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 	write(2, hotID)
 	select {
 	case diff := <-applied:
-		// On Windows the reloaded config spells guardrail.policy_dir with the host
-		// separator, so the diff lists the guardrail section instead of (or as well
-		// as) the assets. The contract here is that the bundle generation rebuilt
-		// the config without a restart and was audited below; the exact asset-only
-		// classification is checked on the other platforms.
-		hasAssets := false
-		for _, changed := range diff.Changed {
-			hasAssets = hasAssets || changed == configDiffAssets
-		}
-		if len(diff.RestartRequired) != 0 || (runtime.GOOS != "windows" && (!hasAssets || len(diff.Changed) != 1)) {
+		if len(diff.RestartRequired) != 0 || len(diff.Changed) != 1 || diff.Changed[0] != configDiffAssets {
 			t.Fatalf("hot policy asset diff = %+v", diff)
 		}
 	case <-time.After(5 * time.Second):

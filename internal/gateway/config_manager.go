@@ -1148,6 +1148,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		awaitRecordedConfigBytes(ctx, m.path, source.raw)
 	}
 	activity, appliedGeneration, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed,
+		append(append([]string{}, diff.RestartRequired...), pendingRestart...),
 		m.appliedGeneration, m.appliedGenerationKnown)
 	if recorded {
 		m.appliedGeneration, m.appliedGenerationKnown = appliedGeneration, true
@@ -1363,7 +1364,7 @@ func cloneConfig(in *config.Config) *config.Config {
 }
 
 func (m *ConfigManager) matches(path string) bool {
-	return filepath.Clean(path) == m.path
+	return equalConfigPathForDiff(filepath.Clean(path), m.path, runtime.GOOS)
 }
 
 // classify reports which watched file the fsnotify event refers to:
@@ -1374,13 +1375,13 @@ func (m *ConfigManager) matches(path string) bool {
 // events on the target's *parent*, not the target itself.
 func (m *ConfigManager) classify(path string) string {
 	cleaned := filepath.Clean(path)
-	if cleaned == m.path {
+	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) {
 		return "config"
 	}
-	if envPath := m.getEnvConfigPath(); envPath != "" && cleaned == filepath.Clean(envPath) {
+	if envPath := m.getEnvConfigPath(); envPath != "" && equalConfigPathForDiff(cleaned, filepath.Clean(envPath), runtime.GOOS) {
 		return "env_config"
 	}
-	if cleaned == filepath.Join(filepath.Dir(m.path), configwrite.GenerationFileName) {
+	if equalConfigPathForDiff(cleaned, filepath.Join(filepath.Dir(m.path), configwrite.GenerationFileName), runtime.GOOS) {
 		return configGenerationTrigger
 	}
 	return ""
@@ -1456,8 +1457,13 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	}
 	var changed []string
 	add := func(path string, oldVal, newVal any) {
-		if !reflect.DeepEqual(oldVal, newVal) {
+		if !configValuesEqualForDiff(oldVal, newVal, runtime.GOOS) {
 			changed = append(changed, path)
+		}
+	}
+	addPath := func(name, oldPath, newPath string) {
+		if !equalConfigPathForDiff(oldPath, newPath, runtime.GOOS) {
+			changed = append(changed, name)
 		}
 	}
 	add("llm", oldCfg.LLM, newCfg.LLM)
@@ -1500,9 +1506,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
 	add("deployment_mode", oldCfg.DeploymentMode, newCfg.DeploymentMode)
 	add("discovery_source", oldCfg.DiscoverySource, newCfg.DiscoverySource)
-	add("data_dir", oldCfg.DataDir, newCfg.DataDir)
-	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
-	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
+	addPath("data_dir", oldCfg.DataDir, newCfg.DataDir)
+	addPath("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
+	addPath("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
 	// Secure Client keeps the reload classification it had before the
 	// configuration generation (issue #1092): the hot set below, a restart
 	// for any gateway edit but the reload mode, and every per-connector
@@ -1516,9 +1522,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// watch) and quarantine_dir restarts the install watcher in-process,
 		// so both are hot; plugin_dir is restart-required: the connector
 		// registry discovers its plugins when the guardrail starts.
-		add("policy_dir", oldCfg.PolicyDir, newCfg.PolicyDir)
-		add("quarantine_dir", oldCfg.QuarantineDir, newCfg.QuarantineDir)
-		add("plugin_dir", oldCfg.PluginDir, newCfg.PluginDir)
+		addPath("policy_dir", oldCfg.PolicyDir, newCfg.PolicyDir)
+		addPath("quarantine_dir", oldCfg.QuarantineDir, newCfg.QuarantineDir)
+		addPath("plugin_dir", oldCfg.PluginDir, newCfg.PluginDir)
 	}
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
@@ -1640,7 +1646,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 			restart = append(restart, path)
 		}
 	}
-	if oldCfg.Gateway.DeviceKeyFile != newCfg.Gateway.DeviceKeyFile {
+	if !equalConfigPathForDiff(oldCfg.Gateway.DeviceKeyFile, newCfg.Gateway.DeviceKeyFile, runtime.GOOS) {
 		restart = append(restart, "gateway.device_key_file")
 	}
 	oldGateway := oldEffectiveGateway
@@ -1649,7 +1655,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	if !secureClient {
 		oldGateway.Watcher, newGateway.Watcher = config.GatewayWatcherConfig{}, config.GatewayWatcherConfig{}
 	}
-	if !reflect.DeepEqual(oldGateway, newGateway) {
+	if !configValuesEqualForDiff(oldGateway, newGateway, runtime.GOOS) {
 		restart = append(restart, "gateway")
 	}
 	if oldCfg.Guardrail.ScannerMode != newCfg.Guardrail.ScannerMode {
@@ -1757,7 +1763,7 @@ func onlyRetainJudgeBodiesChanged(oldCfg, newCfg *config.Config) bool {
 	oldGuardrail := oldCfg.Guardrail
 	newGuardrail := newCfg.Guardrail
 	oldGuardrail.RetainJudgeBodies = newGuardrail.RetainJudgeBodies
-	return reflect.DeepEqual(oldGuardrail, newGuardrail)
+	return configValuesEqualForDiff(oldGuardrail, newGuardrail, runtime.GOOS)
 }
 
 func sortedUniqueStrings(values []string) []string {

@@ -53,7 +53,7 @@ const unattributedConfigActor = "unattributed"
 // debounce, or written while reloads were rejected, carry the paths of other
 // writers too: that event says unattributed and gives the generation range
 // and the last writer instead (GAP-0318). generation is the applied one.
-func configChangeActivity(path string, previous, raw []byte, sections []string, last uint64, lastKnown bool) (in audit.ActivityInput, generation uint64, ok bool) {
+func configChangeActivity(path string, previous, raw []byte, sections, effectiveRestart []string, last uint64, lastKnown bool) (in audit.ActivityInput, generation uint64, ok bool) {
 	state, err := configwrite.ReadGenerationState(path)
 	sum := configwrite.SHA256Hex(raw)
 	if err != nil || strings.TrimSpace(state.Actor) == "" ||
@@ -73,7 +73,10 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 			paths = changed
 		}
 	}
-	restart := configwrite.RestartRequired(paths)
+	// The raw YAML diff supplies precise audit paths, but its parent paths can
+	// classify a whole section as restart-required. The gateway's effective
+	// config diff is the authority on whether this apply needs a restart.
+	restart := effectiveRestart
 	if restart == nil {
 		restart = []string{}
 	}

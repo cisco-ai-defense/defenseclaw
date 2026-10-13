@@ -2471,7 +2471,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 			oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 			!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 			!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
-			oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+			!equalConfigPathForDiff(oldG.RulePackDir, newG.RulePackDir, runtime.GOOS) || oldG.HookSelfHeal != newG.HookSelfHeal ||
 			oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 			!reflect.DeepEqual(oldG.Judge, newG.Judge)
 	}

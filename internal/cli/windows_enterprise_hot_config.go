@@ -261,7 +261,7 @@ func windowsEnterpriseHotConfigApply(
 	if opts.bundle != nil && opts.bundle.gatewayRestarted {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
-	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait) {
+	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
 		undo()
 		if opts.bundle != nil && opts.bundle.gatewayRestarted {
 			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
@@ -377,14 +377,20 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the
 // effective policy the installed config computes to, with no rejected reload
 // and the config recorded.
-func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration) bool {
+func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, bundle *windowsBundleRun) bool {
 	deadline := time.Now().Add(wait)
 	for {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
-		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
+		decoded := json.Unmarshal(out, &report) == nil
+		bundleApplied := true
+		if bundle != nil && bundle.prepared != nil && bundle.prepared.Receipt != nil && bundle.prepared.Receipt.BundleID != "" {
+			bundleApplied = report.GatewayReportedBundleID == bundle.prepared.Receipt.BundleID &&
+				report.GatewayReportedBundleVersion == bundle.prepared.Receipt.Version
+		}
+		if decoded && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
 			report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
-			report.GatewayReportedConfigGeneration == report.ConfigGeneration {
+			report.GatewayReportedConfigGeneration == report.ConfigGeneration && bundleApplied {
 			return true
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {

@@ -547,6 +547,26 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
+func TestWindowsHotBundleWaitsForGatewayBundleIdentity(t *testing.T) {
+	savedDigest, savedPoll := windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigPoll
+	t.Cleanup(func() { windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigPoll = savedDigest, savedPoll })
+	windowsEnterpriseHotConfigPoll = time.Millisecond
+	const bundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	calls := 0
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
+		calls++
+		id := "previous-bundle"
+		if calls > 1 {
+			id = bundleID
+		}
+		return []byte(`{"effective_digest":"sha256:abc","gateway_reported_digest":"sha256:abc","config_generation":3,"config_generation_recorded":true,"gateway_reported_config_generation":3,"gateway_reported_bundle_id":"` + id + `","gateway_reported_bundle_version":2}`), nil
+	}
+	bundle := &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
+	if !windowsEnterpriseHotConfigAdopted(context.Background(), time.Second, bundle) || calls < 2 {
+		t.Fatalf("gateway bundle identity was not awaited; calls=%d", calls)
+	}
+}
+
 func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testing.T) {
 	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	host, opts := newHotConfigHost(t, current, current)
