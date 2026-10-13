@@ -104,7 +104,8 @@ $bundlePaths = @(
     [pscustomobject]@{ relative = "$versionName\policies"; directory = $true; kind = 'BundleVersionDirectory' },
     [pscustomobject]@{ relative = "$versionName\policies\rule.yaml"; directory = $false; kind = 'BundleVersionFile' },
     [pscustomobject]@{ relative = 'receipt.json'; directory = $false; kind = 'BundleReceipt' },
-    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8'; directory = $true; kind = 'AdminDirectory' }
+    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8'; directory = $true; kind = 'AdminDirectory' },
+    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8\policies'; directory = $true; kind = 'AdminDirectory' }
 )
 foreach ($row in $bundlePaths) {
     $actualKind = & $module {

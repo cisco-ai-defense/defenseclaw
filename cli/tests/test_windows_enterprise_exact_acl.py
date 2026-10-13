@@ -386,8 +386,14 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "writeWindowsBundleAdminFile(dst, raw)" in go
     assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
     assert "s.EnsureStageDirectory(dir, parent)" in store
+    assert "if !dirs[parent]" in store
     assert "s.PublishStageFile(full)" in store
     assert "windows.CreateDirectory(name, attributes)" in go
+    assert "createWindowsBundleDirectoryMode" not in go
+    assert "windows.FILE_FLAG_OPEN_REPARSE_POINT" in go
+    assert "windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)" in go
+    assert "windowsEnterpriseSIDEqual(actualOwner, owner)" in go
+    assert "windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT," in go
     assert "windows.PROTECTED_DACL_SECURITY_INFORMATION" in go
 
 

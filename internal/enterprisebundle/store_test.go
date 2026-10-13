@@ -95,6 +95,29 @@ func TestStoreProtectsPrivateDirectoryAndAtomicFiles(t *testing.T) {
 	}
 }
 
+func TestStageCallsDirectoryCreatorOncePerPath(t *testing.T) {
+	s := testStore(t)
+	r, err := s.Receive(testBundleID(89), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(map[string]bool)
+	s.EnsureStageDirectory = func(_, path string) error {
+		if created[path] {
+			return os.ErrExist // model a creator that requires a new requested path
+		}
+		created[path] = true
+		return os.MkdirAll(path, 0o700)
+	}
+	staging, err := s.Stage(r, storeBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created[staging] || !created[filepath.Join(staging, "policies", "guardrail", "strict")] || len(created) != 2 {
+		t.Fatalf("directory creator calls = %v, want root and nested parent once each", created)
+	}
+}
+
 func digestOf(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
 
 // applyThrough runs a receipt for bundle n, version v, up to state stop.

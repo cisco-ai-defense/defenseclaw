@@ -130,6 +130,41 @@ func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
 	}
 }
 
+func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	root := filepath.Join(t.TempDir(), ".staging-test")
+	nested := filepath.Join(root, "policies", "guardrail")
+	for _, path := range []string{root, root, nested, nested, root} {
+		if err := ensureWindowsBundleStageDirectory(root, path); err != nil {
+			t.Fatalf("ensure %s: %v", path, err)
+		}
+	}
+	// A directory with the right owner but a stale DACL must be repaired.
+	if err := applyWindowsBundleSDDL(nested, "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWindowsBundleStageDirectory(root, nested); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := windows.SecurityDescriptorFromString(windowsBundlePrivateSDDL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, filepath.Join(root, "policies"), nested} {
+		actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+		if err != nil || !matches {
+			t.Fatalf("stage directory %s descriptor differs from AdminDirectory: %s (%v)", path, actual.String(), err)
+		}
+	}
+}
+
 // stubWindowsBundleHost points the Windows bundle code at a temp standalone
 // layout whose gateway enforces windowsBundleTestDigest.
 func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {

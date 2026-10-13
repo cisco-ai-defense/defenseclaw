@@ -328,7 +328,8 @@ type Store struct {
 	// are copied into it (Windows uses a protected administrator-only ACL).
 	PrivateStage func(root string) error
 	// EnsureStageDirectory creates the staging root and each nested directory.
-	// Windows supplies the protected AdminDirectory descriptor at creation.
+	// Stage calls it once per requested path. Windows supplies the protected
+	// AdminDirectory descriptor at creation.
 	EnsureStageDirectory func(root, path string) error
 	// PublishStageFile seals a new private staging file before verification.
 	PublishStageFile func(path string) error
@@ -732,17 +733,19 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	for _, name := range names {
 		full := filepath.Join(dir, filepath.FromSlash(name))
 		parent := filepath.Dir(full)
-		var dirErr error
-		if s.EnsureStageDirectory != nil {
-			dirErr = s.EnsureStageDirectory(dir, parent)
-		} else {
-			dirErr = os.MkdirAll(parent, 0o700)
+		if !dirs[parent] {
+			var dirErr error
+			if s.EnsureStageDirectory != nil {
+				dirErr = s.EnsureStageDirectory(dir, parent)
+			} else {
+				dirErr = os.MkdirAll(parent, 0o700)
+			}
+			if dirErr != nil {
+				_ = removeTree(dir)
+				return "", dirErr
+			}
+			dirs[parent] = true
 		}
-		if dirErr != nil {
-			_ = removeTree(dir)
-			return "", dirErr
-		}
-		dirs[parent] = true
 		if err := writeNewFile(full, files[name]); err != nil {
 			_ = removeTree(dir)
 			return "", err

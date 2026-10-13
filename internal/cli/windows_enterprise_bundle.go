@@ -182,12 +182,9 @@ func privateWindowsBundleStage(root string) error {
 }
 
 // createWindowsBundleDirectory gives a new directory its final protected
-// descriptor in CreateDirectory. Reapplying it repairs an existing directory.
+// descriptor in CreateDirectory. Existing administrator-owned directories are
+// opened without following reparse points and repaired through that handle.
 func createWindowsBundleDirectory(path, sddl string) error {
-	return createWindowsBundleDirectoryMode(path, sddl, false)
-}
-
-func createWindowsBundleDirectoryMode(path, sddl string, exclusive bool) error {
 	if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -197,10 +194,7 @@ func createWindowsBundleDirectoryMode(path, sddl string, exclusive bool) error {
 	if err := winpath.RejectReparseChain(path); err != nil {
 		return err
 	}
-	info, err := os.Lstat(path)
-	if err == nil && exclusive {
-		return os.ErrExist
-	}
+	_, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		descriptor, descriptorErr := windows.SecurityDescriptorFromString(sddl)
 		if descriptorErr != nil {
@@ -215,22 +209,65 @@ func createWindowsBundleDirectoryMode(path, sddl string, exclusive bool) error {
 			SecurityDescriptor: descriptor,
 		}
 		if createErr := windows.CreateDirectory(name, attributes); createErr != nil {
-			if exclusive || !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+			if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 				return createErr
 			}
 		}
-		info, err = os.Lstat(path)
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("bundle directory is not a regular directory: %s", path)
 	}
 	if err := winpath.RejectReparseChain(path); err != nil {
 		return err
 	}
-	return applyWindowsBundleSDDL(path, sddl)
+	name, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("bundle directory is not a regular directory: %s", path)
+	}
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	actualOwner, _, err := actual.Owner()
+	if err != nil {
+		return err
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if !windowsEnterpriseSIDEqual(actualOwner, owner) {
+		return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, group, dacl, nil)
 }
 
 func ensureWindowsBundlePrivateDirectory(path string) error {
@@ -248,7 +285,7 @@ func ensureWindowsBundleStageDirectory(root, path string) error {
 		return fmt.Errorf("staging directory escapes bundle root: %s", path)
 	}
 	if relative == "." {
-		return createWindowsBundleDirectoryMode(root, windowsBundlePrivateSDDL(), true)
+		return createWindowsBundleDirectory(root, windowsBundlePrivateSDDL())
 	}
 	if err := createWindowsBundleDirectory(root, windowsBundlePrivateSDDL()); err != nil {
 		return err
