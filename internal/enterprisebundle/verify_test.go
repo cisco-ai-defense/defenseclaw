@@ -26,7 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 var (
@@ -250,6 +252,120 @@ func TestVerifyTamperMatrix(t *testing.T) {
 	res, err = enterprisebundle.Verify(ctx, in)
 	if err != nil || res.DigestVerified || len(res.Warnings) == 0 || res.Warnings[0].Code != enterprisebundle.WarnDigestUnverifiable {
 		t.Fatalf("other product version: %+v %v", res, err)
+	}
+}
+
+// A signer and verifier stage the same files in different directories. Path
+// defaults derived from those directories must not change the signed digest.
+func TestVerifyBundleWithDefaultedPaths(t *testing.T) {
+	const base = `config_version: 9
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+guardrail:
+  enabled: true
+  mode: action
+  block_at: HIGH
+  rule_pack: default
+  profiles:
+    engineering:
+      mode: action
+      block_at: HIGH
+  profile_assignments:
+    - profile: engineering
+      match:
+        groups: [engineering]
+asset_policy:
+  enabled: true
+  mode: action
+  skill:
+    default: deny
+ai_discovery:
+  enabled: true
+  signature_packs:
+    - discovery/signature-packs/team.json
+`
+	for _, tc := range []struct {
+		name, prefix                     string
+		defaultDataDir, defaultPolicyDir bool
+	}{
+		{name: "data_dir omitted, policy_dir empty", prefix: "policy_dir: \"\"\n", defaultDataDir: true},
+		{name: "data_dir and policy_dir omitted", defaultDataDir: true, defaultPolicyDir: true},
+		{name: "data_dir explicit", prefix: "data_dir: /var/lib/defenseclaw\npolicy_dir: \"\"\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := tc.prefix + base
+			if tc.defaultPolicyDir {
+				start, end := strings.Index(source, "guardrail:\n"), strings.Index(source, "asset_policy:\n")
+				source = source[:start] + source[end:]
+			}
+			f := newFixture(t, source, func(in *enterprisebundle.ComposeInput) {
+				if !tc.defaultPolicyDir {
+					return
+				}
+				const name = "policies/guardrail/default/rules/local-patterns.yaml"
+				data := []byte("version: 1\ninjection: []\n")
+				in.Bundle.Files[name] = data
+				full := filepath.Join(in.Root, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
+			checkDefaultPaths := func(cfg *config.Config, root string) {
+				t.Helper()
+				if !tc.defaultDataDir {
+					return
+				}
+				for _, field := range []struct{ name, got, suffix string }{
+					{"data_dir", cfg.DataDir, ""},
+					{"audit_db", cfg.AuditDB, config.DefaultAuditDBName},
+					{"judge_bodies_db", cfg.JudgeBodiesDB, config.DefaultJudgeBodiesDBName},
+					{"quarantine_dir", cfg.QuarantineDir, "quarantine"},
+					{"plugin_dir", cfg.PluginDir, "plugins"},
+					{"scanners.codeguard", cfg.Scanners.CodeGuard, "codeguard-rules"},
+					{"ai_discovery.confidence_policy_path", cfg.AIDiscovery.ConfidencePolicyPath, "confidence.yaml"},
+					{"firewall.config_file", cfg.Firewall.ConfigFile, "firewall.yaml"},
+					{"firewall.rules_file", cfg.Firewall.RulesFile, "firewall.pf.conf"},
+					{"openshell.pack_dir", cfg.OpenShell.PackDir, filepath.Join("policies", config.DefaultOpenShellPackDirName)},
+					{"gateway.device_key_file", cfg.Gateway.DeviceKeyFile, "device.key"},
+				} {
+					if want := filepath.Join(root, field.suffix); field.got != want {
+						t.Errorf("%s = %q, want %q", field.name, field.got, want)
+					}
+				}
+				if tc.defaultPolicyDir && cfg.PolicyDir != filepath.Join(root, "policies") {
+					t.Errorf("policy_dir = %q, want default under %q", cfg.PolicyDir, root)
+				}
+			}
+			cfg, raw, err := enterprisebundle.LoadConfig(f.in.Bundle, f.in.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkDefaultPaths(cfg, f.in.Root)
+			signedPolicy, err := gateway.ComputeEffectivePolicyFor(context.Background(), cfg, gateway.EffectivePolicyOptions{GOOS: "linux", BundleRoot: f.in.Root, Raw: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			in := f.input(t, f.bundle, a)
+			in.Digester = func(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
+				checkDefaultPaths(cfg, root)
+				policy, err := gateway.ComputeEffectivePolicyFor(ctx, cfg, gateway.EffectivePolicyOptions{GOOS: goos, BundleRoot: root, Raw: raw})
+				for key, want := range signedPolicy.Components {
+					if got := policy.Components[key]; got != want {
+						t.Errorf("component %s: signed %s, verified %s", key, want, got)
+					}
+				}
+				return policy.Digest, err
+			}
+			res, err := enterprisebundle.Verify(context.Background(), in)
+			if err != nil || !res.DigestVerified {
+				t.Fatalf("signed bundle did not verify after staging elsewhere: digest=%s expected=%s: %v", res.EffectivePolicyDigest, res.ExpectedDigest, err)
+			}
+		})
 	}
 }
 

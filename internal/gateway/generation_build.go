@@ -187,7 +187,13 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	if digest := observabilityDigest(cfg, in.raw, scope); digest != "" {
 		g.Components["observability"] = digest
 	}
-	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
+	guardrailDigest := config.GuardrailPolicyDigest
+	if scope.bundleRoot != "" {
+		guardrailDigest = func(cfg *config.Config) (string, error) {
+			return config.GuardrailPolicyDigestWithPathRewrite(cfg, scope.rewrite)
+		}
+	}
+	if digest, err := guardrailDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}
 	for key, digest := range assetDigestComponents(cfg, scope) {
@@ -216,8 +222,16 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	profileDigests := map[string]string{}
 	if in.profiles != nil {
 		for name, derived := range in.profiles.profiles {
-			profileDigests[name] = derived.Digest
-			g.Components["profile:"+name] = derived.Digest
+			digest := derived.Digest
+			if scope.bundleRoot != "" {
+				var err error
+				digest, err = derived.DigestWithPathRewrite(scope.rewrite)
+				if err != nil {
+					return nil, fmt.Errorf("generation: guardrail profile %s digest: %w", name, err)
+				}
+			}
+			profileDigests[name] = digest
+			g.Components["profile:"+name] = digest
 		}
 	}
 	g.Digest = effectivePolicyDigest(g.Components, profileDigests)
