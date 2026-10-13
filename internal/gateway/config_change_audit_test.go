@@ -100,6 +100,22 @@ func TestConfigChangeActivitySkipsUnchangedConfigBytes(t *testing.T) {
 	if activity, _, ok := configChangeActivity(path, raw, raw, []string{configDiffAssets}, 1, true); ok {
 		t.Fatalf("asset rebuild produced config change by %q", activity.Actor)
 	}
+	const bundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
+	if _, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+		Actor: "operator:root", Lifecycle: true,
+		Reason: configwrite.BundleReason(bundleID, 2, "new custom pack"),
+		Bundle: configwrite.BundleRef{ID: bundleID, Version: 2},
+	}, func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if activity, generation, ok := configChangeActivity(path, raw, raw, []string{configDiffAssets}, 1, true); !ok ||
+		generation != 2 || activity.Bundle == nil || activity.Bundle.ID != bundleID ||
+		len(activity.Diff) != 1 || activity.Diff[0].Path != configDiffAssets {
+		t.Fatalf("new bundle with unchanged YAML had no asset change event: %+v, generation %d, ok %t", activity, generation, ok)
+	}
+	if activity, _, ok := configChangeActivity(path, raw, raw, []string{configDiffAssets}, 2, true); ok {
+		t.Fatalf("repeat asset rebuild produced config change by %q", activity.Actor)
+	}
 }
 
 func TestConfigChangeActivityAttributesRollbackToAttemptedBundle(t *testing.T) {

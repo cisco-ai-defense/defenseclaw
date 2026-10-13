@@ -3285,8 +3285,10 @@ function New-DefenseClawCanonicalPathAcl {
         # The Users read grant on bundles must not flow to private children.
         $usersTraverseOnly = $Kind -eq 'BundleDirectory' -and
             [string]$entry.sid -eq $script:UsersSID
-        $inheritanceFlags = if ($IsDirectory -and $Kind -notin @('ManagedIPCDirectory', 'BundleVersionDirectory') -and
-            -not $usersTraverseOnly) {
+        $versionServiceReadOnly = $Kind -eq 'BundleVersionDirectory' -and
+            [string]$entry.sid -eq $GatewayServiceSID
+        $inheritanceFlags = if ($IsDirectory -and $Kind -ne 'ManagedIPCDirectory' -and
+            -not $usersTraverseOnly -and -not $versionServiceReadOnly) {
             [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
                 [Security.AccessControl.InheritanceFlags]::ContainerInherit
         }

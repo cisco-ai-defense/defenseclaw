@@ -59,6 +59,9 @@ type generationInputs struct {
 	// bundleRoot the policy bundle root whose prefix the digests replace
 	// with ${bundle_root} ("" for none).
 	goos, bundleRoot string
+	// vendorRoot is a temporary copy of the binary's shipped policies used
+	// by an offline signer; vendorTarget is its standard installed path.
+	vendorRoot, vendorTarget string
 	// offline marks a digest computed for a policy bundle, not loaded into
 	// a gateway: the managed policy_dir trust check, which keeps a loosened
 	// tree out of an enforcing generation, does not apply to a signing host.
@@ -192,6 +195,7 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.bundleRoot = in.bundleRoot
 
 	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
+	scope.vendorRoot, scope.vendorTarget = in.vendorRoot, in.vendorTarget
 	configComponent, err := configDigest(cfg, scope)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
@@ -212,16 +216,19 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	for key, digest := range assetDigestComponents(cfg, scope) {
 		g.Components[key] = digest
 	}
-	g.Providers, err = buildGenerationProviders(cfg)
+	g.Providers, err = buildGenerationProvidersForScope(cfg, scope, in.offline)
 	if err != nil {
 		return nil, fmt.Errorf("generation: providers: %w", err)
 	}
-	g.Components["providers"] = g.Providers.digest()
+	g.Components["providers"] = g.Providers.digestForBundle(cfg, scope)
 	// Every profile scope that resolves to a pack points at the same loaded
 	// pack, so each pack is digested once: digesting it per scope cost about
 	// 1.5 s of gateway start with 1,000 profiles (GAP-0276).
 	packDigests := make(map[*guardrail.RulePack]string, 4)
 	for key, pack := range g.RulePacks {
+		if scope.bundleRoot != "" && !scope.bundleFile(rulePackSourceDir(cfg, in.profiles, key)) {
+			continue
+		}
 		digest, done := packDigests[pack]
 		if !done {
 			digest = rulePackComponentDigest(pack)
@@ -229,7 +236,7 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 		g.Components["rule_pack:"+key] = digest
 	}
-	if g.OPA != nil {
+	if g.OPA != nil && scope.bundleFile(cfg.PolicyDir) {
 		g.Components["rego"] = g.OPA.RegoDigest
 	}
 	profileDigests := map[string]string{}
@@ -251,6 +258,28 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.assetDirs = generationAssetDirs(cfg, g)
 	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// rulePackSourceDir identifies the files behind a loaded pack component.
+// Product-installed packs are pinned by product_version rather than bundle
+// content, so only packs inside the bundle root contribute to its digest.
+func rulePackSourceDir(cfg *config.Config, profiles *guardrailProfileSet, key string) string {
+	if key == "global" {
+		return globalRulePackScope(cfg).dir
+	}
+	if connector, ok := strings.CutPrefix(key, "conn:"); ok {
+		return connectorRulePackScope(cfg, connector).dir
+	}
+	if profile, ok := strings.CutPrefix(key, "prof:"); ok && profiles != nil {
+		name, connector, _ := strings.Cut(profile, "/")
+		if derived, exists := profiles.profiles[name]; exists {
+			if connector == "" {
+				return globalRulePackScope(derived.Config).dir
+			}
+			return connectorRulePackScope(derived.Config, connector).dir
+		}
+	}
+	return ""
 }
 
 // rulePackComponentDigest is a pack's effective-digest component; a seam

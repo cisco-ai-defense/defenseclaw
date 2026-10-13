@@ -18,9 +18,11 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -51,13 +53,17 @@ const unattributedConfigActor = "unattributed"
 // writers too: that event says unattributed and gives the generation range
 // and the last writer instead (GAP-0318). generation is the applied one.
 func configChangeActivity(path string, previous, raw []byte, sections []string, last uint64, lastKnown bool) (in audit.ActivityInput, generation uint64, ok bool) {
-	if len(previous) > 0 && bytes.Equal(previous, raw) {
-		return audit.ActivityInput{}, 0, false
-	}
 	state, err := configwrite.ReadGenerationState(path)
 	sum := configwrite.SHA256Hex(raw)
 	if err != nil || strings.TrimSpace(state.Actor) == "" ||
 		!strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum) {
+		return audit.ActivityInput{}, 0, false
+	}
+	// A bundle can advance the signed policy generation with unchanged YAML
+	// bytes (for example a changed custom pack). Ordinary asset rebuilds must
+	// never inherit the previous config writer's identity.
+	if len(previous) > 0 && bytes.Equal(previous, raw) &&
+		(!lastKnown || state.Generation <= last || state.BundleID == "") {
 		return audit.ActivityInput{}, 0, false
 	}
 	paths := sections
@@ -103,6 +109,9 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 			SignerKeyID: signerKeyID, ChangeSummary: summary}
 		in.After["bundle_id"], in.After["bundle_version"] = bundleID, bundleVersion
 		in.After["signer_key_id"] = signerKeyID
+		in.After["generation_before"] = last
+		in.After["generation_after"] = state.Generation
+		in.After["restart"] = len(restart) > 0
 	}
 	if lastKnown && (state.Generation > last+1 || state.Generation < last) {
 		// A coalesced bundle is still the signed final policy. Its
@@ -136,6 +145,33 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		}
 	}
 	return in, state.Generation, true
+}
+
+// awaitRecordedConfigBytes covers the small interval in a lifecycle write
+// between the config.yaml rename and its config.generation.json rename. The
+// gateway service may read the generation record but cannot open the
+// root-owned writer lock. Only standalone managed reloads wait, and only
+// when the record does not yet describe the YAML that was just applied.
+func awaitRecordedConfigBytes(ctx context.Context, path string, raw []byte) {
+	if _, ok := appliedGenerationOf(path, raw); ok {
+		return
+	}
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+			if _, ok := appliedGenerationOf(path, raw); ok {
+				return
+			}
+		}
+	}
 }
 
 // appliedGenerationOf returns the generation config.generation.json records

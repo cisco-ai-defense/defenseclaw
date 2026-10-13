@@ -11,6 +11,7 @@ import (
 	"context"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -33,6 +34,10 @@ var bundleTopDirs = map[string]bool{"policies": true, "discovery": true, "scanne
 // renders against its working copy and apply against the versioned install
 // directory; the effective digest replaces either root with ${bundle_root}.
 func RenderConfig(b *Bundle, root string) ([]byte, error) {
+	return renderConfigForPlatform(b, root, "")
+}
+
+func renderConfigForPlatform(b *Bundle, root, platform string) ([]byte, error) {
 	raw, ok := b.Files[ConfigName]
 	if !ok {
 		return nil, refuse(CodeFileMissing, ConfigName, "the bundle has no config.yaml")
@@ -63,7 +68,7 @@ func RenderConfig(b *Bundle, root string) ([]byte, error) {
 			if node.Tag != "!!str" {
 				return true
 			}
-			rendered, err := renderValue(node.Value, root, b, dirs)
+			rendered, err := renderValueForPlatform(node.Value, root, platform, b, dirs)
 			if err != nil {
 				bad = err
 				return false
@@ -100,6 +105,10 @@ func bundleDirs(b *Bundle) map[string]bool {
 }
 
 func renderValue(value, root string, b *Bundle, dirs map[string]bool) (string, error) {
+	return renderValueForPlatform(value, root, "", b, dirs)
+}
+
+func renderValueForPlatform(value, root, platform string, b *Bundle, dirs map[string]bool) (string, error) {
 	top, _, nested := strings.Cut(value, "/")
 	if !nested || !bundleTopDirs[top] {
 		return value, nil
@@ -116,6 +125,9 @@ func renderValue(value, root string, b *Bundle, dirs map[string]bool) (string, e
 	}
 	if _, isFile := b.Files[target]; !isFile && !dirs[target] {
 		return "", refuse(CodeFileMissing, target, "config.yaml names it, but the bundle has no such file or directory")
+	}
+	if platform == PlatformLinux || platform == PlatformDarwin {
+		return path.Join(root, value), nil
 	}
 	return filepath.Join(root, filepath.FromSlash(value)), nil
 }
@@ -156,7 +168,7 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 	if err := config.ValidateV8SchemaBytes(ConfigName, source); err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
-	rendered, err := RenderConfig(b, root)
+	rendered, err := renderConfigForPlatform(b, root, platform)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -244,28 +256,61 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 // package stays below the gateway.
 type PolicyDigester func(ctx context.Context, cfg *config.Config, raw []byte, goos, bundleRoot string) (string, error)
 
+type digestComponentsKey struct{}
+
+// ReportPolicyComponents lets a digester attach value-safe sub-digests to a
+// signed manifest. Digesters that only return the overall digest remain valid.
+func ReportPolicyComponents(ctx context.Context, components map[string]string) {
+	if sink, ok := ctx.Value(digestComponentsKey{}).(func(map[string]string)); ok {
+		sink(components)
+	}
+}
+
+func withPolicyComponents(ctx context.Context, sink func(map[string]string)) context.Context {
+	return context.WithValue(ctx, digestComponentsKey{}, sink)
+}
+
 // EffectivePolicyDigests loads the bundle config against root and returns
 // its effective policy digest for each platform using the standard layout.
 func EffectivePolicyDigests(ctx context.Context, b *Bundle, root string, platforms []string, digest PolicyDigester) (map[string]string, error) {
+	out, _, err := effectivePolicyDigestsWithComponents(ctx, b, root, platforms, digest)
+	return out, err
+}
+
+func effectivePolicyDigestsWithComponents(ctx context.Context, b *Bundle, root string, platforms []string, digest PolicyDigester) (map[string]string, map[string][]DigestComponent, error) {
 	out := make(map[string]string, len(platforms))
+	components := make(map[string][]DigestComponent, len(platforms))
 	for _, platform := range platforms {
 		if !knownPlatform(platform) {
-			return nil, refuse(CodeManifestInvalid, "target.platforms", "unknown platform %s", safePath(platform))
+			return nil, nil, refuse(CodeManifestInvalid, "target.platforms", "unknown platform %s", safePath(platform))
 		}
 		cfg, rendered, err := LoadConfigForPlatform(b, root, platform)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := validateTargetConfig(b, cfg, rendered, []string{platform}); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		value, err := digest(ctx, cfg, rendered, platform, root)
+		var details map[string]string
+		value, err := digest(withPolicyComponents(ctx, func(got map[string]string) { details = got }), cfg, rendered, platform, root)
 		if err != nil {
-			return nil, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s: %s", platform, boundedDetail(err.Error()))
+			return nil, nil, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s: %s", platform, boundedDetail(err.Error()))
 		}
 		out[platform] = value
+		if len(details) > 0 {
+			components[platform] = sortedDigestComponents(details)
+		}
 	}
-	return out, nil
+	return out, components, nil
+}
+
+func sortedDigestComponents(details map[string]string) []DigestComponent {
+	out := make([]DigestComponent, 0, len(details))
+	for name, digest := range details {
+		out = append(out, DigestComponent{Name: name, Digest: digest})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func boundedDetail(text string) string {

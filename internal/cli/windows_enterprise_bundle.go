@@ -166,19 +166,19 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 // privateWindowsBundleStage removes the service's inherited read access
 // before the bundle files are copied into staging.
 func privateWindowsBundleStage(root string) error {
-	return applyWindowsSDDL(root, windowsBundlePrivateSDDL())
+	return applyWindowsBundleSDDL(root, windowsBundlePrivateSDDL())
 }
 
 func windowsBundlePrivateSDDL() string {
-	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	return "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 }
 
 func windowsBundleDirectorySDDL(serviceSID string) string {
-	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + serviceSID + ")(A;;0x1200a9;;;BU)"
+	return "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;" + serviceSID + ")"
 }
 
 func windowsBundleReceiptSDDL(serviceSID string) string {
-	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + serviceSID + ")(A;;FR;;;BU)"
+	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;" + serviceSID + ")"
 }
 
 func publishWindowsBundleReceipt(path string) error {
@@ -186,7 +186,13 @@ func publishWindowsBundleReceipt(path string) error {
 	if err != nil {
 		return err
 	}
-	sd, err := windows.SecurityDescriptorFromString(windowsBundleReceiptSDDL(service.String()))
+	return applyWindowsBundleSDDL(path, windowsBundleReceiptSDDL(service.String()))
+}
+
+// applyWindowsBundleSDDL sets the full owner, group, and protected DACL so
+// bundle paths agree with Setup's exact managed-path descriptors.
+func applyWindowsBundleSDDL(path, sddl string) error {
+	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return err
 	}
@@ -218,16 +224,11 @@ func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
 		return err
 	}
 	sddl := windowsBundleDirectorySDDL(service.String())
-	for _, parent := range []string{filepath.Dir(layout.ConfigDir), layout.ConfigDir} {
-		if err := applyWindowsSDDL(parent, sddl); err != nil {
-			return err
-		}
-	}
 	path := filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
-	return applyWindowsSDDL(path, sddl)
+	return applyWindowsBundleSDDL(path, sddl)
 }
 
 // sealWindowsBundleVersionAssets grants the gateway service SID read and
@@ -238,7 +239,6 @@ func sealWindowsBundleVersionAssets(root string) error {
 	if err != nil {
 		return err
 	}
-	sddl := windowsBundleVersionSDDL(service.String())
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -249,7 +249,7 @@ func sealWindowsBundleVersionAssets(root string) error {
 		if !entry.IsDir() && !entry.Type().IsRegular() {
 			return fmt.Errorf("%s is not a regular bundle asset", path)
 		}
-		if err := applyWindowsSDDL(path, sddl); err != nil {
+		if err := applyWindowsBundleSDDL(path, windowsBundleVersionSDDL(service.String(), entry.IsDir())); err != nil {
 			return err
 		}
 		mode := os.FileMode(0o444)
@@ -265,14 +265,18 @@ func publishWindowsBundleVersion(root string) error {
 	if err != nil {
 		return err
 	}
-	if err := applyWindowsSDDL(root, windowsBundleVersionSDDL(service.String())); err != nil {
+	if err := applyWindowsBundleSDDL(root, windowsBundleVersionSDDL(service.String(), true)); err != nil {
 		return err
 	}
 	return os.Chmod(root, 0o555)
 }
 
-func windowsBundleVersionSDDL(serviceSID string) string {
-	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;" + serviceSID + ")"
+func windowsBundleVersionSDDL(serviceSID string, directory bool) string {
+	inherit := ""
+	if directory {
+		inherit = "OICI"
+	}
+	return "O:BAG:BAD:P(A;" + inherit + ";FA;;;SY)(A;" + inherit + ";FA;;;BA)(A;;0x1200a9;;;" + serviceSID + ")"
 }
 
 // prepareWindowsEnterpriseBundle runs before the lifecycle reads --config.

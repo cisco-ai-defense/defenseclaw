@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"slices"
+	"sort"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -225,7 +226,8 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
 		return res, err
 	}
-	digest, err := in.Digester(ctx, cfg, rendered, in.Platform, root)
+	var details map[string]string
+	digest, err := in.Digester(withPolicyComponents(ctx, func(got map[string]string) { details = got }), cfg, rendered, in.Platform, root)
 	if err != nil {
 		return res, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s: %s", in.Platform, boundedDetail(err.Error()))
 	}
@@ -234,6 +236,10 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	standardLayout := layout.IsStandard(in.Platform)
 	if in.ProductVersion == m.EffectivePolicy.ProductVersion && in.HostPlatform == m.EffectivePolicy.ComputedOn && standardLayout {
 		if digest != res.ExpectedDigest {
+			component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details)
+			if component != "" {
+				return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s; component %s differs", digest, boundedDetail(component))
+			}
 			return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s", digest)
 		}
 		res.DigestVerified = true
@@ -256,4 +262,30 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	}
 	res.Warnings = append(res.Warnings, sectionWarnings...)
 	return res, nil
+}
+
+func differingDigestComponent(expected []DigestComponent, actual map[string]string) string {
+	if len(expected) == 0 || len(actual) == 0 {
+		return ""
+	}
+	want := make(map[string]string, len(expected))
+	for _, component := range expected {
+		want[component.Name] = component.Digest
+	}
+	names := make([]string, 0, len(want)+len(actual))
+	for name := range want {
+		names = append(names, name)
+	}
+	for name := range actual {
+		if _, ok := want[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if want[name] != actual[name] {
+			return name
+		}
+	}
+	return ""
 }

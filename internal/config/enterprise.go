@@ -1020,14 +1020,14 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 // An explicit rule_pack_dir is kept as written; on Windows one that equals
 // the implicit data_dir path also selects the embedded packs.
 func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
-	implicit := filepath.Join(dataDir, "policies", "guardrail", "default")
+	implicit := joinPathForPlatform(goos, dataDir, "policies", "guardrail", "default")
 	if cfg.Guardrail.RulePackDir != implicit {
 		return
 	}
 	policyPack := ""
 	if policyDir := strings.TrimSpace(cfg.PolicyDir); policyDir != "" &&
-		filepath.Clean(policyDir) != filepath.Join(dataDir, "policies") {
-		policyPack = filepath.Join(policyDir, "guardrail", "default")
+		joinPathForPlatform(goos, policyDir) != joinPathForPlatform(goos, dataDir, "policies") {
+		policyPack = joinPathForPlatform(goos, policyDir, "guardrail", "default")
 	}
 	layout, onLayout := standaloneUnixLayoutForConfig(cfg.ConfigFilePath)
 	if !onLayout {

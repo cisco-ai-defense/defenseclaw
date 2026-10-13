@@ -1,0 +1,194 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+)
+
+func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	configBytes := func(level, host string) []byte {
+		return []byte("config_version: 8\ngateway:\n  config_reload:\n    mode: restart\nguardrail:\n  mode: action\n  block_at: " + level + "\n  host: " + host + "\nobservability: {}\n")
+	}
+	writeBundle := func(version uint64, id, summary string, raw []byte, afterWrite func()) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+				Actor: "operator:manual-r3", Lifecycle: true,
+				Reason: configwrite.BundleReason(id, version, summary),
+				Bundle: configwrite.BundleRef{ID: id, Version: version, SignerKeyID: "mgmtp1-a"},
+			}, func() (bool, error) {
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					return false, err
+				}
+				if afterWrite != nil {
+					afterWrite()
+				}
+				return true, nil
+			})
+			result <- err
+		}()
+		return result
+	}
+	const firstID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
+	const hotID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	const restartID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9"
+	const assetID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8TA"
+	initialRaw := configBytes("HIGH", "127.0.0.1")
+	if err := <-writeBundle(1, firstID, "initial", initialRaw, nil); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	applied := make(chan struct{}, 1)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	load := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := load(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	mgr.setStartupSource(path, initialRaw)
+	mgr.appliedRaw = initialRaw
+
+	// The lifecycle writes config.yaml before config.generation.json while
+	// holding the lock. Force the watcher into that gap.
+	written := make(chan struct{})
+	release := make(chan struct{})
+	hotRaw := configBytes("MEDIUM", "127.0.0.1")
+	writer := writeBundle(2, hotID, "changed marker title", hotRaw, func() {
+		close(written)
+		<-release
+	})
+	<-written
+	reloaded := make(chan error, 1)
+	go func() { reloaded <- mgr.Reload(context.Background(), "bundle hot apply") }()
+	<-applied
+	close(release)
+	if err := <-writer; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reloaded; err != nil {
+		t.Fatal(err)
+	}
+	check := func(want int, id string, restart bool, changedPath string) {
+		t.Helper()
+		records := capture.snapshot()
+		if len(records) != want {
+			t.Fatalf("audit records = %d, want %d", len(records), want)
+		}
+		if want == 0 {
+			return
+		}
+		record := records[want-1]
+		if record.EventName() != observability.EventName(observability.TelemetryEventConfigChangeApplied) {
+			t.Fatalf("event = %s", record.EventName())
+		}
+		encoded, err := record.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{
+			`"defenseclaw.admin.principal_ref":"operator:manual-r3"`,
+			`"defenseclaw.policy.bundle.id":"` + id + `"`,
+			`"defenseclaw.policy.bundle.version":` + strconv.Itoa(want+1),
+		} {
+			if !strings.Contains(string(encoded), field) {
+				t.Fatalf("audit record lacks %s: %s", field, encoded)
+			}
+		}
+		var envelope struct {
+			Body map[string]json.RawMessage `json:"body"`
+		}
+		if err := json.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		var afterJSON string
+		if err := json.Unmarshal(envelope.Body["defenseclaw.admin.after_state"], &afterJSON); err != nil {
+			t.Fatal(err)
+		}
+		var after map[string]any
+		if err := json.Unmarshal([]byte(afterJSON), &after); err != nil {
+			t.Fatal(err)
+		}
+		if after["generation_before"] != float64(want) || after["generation_after"] != float64(want+1) || after["restart"] != restart {
+			t.Fatalf("bundle generation/restart = %v", after)
+		}
+		if after["policy_generation_before"] != float64(want-1) || after["policy_generation_after"] != float64(want) {
+			t.Fatalf("runtime generation = %v", after)
+		}
+		var diffJSON string
+		if err := json.Unmarshal(envelope.Body["defenseclaw.admin.diff"], &diffJSON); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(diffJSON, "\"path\":\""+changedPath+"\"") || strings.Contains(string(encoded), "\"MEDIUM\"") {
+			t.Fatalf("audit diff lacks %s or exposes a policy value: %s", changedPath, encoded)
+		}
+	}
+	check(1, hotID, false, "guardrail.block_at")
+	if err := mgr.Reload(context.Background(), "unchanged bundle reapply"); err != nil {
+		t.Fatal(err)
+	}
+	check(1, hotID, false, "guardrail.block_at")
+	if err := <-writeBundle(3, restartID, "listener change", configBytes("MEDIUM", "0.0.0.0"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "restart-required bundle"); err != nil {
+		t.Fatal(err)
+	}
+	check(2, restartID, true, "guardrail.host")
+	// A policy asset can change under a new bundle without changing YAML.
+	// The plain config watcher must leave that writer for the asset swap.
+	assetRaw := configBytes("MEDIUM", "0.0.0.0")
+	if err := <-writeBundle(4, assetID, "custom marker title", assetRaw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "unchanged YAML"); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.appliedGeneration != 3 || len(capture.snapshot()) != 2 {
+		t.Fatalf("no-diff reload consumed the bundle generation or logged an event")
+	}
+	if err := mgr.ReloadAssets(context.Background(), "bundle asset changed"); err != nil {
+		t.Fatal(err)
+	}
+	check(3, assetID, false, configDiffAssets)
+	if err := logger.LogPolicyBundleReceipt("operator:manual-r3", audit.PolicyBundle{ID: hotID, Version: 2},
+		audit.PolicyBundleReceipt{ReceiptID: hotID, State: audit.PolicyBundleConfirmed,
+			ConfigGeneration: 2, EnforcingVersion: 2, Restart: false}); err != nil {
+		t.Fatal(err)
+	}
+	records := capture.snapshot()
+	if len(records) != 4 || records[3].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+		t.Fatalf("receipt produced %d records, want one separate config.bundle.receipt", len(records))
+	}
+}

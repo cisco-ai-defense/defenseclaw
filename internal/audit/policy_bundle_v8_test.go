@@ -71,6 +71,24 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 		values[observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleVersion)] != "4" {
 		t.Fatalf("bundle metrics = %v", values)
 	}
+	if err := logger.LogPolicyBundleReceipt("operator:root",
+		PolicyBundle{ID: testPolicyBundleID, Version: 5},
+		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed,
+			Restart: false, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
+		t.Fatalf("hot bundle receipt: %v", err)
+	}
+	_, records = runtime.snapshot()
+	if len(records) != 2 || records[1].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+		t.Fatalf("hot receipt produced %d audit records, want one additional config.bundle.receipt", len(records))
+	}
+	values = map[observability.EventName]string{}
+	for _, metric := range runtime.metricSnapshot() {
+		values[metric.EventName()] = fmt.Sprint(metricValue(t, metric))
+	}
+	if values[observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleApplies)] != "1" ||
+		values[observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleVersion)] != "5" {
+		t.Fatalf("hot bundle metrics = %v", values)
+	}
 	if err := logger.LogPolicyBundleReceipt("", PolicyBundle{}, PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: "applied"}); err == nil {
 		t.Fatal("a receipt that is not terminal was recorded")
 	}

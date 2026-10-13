@@ -139,3 +139,28 @@ guardrail:
 		}
 	})
 }
+
+func TestManagedStandaloneLoaderIgnoresPerUserLLMEnvironment(t *testing.T) {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const source = "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"
+	load := func() *Config {
+		t.Helper()
+		cfg, err := LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, []byte(source), layout.DataDir, "linux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	baseline := load()
+	t.Setenv(DefenseClawLLMModelEnv, "host-only-model")
+	t.Setenv(DefenseClawLLMKeyEnv, "host-only-secret")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	changed := load()
+	if changed.LLM.Model != baseline.LLM.Model || changed.LLM.APIKeyEnv != baseline.LLM.APIKeyEnv || changed.Environment != baseline.Environment {
+		t.Fatalf("host environment changed managed defaults: before=%+v after=%+v", baseline.LLM, changed.LLM)
+	}
+}

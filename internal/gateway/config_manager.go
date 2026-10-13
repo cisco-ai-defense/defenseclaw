@@ -1013,8 +1013,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if len(diff.Changed) == 0 {
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		// A bundle can advance its persistent generation while keeping
+		// config.yaml identical. An asset reload must still be able to
+		// attribute the later policy swap to that bundle.
+		if state, err := configwrite.ReadGenerationState(m.path); err != nil ||
+			state.BundleID == "" || !m.appliedGenerationKnown ||
+			state.Generation <= m.appliedGeneration || !bytes.Equal(m.appliedRaw, source.raw) {
+			m.noteAppliedGeneration(source.raw)
+		}
 		m.appliedRaw = source.raw
-		m.noteAppliedGeneration(source.raw)
 		if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 			m.v8PlanDigest = source.compiledV8.Plan.Digest()
 			m.v8Plan = source.compiledV8.Plan
@@ -1094,15 +1101,22 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.v8Plan = source.compiledV8.Plan
 	}
 	version.SetContentHash(source.raw)
+	if next.StandaloneEnterprise() && !bytes.Equal(m.appliedRaw, source.raw) {
+		awaitRecordedConfigBytes(ctx, m.path, source.raw)
+	}
 	activity, appliedGeneration, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed,
 		m.appliedGeneration, m.appliedGenerationKnown)
 	if recorded {
 		m.appliedGeneration, m.appliedGenerationKnown = appliedGeneration, true
+		if activity.Bundle != nil {
+			activity.After["policy_generation_before"] = gen - 1
+			activity.After["policy_generation_after"] = gen
+		}
 	}
-	// Rebuilding a referenced asset does not change config.yaml. Secure
-	// Client keeps its legacy reload action; other profiles must not emit
-	// a config.change.applied record for the previous writer.
-	if m.logger != nil && (next.SecureClientIntegration() || !bytes.Equal(m.appliedRaw, source.raw)) {
+	// A signed bundle may change policy assets while preserving config.yaml.
+	// configChangeActivity only attributes that swap when its generation
+	// record advanced; an ordinary asset rebuild cannot reuse the writer.
+	if m.logger != nil && (next.SecureClientIntegration() || !bytes.Equal(m.appliedRaw, source.raw) || recorded) {
 		if recorded && !next.SecureClientIntegration() {
 			_ = m.logger.LogActivity(activity)
 		} else {

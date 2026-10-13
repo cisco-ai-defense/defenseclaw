@@ -91,12 +91,19 @@ func (r SecretRef) Name() string { return strings.TrimPrefix(r.Ref, SecretRefSch
 // the built-in packs of that version).
 type EffectivePolicy struct {
 	ProductVersion string `json:"product_version"`
-	// ComputedOn is the platform bundle sign ran on. The config is loaded
-	// once, on that host, so a device compares its own digest with the
-	// manifest only when it runs that platform and that product version
-	// (otherwise it reports digest_unverifiable and its own digest).
+	// ComputedOn is the platform bundle sign ran on. A device compares its
+	// own digest only on that platform and product version (otherwise it
+	// reports digest_unverifiable and its own digest).
 	ComputedOn string            `json:"computed_on"`
 	Digests    map[string]string `json:"digests"`
+	// Components are signed diagnostic sub-digests, sorted by name. Older
+	// bundles may omit them; they do not change the effective digest.
+	Components map[string][]DigestComponent `json:"components,omitempty"`
+}
+
+type DigestComponent struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 // Warning is an informational finding (group reachability). It never
@@ -111,13 +118,14 @@ type Warning struct {
 var (
 	// bundleIDPattern is "b-" and a ULID in canonical upper-case Crockford
 	// base32 (the first character at most 7: 128 bits).
-	bundleIDPattern     = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	scopeIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sha256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	digestPattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	productVersionRegex = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
-	warningCodePattern  = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
-	manifestKeyPattern  = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	bundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	scopeIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sha256Pattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	digestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	componentDigestPattern = regexp.MustCompile(`^sha256:([0-9a-f]{12}|[0-9a-f]{64})$`)
+	productVersionRegex    = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
+	warningCodePattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	manifestKeyPattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 )
 
 // MaxVersion is the highest manifest version: 2^53-1, the largest integer a
@@ -334,6 +342,19 @@ func (m *Manifest) Validate() error {
 	for _, platform := range m.Target.Platforms {
 		if !digestPattern.MatchString(m.EffectivePolicy.Digests[platform]) {
 			return bad("effective_policy.digests."+platform, "want sha256: and 64 lower-case hex digits")
+		}
+	}
+	for platform, components := range m.EffectivePolicy.Components {
+		if !knownPlatform(platform) || m.EffectivePolicy.Digests[platform] == "" || len(components) > 1024 {
+			return bad("effective_policy.components", "invalid platform or component count")
+		}
+		previous := ""
+		for _, component := range components {
+			if component.Name == "" || len(component.Name) > 512 || component.Name <= previous ||
+				!componentDigestPattern.MatchString(component.Digest) && component.Digest != "missing" {
+				return bad("effective_policy.components", "component names must be sorted and sub-digests valid")
+			}
+			previous = component.Name
 		}
 	}
 	if len(m.Warnings) > MaxWarnings {

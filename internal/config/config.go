@@ -2652,11 +2652,19 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	applyRuntimeV8DataDirDefaultsForPlatform(candidate, document, dataDir, runtime.GOOS)
 }
 
+func joinPathForPlatform(goos string, elements ...string) string {
+	if goos == "linux" || goos == "darwin" {
+		return path.Join(elements...)
+	}
+	return filepath.Join(elements...)
+}
+
 func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAMLDocument, dataDir, goos string) {
 	if candidate == nil || document == nil || strings.TrimSpace(dataDir) == "" {
 		return
 	}
 	root := v8DocumentRoot(document.Document)
+	join := func(parts ...string) string { return joinPathForPlatform(goos, parts...) }
 	has := func(path ...string) bool {
 		current := root
 		for _, segment := range path {
@@ -2668,13 +2676,13 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		return true
 	}
 	if !has("quarantine_dir") {
-		candidate.QuarantineDir = filepath.Join(dataDir, "quarantine")
+		candidate.QuarantineDir = join(dataDir, "quarantine")
 	}
 	if !has("plugin_dir") {
-		candidate.PluginDir = filepath.Join(dataDir, "plugins")
+		candidate.PluginDir = join(dataDir, "plugins")
 	}
 	if !has("policy_dir") {
-		candidate.PolicyDir = filepath.Join(dataDir, "policies")
+		candidate.PolicyDir = join(dataDir, "policies")
 		if candidate.StandaloneEnterprise() {
 			if layout, ok := standaloneUnixLayoutForConfig(candidate.ConfigFilePath); ok {
 				// The gateway service can write data_dir, and the gateway
@@ -2688,31 +2696,31 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		}
 	}
 	if !has("scanners", "codeguard") {
-		candidate.Scanners.CodeGuard = filepath.Join(dataDir, "codeguard-rules")
+		candidate.Scanners.CodeGuard = join(dataDir, "codeguard-rules")
 	}
 	if !has("ai_discovery", "confidence_policy_path") {
-		candidate.AIDiscovery.ConfidencePolicyPath = filepath.Join(dataDir, "confidence.yaml")
+		candidate.AIDiscovery.ConfidencePolicyPath = join(dataDir, "confidence.yaml")
 	}
 	if !has("firewall", "config_file") {
-		candidate.Firewall.ConfigFile = filepath.Join(dataDir, "firewall.yaml")
+		candidate.Firewall.ConfigFile = join(dataDir, "firewall.yaml")
 	}
 	if !has("firewall", "rules_file") {
-		candidate.Firewall.RulesFile = filepath.Join(dataDir, "firewall.pf.conf")
+		candidate.Firewall.RulesFile = join(dataDir, "firewall.pf.conf")
 	}
 	if !has("guardrail", "rule_pack_dir") {
-		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
+		candidate.Guardrail.RulePackDir = join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
 			standaloneRulePackDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("openshell", "pack_dir") {
-		candidate.OpenShell.PackDir = filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 	}
 	if !has("gateway", "device_key_file") {
-		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+		candidate.Gateway.DeviceKeyFile = join(dataDir, "device.key")
 	} else if gateway := v8YAMLMapValue(root, "gateway"); gateway != nil {
 		if keyFile := v8YAMLMapValue(gateway, "device_key_file"); keyFile != nil {
-			if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(keyFile.Value, dataDir); ok {
+			if resolved, ok := resolveRelativeGatewayDeviceKeyFileForPlatform(keyFile.Value, dataDir, goos); ok {
 				candidate.Gateway.DeviceKeyFile = resolved
 			}
 		}
@@ -2759,7 +2767,11 @@ func loadConfigSourceCheckedWithLayout(
 		configFile = filepath.Clean(configFile)
 	}
 	dataDir := filepath.Dir(configFile)
-	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
+	if targetGOOS == "linux" || targetGOOS == "darwin" {
+		dataDir = path.Dir(configFile)
+	}
+	inspection := defaultDataDir != ""
+	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); !inspection && configuredPath != "" &&
 		filepath.Clean(configuredPath) == configFile {
 		dataDir = DefaultDataPath()
 	}
@@ -2772,7 +2784,14 @@ func loadConfigSourceCheckedWithLayout(
 	if defaultDataDir != "" {
 		dataDir = defaultDataDir
 	}
-	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	// A managed standalone bundle must have the same defaults in an offline
+	// signer and the enforcing gateway. Per-user model env and host hardware
+	// detection are not policy inputs for this profile.
+	deterministicDefaults := inspection || managedStandaloneSource(sourceBytes)
+	pinnedDeploymentMode := ""
+	if !inspection {
+		pinnedDeploymentMode = normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	}
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
 	}
@@ -2788,7 +2807,7 @@ func loadConfigSourceCheckedWithLayout(
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
 
-	setDefaults(dataDir)
+	setDefaultsForPlatform(dataDir, targetGOOS, deterministicDefaults)
 
 	var cfg Config
 	read := false
@@ -2800,7 +2819,7 @@ func loadConfigSourceCheckedWithLayout(
 			viper.Reset()
 			viper.SetConfigFile(configFile)
 			viper.SetConfigType("yaml")
-			setDefaults(dataDir)
+			setDefaultsForPlatform(dataDir, targetGOOS, deterministicDefaults)
 		}
 	}
 	if !read {
@@ -2852,7 +2871,11 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, err
 	}
-	if err := resolveEnterpriseConfig(&cfg, targetGOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
+	profileEnv := ""
+	if !inspection {
+		profileEnv = os.Getenv(managed.EnterpriseProfileEnv)
+	}
+	if err := resolveEnterpriseConfig(&cfg, targetGOOS, profileEnv); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "enterprise_config_invalid")
 		}
@@ -3039,6 +3062,18 @@ func loadConfigSourceCheckedWithLayout(
 	}
 
 	return &cfg, nil
+}
+
+func managedStandaloneSource(raw []byte) bool {
+	var source struct {
+		DeploymentMode string `yaml:"deployment_mode"`
+		Enterprise     struct {
+			Profile string `yaml:"profile"`
+		} `yaml:"enterprise"`
+	}
+	return decodeSourceYAML(raw, &source) == nil &&
+		managed.IsManagedEnterprise(normalizeDeploymentMode(source.DeploymentMode)) &&
+		managed.IsStandaloneProfile(source.Enterprise.Profile)
 }
 
 // profileSubtrees are the guardrail.profiles and guardrail.profile_assignments
@@ -3514,13 +3549,31 @@ func applySecureClientScannerDefaults(cfg *Config) {
 }
 
 func setDefaults(dataDir string) {
+	setDefaultsForPlatform(dataDir, runtime.GOOS, false)
+}
+
+func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
+	join := func(parts ...string) string { return joinPathForPlatform(goos, parts...) }
 	viper.SetDefault("data_dir", dataDir)
-	viper.SetDefault("audit_db", filepath.Join(dataDir, DefaultAuditDBName))
-	viper.SetDefault("judge_bodies_db", filepath.Join(dataDir, DefaultJudgeBodiesDBName))
-	viper.SetDefault("quarantine_dir", filepath.Join(dataDir, "quarantine"))
-	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
-	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
-	viper.SetDefault("environment", string(DetectEnvironment()))
+	viper.SetDefault("audit_db", join(dataDir, DefaultAuditDBName))
+	viper.SetDefault("judge_bodies_db", join(dataDir, DefaultJudgeBodiesDBName))
+	viper.SetDefault("quarantine_dir", join(dataDir, "quarantine"))
+	viper.SetDefault("plugin_dir", join(dataDir, "plugins"))
+	viper.SetDefault("policy_dir", join(dataDir, "policies"))
+	environment := ""
+	if deterministic {
+		switch goos {
+		case "darwin":
+			environment = string(EnvMacOS)
+		case "windows":
+			environment = string(EnvWindows)
+		default:
+			environment = string(EnvLinux)
+		}
+	} else {
+		environment = string(DetectEnvironment())
+	}
+	viper.SetDefault("environment", environment)
 	viper.SetDefault("tenant_id", "")
 	viper.SetDefault("workspace_id", "")
 	viper.SetDefault("deployment_mode", "")
@@ -3539,8 +3592,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("llm.base_url", "")
 	viper.SetDefault("llm.timeout", defaultLLMTimeoutSeconds)
 	viper.SetDefault("llm.max_retries", defaultLLMMaxRetries)
-	_ = viper.BindEnv("llm.api_key_env", DefenseClawLLMKeyEnv)
-	_ = viper.BindEnv("llm.model", DefenseClawLLMModelEnv)
+	if !deterministic {
+		_ = viper.BindEnv("llm.api_key_env", DefenseClawLLMKeyEnv)
+		_ = viper.BindEnv("llm.model", DefenseClawLLMModelEnv)
+	}
 
 	// Legacy inspect_llm defaults preserved for back-compat with
 	// pre-v5 hand-edited configs. New writers should emit `llm:`.
@@ -3572,12 +3627,12 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.mcp_scanner.scan_resources", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
 	viper.SetDefault("scanners.plugin_scanner", "defenseclaw")
-	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
+	viper.SetDefault("scanners.codeguard", join(dataDir, "codeguard-rules"))
 	// Pack-governed openshell keys (profile, yolo, workdir.mode, upload caps,
 	// egress lists, mcp.import) deliberately have no loader default so an
 	// unset key inherits the selected sandbox policy pack.
 	viper.SetDefault("openshell.binary", DefaultOpenShellBinary)
-	viper.SetDefault("openshell.pack_dir", filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName))
+	viper.SetDefault("openshell.pack_dir", join(dataDir, "policies", DefaultOpenShellPackDirName))
 	viper.SetDefault("openshell.workdir.git_depth", DefaultOpenShellGitDepth)
 	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
 	viper.SetDefault("openshell.workdir.undo_ignored.max_mb", DefaultOpenShellUndoIgnoredMaxMB)
@@ -3622,7 +3677,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
-	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+	viper.SetDefault("ai_discovery.confidence_policy_path", join(dataDir, "confidence.yaml"))
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
 	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
 	viper.SetDefault("ai_discovery.trusted_ad_child_domains", []string{})
@@ -3661,7 +3716,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
-	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
+	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)
@@ -3717,7 +3772,7 @@ func setDefaults(dataDir string) {
 	// doc on GatewayConfig.FleetMode for the override semantics.
 	viper.SetDefault("gateway.fleet_mode", "auto")
 	viper.SetDefault("gateway.config_reload.mode", "hot")
-	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
+	viper.SetDefault("gateway.device_key_file", join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)
 	viper.SetDefault("gateway.max_reconnect_ms", 15000)

@@ -15,6 +15,98 @@
   },
   "command": "sign",
   "effective_policy": {
+    "components": {
+      "darwin": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ],
+      "linux": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ],
+      "windows": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ]
+    },
     "computed_on": "<host>",
     "digests": {
       "darwin": "sha256:<digest>",

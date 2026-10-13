@@ -602,6 +602,14 @@ func printSignText(w io.Writer, res *bundleSignResult) {
 	default:
 		fmt.Fprintf(w, "Signed %s: %s, version %d, key %s (%s).\n", res.Out, res.Bundle.BundleID, res.Bundle.Version, res.KeyID, res.Alg)
 	}
+	if res.EffectivePolicy != nil {
+		for _, platform := range res.Bundle.Platforms {
+			fmt.Fprintf(w, "Effective policy %s: %s\n", platform, res.EffectivePolicy.Digests[platform])
+			for _, component := range res.EffectivePolicy.Components[platform] {
+				fmt.Fprintf(w, "  %s: %s\n", component.Name, component.Digest)
+			}
+		}
+	}
 }
 
 func printVerifyText(w io.Writer, res *bundleVerifyResult) {
@@ -622,6 +630,9 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 
 func bundleDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
 	policy, err := gateway.ComputeEffectivePolicyFor(ctx, cfg, gateway.EffectivePolicyOptions{GOOS: goos, BundleRoot: root, Raw: raw})
+	if err == nil {
+		enterprisebundle.ReportPolicyComponents(ctx, policy.Components)
+	}
 	return policy.Digest, err
 }
 

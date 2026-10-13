@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -57,9 +58,10 @@ const bundleRootToken = "${bundle_root}"
 // data_dir and policy bundle root path prefixes, and the platform whose
 // policy is digested (the kernel control set exists only on Linux).
 type digestScope struct {
-	dataDir    string
-	bundleRoot string
-	goos       string
+	dataDir                  string
+	bundleRoot               string
+	goos                     string
+	vendorRoot, vendorTarget string
 }
 
 // newDigestScope is the scope of cfg on goos ("" is this platform) with a
@@ -78,11 +80,26 @@ func newDigestScope(cfg *config.Config, goos, bundleRoot string) digestScope {
 // rewrite replaces a leading bundle root with ${bundle_root}, else a leading
 // data_dir with ${data_dir}.
 func (s digestScope) rewrite(value string) string {
+	if s.vendorRoot != "" {
+		if out, ok := rewritePathPrefix(value, s.vendorRoot, s.vendorTarget, s.goos); ok {
+			value = out
+		}
+	}
 	if out, ok := rewritePathPrefix(value, s.bundleRoot, bundleRootToken, s.goos); ok {
 		return out
 	}
 	out, _ := rewritePathPrefix(value, s.dataDir, dataDirToken, s.goos)
 	return out
+}
+
+// bundleFile reports whether an asset is shipped by this bundle. Runtime
+// files outside it may differ between an offline signer and a device.
+func (s digestScope) bundleFile(value string) bool {
+	if s.bundleRoot == "" {
+		return true
+	}
+	_, ok := rewritePathPrefix(value, s.bundleRoot, bundleRootToken, s.goos)
+	return ok
 }
 
 // configDigestSecretKeys are the config keys whose values are secret
@@ -320,22 +337,27 @@ func assetDigestComponents(cfg *config.Config, scope digestScope) map[string]str
 	for key, digest := range signaturePackDigests(cfg, scope) {
 		out[key] = digest
 	}
-	if digest := confidencePolicyDigest(cfg); digest != "" {
+	if digest := confidencePolicyDigest(cfg, scope); digest != "" {
 		out[confidencePolicyComponent] = digest
 	}
-	if ref := cfg.Scanners.SkillScanner.PolicyFile; strings.TrimSpace(ref.Path) != "" {
+	if ref := cfg.Scanners.SkillScanner.PolicyFile; strings.TrimSpace(ref.Path) != "" && scope.bundleFile(ref.Path) {
 		out["scanner_policy:skill"] = assetRefDigest(ref)
 	}
 	if refs := cfg.Scanners.MCPScanner.YARA.ExtraRules; len(refs) > 0 {
 		digests := make([]string, 0, len(refs))
 		for _, ref := range refs {
+			if !scope.bundleFile(ref.Path) {
+				continue
+			}
 			digests = append(digests, scope.rewrite(ref.Path)+"="+assetRefDigest(ref))
 		}
-		sort.Strings(digests)
-		out["yara_rules:mcp"] = sha256Digest([]byte(strings.Join(digests, "\n")))
+		if len(digests) > 0 {
+			sort.Strings(digests)
+			out["yara_rules:mcp"] = sha256Digest([]byte(strings.Join(digests, "\n")))
+		}
 	}
 	for _, provider := range cfg.LLMProviders.Custom {
-		if provider.TLS != nil && strings.TrimSpace(provider.TLS.CACertFile) != "" {
+		if provider.TLS != nil && strings.TrimSpace(provider.TLS.CACertFile) != "" && scope.bundleFile(provider.TLS.CACertFile) {
 			out["provider_ca:"+provider.Name] = fileDigest(strings.TrimSpace(provider.TLS.CACertFile))
 		}
 	}
@@ -374,6 +396,9 @@ func signaturePackDigests(cfg *config.Config, scope digestScope) map[string]stri
 		if entry = strings.TrimSpace(entry); entry == "" {
 			continue
 		}
+		if !scope.bundleFile(entry) {
+			continue
+		}
 		files, _ := inventory.SignaturePackEntry(entry)
 		digest := "missing"
 		if len(files) > 0 {
@@ -395,9 +420,9 @@ const confidencePolicyComponent = "confidence_policy"
 
 // confidencePolicyDigest digests ai_discovery.confidence_policy_path, or is
 // "" when no path is set or the file does not exist (the built-in policy).
-func confidencePolicyDigest(cfg *config.Config) string {
+func confidencePolicyDigest(cfg *config.Config, scope digestScope) string {
 	path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath)
-	if path == "" {
+	if path == "" || !scope.bundleFile(path) {
 		return ""
 	}
 	if digest := fileDigest(path); digest != "missing" {
@@ -422,7 +447,7 @@ func discoveryAssetsChanged(live *Generation, cfg *config.Config) bool {
 			return true
 		}
 	}
-	return !cfg.SecureClientIntegration() && live.Components[confidencePolicyComponent] != confidencePolicyDigest(cfg)
+	return !cfg.SecureClientIntegration() && live.Components[confidencePolicyComponent] != confidencePolicyDigest(cfg, newDigestScope(cfg, live.goos, live.bundleRoot))
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.
@@ -500,23 +525,35 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 
 // ComputeEffectivePolicyFor is ComputeEffectivePolicy for another platform
 // or for a configuration rendered from a policy bundle (bundle sign computes
-// one digest per target platform). It has no side effects: it reads the
-// files cfg references and publishes nothing.
+// one digest per target platform). It publishes nothing. An offline bundle
+// load stages a temporary copy of built-in vendor packs and removes it.
 func ComputeEffectivePolicyFor(ctx context.Context, cfg *config.Config, opts EffectivePolicyOptions) (EffectivePolicy, error) {
 	if cfg == nil {
 		return EffectivePolicy{}, fmt.Errorf("effective policy: configuration is unavailable")
 	}
 	cfg = cloneConfig(cfg)
-	rulePacks, err := generationRulePacks(cfg)
+	packCfg := cfg
+	vendorRoot, vendorTarget := "", ""
+	if strings.TrimSpace(opts.BundleRoot) != "" {
+		var cleanup func()
+		var err error
+		packCfg, vendorRoot, vendorTarget, cleanup, err = offlineVendorPolicyConfig(cfg, opts.GOOS)
+		if err != nil {
+			return EffectivePolicy{}, err
+		}
+		defer cleanup()
+	}
+	rulePacks, err := generationRulePacks(packCfg)
 	if err != nil {
 		return EffectivePolicy{}, err
 	}
-	profiles, err := newGuardrailProfileSet(cfg, rulePacks.cache, false)
+	profiles, err := newGuardrailProfileSet(packCfg, rulePacks.cache, false)
 	if err != nil {
 		profiles = nil
 	}
 	g, err := buildGeneration(ctx, generationInputs{cfg: cfg, raw: opts.Raw, rulePacks: rulePacks, profiles: profiles,
-		goos: opts.GOOS, bundleRoot: opts.BundleRoot, offline: strings.TrimSpace(opts.BundleRoot) != ""})
+		goos: opts.GOOS, bundleRoot: opts.BundleRoot, offline: strings.TrimSpace(opts.BundleRoot) != "",
+		vendorRoot: vendorRoot, vendorTarget: vendorTarget})
 	if err != nil {
 		return EffectivePolicy{}, err
 	}
@@ -526,6 +563,53 @@ func ComputeEffectivePolicyFor(ctx context.Context, cfg *config.Config, opts Eff
 		ConfigGeneration:         g.ConfigGen,
 		ConfigGenerationRecorded: g.ConfigGenRecorded,
 	}, nil
+}
+
+// offlineVendorPolicyConfig loads shipped rule packs from this binary rather
+// than from the signer's /opt tree. Their content is pinned by product_version
+// and excluded from the bundle digest. The gateway still loads its installed
+// copies for enforcement.
+func offlineVendorPolicyConfig(cfg *config.Config, goos string) (*config.Config, string, string, func(), error) {
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if (goos != "linux" && goos != "darwin") || !cfg.StandaloneEnterprise() {
+		return cfg, "", "", func() {}, nil
+	}
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return nil, "", "", nil, err
+	}
+	if filepath.Clean(cfg.PolicyDir) != filepath.Clean(layout.VendorPolicyDir) {
+		return cfg, "", "", func() {}, nil
+	}
+	root, err := os.MkdirTemp("", "defenseclaw-vendor-policy-")
+	if err != nil {
+		return nil, "", "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(root) }
+	files, err := policyassets.Files()
+	if err != nil {
+		cleanup()
+		return nil, "", "", nil, err
+	}
+	for _, file := range files {
+		name := filepath.Join(root, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+			cleanup()
+			return nil, "", "", nil, err
+		}
+		if err := os.WriteFile(name, file.Data, 0o600); err != nil {
+			cleanup()
+			return nil, "", "", nil, err
+		}
+	}
+	copy := cloneConfig(cfg)
+	copy.PolicyDir = root
+	if relative, err := filepath.Rel(layout.VendorPolicyDir, cfg.Guardrail.RulePackDir); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		copy.Guardrail.RulePackDir = filepath.Join(root, relative)
+	}
+	return copy, root, layout.VendorPolicyDir, cleanup, nil
 }
 
 // generationRulePacks is the rule-pack set a generation digests: the reload

@@ -72,19 +72,22 @@ const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111
 
 func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 	const sid = "S-1-5-80-1-2-3-4-5"
-	if got, want := windowsBundleDirectorySDDL(sid), "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+sid+")(A;;0x1200a9;;;BU)"; got != want {
+	if got, want := windowsBundleDirectorySDDL(sid), "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;"+sid+")"; got != want {
 		t.Fatalf("public bundle directory ACL = %q, want %q", got, want)
 	}
-	if got, want := windowsBundleReceiptSDDL(sid), "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;"+sid+")(A;;FR;;;BU)"; got != want {
+	if got, want := windowsBundleReceiptSDDL(sid), "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;"+sid+")"; got != want {
 		t.Fatalf("public receipt ACL = %q, want %q", got, want)
 	}
-	if got, want := windowsBundlePrivateSDDL(), "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"; got != want {
+	if got, want := windowsBundlePrivateSDDL(), "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"; got != want {
 		t.Fatalf("private staging ACL = %q, want %q", got, want)
 	}
-	if got, want := windowsBundleVersionSDDL(sid), "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;"+sid+")"; got != want {
-		t.Fatalf("bundle version ACL = %q, want %q", got, want)
+	if got, want := windowsBundleVersionSDDL(sid, true), "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;"+sid+")"; got != want {
+		t.Fatalf("bundle version directory ACL = %q, want %q", got, want)
 	}
-	if strings.Contains(windowsBundlePrivateSDDL(), ";;;BU)") || strings.Contains(windowsBundleVersionSDDL(sid), ";;;BU)") {
+	if got, want := windowsBundleVersionSDDL(sid, false), "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;"+sid+")"; got != want {
+		t.Fatalf("bundle version file ACL = %q, want %q", got, want)
+	}
+	if strings.Contains(windowsBundlePrivateSDDL(), ";;;BU)") || strings.Contains(windowsBundleVersionSDDL(sid, true), ";;;BU)") || strings.Contains(windowsBundleVersionSDDL(sid, false), ";;;BU)") {
 		t.Fatal("private staging or version assets grant Users access")
 	}
 }

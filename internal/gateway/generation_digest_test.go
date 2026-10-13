@@ -83,6 +83,115 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	}
 }
 
+// A bundle must not pick up a confidence policy from the signer's or the
+// device's runtime directory. Only files shipped in the bundle are signed.
+func TestBundleDigestIgnoresHostConfidencePolicy(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+	cfg := &config.Config{DataDir: dataDir}
+	cfg.AIDiscovery.ConfidencePolicyPath = filepath.Join(dataDir, "confidence.yaml")
+	digest := func() EffectivePolicy {
+		t.Helper()
+		got, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{GOOS: "linux", BundleRoot: root, Raw: []byte("config_version: 8\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	before := digest()
+	if err := os.WriteFile(cfg.AIDiscovery.ConfidencePolicyPath, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after := digest()
+	if before.Digest != after.Digest {
+		t.Fatalf("host confidence policy changed bundle digest: %s != %s; components before=%v after=%v", before.Digest, after.Digest, before.Components, after.Components)
+	}
+}
+
+func TestBundleDigestIgnoresExternalRegoAndSignatureFiles(t *testing.T) {
+	root, external := t.TempDir(), t.TempDir()
+	cfg := &config.Config{DataDir: t.TempDir(), PolicyDir: external}
+	cfg.AIDiscovery.SignaturePacks = []string{filepath.Join(external, "signatures.json")}
+	digest := func() EffectivePolicy {
+		t.Helper()
+		got, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{GOOS: "linux", BundleRoot: root, Raw: []byte("config_version: 9\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	before := digest()
+	if err := os.WriteFile(cfg.AIDiscovery.SignaturePacks[0], []byte(`{"version":1,"signatures":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	regoDir := filepath.Join(external, "rego")
+	if err := os.MkdirAll(regoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"admission.rego", "guardrail.rego"} {
+		body, err := os.ReadFile(filepath.Join(repoPolicyDir(t), "rego", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(regoDir, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := digest()
+	if before.Digest != after.Digest {
+		t.Fatalf("external Rego or signatures changed bundle digest: %s != %s", before.Digest, after.Digest)
+	}
+	if _, ok := after.Components["rego"]; ok {
+		t.Fatal("external Rego entered bundle components")
+	}
+}
+
+func TestBundleDigestIgnoresExternalProviderCA(t *testing.T) {
+	root, external := t.TempDir(), t.TempDir()
+	ca := filepath.Join(external, "ca.pem")
+	cfg := &config.Config{ConfigVersion: config.ConfigVersionV9, DataDir: t.TempDir()}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "corp", Domains: []string{"example.com"}, TLS: &config.LLMCustomProviderTLS{CACertFile: ca}}}
+	digest := func() EffectivePolicy {
+		t.Helper()
+		got, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{GOOS: "linux", BundleRoot: root, Raw: []byte("config_version: 9\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	before := digest()
+	if err := os.WriteFile(ca, []byte("host-only-ca"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after := digest()
+	if before.Digest != after.Digest {
+		t.Fatalf("external provider CA changed bundle digest: %s != %s", before.Digest, after.Digest)
+	}
+}
+
+func TestManagedBundleIgnoresPerUserProviderOverlay(t *testing.T) {
+	cfg := &config.Config{ConfigVersion: 8, DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	root := t.TempDir()
+	digest := func() string {
+		t.Helper()
+		got, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{GOOS: "linux", BundleRoot: root, Raw: []byte("config_version: 8\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.Digest
+	}
+	before := digest()
+	overlay := filepath.Join(t.TempDir(), "custom-providers.json")
+	if err := os.WriteFile(overlay, []byte(`{"providers":[{"name":"OPENAI","domains":["host-only.example.com"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlay)
+	if after := digest(); before != after {
+		t.Fatalf("per-user provider overlay changed managed bundle digest: %s != %s", before, after)
+	}
+}
+
 // TestConfigDigestNormalizesTetragonDefaults: an absent enterprise.tetragon
 // block and one that spells out the defaults are the same intent, so they
 // give the same config digest; any other value moves it, and digesting never

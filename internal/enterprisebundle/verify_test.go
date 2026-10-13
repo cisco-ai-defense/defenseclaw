@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -367,10 +368,10 @@ ai_discovery:
 					{"ai_discovery.confidence_policy_path", cfg.AIDiscovery.ConfidencePolicyPath, "confidence.yaml"},
 					{"firewall.config_file", cfg.Firewall.ConfigFile, "firewall.yaml"},
 					{"firewall.rules_file", cfg.Firewall.RulesFile, "firewall.pf.conf"},
-					{"openshell.pack_dir", cfg.OpenShell.PackDir, filepath.Join("policies", config.DefaultOpenShellPackDirName)},
+					{"openshell.pack_dir", cfg.OpenShell.PackDir, path.Join("policies", config.DefaultOpenShellPackDirName)},
 					{"gateway.device_key_file", cfg.Gateway.DeviceKeyFile, "device.key"},
 				} {
-					if want := filepath.Join(root, field.suffix); field.got != want {
+					if want := path.Join(root, field.suffix); field.got != want {
 						t.Errorf("%s = %q, want %q", field.name, field.got, want)
 					}
 				}

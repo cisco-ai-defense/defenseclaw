@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -109,12 +110,10 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The managed gateway pins both paths in its service environment. Without
-	// those pins the plain inspection loader defaults audit DB paths under
-	// etc, which is not the device's effective config.
+	// Model the target layout even when this test runs on another OS.
 	t.Setenv(managed.ConfigPathEnv, layout.ConfigPath)
 	t.Setenv("DEFENSECLAW_HOME", layout.DataDir)
-	installedConfig, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, installedRaw)
+	installedConfig, err := config.LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, installedRaw, layout.DataDir, platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,6 +235,118 @@ func TestEffectivePolicyDigestsIgnoreTheBundleRoot(t *testing.T) {
 		if moved[platform] == signed[platform] {
 			t.Fatalf("%s: an edited signature pack kept the digest", platform)
 		}
+	}
+}
+
+func TestLinuxBundleDigestIgnoresWindowsStyleStageRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows-style relative path is simulated on a Unix host")
+	}
+	posixRoot, bundle := writeBundle(t, bundleConfigBase)
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(workingDir) })
+	windowsRoot := `C:\Users\x\AppData\Local\Temp\bundle-stage`
+	for name, body := range bundle.Files {
+		file := path.Join(windowsRoot, name)
+		if err := os.MkdirAll(path.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compute := func(root string) string {
+		t.Helper()
+		got, err := enterprisebundle.EffectivePolicyDigests(context.Background(), bundle, root, []string{"linux"}, digester)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got["linux"]
+	}
+	if posix, windows := compute(posixRoot), compute(windowsRoot); posix != windows {
+		t.Fatalf("Linux target digest changed with stage root: POSIX %s, Windows-style %s", posix, windows)
+	}
+}
+
+func TestBundleDigestIgnoresSignerHomeEnvironmentAndWorkingDirectory(t *testing.T) {
+	root, bundle := writeBundle(t, bundleConfig(t))
+	compute := func() string {
+		t.Helper()
+		got, err := enterprisebundle.EffectivePolicyDigests(context.Background(), bundle, root, []string{"linux"}, digester)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got["linux"]
+	}
+	baseline := compute()
+	before, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(before) })
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_LLM_MODEL", "host-only-model")
+	t.Setenv(managed.ConfigPathEnv, "/tmp/host-only-config.yaml")
+	t.Setenv(managed.DeploymentModeEnv, "managed_enterprise")
+	t.Setenv(managed.EnterpriseProfileEnv, "standalone")
+	if got := compute(); got != baseline {
+		t.Fatalf("host environment or cwd changed bundle digest: %s != %s", got, baseline)
+	}
+}
+
+func TestOfflineSignerUsesEmbeddedVendorPackWithoutInstall(t *testing.T) {
+	root, bundle := writeBundle(t, bundleConfigBase)
+	compute := func() string {
+		t.Helper()
+		got, err := enterprisebundle.EffectivePolicyDigests(context.Background(), bundle, root, []string{"linux"}, digester)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got["linux"]
+	}
+	first := compute()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	if second := compute(); first != second {
+		t.Fatalf("vendor pack digest changed with host: %s != %s", first, second)
+	}
+}
+
+func TestSignedComponentsNameTheDeviceMismatch(t *testing.T) {
+	const signed = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const device = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.Platforms = []string{"linux"}
+		in.Digester = func(ctx context.Context, _ *config.Config, _ []byte, _, _ string) (string, error) {
+			enterprisebundle.ReportPolicyComponents(ctx, map[string]string{"config": signed, "kernel_policy": "sha256:0123456789ab"})
+			return signed, nil
+		}
+	})
+	m, err := enterprisebundle.DecodeManifest(f.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.EffectivePolicy.Components["linux"]; len(got) != 2 || got[0].Name != "config" || got[0].Digest != signed {
+		t.Fatalf("signed components = %+v", got)
+	}
+	in := f.input(t, f.bundle, anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public())))
+	in.Digester = func(ctx context.Context, _ *config.Config, _ []byte, _, _ string) (string, error) {
+		enterprisebundle.ReportPolicyComponents(ctx, map[string]string{"config": device, "kernel_policy": "sha256:0123456789ab"})
+		return device, nil
+	}
+	_, err = enterprisebundle.Verify(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "component config differs") {
+		t.Fatalf("device mismatch = %v, want config component", err)
 	}
 }
 

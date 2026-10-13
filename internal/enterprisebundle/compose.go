@@ -71,7 +71,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	digests, err := EffectivePolicyDigests(ctx, b, in.Root, platforms, in.Digester)
+	digests, components, err := effectivePolicyDigestsWithComponents(ctx, b, in.Root, platforms, in.Digester)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -89,7 +89,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		MinProductVersion: in.MinProductVersion,
 		Files:             FileEntries(b),
 		SecretRefs:        refs,
-		EffectivePolicy:   EffectivePolicy{ProductVersion: in.ProductVersion, ComputedOn: in.HostPlatform, Digests: digests},
+		EffectivePolicy:   EffectivePolicy{ProductVersion: in.ProductVersion, ComputedOn: in.HostPlatform, Digests: digests, Components: components},
 		Warnings:          limitBundleWarnings(append(append(ruleWarnings, Reachability(cfg, platforms)...), sectionWarnings...)),
 	}
 	raw, err := m.Marshal()
