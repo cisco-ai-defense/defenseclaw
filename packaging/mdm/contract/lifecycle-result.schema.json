@@ -229,6 +229,8 @@
         "config_generation": { "type": "integer", "minimum": 0, "description": "Persistent config generation (config.generation.json), not the gateway policy generation." },
         "applied_at": { "type": "string", "format": "date-time" },
         "confirmed_at": { "type": "string", "format": "date-time" },
+        "restart": { "type": "boolean", "description": "True when applying this bundle restarted the gateway." },
+        "restart_required": { "type": "boolean", "description": "True when the bundle changed settings that only take effect after a gateway restart." },
         "sessions_restart_required": { "$ref": "#/$defs/sessionRestartStatus", "description": "Live process scan; a confirmed receipt can coexist with sessions that retain earlier hooks." },
         "current_bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The confirmed bundle that enforces, when this receipt is not its confirmed receipt: a newer bundle pending or failed, or the enforcing bundle delivered again." },
         "current_version": { "type": "integer", "minimum": 1 }
