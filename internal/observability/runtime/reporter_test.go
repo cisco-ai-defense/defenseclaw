@@ -38,7 +38,7 @@ func TestReadBundleAttributionUsesRollbackTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
-		Actor: "operator:old", Lifecycle: true,
+		Actor: "operator:old", LocalActor: "os:uid:0:root", Lifecycle: true,
 		Bundle:             configwrite.BundleRef{ID: "b-01JA0000000000000000000001", Version: 1, SignerKeyID: "old"},
 		TransactionActor:   "operator:tip",
 		TransactionBundle:  configwrite.BundleRef{ID: "b-01JA0000000000000000000002", Version: 2, SignerKeyID: "new"},
@@ -48,7 +48,7 @@ func TestReadBundleAttributionUsesRollbackTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := ReadBundleAttribution(path)
-	if !ok || got.Principal != "operator:tip" || got.ID != "b-01JA0000000000000000000002" || got.Version != 2 || got.ChangeSummary != "rollback after failed apply" {
+	if !ok || got.Actor != "os:uid:0:root" || got.Principal != "operator:tip" || got.ID != "b-01JA0000000000000000000002" || got.Version != 2 || got.ChangeSummary != "rollback after failed apply" {
 		t.Fatalf("rollback reload attribution = %+v, %t", got, ok)
 	}
 }
@@ -118,13 +118,13 @@ func TestReloadReporterPersistsExactGraphAndDeduplicatesStableDelivery(t *testin
 	applied, err := reporter.buildRecord(manager.Active(), runtimegraph.Report{
 		Code: runtimegraph.ReportReloadApplied, Outcome: "applied", Generation: 1,
 		OccurredAt: now, AttributionCaptured: true,
-		Bundle: &runtimegraph.BundleAttribution{Principal: "operator:tip", ID: "b-01JA0000000000000000000033", Version: 3, SignerKeyID: "k1"},
+		Bundle: &runtimegraph.BundleAttribution{Actor: "os:uid:0:root", Principal: "operator:tip", ID: "b-01JA0000000000000000000033", Version: 3, SignerKeyID: "k1"},
 	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encoded, _ := applied.Bytes()
-	for _, want := range []string{`"defenseclaw.admin.principal_ref":"operator:tip"`, `"defenseclaw.policy.bundle.id":"b-01JA0000000000000000000033"`, `"defenseclaw.policy.bundle.version":3`} {
+	for _, want := range []string{`"defenseclaw.admin.actor_ref":"os:uid:0:root"`, `"defenseclaw.admin.principal_ref":"operator:tip"`, `"defenseclaw.policy.bundle.id":"b-01JA0000000000000000000033"`, `"defenseclaw.policy.bundle.version":3`} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("delayed bundle reload lost %s: %s", want, encoded)
 		}

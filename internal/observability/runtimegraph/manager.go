@@ -196,11 +196,11 @@ type Report struct {
 	DeliveryIndex    uint32
 }
 
-// BundleAttribution is the principal of the config generation that caused a
-// runtime graph reload. It contains only signed bundle metadata.
+// BundleAttribution identifies the local actor and signed bundle principal of
+// the config generation that caused a runtime graph reload.
 type BundleAttribution struct {
-	Principal, ID, SignerKeyID, ChangeSummary string
-	Version                                   uint64
+	Actor, Principal, ID, SignerKeyID, ChangeSummary string
+	Version                                          uint64
 }
 
 type bundleAttributionReporter interface {

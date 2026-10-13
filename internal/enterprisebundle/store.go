@@ -177,6 +177,8 @@ type Receipt struct {
 	DeviceGroup   string `json:"device_group,omitempty"`
 	SignerKeyID   string `json:"signer_key_id,omitempty"`
 	Principal     string `json:"principal,omitempty"`
+	// Actor is the local OS account that received this bundle.
+	Actor string `json:"actor,omitempty"`
 	// ChangeSummary is the manifest change_summary, set at verified.
 	ChangeSummary  string       `json:"change_summary,omitempty"`
 	ManifestSHA256 string       `json:"manifest_sha256,omitempty"`
@@ -487,7 +489,7 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 	}
 	out := enterprisestatus.PublicReceipt{
 		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
-		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal,
+		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
 		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
 		WarningCodes:     append([]string(nil), r.WarningCodes...),
@@ -561,7 +563,7 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 	if r == nil || r.Principal == "" {
 		return configwrite.Options{}, false
 	}
-	return configwrite.Options{Actor: r.Principal, Reason: configwrite.BundleReason(r.BundleID, r.Version, r.ChangeSummary),
+	return configwrite.Options{Actor: r.Principal, LocalActor: configwrite.CurrentOSActor(), Reason: configwrite.BundleReason(r.BundleID, r.Version, r.ChangeSummary),
 		Lifecycle: true, Bundle: configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}}, true
 }
 
@@ -570,7 +572,7 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 // could not be read).
 func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
 	at := s.now()
-	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived,
+	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived, Actor: configwrite.CurrentOSActor(),
 		Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
 	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version

@@ -89,7 +89,7 @@ func ReadBundleAttribution(path string) (BundleAttribution, bool) {
 	}
 	if state.TransactionBundleID != "" && configwrite.IsPrincipalActor(state.TransactionActor) &&
 		state.TransactionBundleVersion != 0 && state.TransactionSignerKeyID != "" {
-		return BundleAttribution{Principal: state.TransactionActor, ID: state.TransactionBundleID,
+		return BundleAttribution{Actor: state.LocalActor, Principal: state.TransactionActor, ID: state.TransactionBundleID,
 			Version: state.TransactionBundleVersion, SignerKeyID: state.TransactionSignerKeyID,
 			ChangeSummary: state.TransactionSummary}, true
 	}
@@ -98,7 +98,7 @@ func ReadBundleAttribution(path string) (BundleAttribution, bool) {
 		return BundleAttribution{}, false
 	}
 	return BundleAttribution{
-		Principal: state.Actor, ID: state.BundleID, Version: state.BundleVersion,
+		Actor: state.LocalActor, Principal: state.Actor, ID: state.BundleID, Version: state.BundleVersion,
 		SignerKeyID: state.SignerKeyID, ChangeSummary: configwrite.BundleChangeSummary(state),
 	}, true
 }
@@ -274,7 +274,11 @@ func (reporter *ReloadReporter) buildRecord(
 		}
 		if ok {
 			input.DefenseClawAdminPrincipalRef = observability.Present(bundle.Principal)
-			input.DefenseClawAdminActorRef = observability.Present(bundle.Principal)
+			actor := bundle.Actor
+			if actor == "" {
+				actor = bundle.Principal
+			}
+			input.DefenseClawAdminActorRef = observability.Present(actor)
 			input.ConditionAdminPrincipalKnown = true
 			input.DefenseClawPolicyBundleID = observability.Present(bundle.ID)
 			input.DefenseClawPolicyBundleVersion = observability.Present(int64(bundle.Version))

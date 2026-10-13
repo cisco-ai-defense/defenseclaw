@@ -21,9 +21,11 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,21 @@ func writeTestConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestCurrentOSActorIdentifiesExecutingAccount(t *testing.T) {
+	actor := CurrentOSActor()
+	current, err := user.Current()
+	if err != nil {
+		t.Skipf("OS account lookup unavailable: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		if !strings.HasPrefix(actor, "os:sid:"+current.Uid+":") {
+			t.Fatalf("actor %q does not identify Windows account %q", actor, current.Uid)
+		}
+	} else if !strings.HasPrefix(actor, "os:uid:"+strconv.Itoa(os.Getuid())+":") || !strings.Contains(actor, current.Username) {
+		t.Fatalf("actor %q does not identify Unix account %q", actor, current.Username)
+	}
 }
 
 func TestApplyPatchesValidatesAndAdvancesGeneration(t *testing.T) {

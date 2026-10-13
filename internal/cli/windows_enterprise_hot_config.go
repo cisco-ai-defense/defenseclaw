@@ -230,7 +230,8 @@ func windowsEnterpriseHotConfigApply(
 			// The record named previous: a bundle config goes back as that
 			// bundle, so /health names the bundle that enforces again.
 			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, configwrite.RestoreOptions(state, configwrite.SHA256Hex(previous), configwrite.Options{
-				Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(next),
+				Actor: configwrite.ActorLifecycle, LocalActor: configwrite.CurrentOSActor(),
+				Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(next),
 			}))
 		} else {
 			_ = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)

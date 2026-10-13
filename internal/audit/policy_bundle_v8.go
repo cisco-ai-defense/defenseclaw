@@ -44,6 +44,8 @@ type PolicyBundle struct {
 // PolicyBundleReceipt is the terminal receipt of one policy bundle delivery
 // on a standalone managed device (log.config.bundle.receipt).
 type PolicyBundleReceipt struct {
+	// Actor is the local OS account that received this bundle.
+	Actor string
 	// ReceiptID is the bundle id, or r-<ULID> for a delivery whose manifest
 	// could not be read.
 	ReceiptID string
@@ -205,8 +207,12 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	if receipt.EnforcingDigest != "" {
 		after["enforcing_digest"] = receipt.EnforcingDigest
 	}
+	actor := strings.TrimSpace(receipt.Actor)
+	if actor == "" {
+		actor = strings.TrimSpace(principal)
+	}
 	return l.logActivityImpl(ActivityInput{
-		Actor: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
+		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
 	})

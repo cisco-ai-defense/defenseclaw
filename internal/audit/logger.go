@@ -1127,7 +1127,9 @@ func (l *Logger) logEventWithV8(ctx context.Context, event Event, emit auditV8Ev
 // The generated v8 runtime owns its projection and persistence; activity_events
 // remains readable only for historical database compatibility.
 type ActivityInput struct {
-	Actor       string
+	Actor string
+	// Principal is the signed bundle creator when Actor is the local OS account.
+	Principal   string
 	Action      Action
 	TargetType  string
 	TargetID    string

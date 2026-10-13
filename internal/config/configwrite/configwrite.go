@@ -50,6 +50,7 @@ import (
 	"os"
 	"os/user"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -123,6 +124,8 @@ type Options struct {
 	// Actor is ActorMigration, ActorLifecycle or a prefixed actor such as
 	// "cli:alice".
 	Actor string
+	// LocalActor identifies the OS account executing a signed bundle apply.
+	LocalActor string
 	// Reason is a short human sentence recorded in the generation file.
 	Reason string
 	// ExpectSHA256 is the hex sha256 of the bytes the caller read; empty
@@ -152,7 +155,7 @@ type BundleRef struct {
 }
 
 func (o Options) writer() cfgtxn.Writer {
-	return cfgtxn.Writer{Actor: o.Actor, Reason: o.Reason,
+	return cfgtxn.Writer{Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
 		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
@@ -299,6 +302,35 @@ func CurrentActor(prefix string) string {
 		name = "unknown"
 	}
 	return prefix + name
+}
+
+// CurrentOSActor identifies the account executing a managed bundle apply.
+// The spelling fits the existing audit actor_ref field on every platform.
+func CurrentOSActor() string {
+	account, err := user.Current()
+	if err != nil || account.Uid == "" {
+		return "os:unknown"
+	}
+	kind := "uid"
+	if runtime.GOOS == "windows" {
+		kind = "sid"
+	}
+	name := strings.ReplaceAll(account.Username, `\`, "/")
+	name = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == ':' || r == '/' || r == '-' {
+			return r
+		}
+		return '_'
+	}, name)
+	actor := "os:" + kind + ":" + account.Uid
+	if name != "" {
+		actor += ":" + name
+	}
+	if len(actor) > 256 {
+		actor = actor[:256]
+	}
+	return actor
 }
 
 // BundleReason is the generation reason the enterprise lifecycle records

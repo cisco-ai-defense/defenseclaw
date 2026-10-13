@@ -36,7 +36,7 @@ func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
 		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
 	}}}}
 	got := windowsHotConfigWriteOptions(opts, "abc")
-	if got.Actor != "control-plane:acme/alice" || got.Bundle.ID != id || got.Bundle.Version != 3 ||
+	if got.Actor != "control-plane:acme/alice" || got.LocalActor != configwrite.CurrentOSActor() || got.Bundle.ID != id || got.Bundle.Version != 3 ||
 		got.Bundle.SignerKeyID != "k1" || got.Reason != configwrite.BundleReason(id, 3, "guardrail pack update") ||
 		!got.Lifecycle || got.ExpectSHA256 != "abc" {
 		t.Fatalf("Windows bundle hot write = %+v", got)
@@ -64,7 +64,7 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := observabilityruntime.ReadBundleAttribution(layout.ConfigPath)
-	if !ok || got.Principal != "control-plane:acme/alice" || got.ID != id || got.Version != 3 || got.SignerKeyID != "k1" {
+	if !ok || got.Actor != configwrite.CurrentOSActor() || got.Principal != "control-plane:acme/alice" || got.ID != id || got.Version != 3 || got.SignerKeyID != "k1" {
 		t.Fatalf("Windows config.change.applied bundle attribution = %+v, ok=%v", got, ok)
 	}
 }

@@ -177,7 +177,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 	bundle := audit.PolicyBundle{ID: p.BundleID, Version: p.Version, SignerKeyID: p.SignerKeyID, ChangeSummary: p.ChangeSummary}
 	err := r.sink.LogPolicyBundleReceipt(p.Principal, bundle, audit.PolicyBundleReceipt{
-		ReceiptID: p.ReceiptID, State: p.State, ErrorCode: p.ErrorCode,
+		ReceiptID: p.ReceiptID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
 		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
 		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
 		RestartRequired:  p.RestartRequired,

@@ -75,13 +75,13 @@ func TestConfigChangeActivityNamesTheWriter(t *testing.T) {
 	bundleRaw := []byte("config_version: 9\nguardrail:\n  mode: action\n  host: 0.0.0.0\n  block_at: HIGH\n")
 	const bundleID = "b-01JA0000000000000000000033"
 	if _, err := configwrite.Locked(context.Background(), path, configwrite.Options{
-		Actor: "operator:tip", Reason: configwrite.BundleReason(bundleID, 4, "enable action"), Lifecycle: true,
+		Actor: "operator:tip", LocalActor: "os:uid:0:root", Reason: configwrite.BundleReason(bundleID, 4, "enable action"), Lifecycle: true,
 		Bundle: configwrite.BundleRef{ID: bundleID, Version: 4, SignerKeyID: "k1"},
 	}, func() (bool, error) { return true, os.WriteFile(path, bundleRaw, 0o600) }); err != nil {
 		t.Fatal(err)
 	}
 	in, _, ok = configChangeActivity(path, after, bundleRaw, []string{"guardrail"}, 1, true)
-	if !ok || in.Actor != "operator:tip" || in.Bundle == nil || in.Bundle.ID != bundleID ||
+	if !ok || in.Actor != "os:uid:0:root" || in.Principal != "operator:tip" || in.Bundle == nil || in.Bundle.ID != bundleID ||
 		in.Bundle.SignerKeyID != "k1" || in.Bundle.ChangeSummary != "enable action" || len(in.Diff) != 0 || in.After["coalesced"] != true {
 		t.Fatalf("coalesced bundle activity = %+v (ok=%v)", in, ok)
 	}
@@ -126,7 +126,7 @@ func TestConfigChangeActivityAttributesRollbackToAttemptedBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
-		Actor: "operator:old", Lifecycle: true,
+		Actor: "operator:old", LocalActor: "os:uid:0:root", Lifecycle: true,
 		Bundle:             configwrite.BundleRef{ID: "b-01JA0000000000000000000001", Version: 1, SignerKeyID: "old"},
 		TransactionActor:   "operator:tip",
 		TransactionBundle:  configwrite.BundleRef{ID: "b-01JA0000000000000000000002", Version: 2, SignerKeyID: "new"},
@@ -136,7 +136,7 @@ func TestConfigChangeActivityAttributesRollbackToAttemptedBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, _, ok := configChangeActivity(path, staged, restored, []string{"guardrail"}, 0, true)
-	if !ok || in.Actor != "operator:tip" || in.Bundle == nil ||
+	if !ok || in.Actor != "os:uid:0:root" || in.Principal != "operator:tip" || in.Bundle == nil ||
 		in.Bundle.ID != "b-01JA0000000000000000000002" || in.Bundle.ChangeSummary != "failed apply" {
 		t.Fatalf("rollback audit attribution = %+v, %t", in, ok)
 	}

@@ -124,6 +124,7 @@ type controlPlaneV8Family uint8
 // the route-selected projection independently for each destination.
 type controlPlaneV8Evidence struct {
 	actorRef        observability.Optional[string]
+	principalRef    observability.Optional[string]
 	origin          observability.Optional[string]
 	targetRef       observability.Optional[string]
 	beforeSummary   observability.Optional[string]
@@ -325,6 +326,9 @@ func buildControlPlaneV8Record(
 		Provenance:  provenance,
 	}
 	principal, principalKnown := controlPlaneV8Principal(event.Actor)
+	if evidence.principalRef.IsPresent() {
+		principal, principalKnown = evidence.principalRef, true
+	}
 	actorRef := evidence.actorRef
 	if !actorRef.IsPresent() {
 		actorRef = optionalControlPlaneV8Actor(event.Actor)
@@ -656,6 +660,7 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 		bundle:          policyBundleV8FieldsFor(input.Bundle),
 		receipt:         receipt,
 		actorRef:        optionalControlPlaneV8Actor(input.Actor),
+		principalRef:    optionalControlPlaneV8Identifier(input.Principal),
 		targetRef:       optionalControlPlaneV8Target(activityTargetReference(input.TargetType, input.TargetID)),
 		beforeSummary:   controlPlaneV8StateSummary(input.Before),
 		afterSummary:    controlPlaneV8StateSummary(input.After),

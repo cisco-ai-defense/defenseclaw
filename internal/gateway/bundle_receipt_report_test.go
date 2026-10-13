@@ -34,13 +34,15 @@ import (
 const testBundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
 
 type fakeBundleReceiptSink struct {
-	receipts []audit.PolicyBundleReceipt
-	bundles  []audit.PolicyBundle
-	versions []uint64
+	receipts   []audit.PolicyBundleReceipt
+	bundles    []audit.PolicyBundle
+	principals []string
+	versions   []uint64
 }
 
-func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(_ string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
+func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
 	f.bundles, f.receipts = append(f.bundles, b), append(f.receipts, r)
+	f.principals = append(f.principals, principal)
 	return nil
 }
 
@@ -76,12 +78,13 @@ func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
 	reporter := newReporter()
 	reporter.poll(context.Background()) // no receipt yet: only the gauge
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
-		BundleID: testBundleID, Version: 4, State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
+		BundleID: testBundleID, Version: 4, Actor: "os:uid:0:root", Principal: "operator:manual-r4", State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
 		CurrentBundleID: testBundleID, CurrentVersion: 4, ChangeSummary: "first", Restart: true, RestartRequired: true})
 	reporter.poll(context.Background())
 	reporter.poll(context.Background())
 	newReporter().poll(context.Background()) // a restarted gateway does not report it again
 	if len(sink.receipts) != 1 || sink.receipts[0].State != "confirmed" || sink.bundles[0].ChangeSummary != "first" ||
+		sink.receipts[0].Actor != "os:uid:0:root" || sink.principals[0] != "operator:manual-r4" ||
 		sink.receipts[0].EnforcingVersion != 4 || !sink.receipts[0].Restart || !sink.receipts[0].RestartRequired {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}
@@ -197,8 +200,17 @@ func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
 		in.Bundle.SignerKeyID != "fleet-2026-10" || in.Bundle.ChangeSummary != "tighten egress" || in.After["bundle_id"] != testBundleID {
 		t.Fatalf("activity = %+v bundle=%+v", in, in.Bundle)
 	}
+	state["local_actor"] = "os:uid:0:root"
+	encoded, _ = json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "config.generation.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if applied, _, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, 2, true); !ok ||
+		applied.Actor != "os:uid:0:root" || applied.Principal != "control-plane:acme/alice" {
+		t.Fatalf("bundle actor/principal = %+v, ok=%v", applied, ok)
+	}
 	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, 1, true); in.Bundle == nil ||
-		in.Actor != "control-plane:acme/alice" || len(in.Diff) != 0 || in.After["coalesced"] != true {
+		in.Actor != "os:uid:0:root" || in.Principal != "control-plane:acme/alice" || len(in.Diff) != 0 || in.After["coalesced"] != true {
 		t.Fatalf("coalesced signed bundle lost its final policy identity or attributed the aggregate diff: %+v", in)
 	}
 }

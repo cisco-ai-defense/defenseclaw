@@ -58,6 +58,7 @@ type GenerationState struct {
 	Generation   uint64 `json:"generation"`
 	ConfigSHA256 string `json:"config_sha256"`
 	Actor        string `json:"actor"`
+	LocalActor   string `json:"local_actor,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	// WrittenAt is RFC 3339 UTC.
 	WrittenAt       string `json:"written_at"`
@@ -81,6 +82,7 @@ type GenerationState struct {
 // installs (only the enterprise lifecycle sets the bundle fields).
 type Writer struct {
 	Actor                    string
+	LocalActor               string
 	Reason                   string
 	BundleID                 string
 	BundleVersion            uint64
@@ -279,6 +281,7 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 	next := GenerationState{
 		ConfigSHA256:             configSHA256,
 		Actor:                    w.Actor,
+		LocalActor:               w.LocalActor,
 		Reason:                   w.Reason,
 		WrittenAt:                time.Now().UTC().Format(time.RFC3339),
 		BundleID:                 w.BundleID,

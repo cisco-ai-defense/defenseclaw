@@ -27,7 +27,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 		result := make(chan error, 1)
 		go func() {
 			_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
-				Actor: "operator:manual-r3", Lifecycle: true,
+				Actor: "operator:manual-r3", LocalActor: "os:uid:0:root", Lifecycle: true,
 				Reason: configwrite.BundleReason(id, version, summary),
 				Bundle: configwrite.BundleRef{ID: id, Version: version, SignerKeyID: "mgmtp1-a"},
 			}, func() (bool, error) {
@@ -118,6 +118,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, field := range []string{
+			`"defenseclaw.admin.actor_ref":"os:uid:0:root"`,
 			`"defenseclaw.admin.principal_ref":"operator:manual-r3"`,
 			`"defenseclaw.policy.bundle.id":"` + id + `"`,
 			`"defenseclaw.policy.bundle.version":` + strconv.Itoa(want+1),

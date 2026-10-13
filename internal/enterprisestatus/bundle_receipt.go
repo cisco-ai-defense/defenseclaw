@@ -50,7 +50,9 @@ type PublicReceipt struct {
 	SignerKeyID   string `json:"signer_key_id,omitempty"`
 	// Principal is the manifest created_by (control-plane:<tenant>/<admin>
 	// or operator:<os-admin>).
-	Principal     string `json:"principal,omitempty"`
+	Principal string `json:"principal,omitempty"`
+	// Actor is the local OS account that received this bundle.
+	Actor         string `json:"actor,omitempty"`
 	ChangeSummary string `json:"change_summary,omitempty"`
 	// State is BundleConfirmed or BundleFailed; ErrorCode is the closed
 	// code of a failed receipt.

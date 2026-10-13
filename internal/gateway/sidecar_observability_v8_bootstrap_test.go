@@ -51,7 +51,7 @@ func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
 	raw := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability: {}\n", fixture.dataDir))
 	const id = "b-01JA0000000000000000000033"
 	if _, err := configwrite.Locked(t.Context(), fixture.configPath, configwrite.Options{
-		Actor: "operator:tip", Reason: configwrite.BundleReason(id, 1, "guardrail pack update"), Lifecycle: true,
+		Actor: "operator:tip", LocalActor: "os:uid:0:root", Reason: configwrite.BundleReason(id, 1, "guardrail pack update"), Lifecycle: true,
 		Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"},
 	}, func() (bool, error) { return true, os.WriteFile(fixture.configPath, raw, 0o600) }); err != nil {
 		t.Fatal(err)
@@ -68,10 +68,10 @@ func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
 	if err := reader.QueryRowContext(t.Context(), `SELECT actor, projected_record_json FROM audit_events WHERE event_name = 'config.change.applied' ORDER BY rowid DESC LIMIT 1`).Scan(&actor, &projected); err != nil {
 		t.Fatal(err)
 	}
-	if actor != "operator:tip" {
-		t.Errorf("config.change.applied actor = %q, want bundle principal", actor)
+	if actor != "os:uid:0:root" {
+		t.Errorf("config.change.applied actor = %q, want local OS account", actor)
 	}
-	for _, want := range []string{"operator:tip", id, `"defenseclaw.policy.bundle.version":1`, "k1", "guardrail pack update"} {
+	for _, want := range []string{`"defenseclaw.admin.actor_ref":"os:uid:0:root"`, `"defenseclaw.admin.principal_ref":"operator:tip"`, id, `"defenseclaw.policy.bundle.version":1`, "k1", "guardrail pack update"} {
 		if !strings.Contains(projected, want) {
 			t.Errorf("config.change.applied lacks %q: %s", want, projected)
 		}

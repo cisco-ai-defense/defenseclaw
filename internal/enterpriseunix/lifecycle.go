@@ -2492,6 +2492,9 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	// bundle) is recorded as that bundle again, so /health and
 	// config.change.applied name the bundle that enforces.
 	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback"}
+	if l.bundle != nil {
+		opt.LocalActor = configwrite.CurrentOSActor()
+	}
 	if before := l.generationBefore; before != nil {
 		if raw, err := os.ReadFile(configPath); err == nil {
 			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)

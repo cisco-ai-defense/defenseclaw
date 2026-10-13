@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -52,7 +53,7 @@ func TestFinishedReceiptWritesPublicReceiptWithoutMessage(t *testing.T) {
 	}
 	got, err := enterprisestatus.ReadPublicReceipt(store.PublicReceiptPath())
 	if err != nil || got.ReceiptID != id || got.State != StateFailed || got.ErrorCode != string(CodeSignatureInvalid) ||
-		got.Principal != "operator:root" || got.ChangeSummary != "tighten egress" || got.FinishedAt == "" {
+		got.Actor != configwrite.CurrentOSActor() || got.Principal != "operator:root" || got.ChangeSummary != "tighten egress" || got.FinishedAt == "" {
 		t.Fatalf("receipt.json = %+v err=%v", got, err)
 	}
 	if info, err := os.Stat(store.PublicReceiptPath()); err != nil || (info.Mode().Perm() != 0o644 && os.PathSeparator == '/') {

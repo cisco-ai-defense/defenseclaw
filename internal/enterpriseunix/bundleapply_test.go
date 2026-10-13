@@ -117,10 +117,10 @@ func testBundleUnixApplyRuntimeAuditCarriesPrincipal(t *testing.T, goos string) 
 	if err := db.QueryRowContext(ctx, `SELECT actor, projected_record_json FROM audit_events WHERE event_name = 'config.change.applied' ORDER BY rowid DESC LIMIT 1`).Scan(&actor, &projected); err != nil {
 		t.Fatal(err)
 	}
-	if actor != "operator:mdm-admin" {
-		t.Errorf("config.change.applied actor = %q, want bundle principal", actor)
+	if actor != configwrite.CurrentOSActor() {
+		t.Errorf("config.change.applied actor = %q, want local OS account %q", actor, configwrite.CurrentOSActor())
 	}
-	for _, want := range []string{"operator:mdm-admin", bundleID(1), `"defenseclaw.policy.bundle.version":1`, "k1", "version 1"} {
+	for _, want := range []string{`"defenseclaw.admin.actor_ref":"` + configwrite.CurrentOSActor() + `"`, `"defenseclaw.admin.principal_ref":"operator:mdm-admin"`, bundleID(1), `"defenseclaw.policy.bundle.version":1`, "k1", "version 1"} {
 		if !strings.Contains(projected, want) {
 			t.Errorf("Unix bundle audit lacks %q: %s", want, projected)
 		}

@@ -39,7 +39,8 @@ const unattributedConfigActor = "unattributed"
 // configChangeActivity describes an applied config.yaml change for the audit
 // trail (spec section 3, step 7): who wrote it (the actor
 // config.generation.json recorded for exactly these bytes, such as
-// cli:<os-user>), the changed paths, the config generation, the sha256 of the
+// cli:<os-user>; for a signed bundle, the local OS actor and bundle principal),
+// the changed paths, the config generation, the sha256 of the
 // applied file and the paths that still need a gateway restart. Values are
 // never recorded. previous is the file the last generation was built from;
 // without it the changed top-level sections stand in for the paths. ok is
@@ -89,8 +90,14 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		actor, bundleID, bundleVersion = state.TransactionActor, state.TransactionBundleID, state.TransactionBundleVersion
 		signerKeyID, summary = state.TransactionSignerKeyID, state.TransactionSummary
 	}
+	bundlePrincipal := bundleID != "" && configwrite.IsPrincipalActor(actor)
+	principal := ""
+	if bundlePrincipal && state.LocalActor != "" {
+		principal, actor = actor, state.LocalActor
+	}
 	in = audit.ActivityInput{
 		Actor:      actor,
+		Principal:  principal,
 		Action:     audit.ActionConfigUpdate,
 		TargetType: "config",
 		TargetID:   filepath.Base(path),
@@ -119,7 +126,7 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		// aggregate path diff could include another writer's changes.
 		// Keep the bundle identity but omit that diff. Other coalesced
 		// writes retain their unattributed audit behavior.
-		bundleFinal := state.Generation > last+1 && in.Bundle != nil && configwrite.IsPrincipalActor(in.Actor)
+		bundleFinal := state.Generation > last+1 && in.Bundle != nil && bundlePrincipal
 		if bundleFinal {
 			in.Diff = nil
 			in.After["changed_paths"] = 0
@@ -127,6 +134,7 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 			in.After["coalesced"] = true
 		} else {
 			in.Bundle = nil
+			in.Principal = ""
 			delete(in.After, "bundle_id")
 			delete(in.After, "bundle_version")
 			delete(in.After, "signer_key_id")
