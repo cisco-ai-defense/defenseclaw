@@ -1575,18 +1575,24 @@ def _convert_otel(
     flat_destination: Mapping[str, Any] | None,
     ctx: _Context,
 ) -> tuple[list[dict[str, Any]], tuple[str, ...], str]:
-    if _type_sensitive_equal(otel, _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER):
-        # The immutable 0.8.0 macOS installer wrote this complete second
-        # endpointless default shape. Match the whole OTel block: inherited
-        # batch, signal, and resource changes are operator state and must stay
-        # on the normal fail-closed conversion path.
-        ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
-        raw_destinations: list[tuple[Any, str]] = []
-    else:
-        raw_destinations = [
-            (raw, f"$.otel.destinations[{index}]")
-            for index, raw in enumerate(otel.get("destinations", []) or [])
-        ]
+    placeholder_parent = dict(otel)
+    # Enabling another exporter leaves the installer's dormant placeholder.
+    # Resource attributes migrate independently; inherited signal/batch edits
+    # still need the normal conversion path.
+    placeholder_parent.update(
+        enabled=False,
+        destinations=[_V7_FRESH_080_NAMED_OTEL_DESTINATION_PLACEHOLDER],
+        resource={"attributes": {}},
+    )
+    default_parent = type(otel.get("enabled")) is bool and _type_sensitive_equal(
+        placeholder_parent, _V7_FRESH_080_NAMED_OTEL_PLACEHOLDER
+    )
+    raw_destinations: list[tuple[Any, str]] = []
+    for index, raw in enumerate(otel.get("destinations", []) or []):
+        if default_parent and _type_sensitive_equal(raw, _V7_FRESH_080_NAMED_OTEL_DESTINATION_PLACEHOLDER):
+            ctx.warning("legacy_unconfigured_generic_otlp_placeholder_omitted")
+            continue
+        raw_destinations.append((raw, f"$.otel.destinations[{index}]"))
     if flat_destination is not None:
         raw_destinations.insert(0, (flat_destination, "$.otel"))
     if master_enabled and not raw_destinations:
