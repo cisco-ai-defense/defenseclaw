@@ -18,6 +18,7 @@
     },
     "noop": { "type": "boolean", "description": "ensure/uninstall found nothing to change." },
     "noop_reason": { "type": "string" },
+    "floor_source": { "type": "string", "description": "Where the signed-bundle version floor came from when a bundle was refused as not newer: trust_anchor_min_version or last_confirmed_bundle." },
     "profile": { "type": "string", "enum": ["standalone", "secure_client"] },
     "platform": { "type": "string", "enum": ["linux", "darwin", "windows"] },
     "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
