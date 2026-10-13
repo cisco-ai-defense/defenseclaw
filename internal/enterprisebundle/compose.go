@@ -63,6 +63,10 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true})
 	}
 	platforms := canonicalPlatforms(in.Platforms)
+	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
+	if err != nil {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
+	}
 	digests, err := EffectivePolicyDigests(ctx, b, in.Root, platforms, in.Digester)
 	if err != nil {
 		return nil, nil, err
@@ -82,7 +86,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		Files:             FileEntries(b),
 		SecretRefs:        refs,
 		EffectivePolicy:   EffectivePolicy{ProductVersion: in.ProductVersion, ComputedOn: in.HostPlatform, Digests: digests},
-		Warnings:          Reachability(cfg, platforms),
+		Warnings:          limitBundleWarnings(append(ruleWarnings, Reachability(cfg, platforms)...)),
 	}
 	raw, err := m.Marshal()
 	if err != nil {

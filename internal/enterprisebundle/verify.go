@@ -208,6 +208,10 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err != nil {
 		return res, err
 	}
+	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
+	if err != nil {
+		return res, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
+	}
 	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
 		return res, err
 	}
@@ -230,5 +234,6 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
+	res.Warnings = append(res.Warnings, ruleWarnings...)
 	return res, nil
 }

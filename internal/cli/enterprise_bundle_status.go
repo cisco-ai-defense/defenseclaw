@@ -27,6 +27,7 @@ import (
 var (
 	bundleStore         = func() (*enterprisebundle.Store, error) { return enterprisebundle.StoreFor(runtime.GOOS) }
 	bundleGatewayPolicy = lifecycleGatewayPolicy
+	bundleSessionStatus = platformBundleSessionStatus
 )
 
 type bundleStatusResult struct {
@@ -34,14 +35,16 @@ type bundleStatusResult struct {
 	Command       string `json:"command"`
 	OK            bool   `json:"ok"`
 	// BundleMode is true when the MDM installed the trust anchors.
-	BundleMode  bool                            `json:"bundle_mode"`
-	Anchors     string                          `json:"anchors,omitempty"`
-	Current     *enterprisebundle.Ref           `json:"current"`
-	LastGood    *enterprisebundle.Ref           `json:"last_good"`
-	Floor       uint64                          `json:"floor"`
-	LastReceipt *enterprisebundle.Receipt       `json:"last_receipt"`
-	LastRefusal *enterprisestatus.BundleRefusal `json:"last_refusal,omitempty"`
-	Bundle      *enterprisestatus.BundleState   `json:"bundle,omitempty"`
+	BundleMode              bool                                  `json:"bundle_mode"`
+	Anchors                 string                                `json:"anchors,omitempty"`
+	Current                 *enterprisebundle.Ref                 `json:"current"`
+	LastGood                *enterprisebundle.Ref                 `json:"last_good"`
+	Floor                   uint64                                `json:"floor"`
+	LastReceipt             *enterprisebundle.Receipt             `json:"last_receipt"`
+	LastRefusal             *enterprisestatus.BundleRefusal       `json:"last_refusal,omitempty"`
+	Bundle                  *enterprisestatus.BundleState         `json:"bundle,omitempty"`
+	SessionsRestartRequired enterprisestatus.SessionRestartStatus `json:"sessions_restart_required"`
+	AlertOnlyRuleCount      int                                   `json:"alert_only_rule_count"`
 	// GatewayChecked says whether the running gateway was asked; then
 	// GatewayDigest is the digest it enforces and Applied says it is the
 	// current bundle digest with no rejected reload.
@@ -124,10 +127,26 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	} else if summary, err := store.Summary(); err == nil {
 		res.Bundle = summary
 	}
+	res.SessionsRestartRequired = bundleSessionStatus(ctx)
+	if res.Bundle != nil {
+		res.Bundle.SessionsRestartRequired = &res.SessionsRestartRequired
+	}
+	if res.SessionsRestartRequired.Count > 0 {
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: enterprisestatus.CodeSessionsNeedRestart,
+			Message: "running agent sessions started before managed hooks changed; ask the listed users to restart them"})
+	}
 	var currentReceipt *enterprisebundle.Receipt
 	var signedExpected string
 	var digestComparable bool
 	if st.Current != nil {
+		if bundle, err := store.ReadVersion(st.Current); err == nil {
+			if cfg, _, err := enterprisebundle.LoadConfig(bundle, store.VersionDir(st.Current.Dir)); err == nil {
+				if warnings, count, err := enterprisebundle.RuleNotBlockingWarnings(cfg); err == nil {
+					res.AlertOnlyRuleCount = count
+					res.Warnings = append(res.Warnings, warnings...)
+				}
+			}
+		}
 		for _, rc := range receipts {
 			if rc.State == enterprisebundle.StateConfirmed && rc.BundleID == st.Current.BundleID && rc.Version == st.Current.Version {
 				currentReceipt = rc
@@ -238,6 +257,8 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 	if r := res.LastRefusal; r != nil {
 		fmt.Fprintf(w, "Last refusal: %s version %d: %s at %s\n", r.BundleID, r.Version, r.ErrorCode, r.Time)
 	}
+	fmt.Fprintf(w, "Running sessions needing restart: %d (%s)\n", res.SessionsRestartRequired.Count, res.SessionsRestartRequired.State)
+	fmt.Fprintf(w, "Detection-only custom rules: %d\n", res.AlertOnlyRuleCount)
 	if res.GatewayChecked {
 		applied := "no"
 		if res.Applied {

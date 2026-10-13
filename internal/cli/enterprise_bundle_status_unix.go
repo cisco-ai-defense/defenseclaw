@@ -26,3 +26,11 @@ func lifecycleGatewayPolicy(ctx context.Context) *enterprisestatus.PolicyState {
 	}
 	return enterpriseunix.Run(ctx, env, enterpriseunix.Options{Action: enterpriseunix.ActionStatus}).Policy
 }
+
+func platformBundleSessionStatus(ctx context.Context) enterprisestatus.SessionRestartStatus {
+	env, err := newUnixLifecycleEnv(runtime.GOOS)
+	if err != nil {
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}}
+	}
+	return env.UnprotectedSessions(ctx)
+}

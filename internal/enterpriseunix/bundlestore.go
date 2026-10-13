@@ -71,6 +71,9 @@ func (l *lifecycle) describeBundle() {
 	summary, err := store.Summary()
 	if err == nil {
 		l.result.Bundle = summary
+		if summary != nil {
+			l.result.SetBundleSessions(l.env.UnprotectedSessions(context.Background()))
+		}
 	}
 	_, l.result.LastRefusal, _ = store.Latest()
 }

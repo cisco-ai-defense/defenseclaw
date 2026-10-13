@@ -191,9 +191,11 @@ type Receipt struct {
 	ConfigGeneration      uint64   `json:"config_generation,omitempty"`
 	AppliedAt             string   `json:"applied_at,omitempty"`
 	ConfirmedAt           string   `json:"confirmed_at,omitempty"`
-	RolledBack            bool     `json:"rolled_back,omitempty"`
-	EnforcingDigest       string   `json:"enforcing_digest,omitempty"`
-	Restart               bool     `json:"restart,omitempty"`
+	// SessionsRestartRequired is the live count when this receipt was confirmed.
+	SessionsRestartRequired int    `json:"sessions_restart_required"`
+	RolledBack              bool   `json:"rolled_back,omitempty"`
+	EnforcingDigest         string `json:"enforcing_digest,omitempty"`
+	Restart                 bool   `json:"restart,omitempty"`
 	// Dir is the version directory name once the bundle is staged.
 	Dir string `json:"dir,omitempty"`
 	// ConfigSHA256 is the hex SHA-256 of the config.yaml the apply installed
@@ -416,7 +418,8 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
 		WarningCodes:     append([]string(nil), r.WarningCodes...),
 		ConfigGeneration: r.ConfigGeneration, AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
-		RolledBack: r.RolledBack, Restart: r.Restart,
+		SessionsRestartRequired: r.SessionsRestartRequired,
+		RolledBack:              r.RolledBack, Restart: r.Restart,
 	}
 	if n := len(r.Transitions); n > 0 {
 		out.FinishedAt = r.Transitions[n-1].At

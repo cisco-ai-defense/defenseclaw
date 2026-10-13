@@ -1,0 +1,27 @@
+{
+  "sessions_restart_required": {
+    "state": "known",
+    "count": 1,
+    "entries": [
+      {
+        "pid": 41,
+        "user": "alice",
+        "agent": "claudecode",
+        "started_at": "2026-10-13T07:07:31Z"
+      }
+    ]
+  },
+  "bundle_sessions_restart_required": {
+    "state": "known",
+    "count": 1,
+    "entries": [
+      {
+        "pid": 41,
+        "user": "alice",
+        "agent": "claudecode",
+        "started_at": "2026-10-13T07:07:31Z"
+      }
+    ]
+  },
+  "sessions_need_restart_warning": true
+}

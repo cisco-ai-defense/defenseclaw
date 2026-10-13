@@ -178,6 +178,41 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	}
 }
 
+func TestEnterpriseBundleStatusSessionGolden(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	confirmBundle(t, store, "b-01JA0000000000000000000032", 1, "sha256:"+strings.Repeat("1", 64))
+	saved := bundleSessionStatus
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "known", Count: 1, Entries: []enterprisestatus.SessionEntry{{PID: 41, User: "alice", Agent: "claudecode", StartedAt: "2026-10-13T07:07:31Z"}}}
+	}
+	t.Cleanup(func() { bundleSessionStatus = saved })
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var res bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.MarshalIndent(struct {
+		Sessions       enterprisestatus.SessionRestartStatus  `json:"sessions_restart_required"`
+		BundleSessions *enterprisestatus.SessionRestartStatus `json:"bundle_sessions_restart_required"`
+		Warning        bool                                   `json:"sessions_need_restart_warning"`
+	}{res.SessionsRestartRequired, res.Bundle.SessionsRestartRequired, hasBundleWarning(res.Warnings, "sessions_need_restart")}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/enterprise_bundle/status-sessions.golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got)+"\n" != string(want) {
+		t.Fatalf("status session golden:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 // On a device, verify takes the floor from bundle-state.json: a bundle at
 // or below the confirmed version is refused.
 func TestEnterpriseBundleVerifyUsesTheDeviceFloor(t *testing.T) {

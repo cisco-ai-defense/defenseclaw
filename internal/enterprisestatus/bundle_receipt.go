@@ -54,14 +54,15 @@ type PublicReceipt struct {
 	ChangeSummary string `json:"change_summary,omitempty"`
 	// State is BundleConfirmed or BundleFailed; ErrorCode is the closed
 	// code of a failed receipt.
-	State                 string   `json:"state"`
-	ErrorCode             string   `json:"error_code,omitempty"`
-	EffectivePolicyDigest string   `json:"effective_policy_digest,omitempty"`
-	WarningCodes          []string `json:"warning_codes,omitempty"`
-	EnforcingDigest       string   `json:"enforcing_digest,omitempty"`
-	ConfigGeneration      uint64   `json:"config_generation,omitempty"`
-	AppliedAt             string   `json:"applied_at,omitempty"`
-	ConfirmedAt           string   `json:"confirmed_at,omitempty"`
+	State                   string   `json:"state"`
+	ErrorCode               string   `json:"error_code,omitempty"`
+	EffectivePolicyDigest   string   `json:"effective_policy_digest,omitempty"`
+	WarningCodes            []string `json:"warning_codes,omitempty"`
+	EnforcingDigest         string   `json:"enforcing_digest,omitempty"`
+	ConfigGeneration        uint64   `json:"config_generation,omitempty"`
+	AppliedAt               string   `json:"applied_at,omitempty"`
+	ConfirmedAt             string   `json:"confirmed_at,omitempty"`
+	SessionsRestartRequired int      `json:"sessions_restart_required"`
 	// FinishedAt is the time of the terminal transition.
 	FinishedAt string `json:"finished_at"`
 	RolledBack bool   `json:"rolled_back,omitempty"`

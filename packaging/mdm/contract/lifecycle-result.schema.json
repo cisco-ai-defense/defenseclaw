@@ -78,7 +78,7 @@
         }
       }
     },
-    "coverage_complete": { "type": "boolean" },
+    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready and no known running agent session still needs a restart to load managed hooks." },
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
@@ -226,6 +226,7 @@
         "config_generation": { "type": "integer", "minimum": 0, "description": "Persistent config generation (config.generation.json), not the gateway policy generation." },
         "applied_at": { "type": "string", "format": "date-time" },
         "confirmed_at": { "type": "string", "format": "date-time" },
+        "sessions_restart_required": { "$ref": "#/$defs/sessionRestartStatus", "description": "Live process scan; a confirmed receipt can coexist with sessions that retain earlier hooks." },
         "current_bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The confirmed bundle that enforces, when this receipt is not its confirmed receipt: a newer bundle pending or failed, or the enforcing bundle delivered again." },
         "current_version": { "type": "integer", "minimum": 1 }
       },
@@ -234,6 +235,28 @@
         { "if": { "properties": { "state": { "const": "confirmed" } } }, "then": { "required": ["effective_policy_digest", "confirmed_at"] } },
         { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "enum": ["received", "failed"] } } } }
       ]
+    },
+    "sessionRestartStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "count", "entries"],
+      "properties": {
+        "state": { "enum": ["known", "unknown"] },
+        "count": { "type": "integer", "minimum": 0 },
+        "entries": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["pid", "user", "agent", "started_at"],
+            "properties": {
+              "pid": { "type": "integer", "minimum": 1 },
+              "user": { "type": "string" },
+              "agent": { "type": "string" },
+              "started_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
     },
     "message": {
       "type": "object",

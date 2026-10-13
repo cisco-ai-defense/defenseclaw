@@ -31,12 +31,17 @@
     the current version. The marker must name the bundle (BundleState
     confirmed) and `defenseclaw.exe enterprise bundle status` must report
     that the running gateway enforces its digest.
+
+.PARAMETER RequireSessionsProtected
+    Require no running agent session to predate its managed hooks. Run in
+    the MDM System context so every user process can be inspected.
 #>
 [CmdletBinding()]
 param(
     [string]$MinimumVersion = '',
     [switch]$RequireHealthy,
-    [string]$RequireBundle = ''
+    [string]$RequireBundle = '',
+    [switch]$RequireSessionsProtected
 )
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
@@ -368,6 +373,25 @@ if ($RequireBundle) {
         Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"
     }
     $bundleText = ", policy bundle $bundleId version $bundleVersion"
+}
+if ($RequireSessionsProtected) {
+    if (-not $RequireBundle) {
+        try {
+            $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+                'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
+            $status = ([string]$run.StdOut) | ConvertFrom-Json
+        } catch {
+            Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
+        }
+        if ($run.ExitCode -ne 0) { Exit-NotDetected -Reason 'bundle status could not be read' }
+    }
+    $sessions = $status.PSObject.Properties['sessions_restart_required']
+    if ($null -eq $sessions -or $null -eq $sessions.Value -or $sessions.Value.state -ne 'known') {
+        Exit-NotDetected -Reason 'running agent sessions could not be checked; run detection in the MDM System context'
+    }
+    if ([int]$sessions.Value.count -gt 0) {
+        Exit-NotDetected -Reason "$($sessions.Value.count) sessions-need-restart: running agent sessions must restart to load managed hooks"
+    }
 }
 [Console]::Out.WriteLine("DefenseClaw Enterprise $($deployment.Version)$bundleText")
 exit 0

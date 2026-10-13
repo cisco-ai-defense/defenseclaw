@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,9 +30,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Signed policy bundles on Windows (management plane spec P1 section 7).
@@ -362,6 +366,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		result.NoopReason = "already_applied"
 	}
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
+		p.Receipt.SessionsRestartRequired = platformBundleSessionStatus(run.ctx).Count
 		installed := windowsBundleInstalledSHA(run.layout.ConfigPath)
 		var failure []string
 		for _, e := range result.Errors {
@@ -462,17 +467,91 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 		result.LastRefusal = refusal
 	}
 	if result.Bundle != nil {
+		result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
 		return
 	}
 	if receipt != nil && !receipt.IsRefusal() {
 		if st, err := store.LoadState(); err == nil {
 			result.Bundle = receipt.Status(st.Current)
+			result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
 		}
 		return
 	}
 	if summary, err := store.Summary(); err == nil && summary != nil && summary.BundleID != "" {
 		result.Bundle = summary
+		result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
 	}
+}
+
+// platformBundleSessionStatus uses the inventory's Windows process creation
+// times. LocalSystem is needed to inspect runs in every user session.
+func platformBundleSessionStatus(parent context.Context) enterprisestatus.SessionRestartStatus {
+	unknown := enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}}
+	if !windowsEnterpriseRunningAsLocalSystem() {
+		return unknown
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	type snapshot struct {
+		rows []inventory.AgentProcess
+		err  error
+	}
+	done := make(chan snapshot, 1)
+	go func() { rows, err := inventory.RunningWindowsAgentProcesses(); done <- snapshot{rows, err} }()
+	var scanned snapshot
+	select {
+	case scanned = <-done:
+	case <-ctx.Done():
+		return unknown
+	}
+	if scanned.err != nil || len(scanned.rows) > 4096 {
+		return unknown
+	}
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		return unknown
+	}
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		return unknown
+	}
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return unknown
+	}
+	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+	changed := map[string]time.Time{}
+	var fallback time.Time
+	if raw, err := os.ReadFile(filepath.Join(layout.LifecycleDir, enterprisestatus.PolicyStateFileName)); err == nil {
+		var state enterprisestatus.PolicyStateRecord
+		if json.Unmarshal(raw, &state) == nil {
+			fallback, _ = time.Parse(time.RFC3339Nano, state.AppliedAt)
+		}
+	}
+	processes := make([]enterprisestatus.SessionProcess, 0, len(scanned.rows))
+	for _, row := range scanned.rows {
+		if _, known := changed[row.Connector]; !known {
+			target, ok := enterprisepolicy.TargetFor(row.Connector)
+			if ok {
+				paths, err := target.Paths(opts)
+				if err == nil {
+					for _, path := range paths {
+						if row.Connector == enterprisepolicy.ConnectorClaudeCode && !strings.HasSuffix(path, enterprisepolicy.DefenseClawDropInName) {
+							continue
+						}
+						if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && info.ModTime().After(changed[row.Connector]) {
+							changed[row.Connector] = info.ModTime()
+						}
+					}
+				}
+			}
+			if changed[row.Connector].IsZero() {
+				changed[row.Connector] = fallback
+			}
+		}
+		processes = append(processes, enterprisestatus.SessionProcess{PID: row.PID, User: row.User, Agent: row.Connector, StartedAt: row.StartedAt})
+	}
+	return enterprisestatus.UnprotectedSessions(processes, changed, true)
 }
 
 func windowsBundlePolicyFromResult(result *enterprisestatus.Result) enterprisebundle.GatewayPolicy {

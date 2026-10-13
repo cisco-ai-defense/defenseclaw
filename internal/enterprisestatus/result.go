@@ -250,6 +250,10 @@ type BundleState struct {
 	BundleID string `json:"bundle_id"`
 	Version  uint64 `json:"version"`
 	State    string `json:"state"`
+	// SessionsRestartRequired is a live scan. A confirmed receipt proves the
+	// gateway applied the policy; coverage_complete also requires its count
+	// to be zero because already-running agents can retain earlier hooks.
+	SessionsRestartRequired *SessionRestartStatus `json:"sessions_restart_required,omitempty"`
 	// ErrorCode is the bundle error code of a failed receipt.
 	ErrorCode string `json:"error_code,omitempty"`
 	// EffectivePolicyDigest is the digest the receipt recorded: the staged
@@ -358,6 +362,9 @@ func (r *Result) AddWarning(code, message string) {
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
 func (r *Result) Finish(goos string, failureCode int) int {
+	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
+		r.CoverageComplete, r.SecurityComplete = false, false
+	}
 	r.OK = len(r.Errors) == 0
 	switch {
 	case r.OK:

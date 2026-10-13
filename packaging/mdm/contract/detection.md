@@ -66,6 +66,15 @@ confirmed bundle is that bundle id, or that version or newer, and
 digest. Not detected, `detect.sh` reports `bundle-missing`, `bundle-mismatch`,
 `bundle-outdated` or `bundle-not-enforced`.
 
+`detect.ps1 -RequireSessionsProtected` and
+`detect.sh --require-sessions-protected` additionally require that no
+running agent predates its managed hook settings. A nonzero count exits 1
+with `sessions-need-restart`; an unknown scan also exits 1. Run the Windows
+mode as LocalSystem and the Unix mode as root. `enterprise bundle status
+--json` reports `sessions_restart_required` with a count and up to 20
+process entries. A confirmed receipt records the count at confirmation;
+`coverage_complete` stays false while the live count is nonzero.
+
 `--bundle-status` prints `<bundle id> <version> <state>` for the receipt that
 reached the enforcing state and always exits 0 (inside `<result>` with `--format jamf`).
 Pre-staging refusals appear separately in `enterprise bundle status --json`
@@ -88,6 +97,7 @@ nothing on STDOUT.
 
 Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY`,
 `DC_REQUIRE_TETRAGON`, `DC_REQUIRE_BUNDLE`, `DC_BUNDLE_STATUS` and `DC_FORMAT`
+(`DC_REQUIRE_SESSIONS_PROTECTED` for the session check)
 in the settings block instead of flags.
 
 ## Versions

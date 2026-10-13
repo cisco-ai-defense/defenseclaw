@@ -25,6 +25,8 @@
 # that is not ready reports "tetragon-not-ready:<first failing check>".
 #
 # --require-bundle <bundle id | version> also requires a signed policy bundle
+# --require-sessions-protected fails while running agents need a restart to
+# load newly installed managed hooks.
 # (`enterprise bundle status`): a bundle id (b-<ULID>) must be the current
 # confirmed bundle, a version number must be at most the current version,
 # and the running gateway must enforce the bundle's effective policy digest.
@@ -41,7 +43,8 @@
 #
 # Usage: detect.sh [--min-version X.Y.Z] [--require-healthy]
 #                  [--require-tetragon consume|observe|enforce]
-#                  [--require-bundle ID|VERSION] [--format exit|value|jamf]
+#                  [--require-bundle ID|VERSION] [--require-sessions-protected]
+#                  [--format exit|value|jamf]
 #        detect.sh --bundle-status [--format exit|value|jamf]
 
 set -eu
@@ -54,6 +57,7 @@ DC_MIN_VERSION_SET=0
 DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
 DC_REQUIRE_TETRAGON=""  # consume | observe | enforce: also require Tetragon readiness (Linux)
 DC_REQUIRE_BUNDLE=""    # bundle id (b-<ULID>) or minimum version: also require that signed policy bundle
+DC_REQUIRE_SESSIONS_PROTECTED=0 # 1: no preexisting agent sessions without managed hooks
 DC_BUNDLE_STATUS=0      # 1: print "<bundle id> <version> <state>" of the enforcing receipt instead
 DC_FORMAT="exit"        # exit | value | jamf
 # ---- end of settings ---------------------------------------------------------
@@ -212,8 +216,8 @@ dc_report() { # <detected 0|1> <value> <reason>
     detected=$1 value=$2 reason=$3
     [ "${DC_BUNDLE_STATUS:-0}" = 0 ] || dc_bundle_line "none 0 $value"
     case "$DC_FORMAT" in
-        value) printf '%s\n' "$value"; exit 0 ;;
-        jamf) printf '<result>%s</result>\n' "$value"; exit 0 ;;
+        value) printf '%s\n' "$value"; [ "${DC_SESSIONS_REQUIRED_FAILURE:-0}" = 0 ] && exit 0 || exit 1 ;;
+        jamf) printf '<result>%s</result>\n' "$value"; [ "${DC_SESSIONS_REQUIRED_FAILURE:-0}" = 0 ] && exit 0 || exit 1 ;;
     esac
     if [ "$value" = busy ]; then
         printf 'defenseclaw detect: lifecycle is busy; retry later\n' >&2
@@ -326,6 +330,24 @@ dc_require_bundle() {
     DC_BUNDLE_TEXT=", policy bundle $id version $version"
 }
 
+# dc_require_sessions_protected <gateway>: a bundle can be confirmed while
+# agents already running still have the hooks they read before installation.
+dc_require_sessions_protected() {
+    doc=$("$1" enterprise bundle status --json 2>/dev/null </dev/null || true)
+    sessions=$(dc_json_object "$doc" sessions_restart_required)
+    state=$(dc_json_top "$sessions" state)
+    count=$(dc_json_top "$sessions" count)
+    DC_SESSIONS_REQUIRED_FAILURE=1
+    [ "$(dc_json_top "$doc" ok)" = true ] && [ "$state" = known ] ||
+        dc_report 0 unknown "running agent sessions could not be checked; run: sudo $1 enterprise bundle status"
+    case "$count" in
+        '' | *[!0-9]*) dc_report 0 unknown "bundle status reported no session count" ;;
+    esac
+    [ "$count" -eq 0 ] ||
+        dc_report 0 sessions-need-restart "sessions-need-restart: $count running agent session(s) need restart to load managed hooks"
+    DC_SESSIONS_REQUIRED_FAILURE=0
+}
+
 # dc_first_failing_check <tetragon verify --json document>: the id of its
 # first failing check.
 dc_first_failing_check() {
@@ -388,6 +410,7 @@ while [ "$#" -gt 0 ]; do
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
         --require-tetragon) DC_REQUIRE_TETRAGON=${2:-}; shift 2 ;;
         --require-bundle) DC_REQUIRE_BUNDLE=${2:-}; [ -n "$DC_REQUIRE_BUNDLE" ] || DC_REQUIRE_BUNDLE=-; shift 2 ;;
+        --require-sessions-protected) DC_REQUIRE_SESSIONS_PROTECTED=1; shift ;;
         --bundle-status) DC_BUNDLE_STATUS=1; shift ;;
         --format) DC_FORMAT=${2:-}; shift 2 ;;
         -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
@@ -410,7 +433,7 @@ if [ -n "$DC_REQUIRE_BUNDLE" ] &&
     exit 2
 fi
 if [ "$DC_BUNDLE_STATUS" = 1 ] &&
-    { [ -n "$DC_MIN_VERSION$DC_REQUIRE_TETRAGON$DC_REQUIRE_BUNDLE" ] || [ "$DC_REQUIRE_HEALTHY" = 1 ]; }; then
+    { [ -n "$DC_MIN_VERSION$DC_REQUIRE_TETRAGON$DC_REQUIRE_BUNDLE" ] || [ "$DC_REQUIRE_HEALTHY" = 1 ] || [ "$DC_REQUIRE_SESSIONS_PROTECTED" = 1 ]; }; then
     printf 'defenseclaw detect: --bundle-status takes no --min-version or --require-* option\n' >&2
     exit 2
 fi
@@ -454,4 +477,5 @@ if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 [ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"
+[ "$DC_REQUIRE_SESSIONS_PROTECTED" = 0 ] || dc_require_sessions_protected "$gateway"
 dc_report 1 "$version" ""

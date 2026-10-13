@@ -877,6 +877,30 @@ dc_report 1 1.2.3 ""
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_can_require_running_sessions_protected(tmp_path: Path) -> None:
+    source = _text(MDM / "linux" / "detect.sh")
+    names = ("dc_json_top", "dc_json_object", "dc_report", "dc_require_sessions_protected")
+    functions = "\n".join(_shell_function(source, name) for name in names)
+    script = functions + '\nDC_FORMAT=$1 DC_BUNDLE_STATUS=0\ndc_require_sessions_protected "$2"\n'
+    for count, expected in ((0, 0), (2, 1)):
+        gateway = tmp_path / f"gateway-{count}"
+        gateway.write_text(
+            '#!/bin/sh\n[ "$*" = "enterprise bundle status --json" ] || exit 9\n'
+            f"printf '%s\\n' '{json.dumps({'ok': True, 'sessions_restart_required': {'state': 'known', 'count': count, 'entries': []}})}'\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        for shell in ("sh", "dash", "bash"):
+            if shutil.which(shell):
+                result = subprocess.run([shell, "-c", script, "detect", "exit", str(gateway)], capture_output=True, text=True)
+                assert result.returncode == expected, (shell, count, result)
+                if count:
+                    assert "sessions-need-restart" in result.stderr
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    assert _run([detect, "--require-sessions-protected", "--bundle-status"]).returncode == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_require_tetragon_arguments() -> None:
     linux, macos = str(MDM / "linux" / "detect.sh"), str(MDM / "macos" / "detect.sh")
     bad = _run([linux, "--require-tetragon", "audit"])

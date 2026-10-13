@@ -499,9 +499,11 @@ func (l *lifecycle) confirmBundleInTransaction(ctx context.Context, configSHA st
 
 func (l *lifecycle) markBundleApplied(digest string, generation uint64, configSHA string, restart bool) error {
 	at := l.env.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	sessions := l.env.UnprotectedSessions(context.Background())
 	return l.bundle.store.Advance(l.bundle.receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
 		rc.EffectivePolicyDigest, rc.ConfigGeneration, rc.ConfigSHA256 = digest, generation, configSHA
 		rc.AppliedAt, rc.Restart = at, restart
+		rc.SessionsRestartRequired = sessions.Count
 	})
 }
 
@@ -541,6 +543,7 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 			// and the swap would: settle finishes it on the next run.
 			return
 		}
+		rc.SessionsRestartRequired = env.UnprotectedSessions(ctx).Count
 		if _, err := run.store.Confirm(rc); err != nil {
 			r.AddWarning(codeBundleNotCurrent, "the bundle is applied but could not be recorded as the current bundle; the next lifecycle run confirms it: "+err.Error())
 		}
@@ -729,6 +732,7 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		err = enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, rc.EffectivePolicyDigest, digest, rc.DigestComparable)
 	}
 	if err == nil && digest == rc.EffectivePolicyDigest {
+		rc.SessionsRestartRequired = l.env.UnprotectedSessions(ctx).Count
 		if _, err := store.Confirm(rc); err != nil {
 			r.AddWarning(codeBundleNotCurrent, "could not record the applied policy bundle as current: "+err.Error())
 			return
