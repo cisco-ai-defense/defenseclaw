@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	// auditWALGuardInterval is how often the audit write-ahead log's size is
-	// checked (one stat call).
+	// auditWALGuardInterval is how often the audit write-ahead log's active
+	// frame count is checked on its dedicated checkpoint connection.
 	auditWALGuardInterval = 2 * time.Second
 	// auditWALLimitBytes is the size past which the log is checkpointed. A busy
 	// gateway writes about 3.4 MB of log per hook decision, so this is the log

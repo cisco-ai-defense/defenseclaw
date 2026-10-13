@@ -5,9 +5,65 @@ package audit
 
 import (
 	"context"
+	"math"
 	"os"
 	"testing"
+	"time"
 )
+
+// The periodic size check must use the checkpoint connection even when the
+// WAL is below the restart limit. A busy checkpoint must not hold the only
+// audit writer connection needed by hook correlation and decision writes.
+func TestCheckpointWALSizeCheckDoesNotHoldAuditWriter(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "before-checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointDB, err := store.checkpointConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reserve the dedicated pool to simulate a slow in-progress checkpoint.
+	tx, err := checkpointDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	guardDone := make(chan error, 1)
+	go func() {
+		_, err := store.CheckpointWALIfLarge(t.Context(), math.MaxInt64)
+		guardDone <- err
+	}()
+	select {
+	case err := <-guardDone:
+		t.Fatalf("WAL size check did not wait for checkpoint connection: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	appendDone := make(chan error, 1)
+	go func() {
+		appendDone <- store.LogEvent(Event{Action: "hook_decision", Target: "during-checkpoint"})
+	}()
+	select {
+	case err := <-appendDone:
+		if err != nil {
+			t.Fatalf("hook audit append failed during checkpoint: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hook audit append waited for checkpoint")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-guardDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WAL size check did not finish after checkpoint connection was released")
+	}
+}
 
 func TestCheckpointWALIfLargeRestartsTheLogOnlyWhenItIsLong(t *testing.T) {
 	store, cleanup := newTestStore(t)
