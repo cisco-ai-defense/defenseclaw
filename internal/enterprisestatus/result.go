@@ -167,9 +167,10 @@ type Result struct {
 	// Client integration and when the gateway did not report it.
 	Policy *PolicyState `json:"policy,omitempty"`
 	// Bundle is the signed policy bundle state of a standalone device in
-	// bundle mode: the last bundle receipt and the bundle that enforces;
-	// nil (omitted) when no bundle was ever received.
-	Bundle *BundleState `json:"bundle,omitempty"`
+	// bundle mode: the last receipt that reached staging and the bundle that
+	// enforces; nil (omitted) when neither exists.
+	Bundle      *BundleState   `json:"bundle,omitempty"`
+	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`

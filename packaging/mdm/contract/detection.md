@@ -55,10 +55,10 @@ checks the installed config's SHA-256.
 
 ## Signed policy bundles
 
-| OS | Is bundle N (or newer) enforcing? | What happened to the last delivery? |
+| OS | Is bundle N (or newer) enforcing? | Enforcing receipt and latest refusal |
 | --- | --- | --- |
 | Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed) | `enterprise bundle status --json` |
-| Linux, macOS | `detect.sh --require-bundle <version\|b-ULID>` (setting `DC_REQUIRE_BUNDLE`) | `detect.sh --bundle-status` (setting `DC_BUNDLE_STATUS=1`) |
+| Linux, macOS | `detect.sh --require-bundle <version\|b-ULID>` (setting `DC_REQUIRE_BUNDLE`) | `detect.sh --bundle-status` (setting `DC_BUNDLE_STATUS=1`) for the enforcing receipt; `enterprise bundle status --json` for `last_refusal` |
 
 `-RequireBundle` and `--require-bundle` detect only when the current,
 confirmed bundle is that bundle id, or that version or newer, and
@@ -66,10 +66,12 @@ confirmed bundle is that bundle id, or that version or newer, and
 digest. Not detected, `detect.sh` reports `bundle-missing`, `bundle-mismatch`,
 `bundle-outdated` or `bundle-not-enforced`.
 
-`--bundle-status` prints `<bundle id> <version> <state>` for the last
-receipt and always exits 0 (inside `<result>` with `--format jamf`). `state`
+`--bundle-status` prints `<bundle id> <version> <state>` for the receipt that
+reached the enforcing state and always exits 0 (inside `<result>` with `--format jamf`).
+Pre-staging refusals appear separately in `enterprise bundle status --json`
+as `last_refusal` (receipt id, bundle id, version, error code, time). `state`
 is `confirmed`, `not-enforced`, `failed:<code>`, an unfinished state
-(`received`, `verified`, `staged`, `applied`), or `none` / `not-installed` /
+(`staged`, `applied`), or `none` / `not-installed` /
 `unknown` after `none 0`. It takes no `--min-version` or `--require-*`
 option (exit 2).
 

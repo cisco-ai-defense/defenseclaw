@@ -211,6 +211,27 @@ func (r *Receipt) ReceivedAt() string {
 	return r.Transitions[0].At
 }
 
+// IsRefusal reports a failed delivery that never reached the staged state.
+func (r *Receipt) IsRefusal() bool {
+	if r.State != StateFailed {
+		return false
+	}
+	for _, tr := range r.Transitions {
+		if tr.State == StateStaged || tr.State == StateApplied {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Receipt) Refusal() *enterprisestatus.BundleRefusal {
+	if !r.IsRefusal() || len(r.Transitions) == 0 {
+		return nil
+	}
+	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, BundleID: r.BundleID,
+		Version: r.Version, ErrorCode: string(r.ErrorCode), Time: r.Transitions[len(r.Transitions)-1].At}
+}
+
 // DigestWarningCode classifies a difference between the signed expectation
 // and the policy the gateway actually enforces. A cross-build signature
 // cannot be compared, but the difference still deserves a visible warning.
@@ -382,6 +403,12 @@ func (s *Store) PublicReceiptPath() string {
 // the bundle that enforces now. It leaves out the error message (it can
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
+	if refusal := r.Refusal(); refusal != nil {
+		if previous, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath()); err == nil {
+			previous.LastRefusal = refusal
+			return s.publishReceipt(previous)
+		}
+	}
 	out := enterprisestatus.PublicReceipt{
 		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal,
@@ -397,6 +424,14 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 	if st, err := s.LoadState(); err == nil && st.Current != nil {
 		out.CurrentBundleID, out.CurrentVersion = st.Current.BundleID, st.Current.Version
 	}
+	out.LastRefusal = r.Refusal()
+	if out.LastRefusal == nil {
+		_, out.LastRefusal, _ = s.Latest()
+	}
+	return s.publishReceipt(out)
+}
+
+func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
@@ -405,6 +440,33 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 		return err
 	}
 	return configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644)
+}
+
+// Latest separates a pre-staging refusal from the latest receipt that
+// reached staging and may have affected the enforcing policy.
+func (s *Store) Latest() (last *Receipt, refusal *enterprisestatus.BundleRefusal, err error) {
+	receipts, err := s.Receipts()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, r := range receipts {
+		if r.IsRefusal() {
+			if refusal == nil {
+				refusal = r.Refusal()
+			}
+		} else if last == nil {
+			for _, tr := range r.Transitions {
+				if tr.State == StateStaged {
+					last = r
+					break
+				}
+			}
+		}
+		if last != nil && refusal != nil {
+			break
+		}
+	}
+	return last, refusal, nil
 }
 
 // GenerationOptions is how the lifecycle records the config of the bundle
@@ -448,19 +510,11 @@ func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
 	return r, s.prune()
 }
 
-// receiptReusable reports whether a new receipt may take the id bundleID:
-// there is no receipt of that id, or it failed. A confirmed, unfinished or
-// unreadable receipt is never overwritten.
+// receiptReusable reports whether a new receipt may take the id bundleID.
+// Every delivery keeps its own history, including repeated refusals.
 func (s *Store) receiptReusable(bundleID string) bool {
-	raw, err := readStoreFile(s.receiptPath(bundleID))
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	var r Receipt
-	return json.Unmarshal(raw, &r) == nil && r.State == StateFailed
+	_, err := readStoreFile(s.receiptPath(bundleID))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // Advance moves r one state forward (CheckTransition), applies update to
@@ -804,19 +858,19 @@ func (s *Store) Receipts() ([]*Receipt, error) {
 	return out, nil
 }
 
-// Summary is the result v2 bundle block: the newest receipt and the current
-// bundle; nil when the device never received a bundle.
+// Summary is the result v2 bundle block: the latest receipt that reached
+// staging and the current bundle; nil when neither exists.
 func (s *Store) Summary() (*enterprisestatus.BundleState, error) {
 	st, err := s.LoadState()
 	if err != nil {
 		return nil, err
 	}
-	receipts, err := s.Receipts()
+	last, _, err := s.Latest()
 	if err != nil {
 		return nil, err
 	}
-	if len(receipts) > 0 {
-		return receipts[0].Status(st.Current), nil
+	if last != nil {
+		return last.Status(st.Current), nil
 	}
 	if c := st.Current; c != nil {
 		return &enterprisestatus.BundleState{BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,

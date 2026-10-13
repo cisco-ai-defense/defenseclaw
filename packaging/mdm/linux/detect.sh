@@ -31,8 +31,8 @@
 # Otherwise: bundle-missing, bundle-mismatch, bundle-outdated or
 # bundle-not-enforced.
 #
-# --bundle-status prints "<bundle id> <version> <state>" of the last bundle
-# receipt instead and always exits 0; with --format jamf inside <result>.
+# --bundle-status prints "<bundle id> <version> <state>" of the enforcing
+# receipt and always exits 0; with --format jamf inside <result>.
 # For a Jamf extension attribute or a compliance script. state is a receipt
 # state (received, verified, staged, applied, confirmed), failed:<error
 # code>, not-enforced (confirmed, but the gateway does not report its
@@ -54,7 +54,7 @@ DC_MIN_VERSION_SET=0
 DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
 DC_REQUIRE_TETRAGON=""  # consume | observe | enforce: also require Tetragon readiness (Linux)
 DC_REQUIRE_BUNDLE=""    # bundle id (b-<ULID>) or minimum version: also require that signed policy bundle
-DC_BUNDLE_STATUS=0      # 1: print "<bundle id> <version> <state>" of the last bundle receipt instead
+DC_BUNDLE_STATUS=0      # 1: print "<bundle id> <version> <state>" of the enforcing receipt instead
 DC_FORMAT="exit"        # exit | value | jamf
 # ---- end of settings ---------------------------------------------------------
 
@@ -284,6 +284,12 @@ dc_bundle_status() {
     doc=$("$1" enterprise bundle status --json 2>/dev/null </dev/null || true)
     dc_json_true "$doc" ok || dc_bundle_line "none 0 unknown"
     bundle=$(dc_json_object "$doc" bundle)
+    current=$(dc_json_object "$doc" current)
+    receipt=$(dc_json_object "$doc" last_receipt)
+    if [ "$(dc_json_field "$receipt" state)" = confirmed ] &&
+       [ "$(dc_json_field "$receipt" bundle_id)" = "$(dc_json_field "$current" bundle_id)" ]; then
+        bundle=$receipt
+    fi
     id=$(dc_json_field "$bundle" bundle_id)
     [ -n "$id" ] || dc_bundle_line "none 0 none"
     version=$(dc_json_field "$bundle" version)

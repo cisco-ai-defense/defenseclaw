@@ -34,13 +34,14 @@ type bundleStatusResult struct {
 	Command       string `json:"command"`
 	OK            bool   `json:"ok"`
 	// BundleMode is true when the MDM installed the trust anchors.
-	BundleMode  bool                          `json:"bundle_mode"`
-	Anchors     string                        `json:"anchors,omitempty"`
-	Current     *enterprisebundle.Ref         `json:"current"`
-	LastGood    *enterprisebundle.Ref         `json:"last_good"`
-	Floor       uint64                        `json:"floor"`
-	LastReceipt *enterprisebundle.Receipt     `json:"last_receipt"`
-	Bundle      *enterprisestatus.BundleState `json:"bundle,omitempty"`
+	BundleMode  bool                            `json:"bundle_mode"`
+	Anchors     string                          `json:"anchors,omitempty"`
+	Current     *enterprisebundle.Ref           `json:"current"`
+	LastGood    *enterprisebundle.Ref           `json:"last_good"`
+	Floor       uint64                          `json:"floor"`
+	LastReceipt *enterprisebundle.Receipt       `json:"last_receipt"`
+	LastRefusal *enterprisestatus.BundleRefusal `json:"last_refusal,omitempty"`
+	Bundle      *enterprisestatus.BundleState   `json:"bundle,omitempty"`
 	// GatewayChecked says whether the running gateway was asked; then
 	// GatewayDigest is the digest it enforces and Applied says it is the
 	// current bundle digest with no rejected reload.
@@ -55,11 +56,11 @@ func newEnterpriseBundleStatusCommand() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the bundle that enforces, the last receipt and the version floor",
+		Short: "Show the bundle that enforces, the last receipt, refusal and version floor",
 		Long: `Report the policy bundle state of this standalone managed device: the
 current (confirmed) bundle that enforces, the last good bundle kept for
-rollback, the version floor, the last bundle receipt (state, error code and
-times) and whether the running gateway enforces the current bundle digest.
+rollback, the version floor, the last enforcing receipt, the last refusal
+and whether the running gateway enforces the current bundle digest.
 It changes nothing. Run it as root or an administrator.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
@@ -106,10 +107,13 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if err != nil {
 		return bundleStateError(err)
 	}
-	if len(receipts) > 0 {
-		res.LastReceipt = receipts[0]
-		res.Bundle = receipts[0].Status(st.Current)
-		switch last := receipts[0]; {
+	res.LastReceipt, res.LastRefusal, err = store.Latest()
+	if err != nil {
+		return bundleStateError(err)
+	}
+	if res.LastReceipt != nil {
+		res.Bundle = res.LastReceipt.Status(st.Current)
+		switch last := res.LastReceipt; {
 		case last.State == enterprisebundle.StateFailed:
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_failed",
 				Message: fmt.Sprintf("the last bundle received failed (%s); the current bundle keeps enforcing", last.ErrorCode)})
@@ -230,6 +234,9 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 			line += " at " + r.Transitions[n-1].At
 		}
 		fmt.Fprintln(w, line)
+	}
+	if r := res.LastRefusal; r != nil {
+		fmt.Fprintf(w, "Last refusal: %s version %d: %s at %s\n", r.BundleID, r.Version, r.ErrorCode, r.Time)
 	}
 	if res.GatewayChecked {
 		applied := "no"

@@ -67,10 +67,12 @@ func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
 // never received a bundle or the store cannot be read (status as a
 // standard user).
 func (l *lifecycle) describeBundle() {
-	summary, err := l.env.bundleStore().Summary()
+	store := l.env.bundleStore()
+	summary, err := store.Summary()
 	if err == nil {
 		l.result.Bundle = summary
 	}
+	_, l.result.LastRefusal, _ = store.Latest()
 }
 
 // withBundleFields adds the bundle the lifecycle installed in the recorded

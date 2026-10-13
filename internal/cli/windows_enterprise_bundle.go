@@ -60,10 +60,10 @@ const (
 
 // Seams for tests.
 var (
-	windowsBundleLayout = managed.StandaloneWindowsLayout
-	windowsBundlePolicy = readWindowsBundleGatewayPolicy
-	windowsBundleSleep  = time.Sleep
-	windowsBundleTrust  = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
+	windowsBundleLayout         = managed.StandaloneWindowsLayout
+	windowsBundlePolicy         = readWindowsBundleGatewayPolicy
+	windowsBundleSleep          = time.Sleep
+	windowsBundleTrust          = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
 	windowsBundlePrivateStage   = privateWindowsBundleStage
 	windowsBundleSealVersion    = sealWindowsBundleVersionAssets
 	windowsBundlePublishVersion = publishWindowsBundleVersion
@@ -411,10 +411,10 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 }
 
 // attachWindowsBundleSummary sets the result v2 bundle block: the receipt
-// of this run, else the last receipt of the store. A store this account
+// of this run if it reached staging, else the store summary. A store this account
 // cannot read (status as a standard user) adds nothing.
 func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterprisebundle.Store, receipt *enterprisebundle.Receipt) {
-	if result == nil || result.Bundle != nil {
+	if result == nil {
 		return
 	}
 	if store == nil {
@@ -424,7 +424,13 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 		}
 		store = newWindowsBundleDriver(layout).Store
 	}
-	if receipt != nil {
+	if _, refusal, err := store.Latest(); err == nil {
+		result.LastRefusal = refusal
+	}
+	if result.Bundle != nil {
+		return
+	}
+	if receipt != nil && !receipt.IsRefusal() {
 		if st, err := store.LoadState(); err == nil {
 			result.Bundle = receipt.Status(st.Current)
 		}

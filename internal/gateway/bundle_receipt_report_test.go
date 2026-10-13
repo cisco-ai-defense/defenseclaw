@@ -98,6 +98,55 @@ func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
 	}
 }
 
+func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: sink,
+		enforcedVersion: func() uint64 { return 2 }}
+	base := enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
+		BundleID: testBundleID, Version: 2, State: enterprisestatus.BundleConfirmed,
+		FinishedAt: "2026-10-13T06:13:33Z", CurrentBundleID: testBundleID, CurrentVersion: 2}
+	writeTestPublicReceipt(t, path, base)
+	r.poll(context.Background())
+	base.LastRefusal = &enterprisestatus.BundleRefusal{ReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
+		BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 1,
+		ErrorCode: "version_not_newer", Time: "2026-10-13T06:16:41Z"}
+	writeTestPublicReceipt(t, path, base)
+	r.lastModTime = time.Time{}
+	r.poll(context.Background())
+	r.poll(context.Background())
+	if len(sink.receipts) != 2 || sink.receipts[0].State != "confirmed" ||
+		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "version_not_newer" ||
+		sink.receipts[1].EnforcingVersion != 2 {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+}
+
+func TestBundleReceiptReporterDoesNotRepeatInitialRefusal(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: sink,
+		enforcedVersion: func() uint64 { return 2 }}
+	refusal := &enterprisestatus.BundleRefusal{ReceiptID: testBundleID, BundleID: testBundleID,
+		Version: 1, ErrorCode: "signature_invalid", Time: "2026-10-13T06:00:00Z"}
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
+		ReceiptID: testBundleID, BundleID: testBundleID, Version: 1, State: "failed",
+		ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time, LastRefusal: refusal})
+	r.poll(context.Background())
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
+		ReceiptID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
+		Version: 2, State: "confirmed", FinishedAt: "2026-10-13T06:05:00Z", LastRefusal: refusal})
+	r.lastModTime = time.Time{}
+	r.poll(context.Background())
+	if len(sink.receipts) != 2 {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+}
+
 func TestBundleReceiptReporterOnlyOnStandaloneEnterprise(t *testing.T) {
 	if r := newBundleReceiptReporter(&config.Config{DataDir: t.TempDir()}, filepath.Join(t.TempDir(), "config.yaml"), &audit.Logger{}); r != nil {
 		t.Fatal("a per-user gateway started the bundle receipt reporter")

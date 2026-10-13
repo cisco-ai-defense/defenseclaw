@@ -169,7 +169,7 @@ func TestStoreFailureKeepsTheLastGoodBundleAndFloor(t *testing.T) {
 		t.Fatalf("a failed bundle changed the state: %+v", st)
 	}
 	got, _ := s.Summary()
-	if got.State != StateFailed || got.ErrorCode != string(CodeDigestMismatch) || got.CurrentBundleID != good.BundleID || got.CurrentVersion != 5 {
+	if got.State != StateConfirmed || got.BundleID != good.BundleID {
 		t.Fatalf("summary = %+v", got)
 	}
 	// The same bundle may be retried after a failure.
@@ -186,11 +186,60 @@ func TestStoreFailureKeepsTheLastGoodBundleAndFloor(t *testing.T) {
 	if err := s.Fail(again, CodeVersionNotNewer, "the manifest differs from the confirmed bundle"); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.Summary(); got.State != StateFailed || got.CurrentBundleID != retry.BundleID || got.CurrentVersion != 6 {
+	if got, _ := s.Summary(); got.State != StateConfirmed || got.BundleID != retry.BundleID || got.Version != 6 {
 		t.Fatalf("summary after a re-delivery = %+v", got)
 	}
 	if receipts, _ := s.Receipts(); !containsReceipt(receipts, retry.ReceiptID, StateConfirmed) {
 		t.Fatal("the confirmed receipt was replaced")
+	}
+}
+
+func TestRefusedReplayPreservesEnforcingReceipt(t *testing.T) {
+	s := testStore(t)
+	v1 := applyThrough(t, s, 1, 1, StateConfirmed)
+	v2 := applyThrough(t, s, 2, 2, StateConfirmed)
+	replay, err := s.Receive(v1.BundleID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Fail(replay, CodeVersionNotNewer, "older version"); err != nil {
+		t.Fatal(err)
+	}
+	secondReplay, err := s.Receive(v1.BundleID, 1)
+	if err != nil || secondReplay.ReceiptID == replay.ReceiptID {
+		t.Fatalf("second refusal receipt = %+v, %v", secondReplay, err)
+	}
+	if err := s.Fail(secondReplay, CodeVersionNotNewer, "older version again"); err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := s.Receipts()
+	if err != nil || !containsReceipt(receipts, replay.ReceiptID, StateFailed) {
+		t.Fatalf("refusal missing: %v", err)
+	}
+	got, err := s.Summary()
+	if err != nil || got.BundleID != v2.BundleID || got.State != StateConfirmed {
+		t.Fatalf("summary = %+v, %v", got, err)
+	}
+	public, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath())
+	if err != nil || public.ReceiptID != v2.ReceiptID || public.State != StateConfirmed || public.LastRefusal == nil || public.LastRefusal.ReceiptID != secondReplay.ReceiptID || public.LastRefusal.ErrorCode != string(CodeVersionNotNewer) {
+		t.Fatalf("public = %+v, %v", public, err)
+	}
+}
+
+func TestStagedFailureReplacesEnforcingReceipt(t *testing.T) {
+	s := testStore(t)
+	good := applyThrough(t, s, 1, 1, StateConfirmed)
+	bad := applyThrough(t, s, 2, 2, StateStaged)
+	if err := s.Fail(bad, CodeApplyFailed, "apply failed"); err != nil {
+		t.Fatal(err)
+	}
+	last, refusal, err := s.Latest()
+	if err != nil || last == nil || last.ReceiptID != bad.ReceiptID || refusal != nil {
+		t.Fatalf("latest = %+v %+v %v", last, refusal, err)
+	}
+	public, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath())
+	if err != nil || public.ReceiptID != bad.ReceiptID || public.State != StateFailed || public.CurrentBundleID != good.BundleID {
+		t.Fatalf("public = %+v, %v", public, err)
 	}
 }
 
@@ -315,7 +364,7 @@ func TestReceiptsArePrunedAndUnreadableBundlesGetAReceipt(t *testing.T) {
 	if !found {
 		t.Fatal("the unfinished receipt was pruned")
 	}
-	if got, _ := s.Summary(); got.BundleID != "" || got.State != StateFailed || got.ErrorCode != string(CodeArchiveInvalid) {
+	if got, _ := s.Summary(); got != nil {
 		t.Fatalf("summary = %+v", got)
 	}
 }

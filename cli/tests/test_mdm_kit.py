@@ -791,6 +791,12 @@ dc_report 1 1.2.3 ""
         "confirmed": _bundle_status("confirmed", True),
         "unenforced": _bundle_status("confirmed", False),
         "failed": _bundle_status("failed", True, "signature_invalid"),
+        "replay": json.dumps({**json.loads(_bundle_status("failed", True, "version_not_newer")),
+                              "last_receipt": {"receipt_id": "r-current", "bundle_id": _BUNDLE_ID,
+                                               "version": 12, "state": "confirmed"},
+                              "last_refusal": {"receipt_id": "r-replay", "bundle_id": "b-older",
+                                               "version": 11, "error_code": "version_not_newer",
+                                               "time": "2026-10-13T06:16:41Z"}}),
         "empty": json.dumps({"ok": True, "current": None, "bundle": None, "applied": False}),
         "refused": json.dumps({"ok": False, "errors": [{"code": "not_root"}]}),
     }
@@ -825,6 +831,7 @@ dc_report 1 1.2.3 ""
             assert failed.returncode == 1 and failed.stdout == "" and failed.stderr, (shell, name, want)
         for name, line in (
             ("confirmed", f"{_BUNDLE_ID} 12 confirmed"), ("unenforced", f"{_BUNDLE_ID} 12 not-enforced"),
+            ("replay", f"{_BUNDLE_ID} 12 confirmed"),
             ("failed", f"{_BUNDLE_ID} 12 failed:signature_invalid"), ("empty", "none 0 none"), ("refused", "none 0 unknown"),
         ):
             for fmt, out in (("exit", line), ("value", line), ("jamf", f"<result>{line}</result>")):

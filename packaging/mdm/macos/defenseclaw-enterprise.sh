@@ -46,8 +46,6 @@
 # example after a config change).
 #
 # Signed policy bundles: --trust-anchor-file installs the trust anchor file
-# Bundle config should omit data_dir: the gateway uses
-# /opt/cisco/defenseclaw/runtime; lifecycle state is separate and root-only.
 # (root-only writable) and turns on bundle mode; --bundle-file applies a
 # signed bundle with `enterprise bundle apply` after the package step and the
 # credential. A bundle carries its own config, so it excludes --config-file,
@@ -55,6 +53,8 @@
 # force keeps enforcing and the trust anchor file this run replaced is put
 # back. Script-only MDMs can paste the anchor file and the base64 of the
 # bundle into the settings below.
+# Bundle config should omit data_dir: the gateway uses its managed data
+# directory; enterprise lifecycle state stays separate and root-only.
 
 set -eu
 

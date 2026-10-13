@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	// PublicReceiptName is the public summary of the last finished policy
+	// PublicReceiptName is the public summary of the last policy receipt that
+	// reached staging, with the last pre-staging refusal recorded separately.
 	// bundle receipt: <etc>/bundles/receipt.json. The enterprise lifecycle
 	// writes it (mode 0644, no secrets, no error message) whenever a receipt
 	// ends confirmed or failed; the gateway reads it to emit the
@@ -67,8 +68,19 @@ type PublicReceipt struct {
 	Restart    bool   `json:"restart,omitempty"`
 	// CurrentBundleID and CurrentVersion name the confirmed bundle that
 	// enforces after this receipt (absent when none does).
-	CurrentBundleID string `json:"current_bundle_id,omitempty"`
-	CurrentVersion  uint64 `json:"current_version,omitempty"`
+	CurrentBundleID string         `json:"current_bundle_id,omitempty"`
+	CurrentVersion  uint64         `json:"current_version,omitempty"`
+	LastRefusal     *BundleRefusal `json:"last_refusal,omitempty"`
+}
+
+// BundleRefusal is a delivery stopped before staging changed the enforcing
+// policy. Its terminal receipt remains in the root-only receipt history.
+type BundleRefusal struct {
+	ReceiptID string `json:"receipt_id"`
+	BundleID  string `json:"bundle_id,omitempty"`
+	Version   uint64 `json:"version,omitempty"`
+	ErrorCode string `json:"error_code"`
+	Time      string `json:"time"`
 }
 
 // PublicReceiptPath is receipt.json for the configuration directory

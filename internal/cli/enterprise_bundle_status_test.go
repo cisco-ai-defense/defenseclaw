@@ -112,14 +112,14 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	store := bundleDevice(t, e)
-	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000008"
+	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000006"
 	digest := "sha256:" + strings.Repeat("1", 64)
 	confirmBundle(t, store, goodID, 7, digest)
-	bad, err := store.Receive(badID, 8)
+	bad, err := store.Receive(badID, 6)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fail(bad, enterprisebundle.CodeSignatureInvalid, "signature does not verify"); err != nil {
+	if err := store.Fail(bad, enterprisebundle.CodeVersionNotNewer, "older than the confirmed floor"); err != nil {
 		t.Fatal(err)
 	}
 	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
@@ -135,10 +135,23 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.OK || !res.BundleMode || res.Current.BundleID != goodID || res.Floor != 7 || !res.GatewayChecked || !res.Applied ||
-		res.LastReceipt.State != enterprisebundle.StateFailed || res.LastReceipt.ErrorCode != enterprisebundle.CodeSignatureInvalid ||
-		res.Bundle.CurrentBundleID != goodID || !hasBundleWarning(res.Warnings, "bundle_failed") {
+		res.LastReceipt.State != enterprisebundle.StateConfirmed || res.LastReceipt.BundleID != goodID ||
+		res.Bundle.BundleID != goodID || res.Bundle.State != enterprisebundle.StateConfirmed ||
+		res.LastRefusal == nil || res.LastRefusal.BundleID != badID || res.LastRefusal.ErrorCode != string(enterprisebundle.CodeVersionNotNewer) {
 		t.Fatalf("status = %s", out)
 	}
+	projection, err := json.Marshal(map[string]any{
+		"current": res.Current.BundleID, "last_receipt": res.LastReceipt.BundleID,
+		"bundle": map[string]any{"bundle_id": res.Bundle.BundleID, "version": res.Bundle.Version, "state": res.Bundle.State},
+		"last_refusal": map[string]any{
+			"bundle_id": res.LastRefusal.BundleID, "version": res.LastRefusal.Version,
+			"error_code": res.LastRefusal.ErrorCode, "time": "<time>",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBundleGolden(t, "status-refused-replay", string(projection), e.dir)
 
 	// The gateway enforcing something else is not applied.
 	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {

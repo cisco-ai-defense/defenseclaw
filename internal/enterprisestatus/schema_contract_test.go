@@ -237,6 +237,7 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		"portHolder":    {reflect.TypeOf(PortHolder{}), defs["portHolder"].(map[string]any)},
 		"policyState":   {reflect.TypeOf(PolicyState{}), defs["policyState"].(map[string]any)},
 		"bundleState":   {reflect.TypeOf(BundleState{}), defs["bundleState"].(map[string]any)},
+		"bundleRefusal": {reflect.TypeOf(BundleRefusal{}), defs["bundleRefusal"].(map[string]any)},
 		"readiness":     {reflect.TypeOf(Readiness{}), properties["readiness"].(map[string]any)},
 		"inspection":    {reflect.TypeOf(Inspection{}), properties["inspection"].(map[string]any)},
 		"enrollment":    {reflect.TypeOf(Enrollment{}), properties["enrollment"].(map[string]any)},

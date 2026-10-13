@@ -90,8 +90,8 @@ func TestLifecycleSettlesBundlesAndReportsTheBundleBlock(t *testing.T) {
 		t.Fatalf("repair did not settle the interrupted bundle: %+v", r.Warnings)
 	}
 	b := r.Bundle
-	if b == nil || b.BundleID != newID || b.State != enterprisebundle.StateFailed || b.ErrorCode != string(enterprisebundle.CodeInterrupted) ||
-		b.CurrentBundleID != goodID || b.CurrentVersion != 3 {
+	if b == nil || b.BundleID != goodID || b.State != enterprisebundle.StateConfirmed ||
+		r.LastRefusal == nil || r.LastRefusal.BundleID != newID || r.LastRefusal.ErrorCode != string(enterprisebundle.CodeInterrupted) {
 		t.Fatalf("bundle block = %+v", b)
 	}
 	if record, err := h.env.loadPolicyState(); err != nil || record == nil || record.BundleID != goodID || record.BundleVersion != 3 {
@@ -100,7 +100,7 @@ func TestLifecycleSettlesBundlesAndReportsTheBundleBlock(t *testing.T) {
 	if st, err := store.LoadState(); err != nil || st.Current.BundleID != goodID || st.Floor != 3 {
 		t.Fatalf("settle changed the bundle state: %+v, %v", st, err)
 	}
-	if status := h.run(Options{Action: ActionStatus}); status.Bundle == nil || status.Bundle.State != enterprisebundle.StateFailed {
+	if status := h.run(Options{Action: ActionStatus}); status.Bundle == nil || status.Bundle.State != enterprisebundle.StateConfirmed || status.LastRefusal == nil {
 		t.Fatalf("status bundle block = %+v", status.Bundle)
 	}
 }

@@ -50,6 +50,7 @@ var (
 // bundleReceiptMarkerName, in the data directory, holds the key of the last
 // receipt reported, so a gateway restart does not report it again.
 const bundleReceiptMarkerName = "bundle-receipt.reported"
+const bundleRefusalMarkerName = "bundle-refusal.reported"
 
 // bundleReceiptSink is the audit surface the reporter uses (*audit.Logger).
 type bundleReceiptSink interface {
@@ -58,16 +59,17 @@ type bundleReceiptSink interface {
 }
 
 type bundleReceiptReporter struct {
-	receiptPath, markerPath string
-	sink                    bundleReceiptSink
+	receiptPath, markerPath, refusalMarkerPath string
+	sink                                       bundleReceiptSink
 	// enforcedVersion is the bundle version the live generation runs.
 	enforcedVersion func() uint64
 
-	lastModTime  time.Time
-	lastSize     int64
-	reported     string
-	attempts     int
-	gaugeVersion uint64
+	lastModTime     time.Time
+	lastSize        int64
+	reported        string
+	reportedRefusal string
+	attempts        int
+	gaugeVersion    uint64
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -79,10 +81,11 @@ func newBundleReceiptReporter(cfg *config.Config, configPath string, logger *aud
 		return nil
 	}
 	return &bundleReceiptReporter{
-		receiptPath:     enterprisestatus.PublicReceiptPath(filepath.Dir(configPath)),
-		markerPath:      filepath.Join(cfg.DataDir, bundleReceiptMarkerName),
-		sink:            logger,
-		enforcedVersion: liveBundleVersion,
+		receiptPath:       enterprisestatus.PublicReceiptPath(filepath.Dir(configPath)),
+		markerPath:        filepath.Join(cfg.DataDir, bundleReceiptMarkerName),
+		refusalMarkerPath: filepath.Join(cfg.DataDir, bundleRefusalMarkerName),
+		sink:              logger,
+		enforcedVersion:   liveBundleVersion,
 	}
 }
 
@@ -95,6 +98,7 @@ func liveBundleVersion() uint64 {
 
 func (r *bundleReceiptReporter) run(ctx context.Context) {
 	r.reported = r.readMarker()
+	r.reportedRefusal = r.readRefusalMarker()
 	ticker := time.NewTicker(bundleReceiptPollInterval)
 	defer ticker.Stop()
 	for {
@@ -130,18 +134,43 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	}
 	key := receipt.Key()
 	if key == r.reported {
-		seen()
-		return
-	}
-	if err := r.report(receipt); err != nil {
-		if r.attempts++; r.attempts >= bundleReceiptRetries {
-			seen()
+		// The public receipt remains confirmed when a pre-staging delivery
+		// is refused. Its separate refusal still needs an audit event.
+	} else {
+		if err := r.report(receipt); err != nil {
+			if r.attempts++; r.attempts >= bundleReceiptRetries {
+				seen()
+			}
+			return
 		}
-		return
+		r.reported = key
+		_ = configwrite.WriteFileDurable(r.markerPath, []byte(key+"\n"), 0o600)
+	}
+	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID == receipt.ReceiptID {
+		r.reportedRefusal = refusal.ReceiptID + "|" + refusal.Time
+		if r.refusalMarkerPath != "" {
+			_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(r.reportedRefusal+"\n"), 0o600)
+		}
+	}
+	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
+		refusalKey := refusal.ReceiptID + "|" + refusal.Time
+		if refusalKey != r.reportedRefusal {
+			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID,
+				BundleID: refusal.BundleID, Version: refusal.Version, State: enterprisestatus.BundleFailed,
+				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
+				CurrentBundleID: receipt.CurrentBundleID, CurrentVersion: receipt.CurrentVersion}); err != nil {
+				if r.attempts++; r.attempts >= bundleReceiptRetries {
+					seen()
+				}
+				return
+			}
+			r.reportedRefusal = refusalKey
+			if r.refusalMarkerPath != "" {
+				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(refusalKey+"\n"), 0o600)
+			}
+		}
 	}
 	seen()
-	r.reported = key
-	_ = configwrite.WriteFileDurable(r.markerPath, []byte(key+"\n"), 0o600)
 }
 
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
@@ -159,7 +188,15 @@ func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 }
 
 func (r *bundleReceiptReporter) readMarker() string {
-	f, err := os.Open(r.markerPath)
+	return readBundleMarker(r.markerPath)
+}
+
+func (r *bundleReceiptReporter) readRefusalMarker() string {
+	return readBundleMarker(r.refusalMarkerPath)
+}
+
+func readBundleMarker(path string) string {
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
