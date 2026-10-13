@@ -134,13 +134,17 @@ def test_tmpfiles_touches_no_path_the_apply_trigger_watches():
 
 def test_windows_bundle_acl_contract_keeps_public_receipt_separate():
     module = (ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
-    contract = module[module.index("function Invoke-DefenseClawBundleAclContract {"):module.index("function Set-DefenseClawManagedAcls {")]
+    # The path classifier lives in its own function next to the contract; both
+    # together decide the descriptor of every path in the bundle store.
+    classifier = module[module.index("function Get-DefenseClawBundlePathKind {"):module.index("function Invoke-DefenseClawBundleAclContract {")]
+    contract = classifier + module[module.index("function Invoke-DefenseClawBundleAclContract {"):module.index("function Set-DefenseClawManagedAcls {")]
     assert "Kind = 'BundleDirectory'" in contract
     assert "'BundleReceipt'" in contract
     assert "'BundleVersionFile'" in contract
     assert "'AdminFile'" in contract
     assert "'bundle-state.json'" in contract and "'receipts'" in contract
-    assert "elseif ($entry.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }" in contract
+    assert "if ($IsDirectory) { return 'AdminDirectory' }" in contract and "return 'AdminFile'" in contract
+    assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
     assert "Assert-DefenseClawCanonicalPathAcl" in contract
     assert "Set-DefenseClawPathAcl" in contract
 
