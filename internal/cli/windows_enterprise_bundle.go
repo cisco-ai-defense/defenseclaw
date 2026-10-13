@@ -78,6 +78,13 @@ func init() {
 	// bundle status and verify ask whether this is a standalone managed
 	// device; on Windows the deployment record answers.
 	bundleManagedDevice = windowsEnterpriseStandaloneInstalled
+	bundlePrivilege = func() error {
+		if !windowsEnterpriseIsElevated() {
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin,
+				Detail: "run this command from an elevated administrator or SYSTEM session to read the managed bundle state"}
+		}
+		return nil
+	}
 	managedStandaloneBundleGeneration = windowsStagedBundleGeneration
 }
 

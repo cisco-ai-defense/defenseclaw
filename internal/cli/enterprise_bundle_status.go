@@ -76,6 +76,16 @@ It changes nothing. Run it as root or an administrator.`,
 				res.Errors, err = bundleRefusal(err)
 			}
 			res.OK = err == nil
+			if enterprisebundle.CodeOf(err) == enterprisebundle.CodeNotAdmin {
+				// The protected state was not read. Do not present zero values as
+				// facts about the device in the privilege refusal.
+				return printBundleResult(cmd, asJSON, struct {
+					SchemaVersion int           `json:"schema_version"`
+					Command       string        `json:"command"`
+					OK            bool          `json:"ok"`
+					Errors        []bundleError `json:"errors"`
+				}{bundleOutputSchemaVersion, "status", false, res.Errors}, err, func(io.Writer) {})
+			}
 			return printBundleResult(cmd, asJSON, res, err, func(w io.Writer) { printStatusText(w, res) })
 		},
 	}
@@ -87,6 +97,9 @@ It changes nothing. Run it as root or an administrator.`,
 func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if bundleSecureClient() {
 		return secureClientBundleRefusal()
+	}
+	if err := bundlePrivilege(); err != nil {
+		return err
 	}
 	if !bundleManagedDevice() {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,

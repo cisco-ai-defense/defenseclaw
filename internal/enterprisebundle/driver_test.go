@@ -275,3 +275,64 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestDriverSettleRunKeepsInterruptedReceiptOnRetry(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	first, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Receipt.State != enterprisebundle.StateStaged {
+		t.Fatalf("first receipt state = %s", first.Receipt.State)
+	}
+	report, rollback, err := d.SettleRun([]byte("config_version: 9\n"), nil)
+	if err != nil || len(rollback) != 0 || len(report.Interrupted) != 1 || report.Interrupted[0] != first.Receipt.ReceiptID {
+		t.Fatalf("settle = %+v, rollback = %+v, err = %v", report, rollback, err)
+	}
+	retry, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Receipt.ReceiptID == first.Receipt.ReceiptID {
+		t.Fatalf("retry reused interrupted receipt %s", retry.Receipt.ReceiptID)
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interrupted bool
+	for _, rc := range receipts {
+		if rc.ReceiptID == first.Receipt.ReceiptID {
+			interrupted = rc.State == enterprisebundle.StateFailed && rc.ErrorCode == enterprisebundle.CodeInterrupted
+		}
+	}
+	if !interrupted {
+		t.Fatalf("interrupted receipt was lost: %+v", receipts)
+	}
+}
+
+func TestDriverSettleRunProtectsInstalledUnconfirmedVersion(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	first, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionDir := d.Store.VersionDir(first.Receipt.Dir)
+	before, err := os.ReadFile(filepath.Join(versionDir, enterprisebundle.ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, rollback, err := d.SettleRun(first.Config, nil)
+	if err != nil || len(report.Interrupted) != 0 || len(rollback) != 1 {
+		t.Fatalf("settle = %+v, rollback = %+v, err = %v", report, rollback, err)
+	}
+	if _, err := d.Prepare(context.Background(), f.bundle, nil); err == nil {
+		t.Fatal("retry replaced the version directory used by the installed unconfirmed config")
+	}
+	after, err := os.ReadFile(filepath.Join(versionDir, enterprisebundle.ManifestName))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("installed version directory changed: %v", err)
+	}
+}

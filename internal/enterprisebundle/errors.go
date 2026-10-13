@@ -61,6 +61,7 @@ const (
 	CodeLifecycleBusy  Code = "lifecycle_busy"
 	CodeBundleRequired Code = "bundle_required"
 	CodeNotManaged     Code = "not_managed"
+	CodeNotAdmin       Code = "not_admin"
 	// CodeStateInvalid: bundle-state.json cannot be read. Nothing is
 	// applied: an unreadable state must not lower the version floor.
 	CodeStateInvalid Code = "state_invalid"

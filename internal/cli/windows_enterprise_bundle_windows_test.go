@@ -11,6 +11,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"os"
@@ -122,6 +123,121 @@ func windowsBundleCommand() (*cobra.Command, *bytes.Buffer) {
 	cmd.SetErr(io.Discard)
 	cmd.SetContext(context.Background())
 	return cmd, &out
+}
+
+func TestWindowsBundleStandardUserRefusedBeforeManagedLookup(t *testing.T) {
+	newBundleCLIEnv(t)
+	savedElevated, savedManaged := windowsEnterpriseIsElevated, bundleManagedDevice
+	t.Cleanup(func() {
+		windowsEnterpriseIsElevated, bundleManagedDevice = savedElevated, savedManaged
+	})
+	windowsEnterpriseIsElevated = func() bool { return false }
+	bundleManagedDevice = func() bool { t.Fatal("read protected deployment metadata as a standard user"); return false }
+	for _, args := range [][]string{{"status", "--json"}, {"apply", "--bundle", "C:\\unreadable.dcbundle", "--json"}} {
+		out, code := runBundle(t, args...)
+		if code != enterprisestatus.WindowsExitFailure {
+			t.Fatalf("%v exit %d, want 1603: %s", args, code, out)
+		}
+		var result struct {
+			Errors []bundleError `json:"errors"`
+		}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "not_admin" {
+			t.Fatalf("%v answered %+v", args, result.Errors)
+		}
+		if strings.Contains(out, `"bundle_mode"`) || strings.Contains(out, `"current"`) {
+			t.Fatalf("%v presented unreadable state as device facts: %s", args, out)
+		}
+	}
+}
+
+func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", first); done || err != nil {
+		t.Fatalf("first prepare ended: %v", err)
+	}
+	firstID := first.bundle.prepared.Receipt.ReceiptID
+	first.bundle.release() // The lifecycle process stopped after staging.
+
+	cmd, _ = windowsBundleCommand()
+	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); done || err != nil {
+		t.Fatalf("retry prepare ended: %v", err)
+	}
+	defer retry.bundle.release()
+	if retry.bundle.prepared.Receipt.ReceiptID == firstID {
+		t.Fatalf("retry reused the interrupted receipt %s", firstID)
+	}
+	receipts, err := newWindowsBundleDriver(layout).Store.Receipts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failed bool
+	for _, rc := range receipts {
+		if rc.ReceiptID == firstID {
+			failed = rc.State == enterprisebundle.StateFailed && rc.ErrorCode == enterprisebundle.CodeInterrupted
+		}
+	}
+	if !failed {
+		t.Fatalf("interrupted receipt missing after retry: %+v", receipts)
+	}
+}
+
+func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", first); done || err != nil {
+		t.Fatalf("first prepare ended: %v", err)
+	}
+	rendered := first.bundle.prepared.Config
+	versionDir := first.bundle.driver.Store.VersionDir(first.bundle.prepared.Receipt.Dir)
+	manifest := filepath.Join(versionDir, enterprisebundle.ManifestName)
+	before, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.ConfigPath, rendered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first.bundle.release() // Installed, then killed before confirmation.
+	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
+
+	cmd, _ = windowsBundleCommand()
+	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); !done || err == nil {
+		t.Fatalf("retry replaced the installed unconfirmed version: done=%v err=%v", done, err)
+	}
+	if retry.bundle != nil {
+		retry.bundle.release()
+	}
+	after, err := os.ReadFile(manifest)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("installed version changed: %v", err)
+	}
 }
 
 // Setup /ensure BUNDLE= on an installed device installs the trust anchors,

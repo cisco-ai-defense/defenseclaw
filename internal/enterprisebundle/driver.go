@@ -278,6 +278,11 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 // gateway enforces the installed config and failed (not_confirmed, named
 // for a rollback) otherwise, never reported as an apply that did not happen.
 func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (report SettleReport, rollback []*Receipt, err error) {
+	installedDirs := VersionDirsNamed(installedConfig, d.Store.BundlesDir)
+	d.Store.installedVersionDirs = make(map[string]bool, len(installedDirs))
+	for _, name := range installedDirs {
+		d.Store.installedVersionDirs[name] = true
+	}
 	installed := ""
 	if installedConfig != nil {
 		installed = sha256Hex(installedConfig)
@@ -286,7 +291,7 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	if err != nil {
 		return report, rollback, err
 	}
-	report, err = d.Store.Settle(VersionDirsNamed(installedConfig, d.Store.BundlesDir)...)
+	report, err = d.Store.Settle(installedDirs...)
 	report.Completed = append(completed, report.Completed...)
 	if err != nil {
 		return report, rollback, err

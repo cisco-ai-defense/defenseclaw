@@ -22,6 +22,9 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	if bundleSecureClient() {
 		return bundleApplyRefused(cmd, opts.json, secureClientBundleRefusal())
 	}
+	if err := bundlePrivilege(); err != nil {
+		return bundleApplyRefused(cmd, opts.json, err)
+	}
 	if !bundleManagedDevice() {
 		return bundleApplyRefused(cmd, opts.json, &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; install the enterprise profile first"})

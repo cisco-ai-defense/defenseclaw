@@ -292,6 +292,9 @@ type Store struct {
 	// assets have been sealed. Windows keeps the staging root private until
 	// the rename; Unix sets its group mode during SealVersion.
 	PublishVersion func(root string) error
+	// installedVersionDirs are named by the config installed when this run
+	// began. A retry must not replace one while that config can still load it.
+	installedVersionDirs map[string]bool
 }
 
 // NewStore returns the store at bundlesDir with its state in lifecycleDir.
@@ -679,6 +682,9 @@ func (s *Store) Promote(r *Receipt) (string, error) {
 	name := VersionDirName(r.Version, r.BundleID)
 	if st.held(name) {
 		return "", fmt.Errorf("bundle %s version %d is already in the store", r.BundleID, r.Version)
+	}
+	if s.installedVersionDirs[name] {
+		return "", fmt.Errorf("bundle %s version %d is used by the installed config", r.BundleID, r.Version)
 	}
 	// An applied receipt that is not confirmed yet names a directory the
 	// installed config may point at: removing it to rename this copy into

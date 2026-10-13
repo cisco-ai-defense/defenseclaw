@@ -94,6 +94,11 @@ force is a success (`already_applied`). The bundle codes are defined in
 `internal/enterprisebundle/errors.go`; a public page that explains each one
 ships with the sync service.
 
+On Windows, `enterprise bundle status` and `apply` require an elevated
+administrator or SYSTEM token. An unelevated token returns `not_admin` and
+exits `1603` before reading the protected deployment record. The refused
+status does not report bundle state that the caller could not read.
+
 ## Retries, downgrades and rollback
 
 Retry only `1618` and `75`. Every other failure repeats until you change the

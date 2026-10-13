@@ -61,9 +61,10 @@ func newBundleCLIEnv(t *testing.T) *bundleCLIEnv {
 	if _, err := os.Stat(filepath.Join(policies, "guardrail", "default")); err != nil {
 		t.Skipf("policies not found: %v", err)
 	}
-	savedNow, savedEntropy, savedDevice, savedSC, savedVersion := bundleNow, bundleIDEntropy, bundleManagedDevice, bundleSecureClient, appVersion
+	savedNow, savedEntropy, savedDevice, savedSC, savedVersion, savedPrivilege := bundleNow, bundleIDEntropy, bundleManagedDevice, bundleSecureClient, appVersion, bundlePrivilege
 	t.Cleanup(func() {
 		bundleNow, bundleIDEntropy, bundleManagedDevice, bundleSecureClient, appVersion = savedNow, savedEntropy, savedDevice, savedSC, savedVersion
+		bundlePrivilege = savedPrivilege
 	})
 	bundleNow = func() time.Time { return time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC) }
 	bundleManagedDevice = func() bool { return false }

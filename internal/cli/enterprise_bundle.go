@@ -50,6 +50,7 @@ var (
 	bundleNow            = time.Now
 	bundleIDEntropy      io.Reader
 	bundleManagedDevice  = managed.IsStandaloneManagedHost
+	bundlePrivilege      = func() error { return nil }
 	bundleSecretPresent  = managedBundleSecretPresent
 	bundleSecureClient   = func() bool { return secureClientHost() }
 	bundleDefaultAnchors = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }

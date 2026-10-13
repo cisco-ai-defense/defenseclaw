@@ -44,6 +44,19 @@ func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 	return store
 }
 
+func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
+	newBundleCLIEnv(t)
+	bundlePrivilege = func() error {
+		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Detail: "administrator required"}
+	}
+	bundleManagedDevice = func() bool { t.Fatal("read deployment state before privilege check"); return false }
+	out, code := runBundle(t, "status", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_admin"`) ||
+		strings.Contains(out, `"bundle_mode"`) || strings.Contains(out, `"current"`) {
+		t.Fatalf("privilege refusal exit=%d: %s", code, out)
+	}
+}
+
 // confirmBundle walks a receipt for id/version to confirmed with digest.
 func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest string) {
 	confirmBundleWithExpected(t, store, id, version, digest, digest, true)
