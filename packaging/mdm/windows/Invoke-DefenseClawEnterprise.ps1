@@ -65,6 +65,7 @@ param(
     [switch]$ConfigFromStdin,
     [string]$BundlePath = '',
     [string]$TrustAnchorPath = '',
+	[switch]$RefuseCapabilityLoss,
     [string]$SecretName = '',
     [string]$SecretPath = '',
     [switch]$SecretFromStdin,
@@ -652,6 +653,9 @@ if ($SecretName) {
 if ($BundlePath -and ($ConfigPath -or $ConfigFromStdin)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-BundlePath cannot be combined with -ConfigPath or -ConfigFromStdin: the signed bundle carries the config'
 }
+if ($RefuseCapabilityLoss -and -not $BundlePath) {
+	Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-RefuseCapabilityLoss requires -BundlePath'
+}
 if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName -or $BundlePath -or $TrustAnchorPath)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "-Action $Action is read-only and takes no config or secret"
 }
@@ -710,6 +714,7 @@ try {
         if ($config) { $arguments += "CONFIG=$config" }
         if ($bundle) { $arguments += "BUNDLE=$bundle" }
         if ($anchors) { $arguments += "TRUSTANCHORS=$anchors" }
+		if ($RefuseCapabilityLoss) { $arguments += 'REFUSECAPABILITYLOSS=1' }
         if ($script:Signers.Count -gt 0) { $arguments += ('ALLOWEDSIGNERS=' + ($script:Signers -join ',')) }
         $run = Invoke-DefenseClawNative -FilePath $stagedSetup -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'Setup'
@@ -722,6 +727,7 @@ try {
         if ($config) { $arguments += @('--config', $config) }
         if ($bundle) { $arguments += @('--bundle', $bundle) }
         if ($anchors) { $arguments += @('--trust-anchors', $anchors) }
+		if ($RefuseCapabilityLoss) { $arguments += '--refuse-capability-loss' }
         if ($ProductVersion) { $arguments += @('--product-version', $ProductVersion.TrimStart('v')) }
         $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'defenseclaw.exe'

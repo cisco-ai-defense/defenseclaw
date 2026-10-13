@@ -62,6 +62,8 @@ type PolicyBundleReceipt struct {
 	// after this receipt (0 when none): the defenseclaw.policy.bundle.version
 	// gauge.
 	EnforcingVersion uint64
+	WarningCodes     []string
+	DisabledByBundle []string
 }
 
 // Terminal receipt states (defenseclaw.policy.bundle.state).
@@ -188,6 +190,12 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	}
 	if receipt.ErrorCode != "" {
 		after["error_code"] = receipt.ErrorCode
+	}
+	if len(receipt.WarningCodes) > 0 {
+		after["warning_codes"] = receipt.WarningCodes
+	}
+	if len(receipt.DisabledByBundle) > 0 {
+		after["disabled_by_bundle"] = receipt.DisabledByBundle
 	}
 	if receipt.EffectivePolicyDigest != "" {
 		after["effective_policy_digest"] = receipt.EffectivePolicyDigest

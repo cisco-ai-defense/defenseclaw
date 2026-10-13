@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -182,7 +183,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		}
 		digestComparable = digestComparable || currentReceipt.DigestComparable
 	}
-	addDigestWarning := func(code string) {
+	addReceiptWarning := func(code string) {
 		if code == "" {
 			return
 		}
@@ -194,12 +195,14 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		message := "the gateway's effective policy digest differs from the signed expected digest"
 		if code == enterprisebundle.WarnDigestUnverifiable {
 			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
+		} else if code == "capability_disabled" {
+			message = "the bundle disabled: " + strings.Join(currentReceipt.DisabledByBundle, ", ")
 		}
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
 	}
 	if currentReceipt != nil {
 		for _, code := range currentReceipt.WarningCodes {
-			addDigestWarning(code)
+			addReceiptWarning(code)
 		}
 	}
 	if !res.BundleMode {
@@ -214,7 +217,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	}
 	res.GatewayChecked, res.GatewayDigest = true, policy.GatewayReportedDigest
 	if st.Current != nil {
-		addDigestWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, digestComparable))
+		addReceiptWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, digestComparable))
 	}
 	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""

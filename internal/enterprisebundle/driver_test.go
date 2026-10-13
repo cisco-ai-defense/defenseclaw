@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -60,6 +61,39 @@ func enforcing(digest string) enterprisebundle.GatewayPolicy {
 }
 
 const gatewayDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+func TestDriverBundleCapabilityLoss(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
+			t.Run(fmt.Sprintf("%s/strict=%t", platform, strict), func(t *testing.T) {
+				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = platform })
+				d := driverFor(t, f)
+				d.Platform = platform
+				d.EnforcedConfig = []byte("config_version: 9\nenterprise:\n  openshell: {driver: vm}\nopenshell: {enabled: true}\n")
+				d.RefuseCapabilityLoss = strict
+				p, err := d.Prepare(context.Background(), f.bundle, nil)
+				if p == nil || p.Receipt == nil || !slices.Contains(p.Receipt.DisabledByBundle, "sandbox") || !slices.Contains(p.Receipt.WarningCodes, "capability_disabled") {
+					t.Fatalf("receipt = %+v", p)
+				}
+				if strict {
+					if enterprisebundle.CodeOf(err) != enterprisebundle.CodeCapabilityLoss || p.Receipt.State != enterprisebundle.StateFailed {
+						t.Fatalf("strict prepare = %+v, %v", p.Receipt, err)
+					}
+					state, stateErr := d.Store.LoadState()
+					if stateErr != nil || state.Current != nil {
+						t.Fatalf("strict changed current state: %+v, %v", state, stateErr)
+					}
+					version := d.Store.VersionDir(enterprisebundle.VersionDirName(p.Receipt.Version, p.Receipt.BundleID))
+					if _, statErr := os.Stat(version); !os.IsNotExist(statErr) {
+						t.Fatalf("strict promoted a version: %v", statErr)
+					}
+				} else if err != nil || !slices.ContainsFunc(p.Warnings, func(w enterprisebundle.Warning) bool { return w.Code == "capability_disabled" }) {
+					t.Fatalf("permissive prepare = %+v, %v", p.Warnings, err)
+				}
+			})
+		}
+	}
+}
 
 func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {

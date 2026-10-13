@@ -210,6 +210,8 @@
         "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
         "version": { "type": "integer", "minimum": 0 },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "warning_codes": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
+        "disabled_by_bundle": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" } },
         "time": { "type": "string", "format": "date-time" }
       }
     },
@@ -221,6 +223,7 @@
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
+        "disabled_by_bundle": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" }, "description": "Capabilities enabled in the enforced config and disabled by this bundle." },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Bundle error code of a failed receipt." },
         "effective_policy_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "config_generation": { "type": "integer", "minimum": 0, "description": "Persistent config generation (config.generation.json), not the gateway policy generation." },

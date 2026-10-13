@@ -51,6 +51,7 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
 	}
+	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
 		Action: enterpriseunix.ActionEnsure, Bundle: bundle, BundleInbox: opts.inbox, Reason: opts.reason,
 	})

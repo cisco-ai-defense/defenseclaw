@@ -1,0 +1,8 @@
+{
+  "disabled_by_bundle": [
+    "asset_policy",
+    "sandbox"
+  ],
+  "warning_code": "capability_disabled",
+  "warning_message": "the bundle disabled: asset_policy, sandbox"
+}

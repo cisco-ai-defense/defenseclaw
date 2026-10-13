@@ -187,6 +187,7 @@ type Receipt struct {
 	// this same product version and platform.
 	DigestComparable      bool     `json:"digest_comparable,omitempty"`
 	WarningCodes          []string `json:"warning_codes,omitempty"`
+	DisabledByBundle      []string `json:"disabled_by_bundle,omitempty"`
 	EffectivePolicyDigest string   `json:"effective_policy_digest,omitempty"`
 	ConfigGeneration      uint64   `json:"config_generation,omitempty"`
 	AppliedAt             string   `json:"applied_at,omitempty"`
@@ -231,7 +232,8 @@ func (r *Receipt) Refusal() *enterprisestatus.BundleRefusal {
 		return nil
 	}
 	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, BundleID: r.BundleID,
-		Version: r.Version, ErrorCode: string(r.ErrorCode), Time: r.Transitions[len(r.Transitions)-1].At}
+		Version: r.Version, ErrorCode: string(r.ErrorCode), Time: r.Transitions[len(r.Transitions)-1].At,
+		WarningCodes: append([]string(nil), r.WarningCodes...), DisabledByBundle: append([]string(nil), r.DisabledByBundle...)}
 }
 
 // DigestWarningCode classifies a difference between the signed expectation
@@ -254,6 +256,7 @@ func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 		BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
+		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
 	}
 	if current != nil && (current.BundleID != r.BundleID || r.State != StateConfirmed) {
 		out.CurrentBundleID, out.CurrentVersion = current.BundleID, current.Version
@@ -420,6 +423,7 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
 		WarningCodes:     append([]string(nil), r.WarningCodes...),
+		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
 		ConfigGeneration: r.ConfigGeneration, AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		SessionsRestartRequired: r.SessionsRestartRequired,
 		RolledBack:              r.RolledBack, Restart: r.Restart,

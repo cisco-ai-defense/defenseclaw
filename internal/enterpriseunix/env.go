@@ -238,6 +238,9 @@ type Env struct {
 	// a signed policy bundle (the gateway ComputeEffectivePolicyFor); nil
 	// refuses every bundle (config_invalid).
 	BundleDigester enterprisebundle.PolicyDigester
+	// RefuseCapabilityLoss makes a bundle apply refuse capability loss
+	// before it changes the installed config.
+	RefuseCapabilityLoss bool
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before

@@ -78,6 +78,7 @@ DC_PRODUCT_VERSION=""       # refuse unless the source is exactly this version
 DC_CONFIG_FILE=""           # absolute path of the administrator config
 DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or stdin)
 DC_SECRET_FILE=""
+DC_REFUSE_CAPABILITY_LOSS=0 # opt in: refuse a bundle that disables an enforced capability
 DC_BUNDLE_FILE=""           # absolute path of a signed policy bundle (.dcbundle)
 DC_TRUST_ANCHOR_FILE=""     # absolute path of the bundle trust anchor file (bundle-anchors.json)
 DC_FORMAT=json              # json | jamf; Jamf wraps the result document in <result>
@@ -441,6 +442,7 @@ dc_parse_args() {
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
             --bundle-file) DC_BUNDLE_FILE=${2:-}; shift 2 ;;
+            --refuse-capability-loss) DC_REFUSE_CAPABILITY_LOSS=1; shift ;;
             --trust-anchor-file) DC_TRUST_ANCHOR_FILE=${2:-}; shift 2 ;;
             --format) DC_FORMAT=${2:-}; shift 2 ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
@@ -500,8 +502,11 @@ dc_validate_args() {
     fi
     if [ "$DC_ACTION" != ensure ] &&
         { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE" ] ||
-            [ "$DC_CONFIG_STDIN$DC_SECRET_STDIN" != 00 ]; }; then
+            [ "$DC_CONFIG_STDIN$DC_SECRET_STDIN" != 00 ] || [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ]; }; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action $DC_ACTION is read-only and takes no source, config, secret, bundle or trust anchor file"
+    fi
+    if [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ] && [ -z "$DC_BUNDLE_FILE" ] && ! dc_inline_bundle | grep -q '[^[:space:]]'; then
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--refuse-capability-loss requires a bundle"
     fi
     if [ -n "$DC_BUNDLE_FILE" ] && { [ -n "$DC_CONFIG_FILE" ] || [ "$DC_CONFIG_STDIN" = 1 ]; }; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
@@ -1182,7 +1187,11 @@ dc_main() {
         return 0
     fi
     status=0
-    dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
+    if [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ]; then
+        dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --refuse-capability-loss --lock-wait 10m || status=$?
+    else
+        dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
+    fi
     if [ "$status" = 0 ]; then
         dc_annotate_package_step
     else

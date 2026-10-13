@@ -38,5 +38,6 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	}
 	return runWindowsEnterpriseLifecycle(cmd.Context(), cmd, "ensure", &windowsEnterpriseLifecycleOptions{
 		bundlePath: bundle, profile: managed.ProfileStandalone, jsonOutput: opts.json,
+		refuseCapabilityLoss: opts.refuseCapabilityLoss,
 	})
 }

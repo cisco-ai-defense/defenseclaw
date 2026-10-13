@@ -62,7 +62,7 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 	confirmBundleWithExpected(t, store, id, version, digest, digest, true)
 }
 
-func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool) {
+func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
 	t.Helper()
 	r, err := store.Receive(id, version)
 	if err != nil {
@@ -80,12 +80,48 @@ func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id s
 	if _, err := store.Promote(r); err != nil {
 		t.Fatal(err)
 	}
+	if len(disabled) > 0 {
+		r.DisabledByBundle = disabled
+		r.WarningCodes = []string{"capability_disabled"}
+	}
 	if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = digest }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Confirm(r); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestEnterpriseBundleStatusCapabilityLossGolden(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000035"
+	digest := "sha256:" + strings.Repeat("8", 64)
+	confirmBundleWithExpected(t, store, id, 1, digest, digest, true, "asset_policy", "sandbox")
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Bundle == nil || !hasBundleWarning(result.Warnings, "capability_disabled") {
+		t.Fatalf("status lost capability warning: %s", out)
+	}
+	projection, err := json.Marshal(map[string]any{
+		"disabled_by_bundle": result.Bundle.DisabledByBundle,
+		"warning_code":       result.Warnings[0].Code,
+		"warning_message":    result.Warnings[0].Message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBundleGolden(t, "status-capability-loss", string(projection), e.dir)
 }
 
 func TestEnterpriseBundleStatusWarnsWhenSignedDigestDiffers(t *testing.T) {

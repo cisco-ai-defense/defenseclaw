@@ -247,9 +247,10 @@ const (
 // generation of config.generation.json, not the gateway policy generation
 // that restarts at 1 with the gateway.
 type BundleState struct {
-	BundleID string `json:"bundle_id"`
-	Version  uint64 `json:"version"`
-	State    string `json:"state"`
+	BundleID         string   `json:"bundle_id"`
+	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
+	Version          uint64   `json:"version"`
+	State            string   `json:"state"`
 	// SessionsRestartRequired is a live scan. A confirmed receipt proves the
 	// gateway applied the policy; coverage_complete also requires its count
 	// to be zero because already-running agents can retain earlier hooks.

@@ -111,8 +111,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// bundlePath is the signed policy bundle ensure applies (--bundle,
 	// Setup BUNDLE=) and trustAnchors the anchor file it installs first
 	// (--trust-anchors, Setup TRUSTANCHORS=). Standalone ensure only.
-	bundlePath   string
-	trustAnchors string
+	bundlePath           string
+	trustAnchors         string
+	refuseCapabilityLoss bool
 	// bundle is the bundle state of the run; bundleRollback marks the
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun
@@ -294,6 +295,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	if action == "ensure" {
 		flags.StringVar(&opts.bundlePath, "bundle", "",
 			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
+		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 		flags.StringVar(&opts.trustAnchors, "trust-anchors", "",
 			"standalone: install this administrator-only bundle trust anchor file (bundle-anchors.json) first")
 	}

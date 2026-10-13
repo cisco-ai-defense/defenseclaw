@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,10 @@ type Driver struct {
 	// is rendered (Windows: owned by SYSTEM or Administrators, no write
 	// entry for another account); nil skips it.
 	TrustVersion func(dir string) error
+	// EnforcedConfig is the currently installed, enforcing config. A nil
+	// value means this is the first bundle on a device with no config.
+	EnforcedConfig       []byte
+	RefuseCapabilityLoss bool
 }
 
 // Prepared is a bundle ready for the ensure transaction.
@@ -168,6 +173,24 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}); err != nil {
 		return refuse(err)
 	}
+	versionName := VersionDirName(receipt.Version, receipt.BundleID)
+	rendered, err := RenderConfig(staged, d.Store.VersionDir(versionName))
+	if err != nil {
+		return refuse(err)
+	}
+	p.Config, p.ConfigSHA256 = rendered, sha256Hex(rendered)
+	loss, err := DisabledByBundle(d.EnforcedConfig, rendered)
+	if err != nil {
+		return refuse(&Error{Code: CodeStateInvalid, Detail: err.Error()})
+	}
+	receipt.DisabledByBundle = loss
+	if len(loss) > 0 {
+		receipt.WarningCodes = append(receipt.WarningCodes, "capability_disabled")
+		p.Warnings = append(p.Warnings, Warning{Code: "capability_disabled", Message: "the bundle disables: " + strings.Join(loss, ", ")})
+		if d.RefuseCapabilityLoss {
+			return refuse(&Error{Code: CodeCapabilityLoss, Detail: "the bundle disables: " + strings.Join(loss, ", ")})
+		}
+	}
 	dir, err := d.Store.Promote(receipt)
 	if err != nil {
 		return refuse(err)
@@ -177,11 +200,6 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 			return refuse(&Error{Code: CodeStateInvalid, Detail: "the bundle version directory is not protected: " + err.Error()})
 		}
 	}
-	rendered, err := RenderConfig(staged, d.Store.VersionDir(receipt.Dir))
-	if err != nil {
-		return refuse(err)
-	}
-	p.Config, p.ConfigSHA256 = rendered, sha256Hex(rendered)
 	// The caller's transaction commits this config before Finish runs.
 	// Record which config it is, so SettleRun can tell a run that stopped
 	// after the commit (the bundle config enforces) from one that stopped

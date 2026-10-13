@@ -225,6 +225,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	refuse := func(code, message string) (bool, error) {
 		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message)
 	}
+	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
+		return refuse("invalid_arguments", "--refuse-capability-loss requires --bundle")
+	}
 	if requested && action != "ensure" {
 		return refuse("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
 	}
@@ -268,8 +271,13 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if opts.bundlePath == "" {
 		return false, nil
 	}
-	installed, _ := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
+	installed, readConfigErr := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
+	if readConfigErr != nil && !errors.Is(readConfigErr, fs.ErrNotExist) {
+		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the enforced config: "+readConfigErr.Error())
+	}
 	run.previous = installed
+	driver.EnforcedConfig = installed
+	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())

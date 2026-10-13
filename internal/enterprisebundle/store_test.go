@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -452,7 +453,7 @@ func TestReceiptStatusFieldsMatchTheResultBlock(t *testing.T) {
 	got := r.Status(&Ref{BundleID: testBundleID(1), Version: 2})
 	want := &enterprisestatus.BundleState{BundleID: testBundleID(2), Version: 3, State: StateFailed, ErrorCode: "interrupted",
 		CurrentBundleID: testBundleID(1), CurrentVersion: 2}
-	if *got != *want {
+	if !reflect.DeepEqual(*got, *want) {
 		t.Fatalf("status = %+v", got)
 	}
 }

@@ -58,6 +58,7 @@ type PublicReceipt struct {
 	ErrorCode               string   `json:"error_code,omitempty"`
 	EffectivePolicyDigest   string   `json:"effective_policy_digest,omitempty"`
 	WarningCodes            []string `json:"warning_codes,omitempty"`
+	DisabledByBundle        []string `json:"disabled_by_bundle,omitempty"`
 	EnforcingDigest         string   `json:"enforcing_digest,omitempty"`
 	ConfigGeneration        uint64   `json:"config_generation,omitempty"`
 	AppliedAt               string   `json:"applied_at,omitempty"`
@@ -77,11 +78,13 @@ type PublicReceipt struct {
 // BundleRefusal is a delivery stopped before staging changed the enforcing
 // policy. Its terminal receipt remains in the root-only receipt history.
 type BundleRefusal struct {
-	ReceiptID string `json:"receipt_id"`
-	BundleID  string `json:"bundle_id,omitempty"`
-	Version   uint64 `json:"version,omitempty"`
-	ErrorCode string `json:"error_code"`
-	Time      string `json:"time"`
+	ReceiptID        string   `json:"receipt_id"`
+	BundleID         string   `json:"bundle_id,omitempty"`
+	Version          uint64   `json:"version,omitempty"`
+	ErrorCode        string   `json:"error_code"`
+	Time             string   `json:"time"`
+	WarningCodes     []string `json:"warning_codes,omitempty"`
+	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 }
 
 // PublicReceiptPath is receipt.json for the configuration directory

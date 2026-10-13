@@ -649,6 +649,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		if opts.Action == "ensure" {
 			appendValue("--bundle", opts.Bundle)
 			appendValue("--trust-anchors", opts.TrustAnchors)
+			if opts.RefuseCapabilityLoss {
+				arguments = append(arguments, "--refuse-capability-loss")
+			}
 		}
 	}
 	return arguments

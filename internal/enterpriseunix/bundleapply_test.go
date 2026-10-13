@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -394,6 +395,45 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	after, _ := b.env.bundleStore().Receipts()
 	if !r.Noop || r.NoopReason != "already_applied" || len(after) != len(receipts) {
 		t.Fatalf("retry: noop = %v (%s), receipts %d -> %d", r.Noop, r.NoopReason, len(receipts), len(after))
+	}
+}
+
+func TestBundleApplyReportsAndCanRefuseCapabilityLoss(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, _, _ := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			configPath := b.env.P(b.env.Layout.ConfigPath)
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			off := strings.Replace(v1, "enabled: true\n  mode: observe", "enabled: false\n  mode: observe", 1)
+			if off == v1 {
+				t.Fatal("test config did not disable guardrail")
+			}
+			b.env.RefuseCapabilityLoss = true
+			refused := b.run(Options{Action: ActionEnsure, Bundle: b.dir(2, off)})
+			b.env.RefuseCapabilityLoss = false
+			if !hasMessageCode(refused.Errors, string(enterprisebundle.CodeCapabilityLoss)) ||
+				!hasMessageCode(refused.Warnings, "capability_disabled") {
+				t.Fatalf("strict result = %+v", refused)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) || b.state().Current.BundleID != bundleID(1) {
+				t.Fatalf("strict changed config or current bundle: %v", err)
+			}
+			if _, err := os.Stat(b.env.P(b.env.bundleVersionDir(enterprisebundle.VersionDirName(2, bundleID(2))))); !os.IsNotExist(err) {
+				t.Fatalf("strict promoted a version: %v", err)
+			}
+			permissive := b.apply(b.dir(3, off))
+			requireOK(t, permissive)
+			if permissive.Bundle == nil || !slices.Contains(permissive.Bundle.DisabledByBundle, "guardrail") ||
+				!slices.Contains(b.receipt(bundleID(3)).WarningCodes, "capability_disabled") {
+				t.Fatalf("permissive result = %+v", permissive.Bundle)
+			}
+		})
 	}
 }
 

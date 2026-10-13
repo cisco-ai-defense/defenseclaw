@@ -240,6 +240,7 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
         ([wrapper, "--action", "verify", "--trust-anchor-file", "/a.json"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--bundle-file", "/b.dcbundle", "--config-file", "/c.yaml"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--bundle-file", "b.dcbundle"], 2, "mdm_invalid_arguments"),
+        ([wrapper, "--refuse-capability-loss"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--source-url", "http://example.com/x.tar.gz", "--sha256", "0" * 64], 2 if os.geteuid() == 0 else 1, None),
         ([str(MDM / other / "defenseclaw-enterprise.sh")], 2, "mdm_wrong_platform"),
     ]
@@ -785,6 +786,16 @@ echo "changed=$DC_ANCHORS_CHANGED"
     assert run("old", "restore") == "changed=0\n" and anchors.read_text() == '{"v": 1}'
     assert run("new", "restore") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
     assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
+
+
+def test_bundle_capability_loss_flag_reaches_apply() -> None:
+    for platform in ("linux", "macos"):
+        script = _text(MDM / platform / "defenseclaw-enterprise.sh")
+        assert "--refuse-capability-loss) DC_REFUSE_CAPABILITY_LOSS=1" in script
+        assert 'bundle apply --bundle "$bundle" --reason mdm --refuse-capability-loss' in script
+    wrapper = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    assert "REFUSECAPABILITYLOSS=1" in wrapper
+    assert "'--refuse-capability-loss'" in wrapper
 
 
 _BUNDLE_ID = "b-01JABCDEFGHJKMNPQRSTVWXYZ0"

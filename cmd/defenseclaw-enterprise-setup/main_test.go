@@ -503,14 +503,15 @@ func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
 // bundle carries the config, so BUNDLE= with CONFIG= is invalid arguments,
 // and the Secure Client Setup does not know them.
 func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
-	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "JSON=1"}, true)
-	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "REFUSECAPABILITYLOSS=1", "JSON=1"}, true)
+	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` || !opts.RefuseCapabilityLoss {
 		t.Fatalf("standalone /ensure BUNDLE=: opts %+v, err %v", opts, err)
 	}
 	for _, arguments := range [][]string{
 		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
 		{"/repair", `BUNDLE=C:\b\v7.dcbundle`},
 		{"/status", `TRUSTANCHORS=C:\b\a.json`},
+		{"/ensure", "REFUSECAPABILITYLOSS=1"},
 	} {
 		if _, _, err := parseEnterpriseSetupOptionsForFlavor(arguments, true); err == nil {
 			t.Errorf("standalone %v was accepted", arguments)

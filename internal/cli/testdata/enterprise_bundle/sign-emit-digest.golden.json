@@ -33,5 +33,22 @@
   "tbs_out": "<tmp>/tbs.bin",
   "to_be_signed_sha256": "<hash>",
   "to_be_signed_sha256_base64": "<hash>",
-  "warnings": []
+  "warnings": [
+    {
+      "code": "sandbox_section_absent",
+      "message": "config.yaml has no sandbox or enterprise.openshell section; applying this full config can switch sandbox protection off"
+    },
+    {
+      "code": "observability_section_absent",
+      "message": "config.yaml has no observability section; applying this full config can switch that capability off"
+    },
+    {
+      "code": "asset_policy_section_absent",
+      "message": "config.yaml has no asset_policy section; applying this full config can switch that capability off"
+    },
+    {
+      "code": "machine_policy_section_absent",
+      "message": "config.yaml has no enterprise.machine_policy section; applying this full config can switch that capability off"
+    }
+  ]
 }

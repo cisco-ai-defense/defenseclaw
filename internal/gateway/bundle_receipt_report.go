@@ -158,6 +158,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID,
 				BundleID: refusal.BundleID, Version: refusal.Version, State: enterprisestatus.BundleFailed,
 				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
+				WarningCodes: refusal.WarningCodes, DisabledByBundle: refusal.DisabledByBundle,
 				CurrentBundleID: receipt.CurrentBundleID, CurrentVersion: receipt.CurrentVersion}); err != nil {
 				if r.attempts++; r.attempts >= bundleReceiptRetries {
 					seen()
@@ -180,6 +181,7 @@ func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
 		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
 		EnforcingVersion: p.CurrentVersion,
+		WarningCodes:     p.WarningCodes, DisabledByBundle: p.DisabledByBundle,
 	})
 	if err == nil && p.CurrentVersion != 0 {
 		r.gaugeVersion = p.CurrentVersion

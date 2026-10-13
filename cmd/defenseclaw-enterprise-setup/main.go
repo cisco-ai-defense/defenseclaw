@@ -159,8 +159,9 @@ type enterpriseSetupOptions struct {
 	// TrustAnchors the bundle trust anchor file it installs first
 	// (TRUSTANCHORS=). The bundle carries the config, so BUNDLE= is not
 	// combined with CONFIG=. Standalone Setup only.
-	Bundle       string
-	TrustAnchors string
+	Bundle               string
+	TrustAnchors         string
+	RefuseCapabilityLoss bool
 
 	// Set from the embedded payload, never from the command line.
 	Standalone         bool
@@ -345,6 +346,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
 		flags.StringVar(&opts.Bundle, "bundle", "", "standalone /ensure: signed policy bundle (.dcbundle) to apply")
 		flags.StringVar(&opts.TrustAnchors, "trust-anchors", "", "standalone /ensure: bundle trust anchor file to install first")
+		flags.BoolVar(&opts.RefuseCapabilityLoss, "refuse-capability-loss", false, "standalone /ensure: refuse a bundle that disables an enforced capability")
 	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
@@ -441,11 +443,14 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if opts.Force && opts.Action != "uninstall" {
 		return opts, false, errors.New("FORCE=1 is valid only with /uninstall")
 	}
-	if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
+	if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "" || opts.RefuseCapabilityLoss) && opts.Action != "ensure" {
 		return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
 	}
 	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
 		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+	}
+	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
+		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
 	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {
 		return opts, false, errors.New("--allow-unsigned requires --certification-codex-home")
@@ -528,6 +533,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 			valueNames[name] = canonical
 		}
 		boolNames["force"] = "force"
+		boolNames["refusecapabilityloss"] = "refuse-capability-loss"
 		for switchName, action := range map[string]string{"/ensure": "ensure"} {
 			actions[switchName] = action
 		}
@@ -797,6 +803,7 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
 	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
 	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first")
+	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
 	fmt.Fprintln(output, "  PURGE=1                        with /uninstall: also remove the DefenseClaw files of each enrolled account")

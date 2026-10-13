@@ -448,11 +448,28 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	if err := env.fault(enterprisebundle.StateVerified); err != nil {
 		return refuse(err)
 	}
-	if _, err := store.Promote(receipt); err != nil {
+	versionName := enterprisebundle.VersionDirName(receipt.Version, receipt.BundleID)
+	rendered, err := enterprisebundle.RenderConfig(staged, env.bundleVersionDir(versionName))
+	if err != nil {
 		return refuse(err)
 	}
-	rendered, err := enterprisebundle.RenderConfig(staged, env.bundleVersionDir(receipt.Dir))
+	current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
+		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: "cannot read the enforced config: " + err.Error()})
+	}
+	loss, err := enterprisebundle.DisabledByBundle(current, rendered)
+	if err != nil {
+		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()})
+	}
+	receipt.DisabledByBundle = loss
+	if len(loss) > 0 {
+		receipt.WarningCodes = append(receipt.WarningCodes, "capability_disabled")
+		r.AddWarning("capability_disabled", "the bundle disables: "+strings.Join(loss, ", "))
+		if env.RefuseCapabilityLoss {
+			return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeCapabilityLoss, Detail: "the bundle disables: " + strings.Join(loss, ", ")})
+		}
+	}
+	if _, err := store.Promote(receipt); err != nil {
 		return refuse(err)
 	}
 	if err := env.fault(enterprisebundle.StateStaged); err != nil {

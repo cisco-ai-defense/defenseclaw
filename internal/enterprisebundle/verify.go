@@ -235,5 +235,10 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
 	res.Warnings = append(res.Warnings, ruleWarnings...)
+	sectionWarnings, err := AbsentSectionWarnings(b.Files[ConfigName])
+	if err != nil {
+		return res, err
+	}
+	res.Warnings = append(res.Warnings, sectionWarnings...)
 	return res, nil
 }

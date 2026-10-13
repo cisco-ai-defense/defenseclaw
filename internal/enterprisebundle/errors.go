@@ -56,6 +56,7 @@ const (
 
 	// Apply and the receipt state machine (spec section 7).
 	CodeApplyFailed    Code = "apply_failed"
+	CodeCapabilityLoss Code = "capability_loss"
 	CodeNotConfirmed   Code = "not_confirmed"
 	CodeInterrupted    Code = "interrupted"
 	CodeLifecycleBusy  Code = "lifecycle_busy"

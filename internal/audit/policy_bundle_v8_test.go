@@ -34,7 +34,8 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 	err := logger.LogPolicyBundleReceipt("control-plane:acme/alice",
 		PolicyBundle{ID: testPolicyBundleID, Version: 5, SignerKeyID: "fleet-2026-10", ChangeSummary: "tighten egress"},
 		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleFailed, ErrorCode: "not_confirmed",
-			EnforcingDigest: "sha256:" + strings.Repeat("a", 64), RolledBack: true, EnforcingVersion: 4})
+			EnforcingDigest: "sha256:" + strings.Repeat("a", 64), RolledBack: true, EnforcingVersion: 4,
+			WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}})
 	if err != nil {
 		t.Fatalf("LogPolicyBundleReceipt: %v", err)
 	}
@@ -56,6 +57,7 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 		`"defenseclaw.policy.bundle.change_summary":"tighten egress"`,
 		`"defenseclaw.policy.bundle.rolled_back":true`,
 		`"defenseclaw.admin.principal_ref":"control-plane:acme/alice"`,
+		`capability_disabled`, `sandbox`,
 	} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("receipt record lacks %s: %s", want, encoded)

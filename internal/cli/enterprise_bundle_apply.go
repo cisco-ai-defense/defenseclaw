@@ -14,9 +14,10 @@ import (
 )
 
 type bundleApplyOptions struct {
-	bundle, reason string
-	inbox, json    bool
-	lockWait       time.Duration
+	bundle, reason       string
+	inbox, json          bool
+	refuseCapabilityLoss bool
+	lockWait             time.Duration
 }
 
 // bundleApplyResult is the document of an apply refused before the
@@ -53,6 +54,7 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage.`,
 	f := cmd.Flags()
 	f.StringVar(&opts.bundle, "bundle", "", "the .dcbundle file or bundle directory")
 	f.BoolVar(&opts.inbox, "inbox", false, "apply the highest version in the bundle inbox")
+	f.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")
 	addLockWaitFlag(f, &opts.lockWait)
 	f.BoolVar(&opts.json, "json", false, "print the result as JSON")

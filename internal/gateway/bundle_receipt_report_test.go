@@ -112,13 +112,16 @@ func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testin
 	r.poll(context.Background())
 	base.LastRefusal = &enterprisestatus.BundleRefusal{ReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
 		BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 1,
-		ErrorCode: "version_not_newer", Time: "2026-10-13T06:16:41Z"}
+		ErrorCode: "capability_loss", Time: "2026-10-13T06:16:41Z",
+		WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}}
 	writeTestPublicReceipt(t, path, base)
 	r.lastModTime = time.Time{}
 	r.poll(context.Background())
 	r.poll(context.Background())
 	if len(sink.receipts) != 2 || sink.receipts[0].State != "confirmed" ||
-		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "version_not_newer" ||
+		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "capability_loss" ||
+		len(sink.receipts[1].WarningCodes) != 1 || sink.receipts[1].WarningCodes[0] != "capability_disabled" ||
+		len(sink.receipts[1].DisabledByBundle) != 1 || sink.receipts[1].DisabledByBundle[0] != "sandbox" ||
 		sink.receipts[1].EnforcingVersion != 2 {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}

@@ -67,6 +67,10 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
 	}
+	sectionWarnings, err := AbsentSectionWarnings(b.Files[ConfigName])
+	if err != nil {
+		return nil, nil, err
+	}
 	digests, err := EffectivePolicyDigests(ctx, b, in.Root, platforms, in.Digester)
 	if err != nil {
 		return nil, nil, err
@@ -86,7 +90,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		Files:             FileEntries(b),
 		SecretRefs:        refs,
 		EffectivePolicy:   EffectivePolicy{ProductVersion: in.ProductVersion, ComputedOn: in.HostPlatform, Digests: digests},
-		Warnings:          limitBundleWarnings(append(ruleWarnings, Reachability(cfg, platforms)...)),
+		Warnings:          limitBundleWarnings(append(append(ruleWarnings, Reachability(cfg, platforms)...), sectionWarnings...)),
 	}
 	raw, err := m.Marshal()
 	if err != nil {
