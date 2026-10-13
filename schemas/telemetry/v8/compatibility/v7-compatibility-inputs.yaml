@@ -52,6 +52,7 @@ classes:
       ActionToolCall: "tool-call"
       ActionToolResult: "tool-result"
       ActionConfigUpdate: "config-update"
+      ActionConfigBundleReceipt: "config.bundle.receipt"
       ActionPolicyUpdate: "policy-update"
       ActionPolicyReload: "policy-reload"
       ActionAction: "action"

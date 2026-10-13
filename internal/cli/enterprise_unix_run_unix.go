@@ -37,7 +37,13 @@ import (
 
 // newUnixLifecycleEnv is a seam for CLI tests.
 var newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-	return enterpriseunix.NewEnv(goos, appVersion)
+	env, err := enterpriseunix.NewEnv(goos, appVersion)
+	if env != nil {
+		// Every changing run verifies signed bundles (the apply trigger
+		// processes the bundle inbox).
+		env.BundleDigester = bundleDigester
+	}
+	return env, err
 }
 
 func platformGOOS(platform string) string {

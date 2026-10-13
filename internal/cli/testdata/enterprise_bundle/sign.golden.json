@@ -1,0 +1,36 @@
+{
+  "alg": "ed25519",
+  "bundle": {
+    "bundle_id": "b-01M4QNE6M00000000000000000",
+    "change_summary": "First bundle",
+    "created_at": "2026-10-12T09:00:00Z",
+    "created_by": "operator:alice",
+    "device_group": "eng",
+    "platforms": [
+      "linux",
+      "darwin",
+      "windows"
+    ],
+    "tenant_id": "acme",
+    "version": 5
+  },
+  "command": "sign",
+  "effective_policy": {
+    "computed_on": "<host>",
+    "digests": {
+      "darwin": "sha256:<digest>",
+      "linux": "sha256:<digest>",
+      "windows": "sha256:<digest>"
+    },
+    "product_version": "1.0.2"
+  },
+  "errors": [],
+  "key_id": "k1",
+  "manifest_sha256": "<hash>",
+  "ok": true,
+  "out": "<tmp>/v5.dcbundle",
+  "result": "signed",
+  "schema_version": 1,
+  "secret_refs": [],
+  "warnings": []
+}

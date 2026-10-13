@@ -138,7 +138,7 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 	if got != want {
 		t.Fatalf("asset files = %s, want %s", got, want)
 	}
-	if _, ok := assetDigestComponents(cfg)["provider_ca:acme"]; !ok {
+	if _, ok := assetDigestComponents(cfg, newDigestScope(cfg, "", ""))["provider_ca:acme"]; !ok {
 		t.Fatal("the provider CA file is not in the effective digest")
 	}
 }

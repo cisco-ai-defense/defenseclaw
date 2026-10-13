@@ -357,6 +357,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			"generation": m.gen.Load(),
 		})
 	}
+	if reporter := newBundleReceiptReporter(m.Current(), m.path, m.logger); reporter != nil {
+		go reporter.run(ctx)
+	}
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		signalConfigStartupReady(startupReady, err)

@@ -53,18 +53,39 @@ checks the installed config's SHA-256.
 | Last package result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
 | Wrapper log | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, 0600). |
 
+## Signed policy bundles
+
+| OS | Is bundle N (or newer) enforcing? | What happened to the last delivery? |
+| --- | --- | --- |
+| Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed) | `enterprise bundle status --json` |
+| Linux, macOS | `detect.sh --require-bundle <version\|b-ULID>` (setting `DC_REQUIRE_BUNDLE`) | `detect.sh --bundle-status` (setting `DC_BUNDLE_STATUS=1`) |
+
+`-RequireBundle` and `--require-bundle` detect only when the current,
+confirmed bundle is that bundle id, or that version or newer, and
+`enterprise bundle status` reports that the running gateway enforces its
+digest. Not detected, `detect.sh` reports `bundle-missing`, `bundle-mismatch`,
+`bundle-outdated` or `bundle-not-enforced`.
+
+`--bundle-status` prints `<bundle id> <version> <state>` for the last
+receipt and always exits 0 (inside `<result>` with `--format jamf`). `state`
+is `confirmed`, `not-enforced`, `failed:<code>`, an unfinished state
+(`received`, `verified`, `staged`, `applied`), or `none` / `not-installed` /
+`unknown` after `none 0`. It takes no `--min-version` or `--require-*`
+option (exit 2).
+
 ## detect.sh output formats
 
 | Format | Exit | Output |
 | --- | --- | --- |
 | `exit` (default) | 0 detected, 1 not | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR |
-| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`) |
+| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`) or a `bundle-*` value (with `--require-bundle`) |
 | `jamf` | always 0 | The same values inside `<result>...</result>` |
 
 In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.
 
-Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY` and `DC_FORMAT`
+Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY`,
+`DC_REQUIRE_TETRAGON`, `DC_REQUIRE_BUNDLE`, `DC_BUNDLE_STATUS` and `DC_FORMAT`
 in the settings block instead of flags.
 
 ## Versions

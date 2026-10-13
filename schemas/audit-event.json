@@ -41,6 +41,7 @@
             "tool-call",
             "tool-result",
             "config-update",
+            "config.bundle.receipt",
             "policy-update",
             "policy-reload",
             "action",

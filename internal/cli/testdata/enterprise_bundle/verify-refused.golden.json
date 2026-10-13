@@ -1,0 +1,40 @@
+{
+  "alg": "ed25519",
+  "anchor_trust": "unchecked",
+  "anchors": "<tmp>/anchors.json",
+  "bundle": {
+    "bundle_id": "b-01M4QNE6M00000000000000000",
+    "change_summary": "First bundle",
+    "created_at": "2026-10-12T09:00:00Z",
+    "created_by": "operator:alice",
+    "device_group": "eng",
+    "platforms": [
+      "linux",
+      "darwin",
+      "windows"
+    ],
+    "tenant_id": "acme",
+    "version": 5
+  },
+  "command": "verify",
+  "digest_verified": false,
+  "errors": [
+    {
+      "code": "file_hash_mismatch",
+      "message": "bundle file_hash_mismatch: discovery/confidence.yaml: size or SHA-256 differs from files[]",
+      "path": "discovery/confidence.yaml"
+    }
+  ],
+  "floor": 0,
+  "ok": false,
+  "platform": "linux",
+  "result": "refused",
+  "schema_version": 1,
+  "signer_key_id": "k1",
+  "warnings": [
+    {
+      "code": "anchor_trust_unchecked",
+      "message": "not a managed device: the anchor file ownership and permissions were not checked"
+    }
+  ]
+}

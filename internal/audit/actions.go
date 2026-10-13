@@ -67,12 +67,17 @@ const (
 	ActionToolResult Action = "tool-result"
 
 	// Operator mutations (v7 Activity)
-	ActionConfigUpdate  Action = "config-update"
-	ActionPolicyUpdate  Action = "policy-update"
-	ActionPolicyReload  Action = "policy-reload"
-	ActionAction        Action = "action" // generic action mutation (block/allow list update)
-	ActionAckAlerts     Action = "acknowledge-alerts"
-	ActionDismissAlerts Action = "dismiss-alerts"
+	ActionConfigUpdate Action = "config-update"
+	// ActionConfigBundleReceipt is the terminal receipt (confirmed or
+	// failed) of a signed policy bundle on a standalone managed device
+	// (log.config.bundle.receipt). The gateway emits it from the public
+	// receipt.json the enterprise lifecycle writes; it reports, never enforces.
+	ActionConfigBundleReceipt Action = "config.bundle.receipt"
+	ActionPolicyUpdate        Action = "policy-update"
+	ActionPolicyReload        Action = "policy-reload"
+	ActionAction              Action = "action" // generic action mutation (block/allow list update)
+	ActionAckAlerts           Action = "acknowledge-alerts"
+	ActionDismissAlerts       Action = "dismiss-alerts"
 
 	// Webhook / notifier
 	ActionWebhookDelivered Action = "webhook-delivered"
@@ -383,6 +388,7 @@ func AllActions() []Action {
 		ActionToolCall,
 		ActionToolResult,
 		ActionConfigUpdate,
+		ActionConfigBundleReceipt,
 		ActionPolicyUpdate,
 		ActionPolicyReload,
 		ActionAction,

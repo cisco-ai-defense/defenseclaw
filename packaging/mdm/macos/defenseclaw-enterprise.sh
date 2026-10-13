@@ -37,12 +37,22 @@
 #       [--gpg-keyring FILE] [--signature FILE | --signature-url URL] (Linux signed)
 #       [--config-file FILE | --config-stdin]
 #       [--secret-name NAME (--secret-file FILE | --secret-stdin)]
+#       [--bundle-file FILE.dcbundle] [--trust-anchor-file FILE]
 #       [--product-version X.Y.Z] [--https-proxy URL] [--log FILE] [--staging-dir DIR]
 #
 # Sources: a defenseclaw-enterprise .deb or .rpm (Linux), a .pkg (macOS) or
 # the defenseclaw-enterprise-<version>-<os>-<arch>.tar.gz payload (both).
 # Without a source the wrapper re-applies the installed deployment (for
 # example after a config change).
+#
+# Signed policy bundles: --trust-anchor-file installs the trust anchor file
+# (root-only writable) and turns on bundle mode; --bundle-file applies a
+# signed bundle with `enterprise bundle apply` after the package step and the
+# credential. A bundle carries its own config, so it excludes --config-file,
+# --config-stdin and the inline config. When the apply fails, the bundle in
+# force keeps enforcing and the trust anchor file this run replaced is put
+# back. Script-only MDMs can paste the anchor file and the base64 of the
+# bundle into the settings below.
 
 set -eu
 
@@ -65,6 +75,8 @@ DC_PRODUCT_VERSION=""       # refuse unless the source is exactly this version
 DC_CONFIG_FILE=""           # absolute path of the administrator config
 DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or stdin)
 DC_SECRET_FILE=""
+DC_BUNDLE_FILE=""           # absolute path of a signed policy bundle (.dcbundle)
+DC_TRUST_ANCHOR_FILE=""     # absolute path of the bundle trust anchor file (bundle-anchors.json)
 DC_HTTPS_PROXY=""           # proxy for the download only
 DC_LOG=""                   # default: the platform log path below
 DC_STAGING_DIR=""           # root-only folder for the staged copy (default: /var/lib/defenseclaw-mdm on Linux, /var/tmp on macOS)
@@ -76,6 +88,20 @@ dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
 DEFENSECLAW_CONFIG
 }
+
+# Inline trust anchor file (the JSON of bundle-anchors.json) and inline
+# policy bundle (the base64 of the .dcbundle file, line breaks allowed) for
+# script-only MDMs. Both are public: the anchor file holds public keys only and
+# a bundle holds no secret values. MDM script bodies have size limits, so
+# deliver a large bundle as a file (--bundle-file) instead.
+dc_inline_trust_anchors() {
+    cat <<'DC_TRUST_ANCHORS_JSON'
+DC_TRUST_ANCHORS_JSON
+}
+dc_inline_bundle() {
+    cat <<'DC_BUNDLE_BASE64'
+DC_BUNDLE_BASE64
+}
 # ---- end of settings ---------------------------------------------------------
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -86,6 +112,7 @@ umask 077
 
 readonly DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
 readonly DC_MAX_CONFIG_BYTES=1048576 DC_MAX_SECRET_BYTES=16384
+readonly DC_MAX_BUNDLE_BYTES=4194304 DC_MAX_ANCHORS_BYTES=65536
 readonly DC_LINUX_PACKAGE=defenseclaw-enterprise
 readonly DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
 
@@ -98,6 +125,8 @@ DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
 DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
+DC_ANCHORS_PREVIOUS="" # staged copy of the trust anchor file this run replaced
+DC_ANCHORS_CHANGED=0   # 1 when this run installed a different trust anchor file
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the macOS package's own scripts write
 
@@ -362,7 +391,7 @@ dc_stage_file() {
 }
 
 dc_usage() {
-    sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
 }
 
 dc_parse_args() {
@@ -397,6 +426,8 @@ dc_parse_args() {
             --secret-name) DC_SECRET_NAME=${2:-}; shift 2 ;;
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
+            --bundle-file) DC_BUNDLE_FILE=${2:-}; shift 2 ;;
+            --trust-anchor-file) DC_TRUST_ANCHOR_FILE=${2:-}; shift 2 ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
             --log) DC_LOG=${2:-}; shift 2 ;;
             --staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;
@@ -449,10 +480,19 @@ dc_validate_args() {
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a secret value needs --secret-name"
     fi
     if [ "$DC_ACTION" != ensure ] &&
-        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE" ] ||
+        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE" ] ||
             [ "$DC_CONFIG_STDIN$DC_SECRET_STDIN" != 00 ]; }; then
-        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action $DC_ACTION is read-only and takes no source, config or secret"
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action $DC_ACTION is read-only and takes no source, config, secret, bundle or trust anchor file"
     fi
+    if [ -n "$DC_BUNDLE_FILE" ] && { [ -n "$DC_CONFIG_FILE" ] || [ "$DC_CONFIG_STDIN" = 1 ]; }; then
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
+    fi
+    for path in "$DC_BUNDLE_FILE" "$DC_TRUST_ANCHOR_FILE"; do
+        case "$path" in
+            "" | /*) ;;
+            *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--bundle-file and --trust-anchor-file take absolute paths: $path" ;;
+        esac
+    done
 }
 
 # The lifecycle record pins the installed bytes. A missing or unreadable
@@ -494,6 +534,7 @@ dc_layout() {
         DC_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
         DC_INSTALL_ROOT=/opt/cisco/defenseclaw
         DC_DEPLOYMENT_RECORD=/opt/cisco/defenseclaw/lifecycle/deployment.json
+        DC_ANCHORS=/opt/cisco/defenseclaw/etc/trust/bundle-anchors.json
         DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
@@ -501,6 +542,7 @@ dc_layout() {
         DC_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
         DC_INSTALL_ROOT=/opt/defenseclaw
         DC_DEPLOYMENT_RECORD=/var/lib/defenseclaw-enterprise/deployment.json
+        DC_ANCHORS=/etc/defenseclaw/trust/bundle-anchors.json
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
     fi
@@ -859,6 +901,69 @@ dc_extract_payload() {
     DC_PAYLOAD_GATEWAY=$gateway
 }
 
+# dc_put_anchors <src>: atomically replace the trust anchor file with src
+# (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
+dc_put_anchors() {
+    dir=$(dirname "$DC_ANCHORS")
+    [ -d "$(dirname "$dir")" ] ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$(dirname "$dir") is missing; install the deployment before the trust anchor file"
+    if [ ! -d "$dir" ]; then
+        ( umask 022; mkdir "$dir" ) ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot create $dir"
+    fi
+    if [ -L "$dir" ] || ! chown 0:0 "$dir" || ! chmod 0755 "$dir"; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot make $dir a root-only folder"
+    fi
+    next="$dir/.bundle-anchors.json.mdm-$$"
+    if ! cp "$1" "$next" || ! chown 0:0 "$next" || ! chmod 0644 "$next" || ! mv -f "$next" "$DC_ANCHORS"; then
+        rm -f "$next"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot write $DC_ANCHORS"
+    fi
+    dc_trusted_path "$DC_ANCHORS" ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$DC_ANCHORS or one of its folders is not root-owned or is writable by other accounts$DC_TRUST_ACL"
+}
+
+# dc_install_anchors <staged>: install the staged trust anchor file unless the
+# installed one is identical, and keep the file it replaces for
+# dc_restore_anchors.
+dc_install_anchors() {
+    if [ -f "$DC_ANCHORS" ] && [ ! -L "$DC_ANCHORS" ] &&
+        [ "$(dc_sha256 "$1")" = "$(dc_sha256 "$DC_ANCHORS" 2>/dev/null || true)" ]; then
+        dc_log "trust anchor file unchanged"
+        return 0
+    fi
+    if [ -L "$DC_ANCHORS" ] || { [ -e "$DC_ANCHORS" ] && [ ! -f "$DC_ANCHORS" ]; }; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$DC_ANCHORS is not a regular file"
+    fi
+    if [ -f "$DC_ANCHORS" ]; then
+        DC_ANCHORS_PREVIOUS="$DC_STAGE/bundle-anchors.previous.json"
+        cp "$DC_ANCHORS" "$DC_ANCHORS_PREVIOUS" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot keep a copy of $DC_ANCHORS"
+    fi
+    DC_ANCHORS_CHANGED=1
+    dc_put_anchors "$1"
+    dc_log "installed trust anchor file $DC_ANCHORS"
+}
+
+# dc_restore_anchors: after a failed bundle apply, put back the trust anchor
+# file this run replaced (or remove the one it added), so a bad anchor file
+# never replaces the one that verified the bundle in force.
+dc_restore_anchors() {
+    [ "$DC_ANCHORS_CHANGED" = 1 ] || return 0
+    DC_ANCHORS_CHANGED=0
+    # A subshell: a restore that fails is logged, and the apply result stays
+    # the document this run prints.
+    if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
+        ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
+            dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
+            return 0
+        }
+    else
+        rm -f "$DC_ANCHORS"
+    fi
+    dc_log "restored the previous trust anchor file after the failed bundle apply"
+}
+
 # dc_emit_result: print the lifecycle's result document, the one document
 # this wrapper writes to stdout on success or on a lifecycle failure.
 dc_emit_result() {
@@ -867,14 +972,15 @@ dc_emit_result() {
     dc_log "result $(tr -d '\n' <"$DC_RESULT")"
 }
 
-# dc_run_lifecycle <gateway> <args...>: run the lifecycle, keep its result
-# for dc_emit_result and return its exit code.
+# dc_run_lifecycle <gateway> <group> <args...>: run `enterprise <group>
+# <args...>` (group linux, macos or bundle), keep its result for
+# dc_emit_result and return its exit code.
 dc_run_lifecycle() {
     gateway=$1
     shift
     result="$DC_STAGE/result.json"
     set +e
-    "$gateway" enterprise "$DC_OS_GROUP" "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null
+    "$gateway" enterprise "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null
     status=$?
     set -e
     if [ -s "$result" ]; then
@@ -927,7 +1033,7 @@ dc_main() {
         dc_trusted_path "$DC_GATEWAY" ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "the managed deployment is not installed ($DC_GATEWAY is missing or not root-owned)$DC_TRUST_ACL"
         status=0
-        dc_run_lifecycle "$DC_GATEWAY" "$DC_ACTION" || status=$?
+        dc_run_lifecycle "$DC_GATEWAY" "$DC_OS_GROUP" "$DC_ACTION" || status=$?
         dc_emit_result
         return "$status"
     fi
@@ -945,6 +1051,29 @@ dc_main() {
         if grep -q '[^[:space:]]' "$inline"; then
             config=$inline
         fi
+    fi
+    bundle=""
+    if [ -n "$DC_BUNDLE_FILE" ]; then
+        bundle="$DC_STAGE/policy.dcbundle"
+        # Verified after the copy: the signature and file hashes.
+        dc_stage_file "$DC_BUNDLE_FILE" "$bundle" "$DC_MAX_BUNDLE_BYTES" "bundle"
+    elif dc_inline_bundle | grep -q '[^[:space:]]'; then
+        bundle="$DC_STAGE/policy.dcbundle"
+        dc_inline_bundle | tr -d ' \t\r\n' | { base64 -d 2>/dev/null || base64 -D; } >"$DC_STAGE/inline.dcbundle" 2>/dev/null ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the inline bundle is not valid base64"
+        dc_read_bounded "$bundle" "$DC_MAX_BUNDLE_BYTES" "bundle" <"$DC_STAGE/inline.dcbundle"
+    fi
+    if [ -n "$bundle" ] && [ -n "$config" ]; then
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a signed bundle carries its own config; empty the inline config block"
+    fi
+    anchors=""
+    if [ -n "$DC_TRUST_ANCHOR_FILE" ]; then
+        anchors="$DC_STAGE/bundle-anchors.json"
+        # Not verified after the copy: it is the root of bundle trust.
+        dc_stage_file "$DC_TRUST_ANCHOR_FILE" "$anchors" "$DC_MAX_ANCHORS_BYTES" "trust anchor file" trusted
+    elif dc_inline_trust_anchors | grep -q '[^[:space:]]'; then
+        anchors="$DC_STAGE/bundle-anchors.json"
+        dc_inline_trust_anchors | dc_read_bounded "$anchors" "$DC_MAX_ANCHORS_BYTES" "trust anchor file"
     fi
     # The credential stays in memory and reaches the lifecycle through a
     # pipe: a staged copy outlived a run killed before its cleanup.
@@ -1008,13 +1137,38 @@ dc_main() {
         dc_log "stored credential $DC_SECRET_NAME"
     fi
 
-    set -- ensure --reason mdm --lock-wait 10m
-    [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
-    [ -z "$config" ] || set -- "$@" "--config=$config"
-    [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
+    # A bundle apply runs the ensure transaction itself, so ensure runs
+    # first only to install the payload channel; the package channel's
+    # postinstall already applied the deployment.
+    if [ -z "$bundle" ] || [ -n "$DC_PAYLOAD_GATEWAY" ]; then
+        set -- "$DC_OS_GROUP" ensure --reason mdm --lock-wait 10m
+        [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
+        [ -z "$config" ] || set -- "$@" "--config=$config"
+        [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
+        status=0
+        dc_run_lifecycle_retry "$gateway" "$@" || status=$?
+        if [ "$status" != 0 ] || [ -z "$bundle$anchors" ]; then
+            [ "$status" != 0 ] || dc_annotate_package_step
+            dc_emit_result
+            return "$status"
+        fi
+        gateway=$DC_GATEWAY
+        dc_trusted_path "$gateway" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "the payload install left no root-owned $gateway$DC_TRUST_ACL"
+    fi
+    [ -z "$anchors" ] || dc_install_anchors "$anchors"
+    if [ -z "$bundle" ]; then
+        dc_annotate_package_step
+        dc_emit_result
+        return 0
+    fi
     status=0
-    dc_run_lifecycle_retry "$gateway" "$@" || status=$?
-    [ "$status" != 0 ] || dc_annotate_package_step
+    dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
+    if [ "$status" = 0 ]; then
+        dc_annotate_package_step
+    else
+        dc_restore_anchors
+    fi
     dc_emit_result
     return "$status"
 }

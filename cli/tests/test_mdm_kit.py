@@ -236,6 +236,9 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
         ([wrapper, "--config-stdin", "--secret-name", "k", "--secret-stdin"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--secret-name", "Bad_Name", "--secret-stdin"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--action", "status", "--config-stdin"], 2, "mdm_invalid_arguments"),
+        ([wrapper, "--action", "verify", "--trust-anchor-file", "/a.json"], 2, "mdm_invalid_arguments"),
+        ([wrapper, "--bundle-file", "/b.dcbundle", "--config-file", "/c.yaml"], 2, "mdm_invalid_arguments"),
+        ([wrapper, "--bundle-file", "b.dcbundle"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--source-url", "http://example.com/x.tar.gz", "--sha256", "0" * 64], 2 if os.geteuid() == 0 else 1, None),
         ([str(MDM / other / "defenseclaw-enterprise.sh")], 2, "mdm_wrong_platform"),
     ]
@@ -712,6 +715,127 @@ def test_unix_detect_requires_tetragon_readiness_in_each_format(tmp_path: Path) 
         assert run("value", "none").stdout == "tetragon-not-ready:unknown\n", shell
         ready = run("value", "ready")
         assert (ready.returncode, ready.stdout) == (0, "ready\n"), shell
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_restores_the_trust_anchor_file_after_a_failed_apply(tmp_path: Path) -> None:
+    # The wrapper installs the anchor file before the bundle apply; a failed
+    # apply puts back the file it replaced (or removes the one it added), and
+    # an identical file is not rewritten.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    names = ("dc_sha256", "dc_put_anchors", "dc_install_anchors", "dc_restore_anchors")
+    functions = "\n".join(_shell_function(text, name) for name in names)
+    (tmp_path / "etc").mkdir()
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    for name, body in (("old", '{"v": 1}'), ("new", '{"v": 2}')):
+        (stage / f"{name}.json").write_text(body, encoding="utf-8")
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    script = f'''DC_SCRIPT_OS=linux DC_STAGE="{stage}" DC_ANCHORS="{anchors}" DC_TRUST_ACL=""
+DC_ANCHORS_PREVIOUS="" DC_ANCHORS_CHANGED=0
+dc_log() {{ :; }}
+dc_fail_result() {{ echo "fail $2"; exit "$1"; }}
+chown() {{ :; }}
+dc_trusted_path() {{ :; }}
+{functions}
+dc_install_anchors "$DC_STAGE/$1.json"
+echo "changed=$DC_ANCHORS_CHANGED"
+[ "$2" = keep ] || dc_restore_anchors
+'''
+
+    def run(name: str, then: str) -> str:
+        result = subprocess.run(["sh", "-c", script, "t", name, then], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout
+
+    assert run("new", "restore") == "changed=1\n" and not anchors.exists()
+    assert run("old", "keep") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    assert oct(anchors.stat().st_mode & 0o777) == "0o644" and oct(anchors.parent.stat().st_mode & 0o777) == "0o755"
+    assert run("old", "restore") == "changed=0\n" and anchors.read_text() == '{"v": 1}'
+    assert run("new", "restore") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
+
+
+_BUNDLE_ID = "b-01JABCDEFGHJKMNPQRSTVWXYZ0"
+
+
+def _bundle_status(state: str, applied: bool, error_code: str = "") -> str:
+    receipt = {"bundle_id": _BUNDLE_ID, "version": 12, "state": state}
+    if error_code:
+        receipt["error_code"] = error_code
+    return json.dumps({
+        "schema_version": 1, "command": "status", "ok": True, "bundle_mode": True,
+        "current": {"bundle_id": _BUNDLE_ID, "version": 12, "manifest_sha256": "ab", "dir": "v12-b-01JABC"},
+        "last_good": None, "floor": 12,
+        "last_receipt": {"receipt_id": "r-1", "bundle_id": "b-other", "version": 99, "state": "confirmed"},
+        "bundle": receipt, "gateway_checked": True, "applied": applied, "warnings": [], "errors": [],
+    }, indent=2)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_bundle_requirement_and_status(tmp_path: Path) -> None:
+    # --require-bundle reads the confirmed current bundle and the gateway
+    # check of `enterprise bundle status`, never the nested last receipt;
+    # --bundle-status prints "<id> <version> <state>" in every format.
+    text = _text(MDM / "linux" / "detect.sh")
+    names = ("dc_json_top", "dc_json_field", "dc_json_true", "dc_json_object", "dc_bundle_line", "dc_report",
+             "dc_bundle_status", "dc_require_bundle")
+    functions = "\n".join(_shell_function(text, name) for name in names)
+    script = functions + '''
+DC_FORMAT=$1 DC_BUNDLE_STATUS=0
+if [ "$3" = status ]; then DC_BUNDLE_STATUS=1; dc_bundle_status "$2"; fi
+dc_require_bundle "$2" "$3"
+dc_report 1 1.2.3 ""
+'''
+    docs = {
+        "confirmed": _bundle_status("confirmed", True),
+        "unenforced": _bundle_status("confirmed", False),
+        "failed": _bundle_status("failed", True, "signature_invalid"),
+        "empty": json.dumps({"ok": True, "current": None, "bundle": None, "applied": False}),
+        "refused": json.dumps({"ok": False, "errors": [{"code": "not_root"}]}),
+    }
+    gateways = {}
+    for name, doc in docs.items():
+        (tmp_path / f"{name}.json").write_text(doc, encoding="utf-8")
+        gateway = tmp_path / f"gateway-{name}"
+        gateway.write_text(
+            '#!/bin/sh\n[ "$*" = "enterprise bundle status --json" ] || exit 9\n'
+            f'cat "{tmp_path / f"{name}.json"}"\n',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        gateways[name] = str(gateway)
+    for shell in ("sh", "dash", "bash"):
+        if not shutil.which(shell):
+            continue
+
+        def run(fmt: str, name: str, want: str, shell: str = shell) -> subprocess.CompletedProcess[str]:
+            return subprocess.run([shell, "-c", script, "detect", fmt, gateways[name], want], capture_output=True, text=True)
+
+        ok = run("exit", "confirmed", "12")
+        assert (ok.returncode, ok.stdout) == (0, f"DefenseClaw Enterprise 1.2.3, policy bundle {_BUNDLE_ID} version 12\n"), shell
+        assert run("exit", "confirmed", _BUNDLE_ID).returncode == 0, shell
+        assert run("value", "confirmed", "11").stdout == "1.2.3\n", shell
+        for name, want, value in (
+            ("confirmed", "13", "bundle-outdated"), ("confirmed", "b-01JABCDEFGHJKMNPQRSTVWXYZ1", "bundle-mismatch"),
+            ("unenforced", "12", "bundle-not-enforced"), ("empty", "1", "bundle-missing"), ("refused", "1", "bundle-missing"),
+        ):
+            assert run("value", name, want).stdout == f"{value}\n", (shell, name, want)
+            failed = run("exit", name, want)
+            assert failed.returncode == 1 and failed.stdout == "" and failed.stderr, (shell, name, want)
+        for name, line in (
+            ("confirmed", f"{_BUNDLE_ID} 12 confirmed"), ("unenforced", f"{_BUNDLE_ID} 12 not-enforced"),
+            ("failed", f"{_BUNDLE_ID} 12 failed:signature_invalid"), ("empty", "none 0 none"), ("refused", "none 0 unknown"),
+        ):
+            for fmt, out in (("exit", line), ("value", line), ("jamf", f"<result>{line}</result>")):
+                status = run(fmt, name, "status")
+                assert (status.returncode, status.stdout) == (0, f"{out}\n"), (shell, name, fmt)
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    for args in (["--require-bundle", "b-lower"], ["--require-bundle", ""], ["--bundle-status", "--require-healthy"]):
+        bad = _run([detect, *args])
+        assert bad.returncode == 2 and bad.stderr, args
+    if os.geteuid() != 0:
+        assert _run([detect, "--bundle-status", "--format", "jamf"]).stdout == "<result>none 0 unknown</result>\n"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")

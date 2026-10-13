@@ -36,8 +36,9 @@
 //     config.change.applied from the Result.
 //
 // Both writers refuse when the host is StandaloneEnterprise() and the actor
-// is not ActorLifecycle or ActorMigration. Under SecureClientIntegration()
-// nothing changes.
+// is not ActorLifecycle, ActorMigration or a bundle principal written by the
+// lifecycle (Options.Lifecycle). Under SecureClientIntegration() nothing
+// changes.
 package configwrite
 
 import (
@@ -83,7 +84,17 @@ const (
 	ActorPrefixAPI      = "api:"
 	ActorPrefixSandbox  = "sandbox:"
 	ActorPrefixHandEdit = "hand-edit:"
+	// ActorPrefixControlPlane and ActorPrefixOperator are the principals of
+	// a signed policy bundle (control-plane:<tenant>/<admin>,
+	// operator:<os-admin>). Only the enterprise lifecycle may write as them
+	// (Options.Lifecycle); every other caller is refused.
+	ActorPrefixControlPlane = "control-plane:"
+	ActorPrefixOperator     = "operator:"
 )
+
+// MaxPrincipalBytes bounds a bundle principal actor. The bundle manifest
+// check uses it too, so a signed created_by is always one the writer takes.
+const MaxPrincipalBytes = 256
 
 var (
 	// ErrConflict means config.yaml changed after the caller read it.
@@ -92,6 +103,9 @@ var (
 	ErrLockBusy = cfgtxn.ErrLockBusy
 	// ErrManaged means the host is managed and the actor may not write.
 	ErrManaged = errors.New("configwrite: this device is managed; policy changes are made in the management plane")
+	// ErrPrincipalNotLifecycle means a bundle principal actor (or bundle
+	// fields) came from a caller other than the enterprise lifecycle.
+	ErrPrincipalNotLifecycle = errors.New("configwrite: bundle principals and bundle fields are accepted only from the enterprise lifecycle")
 )
 
 // Change is one edit. Path is dotted, with [i] for list items, for example
@@ -116,6 +130,25 @@ type Options struct {
 	ExpectSHA256 string
 	// Timeout bounds the lock wait; zero means DefaultLockTimeout.
 	Timeout time.Duration
+	// Lifecycle marks a write by the enterprise lifecycle. Only then may
+	// Actor be a bundle principal (ActorPrefixControlPlane,
+	// ActorPrefixOperator) and Bundle be set.
+	Lifecycle bool
+	// Bundle names the signed policy bundle the lifecycle installs; it is
+	// recorded in config.generation.json.
+	Bundle BundleRef
+}
+
+// BundleRef names a signed policy bundle in config.generation.json.
+type BundleRef struct {
+	ID          string
+	Version     uint64
+	SignerKeyID string
+}
+
+func (o Options) writer() cfgtxn.Writer {
+	return cfgtxn.Writer{Actor: o.Actor, Reason: o.Reason,
+		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID}
 }
 
 // Result describes a committed write.
@@ -161,7 +194,7 @@ func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) 
 // enterprise lifecycle (actor ActorLifecycle). install returns whether it
 // changed the file; an unchanged file keeps the generation.
 func Locked(ctx context.Context, path string, opt Options, install func() (bool, error)) (Result, error) {
-	if err := checkActor(opt.Actor); err != nil {
+	if err := checkActor(opt); err != nil {
 		return Result{}, err
 	}
 	txn, err := cfgtxn.Begin(ctx, path, opt.Timeout)
@@ -182,7 +215,7 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil
 	}
-	state, err := txn.RecordGeneration(sum, opt.Actor, opt.Reason)
+	state, err := txn.RecordGeneration(sum, opt.writer())
 	if err != nil {
 		return Result{}, err
 	}
@@ -234,6 +267,14 @@ func ReadGenerationState(configPath string) (GenerationState, error) {
 // (Options.ExpectSHA256, Result.SHA256).
 func SHA256Hex(raw []byte) string { return cfgtxn.SHA256Hex(raw) }
 
+// WriteFileDurable replaces path with data through a temp file in the same
+// directory: write, fsync, rename (MoveFileExW write-through on Windows) and
+// a directory fsync. A reader sees the old or the new bytes, also after a
+// crash. The enterprise bundle store writes its state with it.
+func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
+	return cfgtxn.WriteFileDurable(path, data, mode)
+}
+
 // CurrentActor returns prefix + the OS user name ("cli:alice").
 func CurrentActor(prefix string) string {
 	name := ""
@@ -252,18 +293,105 @@ func CurrentActor(prefix string) string {
 	return prefix + name
 }
 
-func checkActor(actor string) error {
-	if strings.TrimSpace(actor) == "" {
+// BundleReason is the generation reason the enterprise lifecycle records
+// for the config of a signed policy bundle:
+// "policy bundle <id> version <n>[: <change summary>]".
+func BundleReason(id string, version uint64, summary string) string {
+	reason := fmt.Sprintf("policy bundle %s version %d", id, version)
+	if summary = strings.TrimSpace(summary); summary != "" {
+		reason += ": " + summary
+	}
+	return reason
+}
+
+// BundleChangeSummary is the change summary BundleReason put into the
+// reason of state ("" when state names no bundle or no summary).
+func BundleChangeSummary(state GenerationState) string {
+	if state.BundleID == "" {
+		return ""
+	}
+	prefix := BundleReason(state.BundleID, state.BundleVersion, "") + ": "
+	if !strings.HasPrefix(state.Reason, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(state.Reason, prefix)
+}
+
+// RestoreOptions is how a rollback records the config bytes it put back.
+// When before, the record the change replaced, named a signed policy bundle
+// for exactly those bytes, the restored config is recorded as that bundle
+// again (its principal, reason and bundle fields), so
+// config.generation.json, /health and config.change.applied keep naming the
+// bundle that enforces after a failed apply. Otherwise fallback is used.
+// fallback's ExpectSHA256 and Timeout are kept either way.
+func RestoreOptions(before GenerationState, restoredSHA256 string, fallback Options) Options {
+	norm := func(v string) string { return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "sha256:") }
+	if before.BundleID == "" || !IsPrincipalActor(before.Actor) || !validPrincipal(before.Actor) ||
+		norm(before.ConfigSHA256) == "" || norm(before.ConfigSHA256) != norm(restoredSHA256) {
+		return fallback
+	}
+	out := fallback
+	out.Actor, out.Lifecycle = before.Actor, true
+	out.Reason = BundleReason(before.BundleID, before.BundleVersion, BundleChangeSummary(before))
+	out.Bundle = BundleRef{ID: before.BundleID, Version: before.BundleVersion, SignerKeyID: before.SignerKeyID}
+	return out
+}
+
+// IsPrincipalActor reports whether actor is a bundle principal
+// (control-plane:<tenant>/<admin> or operator:<os-admin>).
+func IsPrincipalActor(actor string) bool {
+	return strings.HasPrefix(actor, ActorPrefixControlPlane) || strings.HasPrefix(actor, ActorPrefixOperator)
+}
+
+// validPrincipal checks the shape of a bundle principal: a non-empty
+// tenant and admin for control-plane:, a non-empty name for operator:, and
+// no control characters (the actor reaches audit lines).
+func validPrincipal(actor string) bool {
+	if len(actor) > MaxPrincipalBytes {
+		return false
+	}
+	for _, r := range actor {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if rest, ok := strings.CutPrefix(actor, ActorPrefixControlPlane); ok {
+		tenant, admin, found := strings.Cut(rest, "/")
+		return found && strings.TrimSpace(tenant) != "" && strings.TrimSpace(admin) != "" && !strings.Contains(admin, "/")
+	}
+	rest, _ := strings.CutPrefix(actor, ActorPrefixOperator)
+	return strings.TrimSpace(rest) != ""
+}
+
+func checkActor(opt Options) error {
+	if strings.TrimSpace(opt.Actor) == "" {
 		return errors.New("configwrite: an actor is required")
+	}
+	principal := IsPrincipalActor(opt.Actor)
+	if (principal || opt.Bundle != (BundleRef{})) && !opt.Lifecycle {
+		return ErrPrincipalNotLifecycle
+	}
+	if principal && !validPrincipal(opt.Actor) {
+		return fmt.Errorf("configwrite: actor %q is not control-plane:<tenant>/<admin> or operator:<os-admin>", opt.Actor)
+	}
+	if opt.Lifecycle && !principal && opt.Actor != ActorLifecycle {
+		return fmt.Errorf("configwrite: the lifecycle writes as %q or a bundle principal, not %q", ActorLifecycle, opt.Actor)
 	}
 	return nil
 }
 
-// managedRefuses reports whether the managed gate refuses actor for the
+// installsAsGiven reports whether opt installs what it was given without
+// the asset check of the editing writers: a migration, the lifecycle, or a
+// bundle principal the lifecycle writes for (the bundle was verified first).
+func installsAsGiven(opt Options) bool {
+	return opt.Actor == ActorLifecycle || opt.Actor == ActorMigration || (opt.Lifecycle && IsPrincipalActor(opt.Actor))
+}
+
+// managedRefuses reports whether the managed gate refuses opt for the
 // current bytes: a standalone managed document (or environment) and an
-// actor other than the lifecycle or a migration.
-func managedRefuses(current []byte, actor string) bool {
-	if actor == ActorLifecycle || actor == ActorMigration {
+// actor other than the lifecycle, a migration or a lifecycle principal.
+func managedRefuses(current []byte, opt Options) bool {
+	if installsAsGiven(opt) {
 		return false
 	}
 	return config.StandaloneManagedSource(current)
@@ -272,7 +400,7 @@ func managedRefuses(current []byte, actor string) bool {
 type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
 
 func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
-	if err := checkActor(opt.Actor); err != nil {
+	if err := checkActor(opt); err != nil {
 		return Result{}, err
 	}
 	if strings.TrimSpace(path) == "" {
@@ -283,7 +411,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	// with a permission error that hides the managed refusal. The check is
 	// repeated under the lock below.
 	if unlocked, readErr := os.ReadFile(path); readErr == nil || os.IsNotExist(readErr) {
-		if managedRefuses(unlocked, opt.Actor) {
+		if managedRefuses(unlocked, opt) {
 			return Result{}, ErrManaged
 		}
 	}
@@ -301,7 +429,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if opt.ExpectSHA256 != "" && !strings.EqualFold(opt.ExpectSHA256, sum) {
 		return Result{}, ErrConflict
 	}
-	if managedRefuses(current, opt.Actor) {
+	if managedRefuses(current, opt) {
 		return Result{}, ErrManaged
 	}
 	candidate, changed, err := mutate(current)
@@ -318,7 +446,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	// An editing writer also proves the rule packs and rule IDs load, so a
 	// bad reference is refused here instead of failing every later reload.
 	// Migrations and the lifecycle install what they were given.
-	if opt.Actor != ActorMigration && opt.Actor != ActorLifecycle {
+	if !installsAsGiven(opt) {
 		if err := config.ValidateCandidateAssets(txn.Path(), candidate); err != nil {
 			return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
 		}
@@ -326,7 +454,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	state, err := txn.Commit(current, candidate, exists, mode, opt.Actor, opt.Reason)
+	state, err := txn.Commit(current, candidate, exists, mode, opt.writer())
 	if err != nil {
 		return Result{}, err
 	}

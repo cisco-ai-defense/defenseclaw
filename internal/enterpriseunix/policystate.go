@@ -158,11 +158,11 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			shortDigest(reported), shortDigest(state.EffectiveDigest)))
 		return
 	}
-	if err := env.savePolicyState(enterprisestatus.PolicyStateRecord{
+	if err := env.savePolicyState(env.withBundleFields(enterprisestatus.PolicyStateRecord{
 		EffectiveDigest:  state.EffectiveDigest,
 		ConfigGeneration: state.ConfigGeneration,
 		AppliedAt:        env.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
+	})); err != nil {
 		r.AddWarning(codeState, "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
 }

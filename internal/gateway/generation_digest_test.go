@@ -92,7 +92,7 @@ func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
 		cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: "/var/lib/defenseclaw"}
 		cfg.Enterprise.Profile = profile
 		cfg.Enterprise.Tetragon = block
-		got, err := configDigest(cfg)
+		got, err := configDigest(cfg, newDigestScope(cfg, "", ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -179,14 +179,47 @@ func TestKernelPolicyComponent(t *testing.T) {
 	if got := kernelPolicyComponent(build(standalone, "observe", true), "linux"); !kernelcontrols.AckMatches(got) {
 		t.Fatalf("component %q is not the value enforce_ack approves", got)
 	}
-	if runtime.GOOS != "linux" {
-		return
-	}
-	if got := assetDigestComponents(build(standalone, "enforce", true))["kernel_policy"]; got != kernelcontrols.Digest() {
+	// The digest scope names the platform, so every host computes the
+	// Linux component the same way (bundle sign digests each target).
+	linux, darwin := newDigestScope(nil, "linux", ""), newDigestScope(nil, "darwin", "")
+	if got := assetDigestComponents(build(standalone, "enforce", true), linux)["kernel_policy"]; got != kernelcontrols.Digest() {
 		t.Fatalf("assetDigestComponents kernel_policy = %q, want %q", got, kernelcontrols.Digest())
 	}
-	if got, ok := assetDigestComponents(build(standalone, "consume", true))["kernel_policy"]; ok {
+	if got, ok := assetDigestComponents(build(standalone, "enforce", true), darwin)["kernel_policy"]; ok {
+		t.Fatalf("the darwin scope carries a kernel_policy component %q", got)
+	}
+	if got, ok := assetDigestComponents(build(standalone, "consume", true), linux)["kernel_policy"]; ok {
 		t.Fatalf("consume carries a kernel_policy component %q", got)
+	}
+}
+
+// TestDigestScopeRewrite: a path under the policy bundle root digests as
+// ${bundle_root}/..., one under data_dir as ${data_dir}/...; the bundle root
+// wins when it lies inside data_dir, a sibling with the same prefix is not
+// rewritten, and a Windows path written with either separator matches.
+func TestDigestScopeRewrite(t *testing.T) {
+	cfg := &config.Config{DataDir: "/var/lib/defenseclaw"}
+	scope := newDigestScope(cfg, "linux", "/var/lib/defenseclaw/bundles/v7-0123abcd/")
+	for in, want := range map[string]string{
+		"/var/lib/defenseclaw/bundles/v7-0123abcd/policies/guardrail/p": "${bundle_root}/policies/guardrail/p",
+		"/var/lib/defenseclaw/bundles/v7-0123abcd":                      "${bundle_root}",
+		"/var/lib/defenseclaw/bundles/v7-0123abcdX/p":                   "${data_dir}/bundles/v7-0123abcdX/p",
+		"/var/lib/defenseclaw/audit.db":                                 "${data_dir}/audit.db",
+		"/etc/defenseclaw/policies":                                     "/etc/defenseclaw/policies",
+		"policies/guardrail/p":                                          "policies/guardrail/p",
+	} {
+		if got := scope.rewrite(in); got != want {
+			t.Errorf("rewrite(%q) = %q, want %q", in, got, want)
+		}
+	}
+	windows := newDigestScope(&config.Config{}, "windows", `C:\ProgramData\DefenseClaw\bundles\v7-0123abcd`)
+	for _, in := range []string{`C:\ProgramData\DefenseClaw\bundles\v7-0123abcd\discovery\confidence.yaml`, "C:/ProgramData/DefenseClaw/bundles/v7-0123abcd/discovery/confidence.yaml"} {
+		if runtime.GOOS != "windows" {
+			break // filepath.ToSlash maps backslashes on Windows only
+		}
+		if got := windows.rewrite(in); got != "${bundle_root}/discovery/confidence.yaml" {
+			t.Errorf("rewrite(%q) = %q", in, got)
+		}
 	}
 }
 
@@ -316,7 +349,7 @@ func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	cfg := &config.Config{DataDir: t.TempDir()}
 	cfg.AIDiscovery.Enabled = true
 	cfg.AIDiscovery.SignaturePacks = []string{pack}
-	live := &Generation{Components: assetDigestComponents(cfg)}
+	live := &Generation{Components: assetDigestComponents(cfg, newDigestScope(cfg, "", ""))}
 	if discoveryAssetsChanged(live, cfg) {
 		t.Fatal("an untouched pack rebuilt discovery")
 	}
@@ -326,7 +359,7 @@ func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	if !discoveryAssetsChanged(live, cfg) {
 		t.Fatal("an edited pack did not rebuild discovery")
 	}
-	live = &Generation{Components: assetDigestComponents(cfg)}
+	live = &Generation{Components: assetDigestComponents(cfg, newDigestScope(cfg, "", ""))}
 	cfg.AIDiscovery.ConfidencePolicyPath = filepath.Join(cfg.DataDir, "confidence.yaml")
 	if discoveryAssetsChanged(live, cfg) {
 		t.Fatal("an absent confidence policy rebuilt discovery")
@@ -348,7 +381,7 @@ func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	for _, entry := range []string{packs, filepath.Join(packs, "*.json")} {
 		cfg.AIDiscovery.Enabled = true
 		cfg.AIDiscovery.SignaturePacks = []string{entry}
-		live = &Generation{Components: assetDigestComponents(cfg)}
+		live = &Generation{Components: assetDigestComponents(cfg, newDigestScope(cfg, "", ""))}
 		if discoveryAssetsChanged(live, cfg) {
 			t.Fatalf("%s: an untouched entry rebuilt discovery", entry)
 		}

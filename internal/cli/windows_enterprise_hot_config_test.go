@@ -98,11 +98,11 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
-	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, reason, expectedSHA string) error {
-		if current, err := os.ReadFile(path); err != nil || configwrite.SHA256Hex(current) != expectedSHA {
+	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, opt configwrite.Options) error {
+		if current, err := os.ReadFile(path); err != nil || configwrite.SHA256Hex(current) != opt.ExpectSHA256 {
 			return errors.New("installed config changed before write")
 		}
-		host.writes = append(host.writes, reason)
+		host.writes = append(host.writes, opt.Reason)
 		// The writer records a generation with every write.
 		if err := os.WriteFile(configwrite.GenerationPath(path), []byte(`{"generation":`+strconv.Itoa(len(host.writes)+10)+`}`), 0o600); err != nil {
 			return err

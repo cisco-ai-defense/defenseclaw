@@ -1,0 +1,369 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0
+
+package enterprisebundle
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+)
+
+// Driver applies a bundle around a lifecycle transaction it does not run
+// itself: the Windows lifecycle, whose transaction is the installer module.
+// Prepare receives the bundle (receipt), stages it, verifies the staged copy
+// (never the path it was delivered at), promotes it to its immutable version
+// directory and renders its config.yaml against that directory. The caller
+// then installs that config with its own ensure transaction, which rolls
+// back on its own failure. Finish confirms the bundle only once the running
+// gateway reports the effective policy of the installed config with no
+// reload error; anything else fails the receipt, and the caller installs
+// the last good config again. Until the confirm, bundle-state.json still
+// names the last good bundle, so a run that stops in between is settled by
+// SettleRun at the start of the next one.
+type Driver struct {
+	Store       *Store
+	AnchorsPath string
+	// AnchorTrust is the device trust check of the anchor file.
+	AnchorTrust    func(path string) error
+	Platform       string
+	ProductVersion string
+	Now            func() time.Time
+	// SecretPresent reports whether the device holds a credential.
+	SecretPresent func(name string) (bool, error)
+	Digester      PolicyDigester
+	// TrustVersion checks the promoted version directory before its config
+	// is rendered (Windows: owned by SYSTEM or Administrators, no write
+	// entry for another account); nil skips it.
+	TrustVersion func(dir string) error
+}
+
+// Prepared is a bundle ready for the ensure transaction.
+type Prepared struct {
+	Receipt  *Receipt
+	Manifest *Manifest
+	// Config is the rendered config.yaml the transaction installs and
+	// ConfigSHA256 its hex SHA-256.
+	Config       []byte
+	ConfigSHA256 string
+	// AlreadyApplied is a repeated delivery of the current bundle: its
+	// receipt was discarded and Config is the current bundle config.
+	AlreadyApplied bool
+	Warnings       []Warning
+}
+
+// GatewayPolicy is what the running gateway reports after the transaction.
+type GatewayPolicy struct {
+	Digest      string
+	Generation  uint64
+	ReloadError string
+	// Applied is true when Digest is the effective policy digest of the
+	// installed config.
+	Applied bool
+}
+
+func (d *Driver) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
+}
+
+// Prepare runs every step before the transaction. b is the delivered bundle
+// and readErr why it could not be read. On a refusal the receipt (when one
+// could be written) is failed with the code and the error carries it.
+func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepared, error) {
+	id, version := "", uint64(0)
+	if readErr == nil && b != nil {
+		if m, err := DecodeManifest(b.Manifest); err == nil {
+			id, version = m.BundleID, m.Version
+		}
+	}
+	receipt, err := d.Store.Receive(id, version)
+	if err != nil {
+		return nil, &Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()}
+	}
+	p := &Prepared{Receipt: receipt}
+	refuse := func(err error) (*Prepared, error) {
+		code := CodeOf(err)
+		if code == "" {
+			code = CodeApplyFailed
+			err = &Error{Code: code, Detail: err.Error()}
+		}
+		_ = d.Store.Fail(receipt, code, err.Error())
+		return p, err
+	}
+	if readErr != nil {
+		return refuse(readErr)
+	}
+	staging, err := d.Store.Stage(receipt, b)
+	if err != nil {
+		return refuse(&Error{Code: CodeArchiveInvalid, Detail: "cannot stage the bundle: " + err.Error()})
+	}
+	staged, err := ReadDir(staging)
+	if err != nil {
+		return refuse(err)
+	}
+	if d.Digester == nil {
+		return refuse(&Error{Code: CodeConfigInvalid, Detail: "this build cannot compute the effective policy digest of a bundle"})
+	}
+	anchors, err := LoadAnchors(d.AnchorsPath, d.AnchorTrust)
+	if err != nil {
+		return refuse(err)
+	}
+	st, err := d.Store.LoadState()
+	if err != nil {
+		return refuse(&Error{Code: CodeStateInvalid, Detail: err.Error()})
+	}
+	res, err := Verify(ctx, VerifyInput{
+		Bundle: staged, Anchors: anchors, Platform: d.Platform, Now: d.now().UTC(), Confirmed: st.Confirmed(),
+		ProductVersion: d.ProductVersion, HostPlatform: d.Platform, SecretPresent: d.SecretPresent,
+		Stage:    func(*Bundle) (string, error) { return staging, nil },
+		Digester: d.Digester,
+	})
+	p.Warnings = res.Warnings
+	if err != nil {
+		return refuse(err)
+	}
+	p.Manifest = res.Manifest
+	if res.AlreadyApplied {
+		if err := d.Store.Discard(receipt); err != nil {
+			p.Warnings = append(p.Warnings, Warning{Code: "bundle_state_unreadable",
+				Message: "could not remove the receipt of the repeated delivery: " + err.Error()})
+		}
+		raw, _, err := d.CurrentConfig()
+		if err != nil {
+			return p, &Error{Code: CodeStateInvalid, Detail: "cannot read the current policy bundle: " + err.Error()}
+		}
+		p.Receipt, p.AlreadyApplied, p.Config, p.ConfigSHA256 = nil, true, raw, sha256Hex(raw)
+		return p, nil
+	}
+	m := res.Manifest
+	if err := d.Store.Advance(receipt, StateVerified, func(rc *Receipt) {
+		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
+		rc.ChangeSummary = m.ChangeSummary
+		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Hex(staged.Manifest), res.ExpectedDigest
+	}); err != nil {
+		return refuse(err)
+	}
+	dir, err := d.Store.Promote(receipt)
+	if err != nil {
+		return refuse(err)
+	}
+	if d.TrustVersion != nil {
+		if err := d.TrustVersion(dir); err != nil {
+			return refuse(&Error{Code: CodeStateInvalid, Detail: "the bundle version directory is not protected: " + err.Error()})
+		}
+	}
+	rendered, err := RenderConfig(staged, d.Store.VersionDir(receipt.Dir))
+	if err != nil {
+		return refuse(err)
+	}
+	p.Config, p.ConfigSHA256 = rendered, sha256Hex(rendered)
+	// The caller's transaction commits this config before Finish runs.
+	// Record which config it is, so SettleRun can tell a run that stopped
+	// after the commit (the bundle config enforces) from one that stopped
+	// before it (the last good config enforces).
+	receipt.ConfigSHA256 = p.ConfigSHA256
+	if err := d.Store.writeReceipt(receipt); err != nil {
+		return refuse(&Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()})
+	}
+	return p, nil
+}
+
+// CurrentConfig renders config.yaml of the current bundle against its
+// version directory; nil when no bundle is current.
+func (d *Driver) CurrentConfig() ([]byte, *Ref, error) {
+	st, err := d.Store.LoadState()
+	if err != nil || st.Current == nil {
+		return nil, nil, err
+	}
+	b, err := d.Store.ReadVersion(st.Current)
+	if err != nil {
+		return nil, st.Current, err
+	}
+	raw, err := RenderConfig(b, d.Store.VersionDir(st.Current.Dir))
+	return raw, st.Current, err
+}
+
+// Finish settles the receipt of p once the transaction ended. installed is
+// the hex SHA-256 of the config.yaml the deployment now holds ("" when it
+// cannot be read), failure the lifecycle error codes of a transaction that
+// failed (empty when it succeeded). The bundle is confirmed only when the
+// transaction installed its config and policy shows the gateway enforcing
+// it; otherwise the receipt fails (apply_failed, not_confirmed) and the
+// returned error carries the code. When the bundle config was installed but
+// not confirmed, rollback (when not nil) installs the last good config again
+// before the receipt fails; it returns the digest the gateway then enforces
+// and whether the rollback finished.
+func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy GatewayPolicy, restart bool,
+	rollback func() (enforcing string, ok bool)) (State, error) {
+	rc := p.Receipt
+	if rc == nil || Finished(rc.State) {
+		return d.Store.LoadState()
+	}
+	rc.EnforcingDigest = policy.Digest
+	if len(failure) > 0 || installed != p.ConfigSHA256 {
+		message := "the ensure transaction did not install the bundle config"
+		if len(failure) > 0 {
+			// Only codes: lifecycle messages can quote config values.
+			message = fmt.Sprintf("the ensure transaction failed (%s)", joinCodes(failure))
+		}
+		rc.RolledBack = installed != p.ConfigSHA256
+		if !rc.RolledBack && rollback != nil {
+			// The transaction failed after it installed the bundle config:
+			// put the last good config back, as for an unconfirmed bundle.
+			enforcing, ok := rollback()
+			rc.RolledBack = ok
+			if enforcing != "" {
+				rc.EnforcingDigest = enforcing
+			}
+			if !ok {
+				message += "; putting the last good config back failed"
+			}
+		}
+		return State{}, d.fail(rc, CodeApplyFailed, message)
+	}
+	if !policy.Applied || policy.ReloadError != "" || !digestPattern.MatchString(policy.Digest) {
+		reason := "the gateway does not report the effective policy of the bundle config"
+		if policy.ReloadError != "" {
+			reason = "the gateway rejected the bundle config and keeps enforcing its previous policy"
+		}
+		if rollback != nil {
+			enforcing, ok := rollback()
+			rc.RolledBack = ok
+			if enforcing != "" {
+				rc.EnforcingDigest = enforcing
+			}
+			if !ok {
+				reason += "; putting the last good config back failed"
+			}
+		}
+		return State{}, d.fail(rc, CodeNotConfirmed, reason)
+	}
+	at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+		r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = policy.Digest, policy.Generation, p.ConfigSHA256
+		r.AppliedAt, r.Restart = at, restart
+	}); err != nil {
+		return State{}, err
+	}
+	return d.Store.Confirm(rc)
+}
+
+// SettleRun finishes what an interrupted run left (Store.Settle) and then
+// each applied but unconfirmed receipt: confirmed when the deployment holds
+// its config and the gateway enforces its digest, failed(not_confirmed)
+// otherwise. rollback lists the receipts failed here whose config is still
+// the installed one: the caller installs the last good config again.
+//
+// A staged receipt whose config the deployment holds was committed by a
+// transaction whose run stopped before Finish: it is confirmed when the
+// gateway enforces the installed config and failed (not_confirmed, named
+// for a rollback) otherwise, never reported as an apply that did not happen.
+func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (report SettleReport, rollback []*Receipt, err error) {
+	installed := ""
+	if installedConfig != nil {
+		installed = sha256Hex(installedConfig)
+	}
+	completed, rollback, err := d.settleCommitted(installed, policy)
+	if err != nil {
+		return report, rollback, err
+	}
+	report, err = d.Store.Settle(VersionDirsNamed(installedConfig, d.Store.BundlesDir)...)
+	report.Completed = append(completed, report.Completed...)
+	if err != nil {
+		return report, rollback, err
+	}
+	for _, rc := range report.Unconfirmed {
+		holds := installed != "" && installed == rc.ConfigSHA256
+		if holds && policy != nil && policy.Applied && policy.ReloadError == "" && policy.Digest == rc.EffectivePolicyDigest {
+			if _, err := d.Store.Confirm(rc); err != nil {
+				return report, rollback, err
+			}
+			report.Completed = append(report.Completed, rc.ReceiptID)
+			continue
+		}
+		if policy != nil {
+			rc.EnforcingDigest = policy.Digest
+		}
+		if err := d.Store.Fail(rc, CodeNotConfirmed, "the run that applied this bundle ended before the gateway confirmed it"); err != nil {
+			return report, rollback, err
+		}
+		if holds {
+			rollback = append(rollback, rc)
+		}
+	}
+	return report, rollback, nil
+}
+
+// settleCommitted settles the staged receipts whose rendered config is the
+// installed one (see SettleRun).
+func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (completed []string, rollback []*Receipt, err error) {
+	if installed == "" {
+		return nil, nil, nil
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil {
+		return nil, nil, err
+	}
+	enforces := policy != nil && policy.Applied && policy.ReloadError == "" && digestPattern.MatchString(policy.Digest)
+	for _, rc := range receipts {
+		if rc.State != StateStaged || rc.ConfigSHA256 != installed {
+			continue
+		}
+		if enforces {
+			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.Digest, policy.Generation, at
+			}); err != nil {
+				return completed, rollback, err
+			}
+			if _, err := d.Store.Confirm(rc); err == nil {
+				completed = append(completed, rc.ReceiptID)
+				continue
+			}
+		}
+		if policy != nil {
+			rc.EnforcingDigest = policy.Digest
+		}
+		if err := d.Store.Fail(rc, CodeNotConfirmed, "the run that installed this bundle config ended before the gateway confirmed it"); err != nil {
+			return completed, rollback, err
+		}
+		rollback = append(rollback, rc)
+	}
+	return completed, rollback, nil
+}
+
+func (d *Driver) fail(rc *Receipt, code Code, message string) error {
+	if err := d.Store.Fail(rc, code, message); err != nil {
+		return fmt.Errorf("record the failed bundle receipt: %w", err)
+	}
+	return &Error{Code: code, Detail: message}
+}
+
+func joinCodes(codes []string) string {
+	out := ""
+	seen := map[string]bool{}
+	for _, c := range codes {
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		if out != "" {
+			out += ", "
+		}
+		out += c
+	}
+	return out
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}

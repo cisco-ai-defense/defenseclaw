@@ -24,8 +24,25 @@
 # requires `enterprise linux tetragon verify --ready-for MODE` to pass; a host
 # that is not ready reports "tetragon-not-ready:<first failing check>".
 #
+# --require-bundle <bundle id | version> also requires a signed policy bundle
+# (`enterprise bundle status`): a bundle id (b-<ULID>) must be the current
+# confirmed bundle, a version number must be at most the current version,
+# and the running gateway must enforce the bundle's effective policy digest.
+# Otherwise: bundle-missing, bundle-mismatch, bundle-outdated or
+# bundle-not-enforced.
+#
+# --bundle-status prints "<bundle id> <version> <state>" of the last bundle
+# receipt instead and always exits 0; with --format jamf inside <result>.
+# For a Jamf extension attribute or a compliance script. state is a receipt
+# state (received, verified, staged, applied, confirmed), failed:<error
+# code>, not-enforced (confirmed, but the gateway does not report its
+# digest), none (no bundle received yet), or not-installed / unknown with
+# "none 0" when there is nothing to read.
+#
 # Usage: detect.sh [--min-version X.Y.Z] [--require-healthy]
-#                  [--require-tetragon consume|observe|enforce] [--format exit|value|jamf]
+#                  [--require-tetragon consume|observe|enforce]
+#                  [--require-bundle ID|VERSION] [--format exit|value|jamf]
+#        detect.sh --bundle-status [--format exit|value|jamf]
 
 set -eu
 
@@ -36,6 +53,8 @@ DC_MIN_VERSION=""       # detect only this version or newer
 DC_MIN_VERSION_SET=0
 DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
 DC_REQUIRE_TETRAGON=""  # consume | observe | enforce: also require Tetragon readiness (Linux)
+DC_REQUIRE_BUNDLE=""    # bundle id (b-<ULID>) or minimum version: also require that signed policy bundle
+DC_BUNDLE_STATUS=0      # 1: print "<bundle id> <version> <state>" of the last bundle receipt instead
 DC_FORMAT="exit"        # exit | value | jamf
 # ---- end of settings ---------------------------------------------------------
 
@@ -191,6 +210,7 @@ dc_json_true() { # <document> <field>: a top-level field is the literal true
 
 dc_report() { # <detected 0|1> <value> <reason>
     detected=$1 value=$2 reason=$3
+    [ "${DC_BUNDLE_STATUS:-0}" = 0 ] || dc_bundle_line "none 0 $value"
     case "$DC_FORMAT" in
         value) printf '%s\n' "$value"; exit 0 ;;
         jamf) printf '<result>%s</result>\n' "$value"; exit 0 ;;
@@ -200,11 +220,104 @@ dc_report() { # <detected 0|1> <value> <reason>
         exit 75
     fi
     if [ "$detected" = 1 ]; then
-        printf 'DefenseClaw Enterprise %s\n' "$value"
+        printf 'DefenseClaw Enterprise %s%s\n' "$value" "${DC_BUNDLE_TEXT:-}"
         exit 0
     fi
     printf 'defenseclaw detect: %s\n' "$reason" >&2
     exit 1
+}
+
+# dc_json_object <document> <field>: the text of a top-level object field,
+# for dc_json_top and dc_json_field; nothing when the field is not an object.
+dc_json_object() {
+    printf '%s' "$1" | awk -v want="$2" '
+        BEGIN { RS = "\001" }
+        {
+            s = $0; n = length(s); depth = 0; key = ""; start = 0; i = 1
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\"") {
+                    j = i + 1
+                    while (j <= n) {
+                        d = substr(s, j, 1)
+                        if (d == "\\") { j += 2; continue }
+                        if (d == "\"") break
+                        j++
+                    }
+                    str = substr(s, i + 1, j - i - 1)
+                    i = j + 1
+                    if (depth == 1) {
+                        k = i
+                        while (k <= n && substr(s, k, 1) ~ /[ \t\r\n]/) k++
+                        if (substr(s, k, 1) == ":") { key = str; i = k + 1 } else key = ""
+                    }
+                    continue
+                }
+                if (c == "{" || c == "[") {
+                    depth++
+                    if (depth == 2 && c == "{" && key == want) start = i
+                    if (depth == 2) key = ""
+                    i++; continue
+                }
+                if (c == "}" || c == "]") {
+                    if (depth == 2 && start) { print substr(s, start, i - start + 1); exit }
+                    depth--; i++; continue
+                }
+                if (depth == 1 && c !~ /[ \t\r\n]/) key = ""
+                i++
+            }
+        }'
+}
+
+# dc_bundle_line <line>: print the --bundle-status line in the format asked
+# for and exit 0.
+dc_bundle_line() {
+    case "$DC_FORMAT" in
+        jamf) printf '<result>%s</result>\n' "$1" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+    exit 0
+}
+
+# dc_bundle_status <gateway>: --bundle-status from `enterprise bundle status`.
+dc_bundle_status() {
+    doc=$("$1" enterprise bundle status --json 2>/dev/null </dev/null || true)
+    dc_json_true "$doc" ok || dc_bundle_line "none 0 unknown"
+    bundle=$(dc_json_object "$doc" bundle)
+    id=$(dc_json_field "$bundle" bundle_id)
+    [ -n "$id" ] || dc_bundle_line "none 0 none"
+    version=$(dc_json_field "$bundle" version)
+    state=$(dc_json_field "$bundle" state)
+    case "$state" in
+        failed)
+            code=$(dc_json_field "$bundle" error_code)
+            state="failed:${code:-unknown}"
+            ;;
+        confirmed) dc_json_true "$doc" applied || state=not-enforced ;;
+        "") state=unknown ;;
+    esac
+    dc_bundle_line "$id ${version:-0} $state"
+}
+
+# dc_require_bundle <gateway> <bundle id | version>: report not detected
+# unless that bundle (or a newer version) is current and the gateway
+# enforces it.
+dc_require_bundle() {
+    doc=$("$1" enterprise bundle status --json 2>/dev/null </dev/null || true)
+    current=$(dc_json_object "$doc" current)
+    id=$(dc_json_field "$current" bundle_id)
+    version=$(dc_json_field "$current" version)
+    case "$id:$version" in
+        b-*:[0-9]*) ;;
+        *) dc_report 0 bundle-missing "no signed policy bundle is confirmed on this computer; run: sudo $1 enterprise bundle status" ;;
+    esac
+    case "$2" in
+        b-*) [ "$id" = "$2" ] || dc_report 0 bundle-mismatch "the confirmed policy bundle is $id, not $2" ;;
+        *) [ "$version" -ge "$2" ] || dc_report 0 bundle-outdated "the confirmed policy bundle is version $version, older than $2" ;;
+    esac
+    dc_json_true "$doc" applied ||
+        dc_report 0 bundle-not-enforced "the running gateway does not enforce policy bundle $id; run: sudo $1 enterprise bundle status"
+    DC_BUNDLE_TEXT=", policy bundle $id version $version"
 }
 
 # dc_first_failing_check <tetragon verify --json document>: the id of its
@@ -268,8 +381,10 @@ while [ "$#" -gt 0 ]; do
         --min-version) DC_MIN_VERSION=${2:-}; DC_MIN_VERSION_SET=1; shift 2 ;;
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
         --require-tetragon) DC_REQUIRE_TETRAGON=${2:-}; shift 2 ;;
+        --require-bundle) DC_REQUIRE_BUNDLE=${2:-}; [ -n "$DC_REQUIRE_BUNDLE" ] || DC_REQUIRE_BUNDLE=-; shift 2 ;;
+        --bundle-status) DC_BUNDLE_STATUS=1; shift ;;
         --format) DC_FORMAT=${2:-}; shift 2 ;;
-        -h | --help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
         *) printf 'defenseclaw detect: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -283,6 +398,16 @@ case "$DC_REQUIRE_TETRAGON" in
     "" | consume | observe | enforce) ;;
     *) printf 'defenseclaw detect: --require-tetragon must be consume, observe or enforce\n' >&2; exit 2 ;;
 esac
+if [ -n "$DC_REQUIRE_BUNDLE" ] &&
+    ! printf '%s' "$DC_REQUIRE_BUNDLE" | grep -Eq '^(b-[0-7][0-9A-HJKMNP-TV-Z]{25}|[0-9]{1,16})$'; then
+    printf 'defenseclaw detect: --require-bundle must be a bundle id (b-<ULID>) or a version number\n' >&2
+    exit 2
+fi
+if [ "$DC_BUNDLE_STATUS" = 1 ] &&
+    { [ -n "$DC_MIN_VERSION$DC_REQUIRE_TETRAGON$DC_REQUIRE_BUNDLE" ] || [ "$DC_REQUIRE_HEALTHY" = 1 ]; }; then
+    printf 'defenseclaw detect: --bundle-status takes no --min-version or --require-* option\n' >&2
+    exit 2
+fi
 if [ -n "$DC_REQUIRE_TETRAGON" ] && [ "$DC_SCRIPT_OS" != linux ]; then
     printf 'defenseclaw detect: --require-tetragon is Linux only (Tetragon runs on Linux)\n' >&2
     exit 2
@@ -300,6 +425,7 @@ dc_trusted_path "$gateway" || dc_report 0 not-installed "$gateway is missing or 
 # An empty binary (a power loss during a package upgrade) runs as an empty
 # script that prints nothing and exits 0 (GAP-0467).
 [ -s "$gateway" ] || dc_report 0 not-installed "$gateway is empty, likely from a power loss during a package upgrade; reinstall the package"
+[ "$DC_BUNDLE_STATUS" = 0 ] || dc_bundle_status "$gateway"
 
 status=$("$gateway" enterprise "$group" status --json 2>/dev/null </dev/null || true)
 dc_json_true "$status" installed || dc_report 0 not-installed "the managed deployment is not installed"
@@ -321,4 +447,5 @@ if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
     dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
+[ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"
 dc_report 1 "$version" ""

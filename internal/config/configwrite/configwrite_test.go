@@ -156,6 +156,53 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	}
 }
 
+// Bundle principals are accepted only from the lifecycle (Options.Lifecycle)
+// and are then recorded with the bundle fields in config.generation.json; a
+// CLI, TUI or API caller naming one is refused before anything is written.
+func TestBundlePrincipalActorsOnlyFromTheLifecycle(t *testing.T) {
+	// A managed standalone config declares its profile: on Windows an unset
+	// profile resolves to secure_client without the service pin, so the
+	// accepted writes below would fail validation.
+	path := writeTestConfig(t, "enterprise:\n  profile: standalone\nobservability: {}\n")
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+	change := []Change{{Path: "guardrail.mode", Value: "action"}}
+	bundle := BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 7, SignerKeyID: "k1"}
+	for _, opt := range []Options{
+		{Actor: "control-plane:t1/alice"},
+		{Actor: "operator:root"},
+		{Actor: ActorLifecycle, Bundle: bundle},
+		{Actor: "cli:alice", Lifecycle: true},
+	} {
+		if _, err := Apply(context.Background(), path, change, opt); err == nil {
+			t.Fatalf("%+v was accepted", opt)
+		}
+	}
+	for _, actor := range []string{"control-plane:t1", "control-plane:/alice", "control-plane:t1/a/b", "operator:", "operator:a\nb"} {
+		if _, err := Apply(context.Background(), path, change, Options{Actor: actor, Lifecycle: true}); err == nil {
+			t.Fatalf("malformed principal %q was accepted", actor)
+		}
+	}
+	if _, err := ReadGenerationState(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused write recorded a generation: %v", err)
+	}
+	res, err := Apply(context.Background(), path, change, Options{Actor: "control-plane:t1/alice", Reason: "tighten", Lifecycle: true, Bundle: bundle})
+	if err != nil {
+		t.Fatalf("lifecycle principal write: %v", err)
+	}
+	state, err := ReadGenerationState(path)
+	if err != nil || state.Generation != res.Generation || state.Actor != "control-plane:t1/alice" ||
+		state.BundleID != bundle.ID || state.BundleVersion != 7 || state.SignerKeyID != "k1" || state.Reason != "tighten" {
+		t.Fatalf("generation state = %+v, %v", state, err)
+	}
+	if _, err := Apply(context.Background(), path, []Change{{Path: "guardrail.mode", Value: "observe"}}, Options{Actor: "operator:root", Lifecycle: true}); err != nil {
+		t.Fatalf("lifecycle operator write: %v", err)
+	}
+	if state, _ := ReadGenerationState(path); state.BundleID != "" || state.Actor != "operator:root" {
+		t.Fatalf("bundle fields leaked into the next generation: %+v", state)
+	}
+}
+
 func TestApplyPutsTheOldConfigBackWhenTheGenerationRecordFails(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")

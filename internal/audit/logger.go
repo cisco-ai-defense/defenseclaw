@@ -1141,6 +1141,11 @@ type ActivityInput struct {
 	RunID       string
 	RequestID   string
 	TraceID     string
+	// Bundle names the signed policy bundle of a config.change.applied
+	// record or a bundle receipt; BundleReceipt is set only on a
+	// config.bundle.receipt record (LogPolicyBundleReceipt).
+	Bundle        *PolicyBundle
+	BundleReceipt *PolicyBundleReceipt
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.

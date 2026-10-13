@@ -101,6 +101,11 @@ func (l *lifecycle) settleInputChanges(ctx context.Context, code int) int {
 		}
 		r.AddWarning(codeInputChanged, "config.yaml or a protected credential changed while this run applied the previous version; applied the change in a follow-up transaction")
 		next := &lifecycle{env: env, opts: Options{Action: ActionEnsure, Reason: codeInputChanged, NoStart: record.NoStart}, result: r}
+		// In bundle mode the follow-up applies the config of the current
+		// bundle again, never an in-place edit of config.yaml.
+		if !next.useCurrentBundleConfig() {
+			return code
+		}
 		code = next.apply(ctx, record)
 		l.planned = next.planned
 	}

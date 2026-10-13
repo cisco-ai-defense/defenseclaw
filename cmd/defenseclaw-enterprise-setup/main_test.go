@@ -499,6 +499,28 @@ func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
 	}
 }
 
+// BUNDLE= and TRUSTANCHORS= are standalone /ensure properties; the signed
+// bundle carries the config, so BUNDLE= with CONFIG= is invalid arguments,
+// and the Secure Client Setup does not know them.
+func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "JSON=1"}, true)
+	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` {
+		t.Fatalf("standalone /ensure BUNDLE=: opts %+v, err %v", opts, err)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
+		{"/repair", `BUNDLE=C:\b\v7.dcbundle`},
+		{"/status", `TRUSTANCHORS=C:\b\a.json`},
+	} {
+		if _, _, err := parseEnterpriseSetupOptionsForFlavor(arguments, true); err == nil {
+			t.Errorf("standalone %v was accepted", arguments)
+		}
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted BUNDLE=")
+	}
+}
+
 // GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
 // the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
 // reads one shape whoever refused; the Secure Client Setup keeps schema 1.

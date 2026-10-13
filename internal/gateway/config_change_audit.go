@@ -93,7 +93,15 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		Diff:     diff,
 		Severity: "INFO",
 	}
+	if state.BundleID != "" {
+		in.Bundle = &audit.PolicyBundle{ID: state.BundleID, Version: state.BundleVersion,
+			SignerKeyID: state.SignerKeyID, ChangeSummary: configwrite.BundleChangeSummary(state)}
+		in.After["bundle_id"], in.After["bundle_version"] = state.BundleID, state.BundleVersion
+		in.After["signer_key_id"] = state.SignerKeyID
+	}
 	if lastKnown && (state.Generation > last+1 || state.Generation < last) {
+		// The bundle fields belong to the last writer only.
+		in.Bundle = nil
 		in.Actor = unattributedConfigActor
 		in.After["last_actor"] = state.Actor
 		if state.Generation > last {

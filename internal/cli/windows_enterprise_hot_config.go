@@ -35,6 +35,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -64,10 +65,8 @@ var (
 	windowsEnterpriseHotConfigLock     = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll     = 2 * time.Second
-	windowsEnterpriseHotConfigWrite    = func(ctx context.Context, path string, raw []byte, reason, expectedSHA string) error {
-		_, err := configwrite.ReplaceDocument(ctx, path, raw, configwrite.Options{
-			Actor: configwrite.ActorLifecycle, Reason: reason, ExpectSHA256: expectedSHA,
-		})
+	windowsEnterpriseHotConfigWrite    = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
+		_, err := configwrite.ReplaceDocument(ctx, path, raw, opt)
 		return err
 	}
 	// The upgrade transaction admits --config only from a source that only
@@ -211,7 +210,7 @@ func windowsEnterpriseHotConfigApply(
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	connectorChangeStartedAt := time.Now().UTC()
-	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure", configwrite.SHA256Hex(previous)); err != nil {
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))); err != nil {
 		return false, nil
 	}
 	// Undoing puts the config back. A config the record named is recorded
@@ -220,7 +219,11 @@ func windowsEnterpriseHotConfigApply(
 	// edit stays unrecorded, and a record the attempt created goes away.
 	undo := func() {
 		if recordedBefore {
-			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)", configwrite.SHA256Hex(next))
+			// The record named previous: a bundle config goes back as that
+			// bundle, so /health names the bundle that enforces again.
+			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, configwrite.RestoreOptions(state, configwrite.SHA256Hex(previous), configwrite.Options{
+				Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(next),
+			}))
 		} else {
 			_ = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
 		}
@@ -485,4 +488,18 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 		return nil, err
 	}
 	return func() { _ = windows.CloseHandle(handle) }, nil
+}
+
+// windowsHotConfigWriteOptions records the hot-applied config as the
+// lifecycle, or, when the run applies a signed policy bundle, as the bundle
+// principal with the bundle fields, so config.generation.json and the
+// gateway's config.change.applied event name the bundle.
+func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) configwrite.Options {
+	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
+		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {
+			opt.ExpectSHA256 = expectSHA
+			return opt
+		}
+	}
+	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure", ExpectSHA256: expectSHA}
 }

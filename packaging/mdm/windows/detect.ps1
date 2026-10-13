@@ -24,11 +24,19 @@
 
 .PARAMETER RequireHealthy
     Also run `defenseclaw.exe enterprise windows verify` and require it to pass.
+
+.PARAMETER RequireBundle
+    Detect only when a signed policy bundle is confirmed: a bundle id
+    (b-<ULID>) must be the current bundle, a version number must be at most
+    the current version. The marker must name the bundle (BundleState
+    confirmed) and `defenseclaw.exe enterprise bundle status` must report
+    that the running gateway enforces its digest.
 #>
 [CmdletBinding()]
 param(
     [string]$MinimumVersion = '',
-    [switch]$RequireHealthy
+    [switch]$RequireHealthy,
+    [string]$RequireBundle = ''
 )
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
@@ -324,5 +332,42 @@ if ($RequireHealthy) {
         Exit-NotDetected -Reason "verify exited $($run.ExitCode); run: `"$($deployment.Cli)`" enterprise windows verify --profile standalone"
     }
 }
-[Console]::Out.WriteLine("DefenseClaw Enterprise $($deployment.Version)")
+$bundleText = ''
+if ($RequireBundle) {
+    $wanted = $RequireBundle.Trim()
+    $wantedVersion = [UInt64]0
+    $byVersion = [UInt64]::TryParse($wanted, [ref]$wantedVersion) -and $wantedVersion -gt 0
+    if (-not $byVersion -and $wanted -cnotmatch '^b-[0-9A-HJKMNP-TV-Z]{26}$') {
+        Exit-NotDetected -Reason "-RequireBundle '$wanted' is neither a bundle id (b-<ULID>) nor a version number"
+    }
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    if ($null -eq $key) { Exit-NotDetected -Reason 'the enterprise marker is missing' }
+    try {
+        $bundleId = [string]$key.GetValue('BundleId')
+        $bundleVersionText = [string]$key.GetValue('BundleVersion')
+        $bundleState = [string]$key.GetValue('BundleState')
+    } finally { $key.Dispose() }
+    $bundleVersion = [UInt64]0
+    if ($bundleState -ne 'confirmed' -or -not $bundleId -or -not [UInt64]::TryParse($bundleVersionText, [ref]$bundleVersion)) {
+        Exit-NotDetected -Reason 'no signed policy bundle is confirmed on this computer'
+    }
+    if ($byVersion -and $bundleVersion -lt $wantedVersion) {
+        Exit-NotDetected -Reason "the confirmed policy bundle is version $bundleVersion, older than $wantedVersion"
+    }
+    if (-not $byVersion -and $bundleId -ne $wanted) {
+        Exit-NotDetected -Reason "the confirmed policy bundle is $bundleId, not $wanted"
+    }
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
+        $status = ([string]$run.StdOut) | ConvertFrom-Json
+    } catch {
+        Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
+    }
+    if ($run.ExitCode -ne 0 -or $null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
+        Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"
+    }
+    $bundleText = ", policy bundle $bundleId version $bundleVersion"
+}
+[Console]::Out.WriteLine("DefenseClaw Enterprise $($deployment.Version)$bundleText")
 exit 0

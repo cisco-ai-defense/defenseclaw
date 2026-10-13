@@ -48,6 +48,43 @@ import (
 // the same policy produce the same digest.
 const dataDirToken = "${data_dir}"
 
+// bundleRootToken replaces the policy bundle root prefix of every path, so a
+// bundle digests the same in the signer's working directory and in the
+// versioned directory a device installs it to.
+const bundleRootToken = "${bundle_root}"
+
+// digestScope is what the effective digest abstracts away from the host: the
+// data_dir and policy bundle root path prefixes, and the platform whose
+// policy is digested (the kernel control set exists only on Linux).
+type digestScope struct {
+	dataDir    string
+	bundleRoot string
+	goos       string
+}
+
+// newDigestScope is the scope of cfg on goos ("" is this platform) with a
+// policy bundle installed at bundleRoot ("" for none).
+func newDigestScope(cfg *config.Config, goos, bundleRoot string) digestScope {
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	root := ""
+	if bundleRoot = strings.TrimSpace(bundleRoot); bundleRoot != "" {
+		root = strings.TrimRight(filepath.Clean(bundleRoot), `/\`)
+	}
+	return digestScope{dataDir: dataDirOf(cfg), bundleRoot: root, goos: goos}
+}
+
+// rewrite replaces a leading bundle root with ${bundle_root}, else a leading
+// data_dir with ${data_dir}.
+func (s digestScope) rewrite(value string) string {
+	if out, ok := rewritePathPrefix(value, s.bundleRoot, bundleRootToken); ok {
+		return out
+	}
+	out, _ := rewritePathPrefix(value, s.dataDir, dataDirToken)
+	return out
+}
+
 // configDigestSecretKeys are the config keys whose values are secret
 // material. They are dropped from the digest; *_env and credential refs stay.
 var configDigestSecretKeys = map[string]struct{}{
@@ -65,7 +102,7 @@ var configDigestRuntimeKeys = map[string]struct{}{
 // configDigest is "sha256:" + hex of the canonical JSON of cfg: secret values
 // dropped, paths under data_dir rewritten to ${data_dir}. Map keys marshal
 // sorted, so the JSON is canonical.
-func configDigest(cfg *config.Config) (string, error) {
+func configDigest(cfg *config.Config, scope digestScope) (string, error) {
 	raw, err := yaml.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
@@ -76,7 +113,7 @@ func configDigest(cfg *config.Config) (string, error) {
 	}
 	dropTetragonDefaults(doc)
 	doc = materializeConfigDefaults(cfg, doc)
-	canonical, err := json.Marshal(canonicalConfigValue("", doc, dataDirOf(cfg)))
+	canonical, err := json.Marshal(canonicalConfigValue("", doc, scope))
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
@@ -180,7 +217,7 @@ func canonicalizeGuardrailLevels(value any) {
 // that section, so configDigest alone never saw a retention or redaction
 // change (GAP-0007). raw is the file's bytes; nil reads cfg.ConfigFilePath. A
 // config with no readable file has no observability component.
-func observabilityDigest(cfg *config.Config, raw []byte) string {
+func observabilityDigest(cfg *config.Config, raw []byte, scope digestScope) string {
 	if raw == nil {
 		path := strings.TrimSpace(cfg.ConfigFilePath)
 		if path == "" {
@@ -197,14 +234,14 @@ func observabilityDigest(cfg *config.Config, raw []byte) string {
 	if yaml.Unmarshal(raw, &doc) != nil {
 		return ""
 	}
-	canonical, err := json.Marshal(canonicalConfigValue("observability", doc.Observability, dataDirOf(cfg)))
+	canonical, err := json.Marshal(canonicalConfigValue("observability", doc.Observability, scope))
 	if err != nil {
 		return ""
 	}
 	return sha256Digest(canonical)
 }
 
-func canonicalConfigValue(path string, value any, dataDir string) any {
+func canonicalConfigValue(path string, value any, scope digestScope) any {
 	switch v := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(v))
@@ -219,17 +256,17 @@ func canonicalConfigValue(path string, value any, dataDir string) any {
 			if _, runtime := configDigestRuntimeKeys[childPath]; runtime {
 				continue
 			}
-			out[key] = canonicalConfigValue(childPath, child, dataDir)
+			out[key] = canonicalConfigValue(childPath, child, scope)
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, child := range v {
-			out[i] = canonicalConfigValue(path, child, dataDir)
+			out[i] = canonicalConfigValue(path, child, scope)
 		}
 		return out
 	case string:
-		return rewriteDataDir(v, dataDir)
+		return scope.rewrite(v)
 	default:
 		return v
 	}
@@ -242,21 +279,22 @@ func dataDirOf(cfg *config.Config) string {
 	return strings.TrimRight(filepath.Clean(strings.TrimSpace(cfg.DataDir)), `/\`)
 }
 
-// rewriteDataDir replaces a leading data_dir with ${data_dir}. On Windows a
-// value written with forward slashes still matches the cleaned data_dir.
-func rewriteDataDir(value, dataDir string) string {
-	if dataDir == "" || dataDir == "." {
-		return value
+// rewritePathPrefix replaces a leading root (a cleaned directory) with token
+// and reports whether it did. On Windows a value written with forward slashes
+// still matches the cleaned root.
+func rewritePathPrefix(value, root, token string) (string, bool) {
+	if root == "" || root == "." {
+		return value, false
 	}
-	slashed, root := filepath.ToSlash(value), filepath.ToSlash(dataDir)
-	if !strings.HasPrefix(slashed, root) {
-		return value
+	slashed, prefix := filepath.ToSlash(value), filepath.ToSlash(root)
+	if !strings.HasPrefix(slashed, prefix) {
+		return value, false
 	}
-	rest := slashed[len(root):]
+	rest := slashed[len(prefix):]
 	if rest == "" || rest[0] == '/' || rest[0] == '\\' {
-		return dataDirToken + rest
+		return token + rest, true
 	}
-	return value
+	return value, false
 }
 
 // assetDigestComponents digests the policy assets config references by path
@@ -265,16 +303,15 @@ func rewriteDataDir(value, dataDir string) string {
 // YARA rules, and the built-in policy bundle compiled into this binary. A
 // file that cannot be read is recorded as "missing" so its later appearance
 // changes the digest.
-func assetDigestComponents(cfg *config.Config) map[string]string {
+func assetDigestComponents(cfg *config.Config, scope digestScope) map[string]string {
 	out := map[string]string{}
 	if cfg == nil {
 		return out
 	}
-	dataDir := dataDirOf(cfg)
 	if digest := strings.TrimSpace(packs.BaseFloor(cfg).RequiredPackDigest); digest != "" {
 		out["sandbox_pack"] = digest
 	}
-	for key, digest := range signaturePackDigests(cfg) {
+	for key, digest := range signaturePackDigests(cfg, scope) {
 		out[key] = digest
 	}
 	if digest := confidencePolicyDigest(cfg); digest != "" {
@@ -286,7 +323,7 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if refs := cfg.Scanners.MCPScanner.YARA.ExtraRules; len(refs) > 0 {
 		digests := make([]string, 0, len(refs))
 		for _, ref := range refs {
-			digests = append(digests, rewriteDataDir(ref.Path, dataDir)+"="+assetRefDigest(ref))
+			digests = append(digests, scope.rewrite(ref.Path)+"="+assetRefDigest(ref))
 		}
 		sort.Strings(digests)
 		out["yara_rules:mcp"] = sha256Digest([]byte(strings.Join(digests, "\n")))
@@ -299,7 +336,7 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if digest := builtinPolicyDigest(); digest != "" {
 		out["builtin"] = digest
 	}
-	if digest := kernelPolicyComponent(cfg, runtime.GOOS); digest != "" {
+	if digest := kernelPolicyComponent(cfg, scope.goos); digest != "" {
 		out["kernel_policy"] = digest
 	}
 	return out
@@ -325,9 +362,8 @@ func kernelPolicyComponent(cfg *config.Config, goos string) string {
 // "signature_pack:<entry>". An entry that is a directory or a glob is digested
 // over the pack files it names now, so adding, removing or editing one changes
 // the digest.
-func signaturePackDigests(cfg *config.Config) map[string]string {
+func signaturePackDigests(cfg *config.Config, scope digestScope) map[string]string {
 	out := map[string]string{}
-	dataDir := dataDirOf(cfg)
 	for _, entry := range cfg.AIDiscovery.SignaturePacks {
 		if entry = strings.TrimSpace(entry); entry == "" {
 			continue
@@ -337,12 +373,12 @@ func signaturePackDigests(cfg *config.Config) map[string]string {
 		if len(files) > 0 {
 			parts := make([]string, 0, len(files))
 			for _, file := range files {
-				parts = append(parts, rewriteDataDir(file, dataDir)+"="+fileDigest(file))
+				parts = append(parts, scope.rewrite(file)+"="+fileDigest(file))
 			}
 			sort.Strings(parts)
 			digest = sha256Digest([]byte(strings.Join(parts, "\n")))
 		}
-		out["signature_pack:"+rewriteDataDir(entry, dataDir)] = digest
+		out["signature_pack:"+scope.rewrite(entry)] = digest
 	}
 	return out
 }
@@ -375,7 +411,7 @@ func discoveryAssetsChanged(live *Generation, cfg *config.Config) bool {
 	if live == nil || cfg == nil || !cfg.AIDiscovery.Enabled {
 		return false
 	}
-	for key, digest := range signaturePackDigests(cfg) {
+	for key, digest := range signaturePackDigests(cfg, newDigestScope(cfg, live.goos, live.bundleRoot)) {
 		if live.Components[key] != digest {
 			return true
 		}
@@ -431,11 +467,36 @@ type EffectivePolicy struct {
 	ConfigGenerationRecorded bool   `json:"config_generation_recorded"`
 }
 
+// EffectivePolicyOptions select what ComputeEffectivePolicyFor digests.
+type EffectivePolicyOptions struct {
+	// GOOS is the platform whose policy is digested; "" is this platform.
+	// The kernel control set is part of the Linux policy only.
+	GOOS string
+	// BundleRoot is the directory of the policy bundle cfg was rendered
+	// from; every path under it digests as ${bundle_root}/..., so a bundle
+	// digests the same wherever it is unpacked. "" for no bundle. A bundle
+	// digest is computed offline (bundle sign runs on any host), so the
+	// managed policy_dir ownership check, which guards what a gateway
+	// loads, is skipped; it does not change the digest.
+	BundleRoot string
+	// Raw is the config.yaml bytes cfg was loaded from; nil reads
+	// cfg.ConfigFilePath.
+	Raw []byte
+}
+
 // ComputeEffectivePolicy builds the generation the gateway would publish for
 // cfg, without publishing it, and returns its digest. doctor and the
 // enterprise status result compare it with the running gateway's
 // /health policy.effective_digest to detect a stale gateway.
 func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectivePolicy, error) {
+	return ComputeEffectivePolicyFor(ctx, cfg, EffectivePolicyOptions{})
+}
+
+// ComputeEffectivePolicyFor is ComputeEffectivePolicy for another platform
+// or for a configuration rendered from a policy bundle (bundle sign computes
+// one digest per target platform). It has no side effects: it reads the
+// files cfg references and publishes nothing.
+func ComputeEffectivePolicyFor(ctx context.Context, cfg *config.Config, opts EffectivePolicyOptions) (EffectivePolicy, error) {
 	if cfg == nil {
 		return EffectivePolicy{}, fmt.Errorf("effective policy: configuration is unavailable")
 	}
@@ -448,7 +509,8 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 	if err != nil {
 		profiles = nil
 	}
-	g, err := buildGeneration(ctx, generationInputs{cfg: cfg, rulePacks: rulePacks, profiles: profiles})
+	g, err := buildGeneration(ctx, generationInputs{cfg: cfg, raw: opts.Raw, rulePacks: rulePacks, profiles: profiles,
+		goos: opts.GOOS, bundleRoot: opts.BundleRoot, offline: strings.TrimSpace(opts.BundleRoot) != ""})
 	if err != nil {
 		return EffectivePolicy{}, err
 	}

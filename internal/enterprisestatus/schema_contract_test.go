@@ -108,13 +108,30 @@ func sampleResults() map[string]*Result {
 	invalid.AddError("invalid_arguments", "--payload and --from-package are exclusive")
 	invalid.Finish("linux", InvalidArgsExitCode("linux"))
 
+	// A bundle device whose newest bundle failed: the last good bundle
+	// keeps enforcing and is named as the current one.
+	bundled := New("status", "standalone", "linux", "1.4.0")
+	bundled.Installed, bundled.InstalledVersion = true, "1.4.0"
+	bundled.Policy = &PolicyState{EffectiveDigest: "sha256:" + strings.Repeat("a", 64), ConfigGeneration: 12, Applied: true,
+		GatewayReportedDigest: "sha256:" + strings.Repeat("a", 64)}
+	bundled.Bundle = &BundleState{BundleID: "b-01JA0000000000000000000002", Version: 8, State: BundleFailed,
+		ErrorCode: "signature_invalid", CurrentBundleID: "b-01JA0000000000000000000001", CurrentVersion: 7}
+	bundled.Finish("linux", 0)
+
+	confirmed := New("ensure", "standalone", "darwin", "1.4.0")
+	confirmed.Installed, confirmed.InstalledVersion = true, "1.4.0"
+	confirmed.Bundle = &BundleState{BundleID: "b-01JA0000000000000000000001", Version: 7, State: BundleConfirmed,
+		EffectivePolicyDigest: "sha256:" + strings.Repeat("b", 64), ConfigGeneration: 12,
+		AppliedAt: "2026-10-12T10:00:00Z", ConfirmedAt: "2026-10-12T10:00:03Z"}
+	confirmed.Finish("darwin", 0)
+
 	notRoot := New("ensure", "standalone", "linux", "1.4.0")
 	notRoot.AddError("not_root", "run this command as root (sudo or the MDM agent)")
 	notRoot.Finish("linux", 0)
 
 	return map[string]*Result{
 		"fresh": fresh, "installed": installed, "noop": noop, "busy": busy, "failed": failed, "invalid": invalid,
-		"not_root": notRoot,
+		"not_root": notRoot, "bundle_failed": bundled, "bundle_confirmed": confirmed,
 	}
 }
 
@@ -157,9 +174,19 @@ func TestLifecycleSchemaRejectsContractViolations(t *testing.T) {
 		}
 		return value
 	}
+	bundle := func(fields map[string]any) func(map[string]any) {
+		return func(v map[string]any) { v["bundle"] = fields }
+	}
 	cases := map[string]func(map[string]any){
-		"unknown top-level field": func(v map[string]any) { v["extra"] = true },
-		"failure without errors":  func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
+		"unknown top-level field":         func(v map[string]any) { v["extra"] = true },
+		"bundle failed without a code":    bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "failed"}),
+		"bundle code on a non-failure":    bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "staged", "error_code": "x"}),
+		"bundle unknown state":            bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "done"}),
+		"bundle confirmed without digest": bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "confirmed", "confirmed_at": "2026-10-12T10:00:03Z"}),
+		"bundle unread but not failed":    bundle(map[string]any{"bundle_id": "", "version": 0, "state": "verified"}),
+		"bundle id not a ulid":            bundle(map[string]any{"bundle_id": "b-1", "version": 2, "state": "received"}),
+		"bundle unknown field":            bundle(map[string]any{"bundle_id": "b-01JA0000000000000000000001", "version": 2, "state": "received", "x": 1}),
+		"failure without errors":          func(v map[string]any) { v["ok"] = false; v["exit_code"] = 1 },
 		"windows code on unix": func(v map[string]any) {
 			v["ok"] = false
 			v["exit_code"] = 1603
@@ -209,6 +236,7 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		"message":       {reflect.TypeOf(Message{}), defs["message"].(map[string]any)},
 		"portHolder":    {reflect.TypeOf(PortHolder{}), defs["portHolder"].(map[string]any)},
 		"policyState":   {reflect.TypeOf(PolicyState{}), defs["policyState"].(map[string]any)},
+		"bundleState":   {reflect.TypeOf(BundleState{}), defs["bundleState"].(map[string]any)},
 		"readiness":     {reflect.TypeOf(Readiness{}), properties["readiness"].(map[string]any)},
 		"inspection":    {reflect.TypeOf(Inspection{}), properties["inspection"].(map[string]any)},
 		"enrollment":    {reflect.TypeOf(Enrollment{}), properties["enrollment"].(map[string]any)},

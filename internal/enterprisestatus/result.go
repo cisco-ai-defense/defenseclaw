@@ -166,6 +166,10 @@ type Result struct {
 	// Policy is the effective policy state; nil (omitted) under the Secure
 	// Client integration and when the gateway did not report it.
 	Policy *PolicyState `json:"policy,omitempty"`
+	// Bundle is the signed policy bundle state of a standalone device in
+	// bundle mode: the last bundle receipt and the bundle that enforces;
+	// nil (omitted) when no bundle was ever received.
+	Bundle *BundleState `json:"bundle,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
@@ -224,6 +228,44 @@ type PolicyState struct {
 	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
 }
 
+// Bundle receipt states (management plane spec P1 section 7). A receipt
+// moves received, verified, staged, applied, confirmed; failed (with an
+// error code) ends it from any state before confirmed.
+const (
+	BundleReceived  = "received"
+	BundleVerified  = "verified"
+	BundleStaged    = "staged"
+	BundleApplied   = "applied"
+	BundleConfirmed = "confirmed"
+	BundleFailed    = "failed"
+)
+
+// BundleState is the result v2 "bundle" block: the last receipt (the
+// newest bundle the device received and how far it got) and the confirmed
+// bundle that enforces. ConfigGeneration is the persistent config
+// generation of config.generation.json, not the gateway policy generation
+// that restarts at 1 with the gateway.
+type BundleState struct {
+	BundleID string `json:"bundle_id"`
+	Version  uint64 `json:"version"`
+	State    string `json:"state"`
+	// ErrorCode is the bundle error code of a failed receipt.
+	ErrorCode string `json:"error_code,omitempty"`
+	// EffectivePolicyDigest is the digest the receipt recorded: the staged
+	// config computes to it, and a confirmed receipt is enforced with it.
+	EffectivePolicyDigest string `json:"effective_policy_digest,omitempty"`
+	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
+	// AppliedAt and ConfirmedAt are RFC 3339 UTC.
+	AppliedAt   string `json:"applied_at,omitempty"`
+	ConfirmedAt string `json:"confirmed_at,omitempty"`
+	// CurrentBundleID and CurrentVersion name the confirmed bundle that
+	// enforces when this receipt is not its confirmed receipt: a newer
+	// bundle pending or failed (the last good bundle keeps enforcing), or
+	// the enforcing bundle delivered again.
+	CurrentBundleID string `json:"current_bundle_id,omitempty"`
+	CurrentVersion  uint64 `json:"current_version,omitempty"`
+}
+
 // ShortDigest is "sha256:" and the first 12 hex digits of a digest, or "none".
 func ShortDigest(digest string) string {
 	if digest == "" {
@@ -279,6 +321,10 @@ type PolicyStateRecord struct {
 	ConfigGeneration uint64 `json:"config_generation"`
 	// AppliedAt is RFC 3339 UTC.
 	AppliedAt string `json:"applied_at"`
+	// BundleID and BundleVersion name the signed policy bundle whose config
+	// computes to EffectiveDigest; absent without bundles.
+	BundleID      string `json:"bundle_id,omitempty"`
+	BundleVersion uint64 `json:"bundle_version,omitempty"`
 }
 
 // New returns a result with the schema version and empty collections set,

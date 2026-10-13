@@ -88,6 +88,13 @@ type Options struct {
 	// that the change wakes cannot interleave with it. A Mutate error fails
 	// the run before anything is applied.
 	Mutate func(ctx context.Context) error
+	// Bundle is a signed policy bundle (.dcbundle file or directory, an
+	// absolute path) that an ensure stages, verifies, applies, confirms and
+	// makes current (bundleapply.go).
+	Bundle string
+	// BundleInbox makes an ensure apply the highest version in the bundle
+	// inbox (<etc>/bundles/inbox) and remove the processed files.
+	BundleInbox bool
 }
 
 // Error codes in the lifecycle result.
@@ -199,6 +206,10 @@ type lifecycle struct {
 	machinePolicyErr error
 	// osPlan is the sandbox subsystem of the plan this run built last.
 	osPlan *openshellPlan
+	// bundle is the signed policy bundle this run applies (nil for none).
+	bundle *bundleRun
+	// inboxProcessed are the bundle inbox files this run removes at its end.
+	inboxProcessed []string
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -324,6 +335,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
+	if l.opts.Action != ActionUninstall {
+		l.settleBundles(ctx, record)
+	}
 	if record != nil {
 		r.Installed = true
 		r.InstalledVersion = record.ProductVersion
@@ -374,6 +388,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 	}
 
+	if code, done := l.prepareBundleMode(ctx, record); done {
+		return code
+	}
+
 	switch l.opts.Action {
 	case ActionInstall:
 		if record != nil {
@@ -404,59 +422,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if record == nil {
 			return l.settleInputChanges(ctx, l.freshInstall(ctx))
 		}
-		if env.insideWSL() {
-			r.AddWarning(codeWSL, wslDeploymentWarning)
+		if l.opts.Bundle != "" {
+			return l.applyBundle(ctx, record)
 		}
-		restored := l.restoreTamperedHookBinary(ctx, record)
-		l.restoreUnchangedConfigMetadata(ctx, record)
-		restored = l.restoreTamperedMachinePolicy(record) || restored
-		if problems, _ := l.unitDropIns(ctx, record); len(problems) > 0 {
-			r.AddError(codeVerify, strings.Join(problems, "; "))
-			l.describe(ctx, record, false)
-			return 0
-		}
-		noop, reason := l.ensureNoop(ctx, record)
-		// Configuration management that installs the same config.yaml
-		// again while this run checks (two installs seconds apart) replaced
-		// the owner the restore above put back, and the run restarted the
-		// gateway for that owner alone (GAP-1030). Restore and check again
-		// while the installed bytes are still the applied config.
-		for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
-			noop, reason = l.ensureNoop(ctx, record)
-		}
-		if noop {
-			// A run that put a tampered file back changed the host.
-			r.Noop = !restored
-			if !restored {
-				r.NoopReason = reason
-			}
-			if err := env.sealHookBinary(record); err != nil {
-				r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
-			}
-			if !exists(env.committedConfigPath()) {
-				// A deployment committed before the lifecycle kept the applied
-				// config; the installed file is exactly that config.
-				if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil && sha256Bytes(raw) == record.ConfigSHA256 {
-					_ = env.saveCommittedConfig(raw)
-				}
-			}
-			l.settleRejectedConfig()
-			if len(r.Errors) == 0 {
-				env.clearApplyRetries()
-			}
-			l.clearSupersededUnitFailures(ctx)
-			l.retryOpenShell(ctx)
-			l.describe(ctx, record, false)
-			// The host runs this package and is healthy, so what a failed
-			// package run left (its result and the kept gateway output) is
-			// stale, as after a run that commits a deployment; the run that
-			// found it so used to keep it (GAP-0174).
-			if l.opts.FromPackage && len(r.Errors) == 0 {
-				l.clearSupersededFailures()
-			}
-			return 0
-		}
-		return l.settleInputChanges(ctx, l.apply(ctx, record))
+		return l.ensureInstalled(ctx, record, l.apply)
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
@@ -471,6 +440,66 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// ensureInstalled is ensure on an installed deployment: put back what was
+// tampered with, return when nothing differs from the inputs, else run apply
+// (the transaction) and the follow-ups for inputs that changed meanwhile.
+func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, apply func(context.Context, *Deployment) int) int {
+	env, r := l.env, l.result
+	if env.insideWSL() {
+		r.AddWarning(codeWSL, wslDeploymentWarning)
+	}
+	restored := l.restoreTamperedHookBinary(ctx, record)
+	l.restoreUnchangedConfigMetadata(ctx, record)
+	restored = l.restoreTamperedMachinePolicy(record) || restored
+	if problems, _ := l.unitDropIns(ctx, record); len(problems) > 0 {
+		r.AddError(codeVerify, strings.Join(problems, "; "))
+		l.describe(ctx, record, false)
+		return 0
+	}
+	noop, reason := l.ensureNoop(ctx, record)
+	// Configuration management that installs the same config.yaml
+	// again while this run checks (two installs seconds apart) replaced
+	// the owner the restore above put back, and the run restarted the
+	// gateway for that owner alone (GAP-1030). Restore and check again
+	// while the installed bytes are still the applied config.
+	for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
+		noop, reason = l.ensureNoop(ctx, record)
+	}
+	if noop {
+		// A run that put a tampered file back changed the host.
+		r.Noop = !restored
+		if !restored {
+			r.NoopReason = reason
+		}
+		if err := env.sealHookBinary(record); err != nil {
+			r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
+		}
+		if !exists(env.committedConfigPath()) {
+			// A deployment committed before the lifecycle kept the applied
+			// config; the installed file is exactly that config.
+			if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil && sha256Bytes(raw) == record.ConfigSHA256 {
+				_ = env.saveCommittedConfig(raw)
+			}
+		}
+		l.settleRejectedConfig()
+		if len(r.Errors) == 0 {
+			env.clearApplyRetries()
+		}
+		l.clearSupersededUnitFailures(ctx)
+		l.retryOpenShell(ctx)
+		l.describe(ctx, record, false)
+		// The host runs this package and is healthy, so what a failed
+		// package run left (its result and the kept gateway output) is
+		// stale, as after a run that commits a deployment; the run that
+		// found it so used to keep it (GAP-0174).
+		if l.opts.FromPackage && len(r.Errors) == 0 {
+			l.clearSupersededFailures()
+		}
+		return 0
+	}
+	return l.settleInputChanges(ctx, apply(ctx, record))
 }
 
 // removeLifecycleStateKeepingLock clears transaction state without replacing
@@ -659,6 +688,18 @@ func (l *lifecycle) validateOptions() int {
 	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
+	}
+	if o.Bundle != "" || o.BundleInbox {
+		switch {
+		case o.Action != ActionEnsure:
+			return bad("a policy bundle is applied by ensure")
+		case o.Bundle != "" && o.BundleInbox:
+			return bad("--bundle and --inbox are mutually exclusive")
+		case o.Bundle != "" && !filepath.IsAbs(o.Bundle):
+			return bad("--bundle must be an absolute path")
+		case o.ConfigFile != "" || o.PayloadDir != "" || o.FromPackage || o.NoStart || o.AdoptExisting || o.Mutate != nil:
+			return bad("a policy bundle carries the config: --config, --payload, --from-package, --no-start and --adopt-existing do not apply")
+		}
 	}
 	return 0
 }
@@ -1763,6 +1804,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeVerify, errors.New(strings.Join(problems, "; ")))
 		}
 	}
+	if l.bundle != nil {
+		// The gateway must report the policy of the bundle before the
+		// deployment commits; otherwise the snapshot (the last good config
+		// and its untouched version directory) goes back.
+		if err := l.confirmBundleInTransaction(ctx, p.config.SHA); err != nil {
+			return failAndRollback(codeBundleNotConfirmed, err)
+		}
+	}
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
 	}
@@ -1914,15 +1963,16 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 	env := l.env
 	configPath := env.P(env.Layout.ConfigPath)
 	var changed map[string]bool
-	_, err := configwrite.Locked(ctx, configPath, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action,
-	}, func() (bool, error) {
+	_, err := configwrite.Locked(ctx, configPath, l.configWriteOptions(), func() (bool, error) {
 		var err error
 		if changed, err = l.applyFiles(p); err != nil {
 			return false, err
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
-		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA, nil
+		// A bundle whose config is already installed is still recorded as
+		// the generation its principal installed.
+		bundleUnrecorded := l.bundle != nil && (state.BundleID != l.bundle.receipt.BundleID || state.BundleVersion != l.bundle.receipt.Version)
+		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded, nil
 	})
 	if err != nil {
 		return nil, err
@@ -2400,8 +2450,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 // generationRecord is config.generation.json before a transaction, with the
 // config digest it names.
 type generationRecord struct {
-	raw []byte
-	sha string
+	raw   []byte
+	sha   string
+	state configwrite.GenerationState
 }
 
 // rememberGeneration keeps the generation record as the transaction found it.
@@ -2414,7 +2465,7 @@ func (l *lifecycle) rememberGeneration() {
 		return
 	}
 	if state, err := configwrite.ReadGenerationState(configPath); err == nil {
-		l.generationBefore = &generationRecord{raw: raw, sha: state.ConfigSHA256}
+		l.generationBefore = &generationRecord{raw: raw, sha: state.ConfigSHA256, state: state}
 	}
 }
 
@@ -2437,9 +2488,16 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if _, err := os.Stat(configPath); err != nil {
 		return nil
 	}
-	_, err = configwrite.Locked(ctx, configPath, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback",
-	}, func() (bool, error) {
+	// A rollback to the config of the bundle the run found (the last good
+	// bundle) is recorded as that bundle again, so /health and
+	// config.change.applied name the bundle that enforces.
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback"}
+	if before := l.generationBefore; before != nil {
+		if raw, err := os.ReadFile(configPath); err == nil {
+			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
+		}
+	}
+	_, err = configwrite.Locked(ctx, configPath, opt, func() (bool, error) {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
 			return false, err
