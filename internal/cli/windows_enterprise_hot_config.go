@@ -51,8 +51,9 @@ import (
 // policy the installed config computes to. Any doubt (a key the gateway
 // reads once at start, a config_version 8 file, a busy lifecycle lock, a
 // config that does not validate, a gateway that does not adopt the change,
-// a verify that fails) puts the previous config back and leaves the change
-// to the upgrade transaction, which is what every change used to do.
+// a verify that fails) puts the previous config back. A signed bundle does
+// not fall through to the all-service upgrade transaction after a failed
+// config apply.
 
 // windowsEnterpriseHotConfigMaxBytes bounds the config read for the check.
 const windowsEnterpriseHotConfigMaxBytes = 4 << 20
@@ -76,6 +77,8 @@ var (
 	// standard user's edit is installed does not depend on which keys it
 	// changed (GAP-0312).
 	windowsEnterpriseHotConfigSourceCheck = managed.ValidateTrustedConfigPath
+	windowsEnterpriseHotConfigRestart     = restartWindowsStandaloneGateway
+	windowsEnterpriseHotConfigRecover     = startWindowsStandaloneGatewayIfStopped
 )
 
 // windowsEnterpriseServicePins are the environment pins the gateway service
@@ -121,7 +124,7 @@ func windowsEnterpriseEnvironmentWith(base []string, pins map[string]string) []s
 // supplied config, and nothing else asked for.
 func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) bool {
 	return windowsEnterpriseIsElevated() &&
-		status != nil && status.OK && status.Installed && status.GatewayReady && !status.TransactionPending &&
+		windowsEnterpriseVerifyAcceptable(status) &&
 		strings.TrimSpace(opts.configPath) != "" &&
 		strings.TrimSpace(opts.manifestPath) == "" && strings.TrimSpace(opts.mode) == "" && strings.TrimSpace(opts.connector) == "" &&
 		!opts.noStart && strings.TrimSpace(opts.installRoot) == "" && strings.TrimSpace(opts.stateRoot) == "" &&
@@ -129,10 +132,10 @@ func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions
 }
 
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
-// gateway and fills result from a verify of the host. It returns false,
-// with config.yaml as it was, when the change must go through the upgrade
-// transaction, and then the changed keys the services read only at start,
-// if that is why.
+// gateway and fills result from a verify of the host. For a signed bundle,
+// start-only keys restart only the gateway. It returns false after attempting
+// to restore the old config on failure; ordinary CONFIG= uses the upgrade transaction
+// for start-only keys.
 func windowsEnterpriseHotConfigApply(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -187,7 +190,10 @@ func windowsEnterpriseHotConfigApply(
 	// (GAP-0601). Who is enrolled and which connectors are is applied too:
 	// the gateway reads neither at start on Windows, and the targets are
 	// refreshed below (GAP-0716).
-	restart := configwrite.ManagedRestartRequired(changed)
+	restart, err := configwrite.ManagedConfigRestartRequired(previous, next)
+	if err != nil {
+		return false, nil
+	}
 	refreshTargets := false
 	var startOnly []string
 	for _, path := range restart {
@@ -197,7 +203,8 @@ func windowsEnterpriseHotConfigApply(
 		}
 		refreshTargets = true
 	}
-	if len(startOnly) > 0 {
+	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	if len(startOnly) > 0 && !bundleChange {
 		return false, startOnly
 	}
 
@@ -235,8 +242,30 @@ func windowsEnterpriseHotConfigApply(
 		undo()
 		return false, nil
 	}
-	if !windowsEnterpriseHotConfigAdopted(ctx) {
+	if len(startOnly) > 0 {
+		restarted, restartErr := windowsEnterpriseHotConfigRestart()
+		if restarted {
+			opts.bundle.gatewayRestarted = true
+		}
+		if restartErr != nil || !restarted {
+			undo()
+			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered {
+				opts.bundle.gatewayRestarted = true
+			}
+			return false, startOnly
+		}
+	}
+	adoptionWait := windowsEnterpriseHotConfigTimeout
+	if opts.bundle != nil && opts.bundle.gatewayRestarted {
+		adoptionWait = 2 * time.Minute
+	}
+	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait) {
 		undo()
+		if opts.bundle != nil && opts.bundle.gatewayRestarted {
+			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
+				_, _ = windowsEnterpriseHotConfigRecover()
+			}
+		}
 		return false, nil
 	}
 	// The enumerator publishes the targets the new config enrolls, as the
@@ -245,20 +274,36 @@ func windowsEnterpriseHotConfigApply(
 	if refreshTargets {
 		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 			undo()
+			if opts.bundle != nil && opts.bundle.gatewayRestarted {
+				if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
+					_, _ = windowsEnterpriseHotConfigRecover()
+				}
+			}
 			return false, nil
 		}
 	}
 	verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
-	if err != nil || !verifyReport.OK {
+	if err != nil || !windowsEnterpriseVerifyAcceptable(verifyReport) {
 		undo()
+		if opts.bundle != nil && opts.bundle.gatewayRestarted {
+			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
+				_, _ = windowsEnterpriseHotConfigRecover()
+			}
+		}
 		return false, nil
 	}
-	applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+	accepted := *verifyReport
+	accepted.OK = true
+	applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 	if refreshTargets {
 		warnWindowsEnterpriseHotAgentSessions(result, previous, next, connectorChangeStartedAt)
 	}
-	result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
+	if len(startOnly) > 0 {
+		result.Changes = append(result.Changes, "applied the config change after restarting the gateway")
+	} else {
+		result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
+	}
 	if kept != "" {
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+kept)
 	}
@@ -278,7 +323,13 @@ func windowsEnterpriseHotConfigApply(
 	case refreshTargets:
 		result.Changes = append(result.Changes, "refreshed the enrolled targets; the hook guardian registers and removes hooks for them without a restart")
 	}
-	result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
+	if len(startOnly) > 0 {
+		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle after restarting the gateway: "+applied)
+	} else if bundleChange {
+		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle in the running gateway: "+applied)
+	} else {
+		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
+	}
 	return true, nil
 }
 
@@ -324,8 +375,8 @@ var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the
 // effective policy the installed config computes to, with no rejected reload
 // and the config recorded.
-func windowsEnterpriseHotConfigAdopted(ctx context.Context) bool {
-	deadline := time.Now().Add(windowsEnterpriseHotConfigTimeout)
+func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
 	for {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport

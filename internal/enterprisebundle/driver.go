@@ -249,6 +249,7 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 	if rc == nil || Finished(rc.State) {
 		return d.Store.LoadState()
 	}
+	rc.Restart, rc.RestartRequired = restart, restart
 	rc.EnforcingDigest = policy.Digest
 	if len(failure) > 0 || installed != p.ConfigSHA256 {
 		message := "the ensure transaction did not install the bundle config"
@@ -285,7 +286,7 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 	at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
 		r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = policy.EffectiveDigest, policy.Generation, p.ConfigSHA256
-		r.AppliedAt, r.Restart = at, restart
+		r.AppliedAt, r.Restart, r.RestartRequired = at, restart, restart
 	}); err != nil {
 		return State{}, err
 	}

@@ -423,3 +423,60 @@ func restartWindowsStandaloneGateway() (bool, error) {
 	}
 	return true, nil
 }
+
+// windowsStandaloneGatewayPID observes the SCM process identity around an
+// installer transaction. A bundle receipt records a restart only when the
+// gateway process actually changed.
+func windowsStandaloneGatewayPID() uint32 {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return 0
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return 0
+	}
+	defer service.Close()
+	status, err := service.Query()
+	if err != nil || status.State != svc.Running {
+		return 0
+	}
+	return status.ProcessId
+}
+
+// startWindowsStandaloneGatewayIfStopped is the rollback recovery for a
+// bundle restart whose stop succeeded but start failed. It never stops a
+// running gateway.
+func startWindowsStandaloneGatewayIfStopped() (bool, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return false, err
+	}
+	defer service.Close()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		status, err := service.Query()
+		if err != nil {
+			return false, err
+		}
+		switch status.State {
+		case svc.Running, svc.StartPending:
+			return false, nil
+		case svc.Stopped:
+			if err := service.Start(); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, fmt.Errorf("%s did not become restartable within 60s", managed.StandaloneWindowsGatewaySvc)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}

@@ -262,8 +262,10 @@ type BundleState struct {
 	EffectivePolicyDigest string `json:"effective_policy_digest,omitempty"`
 	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
 	// AppliedAt and ConfirmedAt are RFC 3339 UTC.
-	AppliedAt   string `json:"applied_at,omitempty"`
-	ConfirmedAt string `json:"confirmed_at,omitempty"`
+	AppliedAt       string `json:"applied_at,omitempty"`
+	ConfirmedAt     string `json:"confirmed_at,omitempty"`
+	Restart         bool   `json:"restart,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
 	// CurrentBundleID and CurrentVersion name the confirmed bundle that
 	// enforces when this receipt is not its confirmed receipt: a newer
 	// bundle pending or failed (the last good bundle keeps enforcing), or

@@ -58,6 +58,7 @@ type PolicyBundleReceipt struct {
 	ConfigGeneration uint64
 	RolledBack       bool
 	Restart          bool
+	RestartRequired  bool
 	// EnforcingVersion is the version of the bundle the device enforces
 	// after this receipt (0 when none): the defenseclaw.policy.bundle.version
 	// gauge.
@@ -187,6 +188,7 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 		"config_generation": receipt.ConfigGeneration,
 		"rolled_back":       receipt.RolledBack,
 		"restart":           receipt.Restart,
+		"restart_required":  receipt.RestartRequired,
 	}
 	if receipt.ErrorCode != "" {
 		after["error_code"] = receipt.ErrorCode

@@ -260,10 +260,10 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
-	if st.Current == nil || st.Current.Version != 7 || st.Floor != 7 || st.Current.EffectivePolicyDigest != good.Receipt.ExpectedDigest {
+	if st.Current == nil || st.Current.Version != 7 || st.Floor != 7 || !st.Current.RestartRequired || st.Current.EffectivePolicyDigest != good.Receipt.ExpectedDigest {
 		t.Fatalf("state after confirm = %+v", st)
 	}
-	if good.Receipt.State != enterprisebundle.StateConfirmed || !good.Receipt.Restart {
+	if good.Receipt.State != enterprisebundle.StateConfirmed || !good.Receipt.Restart || !good.Receipt.RestartRequired {
 		t.Fatalf("confirmed receipt = %+v", good.Receipt)
 	}
 

@@ -114,6 +114,7 @@ type Ref struct {
 	EffectivePolicyDigest string `json:"effective_policy_digest,omitempty"`
 	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
 	ConfirmedAt           string `json:"confirmed_at,omitempty"`
+	RestartRequired       bool   `json:"restart_required,omitempty"`
 }
 
 func (r *Ref) validate() error {
@@ -197,6 +198,7 @@ type Receipt struct {
 	RolledBack              bool   `json:"rolled_back,omitempty"`
 	EnforcingDigest         string `json:"enforcing_digest,omitempty"`
 	Restart                 bool   `json:"restart,omitempty"`
+	RestartRequired         bool   `json:"restart_required,omitempty"`
 	// Dir is the version directory name once the bundle is staged.
 	Dir string `json:"dir,omitempty"`
 	// ConfigSHA256 is the hex SHA-256 of the config.yaml the apply installed
@@ -256,6 +258,7 @@ func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 		BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
+		Restart: r.Restart, RestartRequired: r.RestartRequired,
 		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
 	}
 	if current != nil && (current.BundleID != r.BundleID || r.State != StateConfirmed) {
@@ -429,7 +432,7 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
 		ConfigGeneration: r.ConfigGeneration, AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		SessionsRestartRequired: r.SessionsRestartRequired,
-		RolledBack:              r.RolledBack, Restart: r.Restart,
+		RolledBack:              r.RolledBack, Restart: r.Restart, RestartRequired: r.RestartRequired,
 	}
 	if n := len(r.Transitions); n > 0 {
 		out.FinishedAt = r.Transitions[n-1].At
@@ -748,7 +751,8 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 		return State{}, fmt.Errorf("confirm needs an applied bundle receipt, not %s", r.State)
 	}
 	ref := &Ref{BundleID: r.BundleID, Version: r.Version, ManifestSHA256: r.ManifestSHA256, Dir: r.Dir,
-		SignerKeyID: r.SignerKeyID, EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration}
+		SignerKeyID: r.SignerKeyID, EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
+		RestartRequired: r.RestartRequired}
 	if err := ref.validate(); err != nil {
 		return State{}, fmt.Errorf("bundle receipt %s: %w", r.ReceiptID, err)
 	}

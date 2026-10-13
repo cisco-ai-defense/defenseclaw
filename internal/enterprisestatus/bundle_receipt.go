@@ -65,9 +65,10 @@ type PublicReceipt struct {
 	ConfirmedAt             string   `json:"confirmed_at,omitempty"`
 	SessionsRestartRequired int      `json:"sessions_restart_required"`
 	// FinishedAt is the time of the terminal transition.
-	FinishedAt string `json:"finished_at"`
-	RolledBack bool   `json:"rolled_back,omitempty"`
-	Restart    bool   `json:"restart,omitempty"`
+	FinishedAt      string `json:"finished_at"`
+	RolledBack      bool   `json:"rolled_back,omitempty"`
+	Restart         bool   `json:"restart,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
 	// CurrentBundleID and CurrentVersion name the confirmed bundle that
 	// enforces after this receipt (absent when none does).
 	CurrentBundleID string         `json:"current_bundle_id,omitempty"`

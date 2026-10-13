@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -511,5 +512,54 @@ func TestWindowsEnterpriseHotEnrollmentWarnsOpenSessions(t *testing.T) {
 		if len(warnings) != 1 || !strings.Contains(warnings[0], `user DCFC\alice runs claudecode (pid 41), started before the account was enrolled`) {
 			t.Fatalf("%s session warnings = %q", result.Action, warnings)
 		}
+	}
+}
+
+func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, next string
+		restarts   int
+	}{
+		{"policy only", "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n", 0},
+		{"start only", "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+			host, opts := newHotConfigHost(t, previous, tc.next)
+			host.adopted = true
+			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			windowsEnterprisePolicyDigest = host.digest
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			command := &cobra.Command{}
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), command, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			if !applied || restarts != tc.restarts || opts.bundle.gatewayRestarted != (tc.restarts == 1) || len(stub.calls) != 1 {
+				t.Fatalf("applied=%t restarts=%d receiptRestart=%t installerCalls=%q", applied, restarts, opts.bundle.gatewayRestarted, stub.calls)
+			}
+		})
+	}
+}
+
+func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testing.T) {
+	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	host, opts := newHotConfigHost(t, current, current)
+	opts.bundle = &windowsBundleRun{
+		layout:   managed.StandaloneLayout{ConfigPath: host.configPath},
+		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
+		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
+	}
+	previousDir := windowsEnterpriseHookRuntimeDir
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return filepath.Join(t.TempDir(), "missing"), nil }
+	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = previousDir })
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if !result.Noop || result.NoopReason != "already_applied" || len(stub.calls) != 2 || len(host.writes) != 0 {
+		t.Fatalf("same bundle = %+v, installer calls=%q writes=%q", result, stub.calls, host.writes)
 	}
 }

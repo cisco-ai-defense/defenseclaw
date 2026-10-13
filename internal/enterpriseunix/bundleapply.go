@@ -523,7 +523,7 @@ func (l *lifecycle) markBundleApplied(digest string, generation uint64, configSH
 	sessions := l.env.UnprotectedSessions(context.Background())
 	return l.bundle.store.Advance(l.bundle.receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
 		rc.EffectivePolicyDigest, rc.ConfigGeneration, rc.ConfigSHA256 = digest, generation, configSHA
-		rc.AppliedAt, rc.Restart = at, restart
+		rc.AppliedAt, rc.Restart, rc.RestartRequired = at, restart, restart
 		rc.SessionsRestartRequired = sessions.Count
 	})
 }

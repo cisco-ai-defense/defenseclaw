@@ -180,6 +180,7 @@ func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 		ReceiptID: p.ReceiptID, State: p.State, ErrorCode: p.ErrorCode,
 		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
 		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
+		RestartRequired:  p.RestartRequired,
 		EnforcingVersion: p.CurrentVersion,
 		WarningCodes:     p.WarningCodes, DisabledByBundle: p.DisabledByBundle,
 	})

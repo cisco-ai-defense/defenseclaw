@@ -132,7 +132,10 @@ type windowsBundleRun struct {
 	// config while no bundle is current.
 	previous []byte
 	warnings []enterprisebundle.Warning
-	unlock   func()
+	// gatewayRestarted is set by the config apply path after it actually
+	// restarts the gateway, and is copied into the shared receipt.
+	gatewayRestarted bool
+	unlock           func()
 }
 
 func (run *windowsBundleRun) release() {
@@ -465,11 +468,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 				policy = *next
 			}
 		}
-		restart := false
-		for _, w := range result.Warnings {
-			restart = restart || strings.Contains(w.Message, "every service was restarted")
-		}
-		_, err := run.driver.Finish(p, installed, failure, policy, restart, func() (string, bool) {
+		_, err := run.driver.Finish(p, installed, failure, policy, run.gatewayRestarted, func() (string, bool) {
 			return rollbackWindowsBundle(cmd, opts, run)
 		})
 		if err != nil {

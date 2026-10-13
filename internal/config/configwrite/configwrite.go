@@ -529,6 +529,18 @@ func ManagedRestartRequired(changed []string) []string {
 	return out
 }
 
+// ManagedConfigRestartRequired classifies a managed config change for the
+// gateway on every platform. Callers may have additional platform-specific
+// work (such as refreshing hook targets), but use this classification for
+// the gateway's reload decision.
+func ManagedConfigRestartRequired(before, after []byte) ([]string, error) {
+	changed, err := ChangedPaths(before, after)
+	if err != nil {
+		return nil, err
+	}
+	return ManagedRestartRequired(changed), nil
+}
+
 // RestartRequired returns the paths in changed that need a gateway restart.
 func RestartRequired(changed []string) []string {
 	var out []string

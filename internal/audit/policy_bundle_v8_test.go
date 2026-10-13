@@ -74,12 +74,17 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 	if err := logger.LogPolicyBundleReceipt("operator:root",
 		PolicyBundle{ID: testPolicyBundleID, Version: 5},
 		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed,
-			Restart: false, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
-		t.Fatalf("hot bundle receipt: %v", err)
+			Restart: true, RestartRequired: true, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
+		t.Fatalf("restart bundle receipt: %v", err)
 	}
 	_, records = runtime.snapshot()
 	if len(records) != 2 || records[1].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
-		t.Fatalf("hot receipt produced %d audit records, want one additional config.bundle.receipt", len(records))
+		t.Fatalf("restart receipt produced %d audit records, want one additional config.bundle.receipt", len(records))
+	}
+	encoded, err = records[1].Bytes()
+	if err != nil || !strings.Contains(string(encoded), `"defenseclaw.policy.bundle.restart":true`) ||
+		!strings.Contains(string(encoded), `restart_required`) {
+		t.Fatalf("restart receipt audit = %s, %v", encoded, err)
 	}
 	values = map[observability.EventName]string{}
 	for _, metric := range runtime.metricSnapshot() {

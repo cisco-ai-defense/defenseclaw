@@ -350,6 +350,60 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	}
 }
 
+func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "restart.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	cmd, _ := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts); done || err != nil {
+		t.Fatalf("prepare: done=%t err=%v", done, err)
+	}
+	run := opts.bundle
+	if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.ConfigPath, run.prepared.Config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run.gatewayRestarted = true
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: windowsBundleTestDigest,
+		GatewayReportedDigest: windowsBundleTestDigest, ConfigGeneration: 3, Applied: true}
+	finishWindowsEnterpriseBundle(cmd, opts, result)
+	if len(result.Errors) != 0 {
+		t.Fatalf("finish errors: %+v", result.Errors)
+	}
+	private, err := run.driver.Store.Receipts()
+	if err != nil || len(private) != 1 || !private[0].Restart || !private[0].RestartRequired {
+		t.Fatalf("private receipts = %+v err=%v", private, err)
+	}
+	public, err := enterprisestatus.ReadPublicReceipt(run.driver.Store.PublicReceiptPath())
+	if err != nil || !public.Restart || !public.RestartRequired {
+		t.Fatalf("public receipt = %+v err=%v", public, err)
+	}
+	state, err := run.driver.Store.LoadState()
+	if err != nil || state.Current == nil || !state.Current.RestartRequired {
+		t.Fatalf("bundle state = %+v err=%v", state, err)
+	}
+}
+
+func TestWindowsBundleWarningOnlyVerifyIsNoopEligible(t *testing.T) {
+	report := &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true}
+	if !windowsEnterpriseVerifyAcceptable(report) {
+		t.Fatal("a warning-only verify caused an ensure repair")
+	}
+	report.Errors = []string{"managed ACL is still invalid"}
+	if windowsEnterpriseVerifyAcceptable(report) {
+		t.Fatal("a genuine verify error was treated as compliant")
+	}
+}
+
 func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

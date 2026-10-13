@@ -277,6 +277,18 @@ func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *test
 	}
 }
 
+func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
+	before := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n")
+	hot := []byte("config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n")
+	restart := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n")
+	if keys, err := ManagedConfigRestartRequired(before, hot); err != nil || len(keys) != 0 {
+		t.Fatalf("policy-only change = %v, %v; want hot", keys, err)
+	}
+	if keys, err := ManagedConfigRestartRequired(before, restart); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
+		t.Fatalf("debounce change = %v, %v; want restart", keys, err)
+	}
+}
+
 // enterprise.openshell is lifecycle and restart-required on every host;
 // openshell.* (the sandbox floor included) stays hot.
 func TestEnterpriseOpenShellRestartsAndSandboxFloorStaysHot(t *testing.T) {
