@@ -28,6 +28,14 @@ import (
 // A signer and an installed device must hash a bundled custom rule pack the
 // same way, despite their distinct staging and version directory paths.
 func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T) {
+	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin} {
+		t.Run(platform, func(t *testing.T) {
+			testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t, platform)
+		})
+	}
+}
+
+func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T, platform string) {
 	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
 	const rules = "version: 1\ninjection: []\n"
 	packRoot := t.TempDir()
@@ -43,6 +51,7 @@ func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T)
 	}
 	configYAML := strings.Replace(bundleConfig(t), "guardrail:\n", "guardrail:\n  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+packDigest+"\n", 1)
 	f := newFixture(t, configYAML, func(in *enterprisebundle.ComposeInput) {
+		in.HostPlatform = platform
 		in.Bundle.Files[pack] = []byte(rules)
 		full := filepath.Join(in.Root, filepath.FromSlash(pack))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -80,7 +89,7 @@ func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T)
 			return nil
 		})
 	})
-	driver := &enterprisebundle.Driver{Store: store, AnchorsPath: anchorsPath, Platform: "linux", ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
+	driver := &enterprisebundle.Driver{Store: store, AnchorsPath: anchorsPath, Platform: platform, ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
 	prepared, err := driver.Prepare(context.Background(), f.bundle, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +103,7 @@ func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deviceDigest, err := digester(context.Background(), installedConfig, installedRaw, "linux", versionRoot)
+	deviceDigest, err := digester(context.Background(), installedConfig, installedRaw, platform, versionRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

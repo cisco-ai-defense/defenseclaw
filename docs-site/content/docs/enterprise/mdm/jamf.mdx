@@ -161,7 +161,11 @@ to **After**.
 set -- # Jamf Pro passes positional values; this script takes its settings from this block
 DC_ACTION=ensure
 DC_CONFIG_FILE="/Library/Management/DefenseClaw/config.yaml"
+DC_FORMAT=jamf
 ```
+
+`DC_FORMAT=jamf` emits the lifecycle result as an XML-escaped `<result>` line.
+The wrapper keeps the lifecycle exit code so a failed policy remains failed.
 
 The wrapper refuses a config file that is not owned by root or that another
 account can write, anywhere on its path (`mdm_untrusted_input`). The stage

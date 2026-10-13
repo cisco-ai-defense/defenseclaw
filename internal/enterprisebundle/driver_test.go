@@ -61,8 +61,8 @@ func enforcing(digest string) enterprisebundle.GatewayPolicy {
 
 const gatewayDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
-func TestDriverConfirmationChecksSignedDigestOnBothPlatforms(t *testing.T) {
-	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformWindows} {
+func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
+	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
 		for _, tc := range []struct {
 			name            string
 			comparable      bool

@@ -149,12 +149,14 @@ def _build_fixture(tmp_path: Path, agents: tuple[str, ...] = LAUNCH_AGENTS):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     captured = tmp_path / "captured-root"
+    captured_scripts = tmp_path / "captured-scripts"
     _stub(bin_dir, "uname", "echo Darwin")
     pkgbuild = (
         'while [ "$#" -gt 0 ]; do\n'
-        '    case "$1" in --root) root=$2; shift 2 ;; *) last=$1; shift ;; esac\n'
+        '    case "$1" in --root) root=$2; shift 2 ;; --scripts) scripts=$2; shift 2 ;; *) last=$1; shift ;; esac\n'
         "done\n"
         f"cp -R -P \"$root\" '{captured}'\n"
+        f"cp -R -P \"$scripts\" '{captured_scripts}'\n"
         ': >"$last"'
     )
     _stub(bin_dir, "pkgbuild", pkgbuild)
@@ -217,6 +219,17 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     ):
         assert _mode(directory) & 0o755 == 0o755, directory
     assert _mode(root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway") == 0o755
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+def test_macos_pkg_postinstall_runs_lifecycle_ensure(tmp_path: Path):
+    result, _ = _run_builder(tmp_path)
+    assert result.returncode == 0, result.stderr
+    postinstall = tmp_path / "captured-scripts" / "postinstall"
+    assert _mode(postinstall) == 0o755
+    body = postinstall.read_text(encoding="utf-8")
+    assert 'enterprise macos ensure --from-package' in body
+    assert '--reason package --json' in body
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")

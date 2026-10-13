@@ -38,6 +38,7 @@
 #       [--config-file FILE | --config-stdin]
 #       [--secret-name NAME (--secret-file FILE | --secret-stdin)]
 #       [--bundle-file FILE.dcbundle] [--trust-anchor-file FILE]
+#       [--format json|jamf]
 #       [--product-version X.Y.Z] [--https-proxy URL] [--log FILE] [--staging-dir DIR]
 #
 # Sources: a defenseclaw-enterprise .deb or .rpm (Linux), a .pkg (macOS) or
@@ -79,6 +80,7 @@ DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or st
 DC_SECRET_FILE=""
 DC_BUNDLE_FILE=""           # absolute path of a signed policy bundle (.dcbundle)
 DC_TRUST_ANCHOR_FILE=""     # absolute path of the bundle trust anchor file (bundle-anchors.json)
+DC_FORMAT=json              # json | jamf; Jamf wraps the result document in <result>
 DC_HTTPS_PROXY=""           # proxy for the download only
 DC_LOG=""                   # default: the platform log path below
 DC_STAGING_DIR=""           # root-only folder for the staged copy (default: /var/lib/defenseclaw-mdm on Linux, /var/tmp on macOS)
@@ -147,6 +149,16 @@ dc_json_escape() {
         sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+dc_print_result() {
+    if [ "$DC_FORMAT" = jamf ]; then
+        printf '<result>'
+        tr -d '\n' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+        printf '</result>\n'
+    else
+        cat
+    fi
+}
+
 # dc_fail_result <exit> <code> <message>: print a schema-conformant result for
 # a failure the wrapper detected before the lifecycle ran, log it and exit.
 # installed=false here means "not evaluated"; run --action status to inspect.
@@ -158,7 +170,7 @@ dc_fail_result() {
     esac
     document=$(printf '{"schema_version":2,"ok":false,"action":"%s","noop":false,"profile":"standalone","platform":"%s","product_version":"","installed":false,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[{"code":"%s","message":"%s"}],"exit_code":%s}' \
         "$action" "$DC_SCRIPT_OS" "$code" "$message" "$exit_code")
-    printf '%s\n' "$document"
+    printf '%s\n' "$document" | dc_print_result
     dc_log "result $document"
     exit "$exit_code"
 }
@@ -190,7 +202,7 @@ dc_stop_child() {
 # gone (the pid it recorded no longer runs) or, without a pid, a day old.
 dc_sweep_stages() {
     for stale in "$1"/defenseclaw-mdm.*; do
-        [ -d "$stale" ] && [ ! -L "$stale" ] || continue
+        if [ ! -d "$stale" ] || [ -L "$stale" ]; then continue; fi
         [ "$(dc_stat_uid "$stale")" = 0 ] || continue
         owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
         case "$owner" in
@@ -430,6 +442,7 @@ dc_parse_args() {
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
             --bundle-file) DC_BUNDLE_FILE=${2:-}; shift 2 ;;
             --trust-anchor-file) DC_TRUST_ANCHOR_FILE=${2:-}; shift 2 ;;
+            --format) DC_FORMAT=${2:-}; shift 2 ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
             --log) DC_LOG=${2:-}; shift 2 ;;
             --staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;
@@ -440,6 +453,10 @@ dc_parse_args() {
 }
 
 dc_validate_args() {
+    case "$DC_FORMAT" in
+        json | jamf) ;;
+        *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--format must be json or jamf" ;;
+    esac
     case "$DC_ACTION" in
         ensure | status | verify) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action must be ensure, status or verify (use uninstall.sh to remove)" ;;
@@ -970,7 +987,7 @@ dc_restore_anchors() {
 # this wrapper writes to stdout on success or on a lifecycle failure.
 dc_emit_result() {
     [ -n "$DC_RESULT" ] || return 0
-    cat "$DC_RESULT"
+    dc_print_result <"$DC_RESULT"
     dc_log "result $(tr -d '\n' <"$DC_RESULT")"
 }
 
@@ -1002,7 +1019,7 @@ dc_run_lifecycle_retry() {
     while :; do
         status=0
         dc_run_lifecycle "$@" || status=$?
-        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        if [ "$status" != 75 ] || [ "$attempt" -ge 3 ]; then break; fi
         dc_log "lifecycle busy; retry $attempt of 2"
         attempt=$((attempt + 1))
         sleep 10

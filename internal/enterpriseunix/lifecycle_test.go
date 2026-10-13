@@ -1210,7 +1210,23 @@ func TestDarwinPackageChannelUninstallRemovesBinariesAndReceipt(t *testing.T) {
 	if r.InstalledVersion != "1.2.0" {
 		t.Fatalf("installed version %q", r.InstalledVersion)
 	}
+	inbox := h.env.bundleInboxDir()
+	if inbox != h.env.P("/opt/cisco/defenseclaw/etc/bundles/inbox") {
+		t.Fatalf("launchd bundle inbox = %s", inbox)
+	}
+	if got := h.mode("/opt/cisco/defenseclaw/etc/bundles/inbox"); got != 0o700 {
+		t.Fatalf("bundle inbox mode %04o, want 0700", got)
+	}
+	if owner := h.owners[inbox]; owner != [2]int{0, 0} {
+		t.Fatalf("bundle inbox owner %v, want root:wheel", owner)
+	}
+	if !h.services.isActive(labelApply) {
+		t.Fatal("launchd apply job is not loaded after package ensure")
+	}
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if exists(inbox) {
+		t.Fatal("macOS uninstall kept the bundle inbox")
+	}
 	if exists(filepath.Join(bin, binGateway)) {
 		t.Fatal("macOS package uninstall kept the gateway binary; a pkg has no uninstaller")
 	}

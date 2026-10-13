@@ -49,7 +49,15 @@ func (bundleAuditDeadlines) Context(parent context.Context, timeout time.Duratio
 // generation reader that the gateway wires to its audit store. This catches
 // a generic reload_applied row even when the separate receipt is correct.
 func TestBundleUnixApplyRuntimeAuditCarriesPrincipal(t *testing.T) {
-	b := newBundleHost(t)
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			testBundleUnixApplyRuntimeAuditCarriesPrincipal(t, goos)
+		})
+	}
+}
+
+func testBundleUnixApplyRuntimeAuditCarriesPrincipal(t *testing.T, goos string) {
+	b := newBundleHost(t, goos)
 	v1, _, _ := bundleConfigs(b.testHost)
 	requireOK(t, b.apply(b.dir(1, v1)))
 	path := b.env.P(b.env.Layout.ConfigPath)
@@ -156,9 +164,13 @@ func installedPolicy(h *testHost) (string, uint64) {
 	return "sha256:" + sha256Bytes(raw), state.Generation
 }
 
-func newBundleHost(t *testing.T) *bundleHost {
+func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 	t.Helper()
-	b := &bundleHost{testHost: newTestHost(t, "linux")}
+	goos := "linux"
+	if len(platforms) != 0 {
+		goos = platforms[0]
+	}
+	b := &bundleHost{testHost: newTestHost(t, goos)}
 	h := b.testHost
 	// Version directories are read-only; the temporary root must go.
 	t.Cleanup(func() {
@@ -170,8 +182,12 @@ func newBundleHost(t *testing.T) *bundleHost {
 		})
 	})
 	h.env.Runner = &bundleRunner{fakeRunner: h.runner, h: h}
+	gatewayName := unitGateway
+	if goos == "darwin" {
+		gatewayName = labelGateway
+	}
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
-		if !h.healthy || !h.services.isActive(unitGateway) {
+		if !h.healthy || !h.services.isActive(gatewayName) {
 			return 0, nil, errors.New("connection refused")
 		}
 		digest, generation := installedPolicy(h)
@@ -227,8 +243,8 @@ func (b *bundleHost) signed(version uint64, cfg string) *enterprisebundle.Bundle
 	}
 	_, manifest, err := enterprisebundle.Compose(context.Background(), enterprisebundle.ComposeInput{
 		Bundle: files, Root: root, BundleID: fmt.Sprintf("b-01JA%022d", version), TenantID: "acme", DeviceGroup: "eng",
-		Platforms: []string{"linux"}, Version: version, CreatedAt: time.Now().Add(-time.Hour), CreatedBy: "operator:mdm-admin",
-		ChangeSummary: fmt.Sprintf("version %d", version), ProductVersion: b.env.ProductVersion, HostPlatform: "linux",
+		Platforms: []string{b.env.GOOS}, Version: version, CreatedAt: time.Now().Add(-time.Hour), CreatedBy: "operator:mdm-admin",
+		ChangeSummary: fmt.Sprintf("version %d", version), ProductVersion: b.env.ProductVersion, HostPlatform: b.env.GOOS,
 		Digester: b.env.BundleDigester,
 	})
 	if err != nil {
@@ -261,6 +277,21 @@ func (b *bundleHost) dir(version uint64, cfg string) string {
 func (b *bundleHost) apply(path string) *enterprisestatus.Result {
 	b.t.Helper()
 	return b.run(Options{Action: ActionEnsure, Bundle: path})
+}
+
+// The fake ownership ledger tracks path names rather than inodes. A real
+// rename keeps ownership, so map the promoted path to its staging name.
+func (b *bundleHost) mapPromotedBundleOwners(version uint64) {
+	store := b.env.bundleStore()
+	staging := filepath.Join(store.BundlesDir, ".staging-"+bundleID(version))
+	promoted := store.VersionDir(enterprisebundle.VersionDirName(version, bundleID(version)))
+	ownerOf := b.env.OwnerOf
+	b.env.OwnerOf = func(path string) (int, int, error) {
+		if path == promoted || strings.HasPrefix(path, promoted+string(filepath.Separator)) {
+			path = strings.Replace(path, promoted, staging, 1)
+		}
+		return ownerOf(path)
+	}
 }
 
 func (b *bundleHost) state() enterprisebundle.State {
@@ -367,7 +398,15 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 }
 
 func TestBundleShippedRulePackIsReadableByGateway(t *testing.T) {
-	b := newBundleHost(t)
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			testBundleShippedRulePackIsReadableByGateway(t, goos)
+		})
+	}
+}
+
+func testBundleShippedRulePackIsReadableByGateway(t *testing.T, goos string) {
+	b := newBundleHost(t, goos)
 	const pack = "policies/guardrail/mgmtp1marker"
 	b.extra = map[string]string{pack + "/rules/local-patterns.yaml": "version: 1\ninjection: []\n"}
 	marker := t.TempDir()
@@ -387,19 +426,15 @@ func TestBundleShippedRulePackIsReadableByGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.owners[store.BundlesDir] = [2]int{0, 0}
-	staging := filepath.Join(store.BundlesDir, ".staging-"+bundleID(1))
 	version := store.VersionDir(enterprisebundle.VersionDirName(1, bundleID(1)))
-	ownerOf := b.env.OwnerOf
-	b.env.OwnerOf = func(path string) (int, int, error) {
-		if path == version || strings.HasPrefix(path, version+string(filepath.Separator)) {
-			path = strings.Replace(path, version, staging, 1)
-		}
-		return ownerOf(path)
-	}
+	b.mapPromotedBundleOwners(1)
 	requireOK(t, b.apply(b.dir(1, cfg)))
 	rc := b.receipt(bundleID(1))
 	if rc.State != enterprisebundle.StateConfirmed {
 		t.Fatalf("bundle receipt: %+v", rc)
+	}
+	if goos == "darwin" && !b.services.isActive(labelApply) {
+		t.Fatal("launchd apply job was unloaded after bundle confirmation")
 	}
 	installed, err := os.ReadFile(b.env.P(b.env.Layout.ConfigPath))
 	if err != nil {
@@ -433,6 +468,38 @@ func TestBundleShippedRulePackIsReadableByGateway(t *testing.T) {
 		if err != nil || uid != 0 || gid != account.GID {
 			t.Errorf("%s owner %d:%d, want root:%d (%v)", path, uid, gid, account.GID, err)
 		}
+	}
+}
+
+// A confirmed bundle must leave its policy inputs traversable by the macOS
+// gateway service account. This is the permission check behind the /health
+// config reload state after an MDM bundle apply.
+func TestDarwinConfirmedBundleHealthInputsAreReadable(t *testing.T) {
+	b := newBundleHost(t, "darwin")
+	const pack = "policies/guardrail/health"
+	b.extra = map[string]string{pack + "/rules/local-patterns.yaml": "version: 1\ninjection: []\n"}
+	packRoot := t.TempDir()
+	writeRooted(t, filepath.Join(packRoot, "rules/local-patterns.yaml"), b.extra[pack+"/rules/local-patterns.yaml"])
+	digest, err := guardrail.RulePackDigest(packRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(string(DefaultConfig(b.env.Layout)), "  rule_pack: default\n",
+		"  rule_pack: health\n  custom_packs:\n    health:\n      path: "+pack+"\n      digest: sha256:"+digest+"\n", 1)
+	b.mapPromotedBundleOwners(1)
+	requireOK(t, b.apply(b.dir(1, cfg)))
+	rc := b.receipt(bundleID(1))
+	account := b.accounts.accounts[b.env.Layout.ServiceUser]
+	if problem := b.env.RulePackServiceReadProblem(context.Background(), filepath.Join(b.env.bundleVersionDir(rc.Dir), pack)); problem != "" {
+		t.Fatalf("confirmed bundle leaves an unreadable health input: %s", problem)
+	}
+	if account.GID == 0 || rc.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("service account or receipt is not ready: account=%+v receipt=%+v", account, rc)
+	}
+	status, raw, err := b.env.HealthGet(context.Background())
+	if err != nil || status != 200 || !bytes.Contains(raw, []byte(rc.EffectivePolicyDigest)) ||
+		!bytes.Contains(raw, []byte(`"last_reload_error":""`)) {
+		t.Fatalf("bundle health = %d %s (%v)", status, raw, err)
 	}
 }
 

@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -257,6 +258,36 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
         assert document["platform"] == ("darwin" if host == "macos" else "linux") or error == "mdm_wrong_platform"
         if error:
             assert [e["code"] for e in document["errors"]] == [error], (args, document)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_macos_wrapper_jamf_format_wraps_success_and_failure(tmp_path: Path) -> None:
+    wrapper = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_fail_result", "dc_parse_args", "dc_emit_result",
+    ))
+    result_file = tmp_path / "result.json"
+    result_file.write_text('{"ok":true,"message":"A < B & C > D"}\n', encoding="utf-8")
+    setup = (
+        'DC_ACTION=ensure DC_SCRIPT_OS=darwin DC_FORMAT=json DC_LOG="" DC_EXIT_INVALID=2\n'
+        'dc_log() { :; }\n'
+        f'{functions}\n'
+        'dc_parse_args --format jamf\n'
+        '[ "$DC_FORMAT" = jamf ] || exit 9\n'
+    )
+    success = subprocess.run(
+        ["sh", "-c", setup + f'DC_RESULT="{result_file}"\ndc_emit_result\n'],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert success.returncode == 0, success.stderr
+    assert json.loads(ET.fromstring(success.stdout).text or "") == json.loads(result_file.read_text())
+    failure = subprocess.run(
+        ["sh", "-c", setup + 'dc_fail_result 2 mdm_invalid_arguments "A < B & C > D"\n'],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert failure.returncode == 2, failure.stderr
+    document = json.loads(ET.fromstring(failure.stdout).text or "")
+    assert document["errors"][0] == {"code": "mdm_invalid_arguments", "message": "A < B & C > D"}
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file descriptors")
