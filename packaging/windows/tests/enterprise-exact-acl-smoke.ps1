@@ -31,6 +31,10 @@ $expected = [ordered]@{
     AdminFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
     ConfigDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     ConfigFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
+    BundleDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;$serviceSID)"
+    BundleReceipt = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;$serviceSID)"
+    BundleVersionDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$serviceSID)"
+    BundleVersionFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;$serviceSID)"
     MachinePolicyFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)'
     RuntimeDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
     RuntimeFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;$serviceSID)"
@@ -51,6 +55,8 @@ $directoryKinds = @(
     'StateDirectory',
     'AdminDirectory',
     'ConfigDirectory',
+    'BundleDirectory',
+    'BundleVersionDirectory',
     'RuntimeDirectory',
     'AuthorizationDirectory',
     'LogDirectory',
@@ -138,6 +144,10 @@ $pairings = [ordered]@{
     AdminFile = 'Admin'
     ConfigDirectory = 'ConfigDirectory'
     ConfigFile = 'Config'
+    BundleDirectory = 'ServiceInstall'
+    BundleReceipt = 'Config'
+    BundleVersionDirectory = 'ServiceInstall'
+    BundleVersionFile = 'ServiceInstall'
     MachinePolicyFile = 'MachinePolicy'
     RuntimeDirectory = 'Runtime'
     RuntimeFile = 'Runtime'

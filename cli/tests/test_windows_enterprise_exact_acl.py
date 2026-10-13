@@ -215,6 +215,84 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
     assert "$script:AuthenticatedUsersSID" in verifier
 
 
+def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    builder = _extract_function_body(
+        source,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    cases = {
+        kind: builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        for kind in (
+            "StateDirectory",
+            "ConfigDirectory",
+            "BundleDirectory",
+            "BundleReceipt",
+            "BundleVersionDirectory",
+            "BundleVersionFile",
+            "ConfigFile",
+        )
+    }
+    for kind in (
+        "StateDirectory",
+        "ConfigDirectory",
+        "BundleVersionDirectory",
+        "BundleVersionFile",
+        "ConfigFile",
+    ):
+        assert "$script:UsersSID" not in cases[kind], kind
+    assert "        'AdminDirectory' {" not in builder
+    assert "        'AdminFile' {" not in builder
+    assert (
+        "sid = $script:UsersSID\n"
+        "                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute"
+    ) in cases["BundleDirectory"]
+    assert (
+        "sid = $script:UsersSID\n"
+        "                rights = [Security.AccessControl.FileSystemRights]::Read"
+    ) in cases["BundleReceipt"]
+    assert "$Kind -eq 'BundleDirectory'" in builder
+    assert "-not $usersTraverseOnly" in builder
+
+    contract = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawBundleAclContract",
+        "function Set-DefenseClawManagedAcls",
+    )
+    assert (
+        "$bundleDirectory = Microsoft.PowerShell.Management\\Join-Path "
+        "$Layout.ConfigDirectory 'bundles'"
+    ) in contract
+    assert "$relative -ceq 'receipt.json' -and -not $entry.PSIsContainer" in contract
+    assert "elseif ($entry.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }" in contract
+    assert "'BundleVersionDirectory'" in contract
+    assert "'BundleVersionFile'" in contract
+    assert "'bundle-state.json'" in contract
+    assert "'receipts'" in contract
+    assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
+    assert "Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind" in contract
+
+    provisioner = _extract_function_body(
+        source,
+        "function Set-DefenseClawManagedAcls",
+        "function Get-DefenseClawLayout",
+    )
+    assert (
+        "Invoke-DefenseClawBundleAclContract -Layout $Layout "
+        "-GatewayServiceSID $gatewaySID -Repair"
+    ) in provisioner
+    verifier = _extract_function_body(
+        source,
+        "function Assert-DefenseClawEnterpriseDeployment",
+        "function Get-DefenseClawLifecycleStatus",
+    )
+    assert (
+        "Invoke-DefenseClawBundleAclContract -Layout $Layout "
+        "-GatewayServiceSID $gatewaySID"
+    ) in verifier
+
+
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:
     source = MODULE.read_text(encoding="utf-8")
     matcher = _extract_function_body(
@@ -230,7 +308,7 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
     cleanup = _extract_function_body(
         source,
         "function Revoke-DefenseClawManagedIPCServiceAccess",
-        "function Set-DefenseClawManagedAcls",
+        "function Invoke-DefenseClawBundleAclContract",
     )
     descriptor_guard = _extract_function_body(
         source,

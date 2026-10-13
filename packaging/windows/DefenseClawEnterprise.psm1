@@ -3181,19 +3181,11 @@ function New-DefenseClawCanonicalPathAcl {
                 sid = $GatewayServiceSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
             })
-            $entries.Add([pscustomobject]@{
-                sid = $script:UsersSID
-                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
-            })
         }
         'ConfigDirectory' {
             # Traverse only; the service cannot open ConfigFile without it.
             $entries.Add([pscustomobject]@{
                 sid = $GatewayServiceSID
-                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
-            })
-            $entries.Add([pscustomobject]@{
-                sid = $script:UsersSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
             })
         }
@@ -3290,9 +3282,8 @@ function New-DefenseClawCanonicalPathAcl {
     }
 
     foreach ($entry in $entries) {
-        # Users may traverse the public receipt path, but that grant must
-        # never flow to private siblings or bundle version assets.
-        $usersTraverseOnly = $Kind -in @('StateDirectory', 'ConfigDirectory', 'BundleDirectory') -and
+        # The Users read grant on bundles must not flow to private children.
+        $usersTraverseOnly = $Kind -eq 'BundleDirectory' -and
             [string]$entry.sid -eq $script:UsersSID
         $inheritanceFlags = if ($IsDirectory -and $Kind -notin @('ManagedIPCDirectory', 'BundleVersionDirectory') -and
             -not $usersTraverseOnly) {
@@ -18408,11 +18399,9 @@ function New-DefenseClawRequiredRights {
         }
         'State' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
-            $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'ConfigDirectory' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
-            $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'Config' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Read
@@ -19190,13 +19179,13 @@ function Assert-DefenseClawEnterpriseDeployment {
     Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `
-        -AllowedReaderSIDs ($gatewayReaders + @($script:UsersSID)) `
+        -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $stateRights `
         -RejectUntrustedRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigDirectory `
         -AllowedWriterSIDs $adminWriters `
-        -AllowedReaderSIDs ($gatewayReaders + @($script:UsersSID)) `
+        -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $configDirectoryRights `
         -RejectUntrustedRead
     foreach ($entry in @(
@@ -19815,13 +19804,10 @@ function Assert-DefenseClawGatewayServiceAccess {
         @($Layout.ConfigPath, 'Config', $adminWriters),
         @($Layout.RuntimeDirectory, 'Runtime', $gatewayReaders)
     )) {
-        $readers = if ([string]$check[1] -eq 'ConfigDirectory') {
-            $gatewayReaders + @($script:UsersSID)
-        } else { $gatewayReaders }
         Assert-DefenseClawPathAcl `
             -Path ([string]$check[0]) `
             -AllowedWriterSIDs $check[2] `
-            -AllowedReaderSIDs $readers `
+            -AllowedReaderSIDs $gatewayReaders `
             -RequiredRights (New-DefenseClawRequiredRights -Kind ([string]$check[1]) -GatewayServiceSID $gatewaySID) `
             -RejectUntrustedRead
     }
