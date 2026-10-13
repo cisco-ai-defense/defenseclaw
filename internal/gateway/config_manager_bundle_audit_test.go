@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -176,9 +177,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	if err := mgr.Reload(context.Background(), "unchanged YAML"); err != nil {
 		t.Fatal(err)
 	}
-	if mgr.appliedGeneration != 3 || len(capture.snapshot()) != 2 {
-		t.Fatalf("no-diff reload consumed the bundle generation or logged an event")
-	}
+	check(3, assetID, false, configDiffAssets)
 	if err := mgr.ReloadAssets(context.Background(), "bundle asset changed"); err != nil {
 		t.Fatal(err)
 	}
@@ -192,4 +191,120 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	if len(records) != 4 || records[3].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
 		t.Fatalf("receipt produced %d records, want one separate config.bundle.receipt", len(records))
 	}
+}
+
+// A policy-only bundle can advance its signed generation without changing
+// any parsed config field. The lifecycle's generation-file write must wake
+// the running gateway, rebuild its policy, and emit the attributed audit row.
+func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 8\nguardrail:\n  mode: action\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write := func(version uint64, id string) {
+		t.Helper()
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{
+			Actor: "operator:manual-r4", Lifecycle: true,
+			Reason: configwrite.BundleReason(id, version, "policy asset changed"),
+			Bundle: configwrite.BundleRef{ID: id, Version: version, SignerKeyID: "mgmtp1-a"},
+		}, func() (bool, error) { return true, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const firstID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
+	const hotID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	write(1, firstID)
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	applied := make(chan ConfigDiff, 1)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+		applied <- diff
+		return nil
+	})
+	load := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := load(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	mgr.setStartupSource(path, raw)
+	mgr.appliedRaw = raw
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: initial.DataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	write(2, hotID)
+	select {
+	case diff := <-applied:
+		if len(diff.Changed) != 1 || diff.Changed[0] != configDiffAssets || len(diff.RestartRequired) != 0 {
+			t.Fatalf("hot policy asset diff = %+v", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation-file event did not rebuild the hot bundle")
+	}
+	deadline := time.After(5 * time.Second)
+	for len(capture.snapshot()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("hot bundle produced no config.change.applied")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	records := capture.snapshot()
+	if len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventConfigChangeApplied) {
+		t.Fatalf("hot bundle audit records = %d: %+v", len(records), records)
+	}
+	encoded, err := records[0].Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"defenseclaw.admin.principal_ref":"operator:manual-r4"`,
+		`"defenseclaw.policy.bundle.id":"` + hotID + `"`,
+		`"defenseclaw.policy.bundle.version":2`,
+	} {
+		if !strings.Contains(string(encoded), field) {
+			t.Fatalf("hot bundle audit lacks %s: %s", field, encoded)
+		}
+	}
+	var envelope struct {
+		Body map[string]json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var afterJSON string
+	if err := json.Unmarshal(envelope.Body["defenseclaw.admin.after_state"], &afterJSON); err != nil {
+		t.Fatal(err)
+	}
+	var after map[string]any
+	if err := json.Unmarshal([]byte(afterJSON), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after["generation_before"] != float64(1) || after["generation_after"] != float64(2) || after["restart"] != false {
+		t.Fatalf("hot bundle generation/restart = %v", after)
+	}
+	cancel()
+	<-done
 }

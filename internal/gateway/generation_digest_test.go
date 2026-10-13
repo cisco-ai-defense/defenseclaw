@@ -471,6 +471,9 @@ func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
 	if generationUnchanged(nil, live) || generationUnchanged(live, &Generation{Digest: "sha256:b", opaError: live.opaError}) {
 		t.Fatal("a different generation was unchanged")
 	}
+	if generationUnchanged(live, &Generation{Digest: live.Digest, opaError: live.opaError, BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", BundleVersion: 2}) {
+		t.Fatal("a new signed bundle was swallowed as an unchanged asset rebuild")
+	}
 }
 
 // A signature pack edited on disk rebuilds AI discovery, which loads its catalog

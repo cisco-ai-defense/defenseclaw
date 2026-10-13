@@ -612,7 +612,19 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			pendingTrigger = ""
 			pendingKinds = map[string]bool{}
 			if len(kinds) == 1 && kinds[configGenerationTrigger] {
-				refreshConfigGeneration(nil)
+				// A bundle can replace policy assets without changing parsed
+				// config fields. Its generation record is then the only event
+				// that tells us to build and audit the new policy.
+				m.mu.Lock()
+				pendingBundle := m.pendingBundleGeneration(nil)
+				m.mu.Unlock()
+				if pendingBundle {
+					if err := m.reload(ctx, reason, false); err != nil && ctx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
+					}
+				} else {
+					refreshConfigGeneration(nil)
+				}
 				configReloadInFlight.settle()
 				continue
 			}
@@ -790,6 +802,15 @@ func (m *ConfigManager) noteAppliedGeneration(raw []byte) {
 	if generation, ok := appliedGenerationOf(m.path, raw); ok {
 		m.appliedGeneration, m.appliedGenerationKnown = generation, true
 	}
+}
+
+// pendingBundleGeneration is true only for a new lifecycle-recorded bundle
+// whose generation has not passed through the config manager's apply path.
+func (m *ConfigManager) pendingBundleGeneration(raw []byte) bool {
+	state, err := configwrite.ReadGenerationState(m.path)
+	return err == nil && state.BundleID != "" && m.appliedGenerationKnown &&
+		state.Generation > m.appliedGeneration &&
+		(raw == nil || strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)))
 }
 
 // startupSourceUnchanged reports whether config.yaml still holds the bytes
@@ -1008,6 +1029,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	// and without the rebuild the error would stay until some unrelated
 	// change.
 	if len(diff.Changed) == 0 && (assets || m.rejected) {
+		diff.Changed = []string{configDiffAssets}
+	}
+	if len(diff.Changed) == 0 && m.pendingBundleGeneration(source.raw) {
+		// The bundle may have changed only a referenced policy file. Build
+		// its generation before recording that it was applied.
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
