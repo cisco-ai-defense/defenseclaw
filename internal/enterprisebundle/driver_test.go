@@ -56,10 +56,83 @@ func driverFor(t *testing.T, f *fixture) *enterprisebundle.Driver {
 }
 
 func enforcing(digest string) enterprisebundle.GatewayPolicy {
-	return enterprisebundle.GatewayPolicy{Digest: digest, Generation: 4, Applied: true}
+	return enterprisebundle.GatewayPolicy{EffectiveDigest: digest, Digest: digest, Generation: 4, Applied: true}
 }
 
 const gatewayDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+func TestDriverConfirmationChecksSignedDigestOnBothPlatforms(t *testing.T) {
+	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformWindows} {
+		for _, tc := range []struct {
+			name            string
+			comparable      bool
+			mismatch        bool
+			gatewayMismatch bool
+			wantCode        enterprisebundle.Code
+		}{
+			{name: "matching", comparable: true},
+			{name: "mismatching comparable", comparable: true, mismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
+			{name: "gateway differs from receipt effective", comparable: true, gatewayMismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
+			{name: "non-comparable", mismatch: true},
+		} {
+			t.Run(platform+"/"+tc.name, func(t *testing.T) {
+				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+					in.HostPlatform = platform
+				})
+				d := driverFor(t, f)
+				d.Platform = platform
+				if !tc.comparable {
+					d.ProductVersion = "1.0.3"
+				}
+				p, err := d.Prepare(context.Background(), f.bundle, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if p.Receipt.DigestComparable != tc.comparable {
+					t.Fatalf("digest comparable = %v", p.Receipt.DigestComparable)
+				}
+				digest := p.Receipt.ExpectedDigest
+				if tc.mismatch {
+					digest = gatewayDigest
+				}
+				policy := enforcing(digest)
+				if tc.gatewayMismatch {
+					policy.Digest = gatewayDigest
+					policy.Applied = false
+				}
+				rolledBack := false
+				state, err := d.Finish(p, p.ConfigSHA256, nil, policy, false, func() (string, bool) {
+					rolledBack = true
+					return p.Receipt.ExpectedDigest, true
+				})
+				if got := enterprisebundle.CodeOf(err); got != tc.wantCode {
+					t.Fatalf("finish code = %q, want %q: %v", got, tc.wantCode, err)
+				}
+				if tc.wantCode != "" {
+					if !rolledBack || !p.Receipt.RolledBack || p.Receipt.State != enterprisebundle.StateFailed || p.Receipt.ErrorCode != tc.wantCode || state.Current != nil {
+						t.Fatalf("mismatch was confirmed or not rolled back: receipt=%+v state=%+v", p.Receipt, state)
+					}
+					return
+				}
+				if rolledBack || p.Receipt.State != enterprisebundle.StateConfirmed || state.Current == nil {
+					t.Fatalf("matching policy was not confirmed: receipt=%+v state=%+v", p.Receipt, state)
+				}
+				if !tc.comparable && !containsWarning(p.Receipt.WarningCodes, enterprisebundle.WarnDigestUnverifiable) {
+					t.Fatalf("non-comparable digest has no warning: %+v", p.Receipt)
+				}
+			})
+		}
+	}
+}
+
+func containsWarning(codes []string, want string) bool {
+	for _, code := range codes {
+		if code == want {
+			return true
+		}
+	}
+	return false
+}
 
 // A bundle applied around a transaction the driver does not run becomes
 // current only when that transaction installed its config and the gateway
@@ -115,11 +188,11 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third prepare: %v", err)
 	}
-	st, err := d.Finish(good, good.ConfigSHA256, nil, enforcing(gatewayDigest), true, rollback)
+	st, err := d.Finish(good, good.ConfigSHA256, nil, enforcing(good.Receipt.ExpectedDigest), true, rollback)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
-	if st.Current == nil || st.Current.Version != 7 || st.Floor != 7 || st.Current.EffectivePolicyDigest != gatewayDigest {
+	if st.Current == nil || st.Current.Version != 7 || st.Floor != 7 || st.Current.EffectivePolicyDigest != good.Receipt.ExpectedDigest {
 		t.Fatalf("state after confirm = %+v", st)
 	}
 	if good.Receipt.State != enterprisebundle.StateConfirmed || !good.Receipt.Restart {
@@ -169,9 +242,14 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			policy := *tc.policy
+			policy.EffectiveDigest = p.Receipt.ExpectedDigest
+			if policy.Digest == gatewayDigest {
+				policy.Digest = p.Receipt.ExpectedDigest
+			}
 			if !tc.staged {
 				if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
-					rc.EffectivePolicyDigest, rc.ConfigSHA256 = gatewayDigest, p.ConfigSHA256
+					rc.EffectivePolicyDigest, rc.ConfigSHA256 = p.Receipt.ExpectedDigest, p.ConfigSHA256
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -180,7 +258,7 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if tc.holds {
 				installed = p.Config
 			}
-			report, rollback, err := d.SettleRun(installed, tc.policy)
+			report, rollback, err := d.SettleRun(installed, &policy)
 			if err != nil {
 				t.Fatal(err)
 			}

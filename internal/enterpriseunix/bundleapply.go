@@ -487,7 +487,7 @@ func (l *lifecycle) confirmBundleInTransaction(ctx context.Context, configSHA st
 	if err := env.fault("transaction"); err != nil {
 		return err
 	}
-	digest, generation, err := l.awaitBundlePolicy(ctx, l.serviceUID, true)
+	digest, generation, err := l.awaitBundlePolicy(ctx, l.serviceUID, true, l.bundle.receipt)
 	if err != nil {
 		return err
 	}
@@ -525,13 +525,13 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		var digest string
 		var generation uint64
 		if err == nil {
-			digest, generation, err = l.awaitBundlePolicy(ctx, record.ServiceUID, false)
+			digest, generation, err = l.awaitBundlePolicy(ctx, record.ServiceUID, false, rc)
 		}
 		if err == nil {
 			err = l.markBundleApplied(digest, generation, record.ConfigSHA256, false)
 		}
 		if err != nil {
-			l.failBundle(ctx, run, record, enterprisebundle.CodeNotConfirmed, err.Error())
+			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error())
 			return
 		}
 	}
@@ -547,7 +547,9 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		return
 	}
 	code := enterprisebundle.CodeApplyFailed
-	if hasMessageCode(r.Errors, codeBundleNotConfirmed) {
+	if hasMessageCode(r.Errors, string(enterprisebundle.CodeDigestMismatch)) {
+		code = enterprisebundle.CodeDigestMismatch
+	} else if hasMessageCode(r.Errors, codeBundleNotConfirmed) {
 		code = enterprisebundle.CodeNotConfirmed
 	}
 	var codes []string
@@ -588,6 +590,13 @@ func displayID(rc *enterprisebundle.Receipt) string {
 		return rc.BundleID
 	}
 	return rc.ReceiptID
+}
+
+func bundleConfirmationCode(err error) enterprisebundle.Code {
+	if enterprisebundle.CodeOf(err) == enterprisebundle.CodeDigestMismatch {
+		return enterprisebundle.CodeDigestMismatch
+	}
+	return enterprisebundle.CodeNotConfirmed
 }
 
 // bundleHealth is the /health policy block a bundle confirm reads.
@@ -645,7 +654,7 @@ func (l *lifecycle) recordBundleGeneration(ctx context.Context, record *Deployme
 // report the effective policy the installed config computes to and no
 // reload error, and with requireGeneration the recorded config_generation.
 // It returns that digest and generation.
-func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requireGeneration bool) (string, uint64, error) {
+func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requireGeneration bool, rc *enterprisebundle.Receipt) (string, uint64, error) {
 	env := l.env
 	want, _, ok := l.computePolicy(ctx)
 	if !ok {
@@ -665,6 +674,9 @@ func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requi
 		if body, err := l.gatewayHealth(ctx, gateway, serviceUID); err == nil {
 			last = parseBundleHealth(body)
 			if last.digest == want && last.reloadError == "" && (!requireGeneration || last.configGeneration == 0 || last.configGeneration == state.Generation) {
+				if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, want, last.digest, rc.DigestComparable); err != nil {
+					return "", 0, err
+				}
 				return want, state.Generation, nil
 			}
 		}
@@ -683,6 +695,9 @@ func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requi
 	case last.digest == "":
 		return "", 0, errors.New("the gateway did not report its effective policy, so it did not confirm the bundle")
 	case last.digest != want:
+		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, want, last.digest, rc.DigestComparable); err != nil {
+			return "", 0, err
+		}
 		return "", 0, fmt.Errorf("the gateway reports effective policy %s, not %s of the bundle config", shortDigest(last.digest), shortDigest(want))
 	}
 	return "", 0, fmt.Errorf("the gateway reports config generation %d, not %d", last.configGeneration, state.Generation)
@@ -709,7 +724,10 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		r.AddWarning(codeBundleInterrupted, fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply; the last good policy enforces", rc.BundleID, rc.Version))
 		return
 	}
-	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, false)
+	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, false, rc)
+	if err == nil {
+		err = enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, rc.EffectivePolicyDigest, digest, rc.DigestComparable)
+	}
 	if err == nil && digest == rc.EffectivePolicyDigest {
 		if _, err := store.Confirm(rc); err != nil {
 			r.AddWarning(codeBundleNotCurrent, "could not record the applied policy bundle as current: "+err.Error())
@@ -721,7 +739,7 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 	st, _ := store.LoadState()
 	rc.RolledBack = st.Current != nil
 	rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
-	if err := store.Fail(rc, enterprisebundle.CodeNotConfirmed, "after an interrupted apply the gateway did not report the policy of this bundle"); err != nil {
+	if err := store.Fail(rc, bundleConfirmationCode(err), "after an interrupted apply the gateway did not report the policy of this bundle"); err != nil {
 		r.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
 		return
 	}

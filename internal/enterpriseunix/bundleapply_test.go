@@ -149,6 +149,10 @@ func (r *bundleRunner) Run(ctx context.Context, name string, args ...string) (Co
 func installedPolicy(h *testHost) (string, uint64) {
 	raw, _ := os.ReadFile(h.env.P(h.env.Layout.ConfigPath))
 	state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	bundlesDir := filepath.Join(h.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
+	for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
+		raw = bytes.ReplaceAll(raw, []byte(filepath.Join(bundlesDir, name)), []byte("${bundle_root}"))
+	}
 	return "sha256:" + sha256Bytes(raw), state.Generation
 }
 
@@ -555,7 +559,7 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 }
 
 // The first bundle, installed by a run that ended before it recorded it and
-// then not confirmed by the gateway, has no last good bundle to return to: it
+// then rejected for a gateway digest mismatch, has no last good bundle to return to: it
 // keeps enforcing, so later runs keep the version directory its installed
 // config names (gc used to remove it with the failed receipt).
 func TestBundleUnconfirmedFirstBundleKeepsItsVersionDirectory(t *testing.T) {
@@ -574,7 +578,7 @@ func TestBundleUnconfirmedFirstBundleKeepsItsVersionDirectory(t *testing.T) {
 	b.frozen = "sha256:" + strings.Repeat("0", 64)
 	b.run(Options{Action: ActionEnsure})
 	rc := b.receipt(bundleID(1))
-	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeNotConfirmed {
+	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeDigestMismatch {
 		t.Fatalf("receipt = %+v", rc)
 	}
 	b.run(Options{Action: ActionEnsure})

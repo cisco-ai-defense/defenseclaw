@@ -129,6 +129,30 @@ func (f *fixture) input(t *testing.T, b *enterprisebundle.Bundle, a *enterpriseb
 	}
 }
 
+func TestBundleVerifyRejectsSignedUnknownConfigSetting(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	invalid := strings.Replace(bundleConfig(t), "guardrail:\n  enabled: true\n  mode: observe\n", "guardrail:\n  enabled: true\n  mode: observe\n  rules:\n    definitions: policies/guardrail/missing\n", 1)
+	if invalid == bundleConfig(t) {
+		t.Fatal("test config has no guardrail mode to extend")
+	}
+	f.in.Bundle.Files[enterprisebundle.ConfigName] = []byte(invalid)
+	m, err := enterprisebundle.DecodeManifest(f.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Files = enterprisebundle.FileEntries(&enterprisebundle.Bundle{Files: f.in.Bundle.Files})
+	raw, err := m.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := f.signed(t, raw)
+	a := anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public()))
+	_, err = enterprisebundle.Verify(context.Background(), f.input(t, b, a))
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), "guardrail.rules.definitions") {
+		t.Fatalf("verify accepted a signed unknown setting: %v", err)
+	}
+}
+
 func flip(data []byte, i int) []byte {
 	out := append([]byte(nil), data...)
 	out[i] ^= 0x01

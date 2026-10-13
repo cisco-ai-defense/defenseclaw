@@ -132,6 +132,21 @@ func (e *bundleCLIEnv) signArgs(extra ...string) []string {
 		"--created-by", "operator:alice", "--summary", "First bundle", "--json"}, extra...)
 }
 
+func TestBundleSignRejectsUnknownConfigSetting(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	path := filepath.Join(e.in, "config.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte("  mode: observe\n"), []byte("  mode: observe\n  rules:\n    definitions: policies/guardrail/missing\n"), 1)
+	writeBundleTestFile(t, path, raw)
+	out, code := runBundle(t, e.signArgs("--out", filepath.Join(e.dir, "invalid.dcbundle"), "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...)
+	if code == 0 || !strings.Contains(out, "config_invalid") || !strings.Contains(out, "guardrail.rules.definitions") {
+		t.Fatalf("sign accepted an unknown setting: exit=%d\n%s", code, out)
+	}
+}
+
 // normalizeBundleJSON drops what differs per run or per policy content:
 // temp paths, digests and hashes.
 func normalizeBundleJSON(t *testing.T, raw, tmp string) []byte {

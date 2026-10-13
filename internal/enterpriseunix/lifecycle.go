@@ -1809,7 +1809,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		// deployment commits; otherwise the snapshot (the last good config
 		// and its untouched version directory) goes back.
 		if err := l.confirmBundleInTransaction(ctx, p.config.SHA); err != nil {
-			return failAndRollback(codeBundleNotConfirmed, err)
+			return failAndRollback(string(bundleConfirmationCode(err)), err)
 		}
 	}
 	if err := env.saveDeployment(newRecord); err != nil {

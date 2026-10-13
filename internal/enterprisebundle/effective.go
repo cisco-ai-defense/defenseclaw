@@ -125,6 +125,16 @@ func renderValue(value, root string, b *Bundle, dirs map[string]bool) (string, e
 // config and the rendered bytes. root must hold the bundle files: the
 // loader and the effective digest read the policy files the config names.
 func LoadConfig(b *Bundle, root string) (*config.Config, []byte, error) {
+	source, ok := b.Files[ConfigName]
+	if !ok {
+		return nil, nil, refuse(CodeFileMissing, ConfigName, "the bundle has no config.yaml")
+	}
+	// Device validation checks the source schema before interpreting values.
+	// Do that before RenderConfig treats a value as a bundle path: an unknown
+	// setting must name the setting even when its value looks like an asset.
+	if err := config.ValidateV8SchemaBytes(ConfigName, source); err != nil {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
+	}
 	rendered, err := RenderConfig(b, root)
 	if err != nil {
 		return nil, nil, err

@@ -59,12 +59,28 @@ type Prepared struct {
 
 // GatewayPolicy is what the running gateway reports after the transaction.
 type GatewayPolicy struct {
-	Digest      string
-	Generation  uint64
-	ReloadError string
+	// EffectiveDigest is computed from the installed config; Digest is what
+	// the running gateway reports. They must agree before confirmation.
+	EffectiveDigest string
+	Digest          string
+	Generation      uint64
+	ReloadError     string
 	// Applied is true when Digest is the effective policy digest of the
 	// installed config.
 	Applied bool
+}
+
+// ConfirmPolicyDigests applies the signed bundle's integrity contract on
+// every platform. A cross-version or cross-platform signature is not
+// comparable, but the installed config and gateway still have to agree.
+func ConfirmPolicyDigests(expected, effective, gateway string, comparable bool) error {
+	if digestPattern.MatchString(effective) && digestPattern.MatchString(gateway) && effective != gateway {
+		return &Error{Code: CodeDigestMismatch, Detail: "the gateway digest differs from the installed bundle policy digest"}
+	}
+	if comparable && digestPattern.MatchString(effective) && effective != expected {
+		return &Error{Code: CodeDigestMismatch, Detail: "the installed bundle policy digest differs from the signed expected digest"}
+	}
+	return nil
 }
 
 func (d *Driver) now() time.Time {
@@ -230,26 +246,20 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		}
 		return State{}, d.fail(rc, CodeApplyFailed, message)
 	}
-	if !policy.Applied || policy.ReloadError != "" || !digestPattern.MatchString(policy.Digest) {
+	rc.EffectivePolicyDigest = policy.EffectiveDigest
+	if err := ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err != nil {
+		return State{}, d.failAfterRollback(rc, CodeDigestMismatch, err.Error(), rollback)
+	}
+	if !policy.Applied || policy.ReloadError != "" || !digestPattern.MatchString(policy.Digest) || !digestPattern.MatchString(policy.EffectiveDigest) {
 		reason := "the gateway does not report the effective policy of the bundle config"
 		if policy.ReloadError != "" {
 			reason = "the gateway rejected the bundle config and keeps enforcing its previous policy"
 		}
-		if rollback != nil {
-			enforcing, ok := rollback()
-			rc.RolledBack = ok
-			if enforcing != "" {
-				rc.EnforcingDigest = enforcing
-			}
-			if !ok {
-				reason += "; putting the last good config back failed"
-			}
-		}
-		return State{}, d.fail(rc, CodeNotConfirmed, reason)
+		return State{}, d.failAfterRollback(rc, CodeNotConfirmed, reason, rollback)
 	}
 	at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
-		r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = policy.Digest, policy.Generation, p.ConfigSHA256
+		r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = policy.EffectiveDigest, policy.Generation, p.ConfigSHA256
 		r.AppliedAt, r.Restart = at, restart
 	}); err != nil {
 		return State{}, err
@@ -283,7 +293,11 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	}
 	for _, rc := range report.Unconfirmed {
 		holds := installed != "" && installed == rc.ConfigSHA256
-		if holds && policy != nil && policy.Applied && policy.ReloadError == "" && policy.Digest == rc.EffectivePolicyDigest {
+		var digestErr error
+		if policy != nil {
+			digestErr = ConfirmPolicyDigests(rc.ExpectedDigest, rc.EffectivePolicyDigest, policy.Digest, rc.DigestComparable)
+		}
+		if holds && policy != nil && policy.Applied && policy.ReloadError == "" && digestErr == nil && policy.Digest == rc.EffectivePolicyDigest {
 			if _, err := d.Store.Confirm(rc); err != nil {
 				return report, rollback, err
 			}
@@ -293,7 +307,11 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 		if policy != nil {
 			rc.EnforcingDigest = policy.Digest
 		}
-		if err := d.Store.Fail(rc, CodeNotConfirmed, "the run that applied this bundle ended before the gateway confirmed it"); err != nil {
+		code := CodeNotConfirmed
+		if digestErr != nil {
+			code = CodeDigestMismatch
+		}
+		if err := d.Store.Fail(rc, code, "the run that applied this bundle ended before the gateway confirmed it"); err != nil {
 			return report, rollback, err
 		}
 		if holds {
@@ -313,15 +331,20 @@ func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (compl
 	if err != nil {
 		return nil, nil, err
 	}
-	enforces := policy != nil && policy.Applied && policy.ReloadError == "" && digestPattern.MatchString(policy.Digest)
 	for _, rc := range receipts {
 		if rc.State != StateStaged || rc.ConfigSHA256 != installed {
 			continue
 		}
+		var digestErr error
+		if policy != nil {
+			digestErr = ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable)
+		}
+		enforces := policy != nil && policy.Applied && policy.ReloadError == "" && digestPattern.MatchString(policy.Digest) &&
+			digestPattern.MatchString(policy.EffectiveDigest) && digestErr == nil
 		if enforces {
 			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
-				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.Digest, policy.Generation, at
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.EffectiveDigest, policy.Generation, at
 			}); err != nil {
 				return completed, rollback, err
 			}
@@ -333,12 +356,30 @@ func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (compl
 		if policy != nil {
 			rc.EnforcingDigest = policy.Digest
 		}
-		if err := d.Store.Fail(rc, CodeNotConfirmed, "the run that installed this bundle config ended before the gateway confirmed it"); err != nil {
+		code := CodeNotConfirmed
+		if digestErr != nil {
+			code = CodeDigestMismatch
+		}
+		if err := d.Store.Fail(rc, code, "the run that installed this bundle config ended before the gateway confirmed it"); err != nil {
 			return completed, rollback, err
 		}
 		rollback = append(rollback, rc)
 	}
 	return completed, rollback, nil
+}
+
+func (d *Driver) failAfterRollback(rc *Receipt, code Code, message string, rollback func() (string, bool)) error {
+	if rollback != nil {
+		enforcing, ok := rollback()
+		rc.RolledBack = ok
+		if enforcing != "" {
+			rc.EnforcingDigest = enforcing
+		}
+		if !ok {
+			message += "; putting the last good config back failed"
+		}
+	}
+	return d.fail(rc, code, message)
 }
 
 func (d *Driver) fail(rc *Receipt, code Code, message string) error {

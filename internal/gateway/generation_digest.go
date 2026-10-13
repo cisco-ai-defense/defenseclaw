@@ -78,10 +78,10 @@ func newDigestScope(cfg *config.Config, goos, bundleRoot string) digestScope {
 // rewrite replaces a leading bundle root with ${bundle_root}, else a leading
 // data_dir with ${data_dir}.
 func (s digestScope) rewrite(value string) string {
-	if out, ok := rewritePathPrefix(value, s.bundleRoot, bundleRootToken); ok {
+	if out, ok := rewritePathPrefix(value, s.bundleRoot, bundleRootToken, s.goos); ok {
 		return out
 	}
-	out, _ := rewritePathPrefix(value, s.dataDir, dataDirToken)
+	out, _ := rewritePathPrefix(value, s.dataDir, dataDirToken, s.goos)
 	return out
 }
 
@@ -282,12 +282,18 @@ func dataDirOf(cfg *config.Config) string {
 // rewritePathPrefix replaces a leading root (a cleaned directory) with token
 // and reports whether it did. On Windows a value written with forward slashes
 // still matches the cleaned root.
-func rewritePathPrefix(value, root, token string) (string, bool) {
+func rewritePathPrefix(value, root, token, goos string) (string, bool) {
 	if root == "" || root == "." {
 		return value, false
 	}
 	slashed, prefix := filepath.ToSlash(value), filepath.ToSlash(root)
-	if !strings.HasPrefix(slashed, prefix) {
+	if goos == "windows" {
+		slashed = strings.ReplaceAll(value, `\`, "/")
+		prefix = strings.ReplaceAll(root, `\`, "/")
+		if !strings.HasPrefix(strings.ToLower(slashed), strings.ToLower(prefix)) {
+			return value, false
+		}
+	} else if !strings.HasPrefix(slashed, prefix) {
 		return value, false
 	}
 	rest := slashed[len(prefix):]

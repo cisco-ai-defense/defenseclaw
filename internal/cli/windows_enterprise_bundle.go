@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -73,6 +74,39 @@ func init() {
 	// bundle status and verify ask whether this is a standalone managed
 	// device; on Windows the deployment record answers.
 	bundleManagedDevice = windowsEnterpriseStandaloneInstalled
+	managedStandaloneBundleGeneration = windowsStagedBundleGeneration
+}
+
+// windowsStagedBundleGeneration ties the installer child process's config
+// generation to the receipt staged by the parent before Setup installs it.
+func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options, bool, error) {
+	layout, err := windowsBundleLayout()
+	if err != nil || !strings.EqualFold(filepath.Clean(path), filepath.Clean(layout.ConfigPath)) {
+		return configwrite.Options{}, false, nil
+	}
+	receipts, err := newWindowsBundleDriver(layout).Store.Receipts()
+	if err != nil {
+		return configwrite.Options{}, false, fmt.Errorf("read staged policy bundles: %w", err)
+	}
+	sum := configwrite.SHA256Hex(raw)
+	var matched *enterprisebundle.Receipt
+	for _, receipt := range receipts {
+		if receipt.State != enterprisebundle.StateStaged || !strings.EqualFold(receipt.ConfigSHA256, sum) {
+			continue
+		}
+		if matched != nil {
+			return configwrite.Options{}, false, fmt.Errorf("multiple staged policy bundles match installed config %s", path)
+		}
+		matched = receipt
+	}
+	if matched == nil {
+		return configwrite.Options{}, false, nil
+	}
+	opt, ok := enterprisebundle.GenerationOptions(matched)
+	if !ok {
+		return configwrite.Options{}, false, fmt.Errorf("staged policy bundle %s has no principal", matched.ReceiptID)
+	}
+	return opt, true, nil
 }
 
 // windowsBundleRun is the bundle state of one ensure run.
@@ -446,7 +480,7 @@ func windowsBundlePolicyFromResult(result *enterprisestatus.Result) enterprisebu
 		return enterprisebundle.GatewayPolicy{}
 	}
 	p := result.Policy
-	return enterprisebundle.GatewayPolicy{Digest: p.GatewayReportedDigest, Generation: p.ConfigGeneration,
+	return enterprisebundle.GatewayPolicy{EffectiveDigest: p.EffectiveDigest, Digest: p.GatewayReportedDigest, Generation: p.ConfigGeneration,
 		ReloadError: p.LastReloadError, Applied: p.Applied}
 }
 
@@ -458,7 +492,7 @@ func readWindowsBundleGatewayPolicy(ctx context.Context) *enterprisebundle.Gatew
 	if state == nil {
 		return nil
 	}
-	return &enterprisebundle.GatewayPolicy{Digest: state.GatewayReportedDigest, Generation: state.ConfigGeneration,
+	return &enterprisebundle.GatewayPolicy{EffectiveDigest: state.EffectiveDigest, Digest: state.GatewayReportedDigest, Generation: state.ConfigGeneration,
 		ReloadError: state.LastReloadError, Applied: state.Applied}
 }
 

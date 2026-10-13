@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -177,6 +178,18 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	record := readConfigGenerationRecord(cfg.ConfigFilePath, in.raw)
 	g.ConfigGen, g.ConfigGenRecorded = record.Generation, record.Recorded
 	g.BundleID, g.BundleVersion = record.BundleID, record.BundleVersion
+	if in.bundleRoot == "" && record.Recorded && enterprisebundle.ValidBundleID(record.BundleID) && record.BundleVersion > 0 {
+		// The signer and staged verifier digest paths beneath their bundle
+		// root as ${bundle_root}. The live gateway must use the installed
+		// version directory for the same normalization. The generation record
+		// binds that directory to the config bytes this generation loaded.
+		root := filepath.Join(filepath.Dir(cfg.ConfigFilePath), enterprisebundle.BundlesDirName,
+			enterprisebundle.VersionDirName(record.BundleVersion, record.BundleID))
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			in.bundleRoot = root
+		}
+	}
+	g.bundleRoot = in.bundleRoot
 
 	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
 	configComponent, err := configDigest(cfg, scope)
