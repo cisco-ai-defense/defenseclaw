@@ -157,6 +157,8 @@ output/playwright/
 # these from disk; keeping them out of git prevents cross-contamination
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
+# The root AGENTS.md is the tracked contributor entry point for coding agents.
+!/AGENTS.md
 CLAUDE.md
 agent-out/
 

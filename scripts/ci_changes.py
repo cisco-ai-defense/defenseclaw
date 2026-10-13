@@ -55,6 +55,8 @@ EVERYTHING = frozenset(SUITES)
 RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     ((".github/workflows/", ".github/actionlint.yaml"), frozenset({"workflows"})),
     ((".github/",), frozenset()),
+    # The defenseclaw-develop skill is verified by make skill-check inside make check.
+    ((".claude/skills/defenseclaw-develop/",), frozenset({"checks"})),
     (("docs-site/", "docs/"), frozenset({"docs"})),
     (("*.md", "*.mdx"), frozenset({"docs"})),
     (("macos/",), frozenset({"macos_app"})),

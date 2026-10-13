@@ -228,6 +228,11 @@ def test_enterprise_lifecycle_paths_run_the_enterprise_lanes() -> None:
         assert outputs["packaging"] and outputs["enterprise"], path
 
 
+def test_the_develop_skill_runs_the_checks_lane() -> None:
+    outputs = classify(".claude/skills/defenseclaw-develop/SKILL.md")
+    assert outputs["checks"]
+
+
 def test_large_pull_requests_and_empty_diffs_run_everything() -> None:
     many = [f"docs-site/content/docs/page-{index}.mdx" for index in range(ci_changes.LARGE_PR_FILES + 1)]
     assert ran(classify(*many)) == ALL_GROUPS
