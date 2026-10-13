@@ -412,7 +412,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
