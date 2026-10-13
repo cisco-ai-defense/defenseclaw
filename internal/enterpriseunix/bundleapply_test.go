@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // bundleHost is an installed fake host in bundle mode: trust anchors with
@@ -269,6 +270,76 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	after, _ := b.env.bundleStore().Receipts()
 	if !r.Noop || r.NoopReason != "already_applied" || len(after) != len(receipts) {
 		t.Fatalf("retry: noop = %v (%s), receipts %d -> %d", r.Noop, r.NoopReason, len(receipts), len(after))
+	}
+}
+
+func TestBundleShippedRulePackIsReadableByGateway(t *testing.T) {
+	b := newBundleHost(t)
+	const pack = "policies/guardrail/mgmtp1marker"
+	b.extra = map[string]string{pack + "/rules/local-patterns.yaml": "version: 1\ninjection: []\n"}
+	marker := t.TempDir()
+	writeRooted(t, filepath.Join(marker, "rules/local-patterns.yaml"), b.extra[pack+"/rules/local-patterns.yaml"])
+	digest, err := guardrail.RulePackDigest(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(string(DefaultConfig(b.env.Layout)), "  rule_pack: default\n",
+		"  rule_pack: mgmtp1marker\n  custom_packs:\n    mgmtp1marker:\n      path: "+pack+"\n      digest: sha256:"+digest+"\n", 1)
+	store := b.env.bundleStore()
+	// An existing host can have the original root-only bundle parent.
+	if err := os.MkdirAll(store.BundlesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.BundlesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b.owners[store.BundlesDir] = [2]int{0, 0}
+	staging := filepath.Join(store.BundlesDir, ".staging-"+bundleID(1))
+	version := store.VersionDir(enterprisebundle.VersionDirName(1, bundleID(1)))
+	ownerOf := b.env.OwnerOf
+	b.env.OwnerOf = func(path string) (int, int, error) {
+		if path == version || strings.HasPrefix(path, version+string(filepath.Separator)) {
+			path = strings.Replace(path, version, staging, 1)
+		}
+		return ownerOf(path)
+	}
+	requireOK(t, b.apply(b.dir(1, cfg)))
+	rc := b.receipt(bundleID(1))
+	if rc.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("bundle receipt: %+v", rc)
+	}
+	installed, err := os.ReadFile(b.env.P(b.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packOnDisk := filepath.Join(version, filepath.FromSlash(pack))
+	configuredPack := filepath.Join(b.env.bundleVersionDir(rc.Dir), filepath.FromSlash(pack))
+	if !strings.Contains(string(installed), configuredPack) {
+		t.Fatalf("installed config does not name the promoted pack %s:\n%s", configuredPack, installed)
+	}
+	account := b.accounts.accounts[b.env.Layout.ServiceUser]
+	if err := b.env.rulePackReadable(filepath.Join(b.env.bundleVersionDir(rc.Dir), filepath.FromSlash(pack)), account); err != nil {
+		t.Fatalf("service account cannot read the promoted rule pack: %v", err)
+	}
+	if _, err := guardrail.LoadRulePack(packOnDisk); err != nil {
+		t.Fatalf("gateway rule-pack loader cannot load the promoted pack: %v", err)
+	}
+	for _, path := range []string{store.BundlesDir, version, packOnDisk, filepath.Join(packOnDisk, "rules"), filepath.Join(packOnDisk, "rules/local-patterns.yaml")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := os.FileMode(0o750)
+		if !info.IsDir() {
+			want = 0o640
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("%s mode %04o, want %04o", path, info.Mode().Perm(), want)
+		}
+		uid, gid, err := b.env.OwnerOf(path)
+		if err != nil || uid != 0 || gid != account.GID {
+			t.Errorf("%s owner %d:%d, want root:%d (%v)", path, uid, gid, account.GID, err)
+		}
 	}
 }
 

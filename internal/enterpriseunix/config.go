@@ -579,7 +579,11 @@ func (e *Env) RulePackServiceReadProblem(ctx context.Context, dir string) string
 
 func (e *Env) rulePackReadable(dir string, account Account) error {
 	for parent := filepath.Dir(dir); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
-		uid, gid, mode, err := statOwnerMode(e.P(parent))
+		_, _, mode, err := statOwnerMode(e.P(parent))
+		uid, gid, ownerErr := e.OwnerOf(e.P(parent))
+		if err == nil {
+			err = ownerErr
+		}
 		if err == nil && mode.IsDir() && !accountMayAccess(uid, gid, mode, account, 0o1) {
 			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; %s", parent, mode.Perm(), e.Layout.ServiceUser, e.serviceGroupTraverseFix(parent))
 		}
@@ -589,7 +593,11 @@ func (e *Env) rulePackReadable(dir string, account Account) error {
 		if err != nil {
 			return err
 		}
-		uid, gid, mode, err := statOwnerMode(full)
+		_, _, mode, err := statOwnerMode(full)
+		if err != nil {
+			return err
+		}
+		uid, gid, err := e.OwnerOf(full)
 		if err != nil {
 			return err
 		}

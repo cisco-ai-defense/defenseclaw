@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -329,6 +330,69 @@ func TestStageRefusesPathsOutsideTheBundle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.BundlesDir, "..", "escape.yaml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("file written outside the store: %v", err)
+	}
+}
+
+func TestStorePromotedTreeHasServiceGroupReadOnlyModes(t *testing.T) {
+	s := testStore(t)
+	const serviceGID = 4242
+	owned := map[string][2]int{}
+	s.SealVersion = func(root string) error {
+		return SealVersionForGroup(root, serviceGID, func(path string, uid, gid int) error {
+			owned[path] = [2]int{uid, gid}
+			return nil
+		})
+	}
+	r := applyThrough(t, s, 7, 7, StateReceived)
+	staging, err := s.Stage(r, storeBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(staging); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("private staging directory: %v, %v", info, err)
+	}
+	if err := s.Advance(r, StateVerified, nil); err != nil {
+		t.Fatal(err)
+	}
+	version, err := s.Promote(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != StateStaged || r.Dir != VersionDirName(7, r.BundleID) {
+		t.Fatalf("promoted receipt: %+v", r)
+	}
+	err = filepath.WalkDir(version, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		want := os.FileMode(0o640)
+		if entry.IsDir() {
+			want = 0o750
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("%s mode %04o, want %04o", path, info.Mode().Perm(), want)
+		}
+		staged := strings.Replace(path, version, staging, 1)
+		if got := owned[staged]; got != [2]int{0, serviceGID} {
+			t.Errorf("%s owner call %v, want root:%d", path, got, serviceGID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{s.LifecycleDir, s.receiptsDir()} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("private lifecycle directory %s: %v, %v", path, info, err)
+		}
+	}
+	if info, err := os.Stat(s.receiptPath(r.ReceiptID)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("private receipt: %v, %v", info, err)
 	}
 }
 

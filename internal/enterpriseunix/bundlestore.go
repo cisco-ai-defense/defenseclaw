@@ -32,6 +32,16 @@ func (e *Env) bundleStore() *enterprisebundle.Store {
 	return s
 }
 
+// bundleStoreForGroup seals promoted versions for the gateway's service
+// group. Read-only status and settlement use bundleStore without this hook.
+func (e *Env) bundleStoreForGroup(gid int) *enterprisebundle.Store {
+	s := e.bundleStore()
+	s.SealVersion = func(root string) error {
+		return enterprisebundle.SealVersionForGroup(root, gid, e.Lchown)
+	}
+	return s
+}
+
 // settleBundles runs after recoverInterrupted on every changing run: a
 // bundle a previous run received but did not apply ends as
 // failed(interrupted) and its staging copy goes; the last good bundle keeps

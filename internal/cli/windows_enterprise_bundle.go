@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,6 +64,9 @@ var (
 	windowsBundlePolicy = readWindowsBundleGatewayPolicy
 	windowsBundleSleep  = time.Sleep
 	windowsBundleTrust  = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
+	windowsBundlePrivateStage   = privateWindowsBundleStage
+	windowsBundleSealVersion    = sealWindowsBundleVersionAssets
+	windowsBundlePublishVersion = publishWindowsBundleVersion
 )
 
 func init() {
@@ -92,8 +96,12 @@ func (run *windowsBundleRun) release() {
 }
 
 func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.Driver {
+	store := enterprisebundle.NewStore(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), layout.LifecycleDir)
+	store.PrivateStage = windowsBundlePrivateStage
+	store.SealVersion = windowsBundleSealVersion
+	store.PublishVersion = windowsBundlePublishVersion
 	return &enterprisebundle.Driver{
-		Store:       enterprisebundle.NewStore(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), layout.LifecycleDir),
+		Store:       store,
 		AnchorsPath: filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName),
 		AnchorTrust: bundleAnchorTrust, Platform: enterprisebundle.PlatformWindows, ProductVersion: appVersion,
 		SecretPresent: bundleSecretPresent, Digester: bundleDigester,
@@ -101,6 +109,61 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 			return windowsBundleTrust(filepath.Join(dir, enterprisebundle.ManifestName))
 		},
 	}
+}
+
+// privateWindowsBundleStage removes the service's inherited read access
+// before the bundle files are copied into staging.
+func privateWindowsBundleStage(root string) error {
+	return applyWindowsSDDL(root, windowsBundlePrivateSDDL())
+}
+
+func windowsBundlePrivateSDDL() string {
+	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+}
+
+// sealWindowsBundleVersionAssets grants the gateway service SID read and
+// execute on each verified asset. The staging root stays administrator-only
+// until the rename has published it as a version directory.
+func sealWindowsBundleVersionAssets(root string) error {
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	sddl := windowsBundleVersionSDDL(service.String())
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		if !entry.IsDir() && !entry.Type().IsRegular() {
+			return fmt.Errorf("%s is not a regular bundle asset", path)
+		}
+		if err := applyWindowsSDDL(path, sddl); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o444)
+		if entry.IsDir() {
+			mode = 0o555
+		}
+		return os.Chmod(path, mode)
+	})
+}
+
+func publishWindowsBundleVersion(root string) error {
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	if err := applyWindowsSDDL(root, windowsBundleVersionSDDL(service.String())); err != nil {
+		return err
+	}
+	return os.Chmod(root, 0o555)
+}
+
+func windowsBundleVersionSDDL(serviceSID string) string {
+	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;" + serviceSID + ")"
 }
 
 // prepareWindowsEnterpriseBundle runs before the lifecycle reads --config.

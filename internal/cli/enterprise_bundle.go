@@ -110,6 +110,11 @@ func newEnterpriseBundleSignCommand() *cobra.Command {
 per platform and group reachability warnings. Errors refuse; warnings are
 printed and recorded in the manifest.
 
+For managed bundles, omit data_dir so each device uses its service state
+directory: /var/lib/defenseclaw on Linux, /opt/cisco/defenseclaw/runtime on
+macOS, or the registered ProgramData\Cisco\DefenseClaw\runtime on Windows.
+/var/lib/defenseclaw-enterprise holds lifecycle receipts, not gateway data.
+
 For an HSM or KMS key, run sign with --emit-digest to write the unsigned
 bundle and print the SHA-256 to sign (ecdsa-p256-sha256; an ed25519 key
 signs the exact bytes --tbs-out writes), then run sign --attach-sig with the

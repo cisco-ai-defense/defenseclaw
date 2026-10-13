@@ -46,6 +46,8 @@
 # example after a config change).
 #
 # Signed policy bundles: --trust-anchor-file installs the trust anchor file
+# Bundle config should omit data_dir: the gateway uses /var/lib/defenseclaw;
+# /var/lib/defenseclaw-enterprise holds root-only lifecycle state.
 # (root-only writable) and turns on bundle mode; --bundle-file applies a
 # signed bundle with `enterprise bundle apply` after the package step and the
 # credential. A bundle carries its own config, so it excludes --config-file,

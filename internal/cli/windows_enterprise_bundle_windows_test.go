@@ -28,6 +28,16 @@ import (
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
+	const sid = "S-1-5-80-1-2-3-4-5"
+	if got, want := windowsBundlePrivateSDDL(), "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"; got != want {
+		t.Fatalf("private staging ACL = %q, want %q", got, want)
+	}
+	if got, want := windowsBundleVersionSDDL(sid), "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;"+sid+")"; got != want {
+		t.Fatalf("bundle version ACL = %q, want %q", got, want)
+	}
+}
+
 // stubWindowsBundleHost points the Windows bundle code at a temp standalone
 // layout whose gateway enforces windowsBundleTestDigest.
 func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
@@ -46,8 +56,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 		})
 	})
 	savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust := windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust
+	savedPrivate, savedSeal, savedPublish := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
+		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
 	})
 	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
@@ -55,6 +67,9 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	}
 	windowsBundleSleep = func(time.Duration) {}
 	windowsBundleTrust = func(string) error { return nil }
+	windowsBundlePrivateStage = func(string) error { return nil }
+	windowsBundleSealVersion = func(string) error { return nil }
+	windowsBundlePublishVersion = func(string) error { return nil }
 	bundleAnchorTrust = nil
 	return layout
 }

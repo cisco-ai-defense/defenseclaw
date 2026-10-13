@@ -241,6 +241,17 @@ type Store struct {
 	Now func() time.Time
 	// Entropy names receipts of unreadable bundles (crypto/rand when nil).
 	Entropy io.Reader
+	// PrivateStage protects a newly created staging directory before files
+	// are copied into it (Windows uses a protected administrator-only ACL).
+	PrivateStage func(root string) error
+	// SealVersion makes a verified staging tree readable by the gateway
+	// before it is renamed into its immutable version directory. When nil,
+	// the store uses its platform-neutral read-only modes.
+	SealVersion func(root string) error
+	// PublishVersion grants traversal on the renamed version root after its
+	// assets have been sealed. Windows keeps the staging root private until
+	// the rename; Unix sets its group mode during SealVersion.
+	PublishVersion func(root string) error
 }
 
 // NewStore returns the store at bundlesDir with its state in lifecycleDir.
@@ -530,6 +541,12 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
 	}
+	if s.PrivateStage != nil {
+		if err := s.PrivateStage(dir); err != nil {
+			_ = removeTree(dir)
+			return "", err
+		}
+	}
 	files := map[string][]byte{}
 	if b.Manifest != nil {
 		files[ManifestName] = b.Manifest
@@ -604,11 +621,20 @@ func (s *Store) Promote(r *Receipt) (string, error) {
 	if err := removeTree(target); err != nil {
 		return "", err
 	}
-	if err := makeReadOnly(staging); err != nil {
+	seal := s.SealVersion
+	if seal == nil {
+		seal = makeReadOnly
+	}
+	if err := seal(staging); err != nil {
 		return "", err
 	}
 	if err := os.Rename(staging, target); err != nil {
 		return "", err
+	}
+	if s.PublishVersion != nil {
+		if err := s.PublishVersion(target); err != nil {
+			return "", err
+		}
 	}
 	if err := syncDir(s.BundlesDir); err != nil {
 		return "", err
@@ -925,6 +951,47 @@ func makeReadOnly(root string) error {
 			return err
 		}
 		if err := os.Chmod(dirs[i], 0o555); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SealVersionForGroup gives one service group read and traversal rights to
+// the verified tree. Ownership is set while staging remains private, and
+// every entry is made read-only before the rename publishes it.
+func SealVersionForGroup(root string, gid int, chown func(string, int, int) error) error {
+	if gid < 0 || chown == nil {
+		return errors.New("a service group and ownership operation are required")
+	}
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			dirs = append(dirs, path)
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", path)
+		}
+		if err := chown(path, 0, gid); err != nil {
+			return err
+		}
+		return os.Chmod(path, 0o640)
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := chown(dirs[i], 0, gid); err != nil {
+			return err
+		}
+		if err := syncDir(dirs[i]); err != nil {
+			return err
+		}
+		if err := os.Chmod(dirs[i], 0o750); err != nil {
 			return err
 		}
 	}

@@ -170,6 +170,13 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 			// registration, which an offline signer cannot read. The schema
 			// and runtime loader ran above; require the declared profile that
 			// the standalone service pins on the target.
+			doc, err := config.ParseV8YAML(ConfigName, b.Files[ConfigName])
+			if err != nil {
+				return refuse(CodeConfigInvalid, ConfigName, "windows: %s", boundedDetail(err.Error()))
+			}
+			if _, explicit := doc.Plain["data_dir"]; explicit {
+				return refuse(CodeConfigInvalid, ConfigName, "windows: config data_dir must be omitted; the device uses <registered ProgramData>\\Cisco\\DefenseClaw\\runtime (usually C:\\ProgramData\\Cisco\\DefenseClaw\\runtime)")
+			}
 			if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 				return refuse(CodeConfigInvalid, ConfigName, "windows: config deployment_mode must be %s", managed.DeploymentModeManagedEnterprise)
 			}

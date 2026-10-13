@@ -380,12 +380,14 @@ ai_discovery:
 func TestBundleManagedConfigRefusals(t *testing.T) {
 	base := bundleConfig(t)
 	for _, tc := range []struct {
-		name, config, key string
+		name, platform, config, key, allowed string
 	}{
-		{"empty policy_dir", strings.Replace(base, "policy_dir: ", "policy_dir: \"\" # ", 1), "policy_dir"},
-		{"wrong data_dir", base + "data_dir: /tmp/other\n", "data_dir"},
-		{"nonloopback api_bind", base + "gateway:\n  api_bind: 0.0.0.0\n", "gateway.api_bind"},
-		{"wrong api_port", base + "gateway:\n  api_port: 18971\n", "gateway.api_port"},
+		{"empty policy_dir", "linux", strings.Replace(base, "policy_dir: ", "policy_dir: \"\" # ", 1), "policy_dir", ""},
+		{"wrong Linux data_dir", "linux", base + "data_dir: /var/lib/defenseclaw-enterprise\n", "data_dir", "/var/lib/defenseclaw"},
+		{"wrong macOS data_dir", "darwin", base + "data_dir: /var/lib/defenseclaw-enterprise\n", "data_dir", "/opt/cisco/defenseclaw/runtime"},
+		{"explicit Windows data_dir", "windows", base + "data_dir: C:/ProgramData/Cisco/DefenseClaw/runtime\n", "data_dir", "<registered ProgramData>"},
+		{"nonloopback api_bind", "linux", base + "gateway:\n  api_bind: 0.0.0.0\n", "gateway.api_bind", ""},
+		{"wrong api_port", "linux", base + "gateway:\n  api_port: 18971\n", "gateway.api_port", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, b := writeBundle(t, tc.config)
@@ -401,11 +403,11 @@ func TestBundleManagedConfigRefusals(t *testing.T) {
 			}
 			in := enterprisebundle.ComposeInput{
 				Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
-				Platforms: []string{"linux"}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+				Platforms: []string{tc.platform}, CreatedAt: signedAt, CreatedBy: "operator:alice",
 				ProductVersion: "1.0.2", HostPlatform: runtime.GOOS, Digester: digester,
 			}
-			if _, _, err := enterprisebundle.Compose(context.Background(), in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) {
-				t.Fatalf("sign: got %v, want config_invalid naming %s", err, tc.key)
+			if _, _, err := enterprisebundle.Compose(context.Background(), in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.allowed) {
+				t.Fatalf("sign: got %v, want config_invalid naming %s and allowed value %s", err, tc.key, tc.allowed)
 			}
 
 			// Sign a manifest with matching file hashes to exercise verify's
@@ -441,8 +443,9 @@ func TestBundleManagedConfigRefusals(t *testing.T) {
 			modified.Files[enterprisebundle.ConfigName] = []byte(tc.config)
 			a := anchors(t, "acme", nil, 0, activeKey("k1", valid.key.Public()))
 			verify := valid.input(t, modified, a)
-			if _, err := enterprisebundle.Verify(context.Background(), verify); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) {
-				t.Fatalf("verify: got %v, want config_invalid naming %s", err, tc.key)
+			verify.Platform = tc.platform
+			if _, err := enterprisebundle.Verify(context.Background(), verify); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.allowed) {
+				t.Fatalf("verify: got %v, want config_invalid naming %s and allowed value %s", err, tc.key, tc.allowed)
 			}
 		})
 	}

@@ -350,6 +350,9 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	defer l.removeProcessedInbox()
 	store := env.bundleStore()
+	if record != nil {
+		store = env.bundleStoreForGroup(record.ServiceGID)
+	}
 	b, readErr := readBundleInput(l.opts.Bundle)
 	id, version := "", uint64(0)
 	if readErr == nil {
@@ -379,6 +382,9 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	if readErr != nil {
 		return refuse(readErr)
+	}
+	if err := env.ensureDir(store.BundlesDir, 0o750, fileOwner{UID: 0, GID: record.ServiceGID}); err != nil {
+		return refuse(fmt.Errorf("prepare the policy bundle store: %w", err))
 	}
 	staging, err := store.Stage(receipt, b)
 	if err != nil {
