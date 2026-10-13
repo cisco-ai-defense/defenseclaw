@@ -1251,9 +1251,9 @@ const windowsEnterpriseUserRegistrationListMax = 20
 
 // addWindowsEnterpriseUserRegistrationWarnings tells the administrator which
 // DefenseClaw per-user registrations an uninstall left in place: those of
-// users who were signed out, of every user when the uninstall did not run as
-// LocalSystem, and removals that failed. They stay inert (enrollment
-// revoked, hook runtime and binary removed).
+// users who were signed out, those another account could not clean without
+// LocalSystem, and removals that failed. They stay inert (enrollment revoked,
+// hook runtime and binary removed).
 func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed)
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {

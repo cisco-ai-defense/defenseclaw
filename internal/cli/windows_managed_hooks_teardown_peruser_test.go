@@ -89,9 +89,49 @@ func TestWindowsStandaloneUninstallCleansClaudeSettingsWithoutUserSession(t *tes
 	}
 }
 
+func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalSID := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID
+	originalProbe, originalRemover := windowsManagedClaudeRegistrationProbe, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID = originalIdentity, originalSID
+		windowsManagedClaudeRegistrationProbe, windowsManagedClaudeSettingsRemover = originalProbe, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
+	present := false
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("probed %s %s", home, sid)
+		}
+		return present, nil
+	}
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, error) {
+		t.Fatal("another user's settings were edited")
+		return 0, nil
+	}
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("machine-policy-only enrollment = %+v", result)
+	}
+	present = true
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Pending) != 1 || result.Pending[0] != "claudecode/"+manifest.Targets[0].SID || len(result.Failed) != 1 {
+		t.Fatalf("another user's legacy hook = %+v", result)
+	}
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return manifest.Targets[0].SID, nil }
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, error) { return 1, nil }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.Removed) != 1 || len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("administrator's own legacy hook = %+v", result)
+	}
+}
+
 // Uninstall cleans every per-user registration the guardian made or still
-// owes, as each user; when it cannot act as users at all (an interactive
-// administrator), every registration is reported, never silently skipped.
+// owes, as each user; when an interactive administrator cannot act as another
+// user, every registration still present is reported.
 func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecordedUser(t *testing.T) {
 	dataDir := useUserCleanupStateDir(t)
 	homeA, homeB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
@@ -182,6 +222,12 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		!strings.Contains(result.Failed[0], "LocalSystem") {
 		t.Fatalf("non-LocalSystem uninstall: attempted=%v result=%+v", attempted, result)
 	}
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if len(result.Pending) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("non-LocalSystem uninstall with no registrations = %+v", result)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 
 	// Only the standalone profile's teardown accepts the per-user connectors.
 	t.Run("teardown targets", func(t *testing.T) {
