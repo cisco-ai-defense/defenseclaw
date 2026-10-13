@@ -76,7 +76,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseIsElevated = func() bool { return true }
 	layoutSeam, lockSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
-	timeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll
+	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
@@ -84,6 +84,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
+		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
@@ -110,7 +111,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		}
 		return os.WriteFile(path, raw, 0o600)
 	}
-	windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = 50*time.Millisecond, 5*time.Millisecond
+	windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll = 50*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond
 	opts := ensureTestOptions()
 	opts.configPath, opts.manifestPath, opts.noStart = supplied, "", false
 	return host, opts
@@ -532,9 +533,9 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
 			restarts := 0
 			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
-			windowsEnterprisePolicyDigest = host.digest
 			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
 			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
 			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 			command := &cobra.Command{}
 			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), command, opts, "installer.ps1",
@@ -549,17 +550,19 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testing.T) {
 	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	host, opts := newHotConfigHost(t, current, current)
+	unlocks := 0
 	opts.bundle = &windowsBundleRun{
 		layout:   managed.StandaloneLayout{ConfigPath: host.configPath},
 		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
 		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
+		unlock:   func() { unlocks++ },
 	}
 	previousDir := windowsEnterpriseHookRuntimeDir
 	windowsEnterpriseHookRuntimeDir = func() (string, error) { return filepath.Join(t.TempDir(), "missing"), nil }
 	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = previousDir })
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
 	result := runHotConfigEnsure(t, host, opts, stub)
-	if !result.Noop || result.NoopReason != "already_applied" || len(stub.calls) != 2 || len(host.writes) != 0 {
-		t.Fatalf("same bundle = %+v, installer calls=%q writes=%q", result, stub.calls, host.writes)
+	if !result.Noop || result.NoopReason != "already_applied" || len(stub.calls) != 2 || len(host.writes) != 0 || unlocks != 1 {
+		t.Fatalf("same bundle = %+v, installer calls=%q writes=%q unlocks=%d", result, stub.calls, host.writes, unlocks)
 	}
 }

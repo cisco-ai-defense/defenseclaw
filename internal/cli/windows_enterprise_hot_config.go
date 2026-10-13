@@ -61,12 +61,13 @@ const windowsEnterpriseHotConfigMaxBytes = 4 << 20
 // Seams for tests. The timeout bounds how long the running gateway gets to
 // report the policy the new config computes to.
 var (
-	windowsEnterpriseHotConfigTimeout  = 30 * time.Second
-	windowsEnterpriseHotConfigLayout   = managed.StandaloneWindowsLayout
-	windowsEnterpriseHotConfigLock     = acquireWindowsEnterpriseLifecycleLock
-	windowsEnterpriseHotConfigValidate = validateWindowsServiceConfig
-	windowsEnterpriseHotConfigPoll     = 2 * time.Second
-	windowsEnterpriseHotConfigWrite    = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
+	windowsEnterpriseHotConfigTimeout        = 30 * time.Second
+	windowsEnterpriseHotConfigRestartTimeout = 2 * time.Minute
+	windowsEnterpriseHotConfigLayout         = managed.StandaloneWindowsLayout
+	windowsEnterpriseHotConfigLock           = acquireWindowsEnterpriseLifecycleLock
+	windowsEnterpriseHotConfigValidate       = validateWindowsServiceConfig
+	windowsEnterpriseHotConfigPoll           = 2 * time.Second
+	windowsEnterpriseHotConfigWrite          = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
 		_, err := configwrite.ReplaceDocument(ctx, path, raw, opt)
 		return err
 	}
@@ -257,7 +258,7 @@ func windowsEnterpriseHotConfigApply(
 	}
 	adoptionWait := windowsEnterpriseHotConfigTimeout
 	if opts.bundle != nil && opts.bundle.gatewayRestarted {
-		adoptionWait = 2 * time.Minute
+		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait) {
 		undo()

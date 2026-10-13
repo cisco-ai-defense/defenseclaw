@@ -335,6 +335,14 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	run := &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
 	opts.bundle = run
+	// Refusals can finish before the caller reaches the normal result path.
+	// Keep the lock through a successful prepare, but close it on every
+	// early return even if writing the refusal itself fails.
+	defer func() {
+		if done || err != nil {
+			run.release()
+		}
+	}()
 	if err := windowsBundleEnsureDirectory(layout); err != nil {
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot protect the policy bundle directory: "+err.Error())
 	}
@@ -775,14 +783,18 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 	if err := os.MkdirAll(lifecycleDir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(lifecycleDir, windowsBundleLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	name, err := windows.UTF16PtrFromString(filepath.Join(lifecycleDir, windowsBundleLockName))
 	if err != nil {
 		return nil, err
 	}
-	handle := windows.Handle(f.Fd())
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, err
+	}
 	overlapped := new(windows.Overlapped)
 	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped); err != nil {
-		_ = f.Close()
+		_ = windows.CloseHandle(handle)
 		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 			return nil, errors.New("another policy bundle run holds the bundle store; retry when it ends")
 		}
@@ -790,7 +802,7 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 	}
 	return func() {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
-		_ = f.Close()
+		_ = windows.CloseHandle(handle)
 	}, nil
 }
 

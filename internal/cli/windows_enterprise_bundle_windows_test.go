@@ -249,8 +249,8 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); !done || err == nil {
 		t.Fatalf("retry replaced the installed unconfirmed version: done=%v err=%v", done, err)
 	}
-	if retry.bundle != nil {
-		retry.bundle.release()
+	if err := os.Remove(filepath.Join(layout.LifecycleDir, windowsBundleLockName)); err != nil {
+		t.Fatalf("bundle lock remained open after prepare refusal: %v", err)
 	}
 	after, err := os.ReadFile(manifest)
 	if err != nil || !bytes.Equal(after, before) {
@@ -440,5 +440,9 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeDigestMismatch)) ||
 		result.Bundle.ErrorCode != string(enterprisebundle.CodeDigestMismatch) {
 		t.Fatalf("Windows confirmed a different digest: errors=%+v bundle=%+v", result.Errors, result.Bundle)
+	}
+	lockPath := filepath.Join(layout.LifecycleDir, windowsBundleLockName)
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("bundle lock remained open after digest mismatch: %v", err)
 	}
 }

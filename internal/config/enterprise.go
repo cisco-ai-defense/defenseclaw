@@ -1020,6 +1020,15 @@ func (c *Config) DeclaredEnterpriseProfile() string {
 // An explicit rule_pack_dir is kept as written; on Windows one that equals
 // the implicit data_dir path also selects the embedded packs.
 func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
+	standaloneRulePackDefaultWithExists(cfg, dataDir, goos, func(name string) (bool, error) {
+		_, err := os.Stat(name)
+		return err == nil, err
+	})
+}
+
+// standaloneRulePackDefaultWithExists resolves target-platform paths without
+// consulting the host filesystem. The caller supplies the policy-pack probe.
+func standaloneRulePackDefaultWithExists(cfg *Config, dataDir, goos string, exists func(string) (bool, error)) {
 	implicit := joinPathForPlatform(goos, dataDir, "policies", "guardrail", "default")
 	if cfg.Guardrail.RulePackDir != implicit {
 		return
@@ -1046,7 +1055,8 @@ func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 	if policyPack != "" {
 		// Only a folder known to be absent falls back: any other stat
 		// error keeps the policy_dir pack, which the trust checks report.
-		if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		present, err := exists(policyPack)
+		if present || (err != nil && !errors.Is(err, fs.ErrNotExist)) {
 			cfg.Guardrail.RulePackDir = policyPack
 			return
 		}
