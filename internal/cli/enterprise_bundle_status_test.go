@@ -46,6 +46,10 @@ func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 
 // confirmBundle walks a receipt for id/version to confirmed with digest.
 func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest string) {
+	confirmBundleWithExpected(t, store, id, version, digest, digest, true)
+}
+
+func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool) {
 	t.Helper()
 	r, err := store.Receive(id, version)
 	if err != nil {
@@ -54,7 +58,10 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 	if _, err := store.Stage(r, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) { r.ManifestSHA256 = strings.Repeat("f", 64) }); err != nil {
+	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.ManifestSHA256 = strings.Repeat("f", 64)
+		r.ExpectedDigest, r.DigestComparable = expected, comparable
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Promote(r); err != nil {
@@ -65,6 +72,39 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 	}
 	if _, err := store.Confirm(r); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnterpriseBundleStatusWarnsWhenSignedDigestDiffers(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000034"
+	digest, expected := "sha256:"+strings.Repeat("8", 64), "sha256:"+strings.Repeat("2", 64)
+	confirmBundleWithExpected(t, store, id, 1, digest, expected, true)
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var status bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Applied || status.LastReceipt == nil || status.LastReceipt.ExpectedDigest != expected ||
+		!hasBundleWarning(status.Warnings, enterprisebundle.WarnDigestDiffers) ||
+		len(status.LastReceipt.WarningCodes) != 1 || status.LastReceipt.WarningCodes[0] != enterprisebundle.WarnDigestDiffers {
+		t.Fatalf("status omitted signed digest warning: %s", out)
+	}
+	publicReceipt, err := os.ReadFile(store.PublicReceiptPath())
+	if err != nil || !strings.Contains(string(publicReceipt), `"warning_codes": [`) ||
+		!strings.Contains(string(publicReceipt), enterprisebundle.WarnDigestDiffers) {
+		t.Fatalf("public receipt omitted signed digest warning: %s (%v)", publicReceipt, err)
+	}
+	if code := enterprisebundle.DigestWarningCode(expected, digest, false); code != enterprisebundle.WarnDigestUnverifiable {
+		t.Fatalf("cross-version digest warning = %q", code)
 	}
 }
 

@@ -145,8 +145,9 @@ func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
 		in.Bundle.SignerKeyID != "fleet-2026-10" || in.Bundle.ChangeSummary != "tighten egress" || in.After["bundle_id"] != testBundleID {
 		t.Fatalf("activity = %+v bundle=%+v", in, in.Bundle)
 	}
-	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, 1, true); in.Bundle != nil {
-		t.Fatal("coalesced generations named the last writer's bundle")
+	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, 1, true); in.Bundle == nil ||
+		in.Actor != "control-plane:acme/alice" || len(in.Diff) != 0 || in.After["coalesced"] != true {
+		t.Fatalf("coalesced signed bundle lost its final policy identity or attributed the aggregate diff: %+v", in)
 	}
 }
 

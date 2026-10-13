@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -41,6 +42,41 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+// A managed bundle is recorded by the Unix or Windows lifecycle before the
+// gateway observes its config. The runtime graph's own reload audit row must
+// retain that identity, even when it is the only config.change.applied row.
+func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	raw := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability: {}\n", fixture.dataDir))
+	const id = "b-01JA0000000000000000000033"
+	if _, err := configwrite.Locked(t.Context(), fixture.configPath, configwrite.Options{
+		Actor: "operator:tip", Reason: configwrite.BundleReason(id, 1, "guardrail pack update"), Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"},
+	}, func() (bool, error) { return true, os.WriteFile(fixture.configPath, raw, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
+		t.Fatalf("bootstrap: bound=%v err=%v", bound, err)
+	}
+	reader, err := sql.Open("sqlite", fixture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var actor, projected string
+	if err := reader.QueryRowContext(t.Context(), `SELECT actor, projected_record_json FROM audit_events WHERE event_name = 'config.change.applied' ORDER BY rowid DESC LIMIT 1`).Scan(&actor, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "operator:tip" {
+		t.Errorf("config.change.applied actor = %q, want bundle principal", actor)
+	}
+	for _, want := range []string{"operator:tip", id, `"defenseclaw.policy.bundle.version":1`, "k1", "guardrail pack update"} {
+		if !strings.Contains(projected, want) {
+			t.Errorf("config.change.applied lacks %q: %s", want, projected)
+		}
+	}
+}
 
 func TestSidecarObservabilityV8BootstrapErrorReportsOnlySafeRedactionSubcode(t *testing.T) {
 	t.Parallel()

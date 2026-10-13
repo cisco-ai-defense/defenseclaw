@@ -21,10 +21,24 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestWindowsBundleHotWriteRecordsPrincipalAndSignedMetadata(t *testing.T) {
+	const id = "b-01JA0000000000000000000033"
+	opts := &windowsEnterpriseLifecycleOptions{bundle: &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
+		BundleID: id, Version: 3, Principal: "control-plane:acme/alice", SignerKeyID: "k1", ChangeSummary: "guardrail pack update",
+	}}}}
+	got := windowsHotConfigWriteOptions(opts, "abc")
+	if got.Actor != "control-plane:acme/alice" || got.Bundle.ID != id || got.Bundle.Version != 3 ||
+		got.Bundle.SignerKeyID != "k1" || got.Reason != configwrite.BundleReason(id, 3, "guardrail pack update") ||
+		!got.Lifecycle || got.ExpectSHA256 != "abc" {
+		t.Fatalf("Windows bundle hot write = %+v", got)
+	}
+}
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 

@@ -70,6 +70,21 @@ func TestConfigChangeActivityNamesTheWriter(t *testing.T) {
 	if in, _, _ := configChangeActivity(path, bob, carol, []string{"guardrail"}, 2, true); in.Actor != "cli:carol" {
 		t.Fatalf("a single generation names %q, want its writer cli:carol", in.Actor)
 	}
+	// A signed bundle finishing a coalesced burst names the enforcing
+	// bundle, without assigning the earlier writer's path diff to it.
+	bundleRaw := []byte("config_version: 9\nguardrail:\n  mode: action\n  host: 0.0.0.0\n  block_at: HIGH\n")
+	const bundleID = "b-01JA0000000000000000000033"
+	if _, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+		Actor: "operator:tip", Reason: configwrite.BundleReason(bundleID, 4, "enable action"), Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: bundleID, Version: 4, SignerKeyID: "k1"},
+	}, func() (bool, error) { return true, os.WriteFile(path, bundleRaw, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	in, _, ok = configChangeActivity(path, after, bundleRaw, []string{"guardrail"}, 1, true)
+	if !ok || in.Actor != "operator:tip" || in.Bundle == nil || in.Bundle.ID != bundleID ||
+		in.Bundle.SignerKeyID != "k1" || in.Bundle.ChangeSummary != "enable action" || len(in.Diff) != 0 || in.After["coalesced"] != true {
+		t.Fatalf("coalesced bundle activity = %+v (ok=%v)", in, ok)
+	}
 }
 
 // An asset-only generation rebuild reuses config.yaml bytes and must not

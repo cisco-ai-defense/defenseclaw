@@ -176,20 +176,24 @@ type Receipt struct {
 	SignerKeyID   string `json:"signer_key_id,omitempty"`
 	Principal     string `json:"principal,omitempty"`
 	// ChangeSummary is the manifest change_summary, set at verified.
-	ChangeSummary         string       `json:"change_summary,omitempty"`
-	ManifestSHA256        string       `json:"manifest_sha256,omitempty"`
-	State                 string       `json:"state"`
-	Transitions           []Transition `json:"transitions"`
-	ErrorCode             Code         `json:"error_code,omitempty"`
-	ErrorMessage          string       `json:"error_message,omitempty"`
-	ExpectedDigest        string       `json:"expected_digest,omitempty"`
-	EffectivePolicyDigest string       `json:"effective_policy_digest,omitempty"`
-	ConfigGeneration      uint64       `json:"config_generation,omitempty"`
-	AppliedAt             string       `json:"applied_at,omitempty"`
-	ConfirmedAt           string       `json:"confirmed_at,omitempty"`
-	RolledBack            bool         `json:"rolled_back,omitempty"`
-	EnforcingDigest       string       `json:"enforcing_digest,omitempty"`
-	Restart               bool         `json:"restart,omitempty"`
+	ChangeSummary  string       `json:"change_summary,omitempty"`
+	ManifestSHA256 string       `json:"manifest_sha256,omitempty"`
+	State          string       `json:"state"`
+	Transitions    []Transition `json:"transitions"`
+	ErrorCode      Code         `json:"error_code,omitempty"`
+	ErrorMessage   string       `json:"error_message,omitempty"`
+	ExpectedDigest string       `json:"expected_digest,omitempty"`
+	// DigestComparable records that verify compared the signed digest on
+	// this same product version and platform.
+	DigestComparable      bool     `json:"digest_comparable,omitempty"`
+	WarningCodes          []string `json:"warning_codes,omitempty"`
+	EffectivePolicyDigest string   `json:"effective_policy_digest,omitempty"`
+	ConfigGeneration      uint64   `json:"config_generation,omitempty"`
+	AppliedAt             string   `json:"applied_at,omitempty"`
+	ConfirmedAt           string   `json:"confirmed_at,omitempty"`
+	RolledBack            bool     `json:"rolled_back,omitempty"`
+	EnforcingDigest       string   `json:"enforcing_digest,omitempty"`
+	Restart               bool     `json:"restart,omitempty"`
 	// Dir is the version directory name once the bundle is staged.
 	Dir string `json:"dir,omitempty"`
 	// ConfigSHA256 is the hex SHA-256 of the config.yaml the apply installed
@@ -205,6 +209,19 @@ func (r *Receipt) ReceivedAt() string {
 		return ""
 	}
 	return r.Transitions[0].At
+}
+
+// DigestWarningCode classifies a difference between the signed expectation
+// and the policy the gateway actually enforces. A cross-build signature
+// cannot be compared, but the difference still deserves a visible warning.
+func DigestWarningCode(expected, enforcing string, comparable bool) string {
+	if expected == "" || enforcing == "" || expected == enforcing {
+		return ""
+	}
+	if comparable {
+		return WarnDigestDiffers
+	}
+	return WarnDigestUnverifiable
 }
 
 // Status is the result v2 bundle block for r, naming current when r is not
@@ -370,6 +387,7 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal,
 		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
+		WarningCodes:     append([]string(nil), r.WarningCodes...),
 		ConfigGeneration: r.ConfigGeneration, AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		RolledBack: r.RolledBack, Restart: r.Restart,
 	}
@@ -661,6 +679,10 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	if !digestPattern.MatchString(r.EffectivePolicyDigest) {
 		return State{}, fmt.Errorf("bundle receipt %s has no effective policy digest to confirm", r.ReceiptID)
 	}
+	if code := DigestWarningCode(r.ExpectedDigest, r.EffectivePolicyDigest, r.DigestComparable); code != "" && !slices.Contains(r.WarningCodes, code) {
+		r.WarningCodes = append(r.WarningCodes, code)
+	}
+	r.EnforcingDigest = r.EffectivePolicyDigest
 	st, err := s.LoadState()
 	if err != nil {
 		return State{}, err

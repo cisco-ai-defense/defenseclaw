@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -22,12 +23,100 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
+	_ "modernc.org/sqlite"
 )
+
+type bundleAuditClock struct{}
+
+func (bundleAuditClock) Now() time.Time { return time.Now().UTC() }
+
+type bundleAuditDeadlines struct{}
+
+func (bundleAuditDeadlines) Context(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
+}
+
+// Exercise the Unix bundle transaction and the same runtime reporter and
+// generation reader that the gateway wires to its audit store. This catches
+// a generic reload_applied row even when the separate receipt is correct.
+func TestBundleUnixApplyRuntimeAuditCarriesPrincipal(t *testing.T) {
+	b := newBundleHost(t)
+	v1, _, _ := bundleConfigs(b.testHost)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	path := b.env.P(b.env.Layout.ConfigPath)
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auditPath := filepath.Join(dataDir, "audit.db")
+	store, err := audit.NewStore(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := redaction.NewEngine(bytes.Repeat([]byte{0x33}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter, err := observabilityruntime.NewReloadReporter(store, engine, nil, "bundle-unix-apply", "v8-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter.SetBundleAttribution(func() (observabilityruntime.BundleAttribution, bool) {
+		return observabilityruntime.ReadBundleAttribution(path)
+	})
+	plan, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{Local: config.ObservabilityV8LocalSource{
+		Path: auditPath, JudgeBodiesPath: filepath.Join(dataDir, "judge.db"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := runtimegraph.New(t.Context(), runtimegraph.ConfigFromPlan(plan, true), nil,
+		runtimegraph.Options{Reporter: reporter, DrainTimeout: time.Second, Clock: bundleAuditClock{}, Deadlines: bundleAuditDeadlines{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = graph.Close(ctx)
+		_ = graph.WaitReporter(ctx)
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := graph.FlushReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var actor, projected string
+	if err := db.QueryRowContext(ctx, `SELECT actor, projected_record_json FROM audit_events WHERE event_name = 'config.change.applied' ORDER BY rowid DESC LIMIT 1`).Scan(&actor, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "operator:mdm-admin" {
+		t.Errorf("config.change.applied actor = %q, want bundle principal", actor)
+	}
+	for _, want := range []string{"operator:mdm-admin", bundleID(1), `"defenseclaw.policy.bundle.version":1`, "k1", "version 1"} {
+		if !strings.Contains(projected, want) {
+			t.Errorf("Unix bundle audit lacks %q: %s", want, projected)
+		}
+	}
+}
 
 // bundleHost is an installed fake host in bundle mode: trust anchors with
 // one ed25519 key, a gateway that reports the digest of the installed

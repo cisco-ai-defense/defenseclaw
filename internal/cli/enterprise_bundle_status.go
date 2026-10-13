@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/cobra"
@@ -119,6 +120,52 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	} else if summary, err := store.Summary(); err == nil {
 		res.Bundle = summary
 	}
+	var currentReceipt *enterprisebundle.Receipt
+	var signedExpected string
+	var digestComparable bool
+	if st.Current != nil {
+		for _, rc := range receipts {
+			if rc.State == enterprisebundle.StateConfirmed && rc.BundleID == st.Current.BundleID && rc.Version == st.Current.Version {
+				currentReceipt = rc
+				break
+			}
+		}
+		// Older receipts predate digest_comparable. The signed manifest in
+		// the immutable current version still tells status whether this
+		// platform and build can compare the expected and live digests.
+		if raw, err := os.ReadFile(filepath.Join(store.VersionDir(st.Current.Dir), enterprisebundle.ManifestName)); err == nil {
+			if manifest, err := enterprisebundle.DecodeManifest(raw); err == nil {
+				signedExpected = manifest.EffectivePolicy.Digests[runtime.GOOS]
+				digestComparable = manifest.EffectivePolicy.ProductVersion == appVersion && manifest.EffectivePolicy.ComputedOn == runtime.GOOS
+			}
+		}
+	}
+	if currentReceipt != nil {
+		if currentReceipt.ExpectedDigest != "" {
+			signedExpected = currentReceipt.ExpectedDigest
+		}
+		digestComparable = digestComparable || currentReceipt.DigestComparable
+	}
+	addDigestWarning := func(code string) {
+		if code == "" {
+			return
+		}
+		for _, existing := range res.Warnings {
+			if existing.Code == code {
+				return
+			}
+		}
+		message := "the gateway's effective policy digest differs from the signed expected digest"
+		if code == enterprisebundle.WarnDigestUnverifiable {
+			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
+		}
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
+	}
+	if currentReceipt != nil {
+		for _, code := range currentReceipt.WarningCodes {
+			addDigestWarning(code)
+		}
+	}
 	if !res.BundleMode {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_missing",
 			Message: "no trust anchor file is installed, so this device does not take bundles"})
@@ -130,6 +177,9 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		return nil
 	}
 	res.GatewayChecked, res.GatewayDigest = true, policy.GatewayReportedDigest
+	if st.Current != nil {
+		addDigestWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, digestComparable))
+	}
 	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
 	if policy.LastReloadError != "" {

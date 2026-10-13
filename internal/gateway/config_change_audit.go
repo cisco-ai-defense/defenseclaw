@@ -100,15 +100,34 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		in.After["signer_key_id"] = state.SignerKeyID
 	}
 	if lastKnown && (state.Generation > last+1 || state.Generation < last) {
-		// The bundle fields belong to the last writer only.
-		in.Bundle = nil
-		in.Actor = unattributedConfigActor
-		in.After["last_actor"] = state.Actor
+		// A coalesced bundle is still the signed final policy. Its
+		// principal and manifest identify that final apply, while the
+		// aggregate path diff could include another writer's changes.
+		// Keep the bundle identity but omit that diff. Other coalesced
+		// writes retain their unattributed audit behavior.
+		bundleFinal := state.Generation > last+1 && in.Bundle != nil && configwrite.IsPrincipalActor(state.Actor)
+		if bundleFinal {
+			in.Diff = nil
+			in.After["changed_paths"] = 0
+			in.After["restart_required"] = []string{}
+			in.After["coalesced"] = true
+		} else {
+			in.Bundle = nil
+			delete(in.After, "bundle_id")
+			delete(in.After, "bundle_version")
+			delete(in.After, "signer_key_id")
+			in.Actor = unattributedConfigActor
+			in.After["last_actor"] = state.Actor
+		}
 		if state.Generation > last {
 			in.After["first_generation"] = last + 1
-			in.Reason = fmt.Sprintf("generations %d-%d applied together; last writer %s", last+1, state.Generation, state.Actor)
+			if !bundleFinal {
+				in.Reason = fmt.Sprintf("generations %d-%d applied together; last writer %s", last+1, state.Generation, state.Actor)
+			}
 		} else {
-			in.Reason = fmt.Sprintf("generation %d follows %d (the generation record was reset); last writer %s", state.Generation, last, state.Actor)
+			if !bundleFinal {
+				in.Reason = fmt.Sprintf("generation %d follows %d (the generation record was reset); last writer %s", state.Generation, last, state.Actor)
+			}
 		}
 	}
 	return in, state.Generation, true

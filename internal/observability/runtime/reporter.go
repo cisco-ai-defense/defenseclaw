@@ -20,10 +20,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -56,9 +59,49 @@ type ReloadReporter struct {
 	signer       audit.ProjectionIntegritySigner
 	processRunID string
 	binary       string
+	// bundleAttribution reads the generation record for the config whose
+	// reload the gateway is reporting. It is installed before the runtime
+	// graph starts; nil keeps the generic runtime report.
+	bundleAttribution func() (BundleAttribution, bool)
 
 	mu        sync.Mutex
 	delivered map[reportDeliveryKey]struct{}
+}
+
+// BundleAttribution is the verified generation record of a signed bundle.
+// The gateway supplies it only when the record hashes the config on disk.
+type BundleAttribution struct {
+	Principal, ID, SignerKeyID, ChangeSummary string
+	Version                                   uint64
+}
+
+// ReadBundleAttribution reads the generation record for the config whose
+// reload the gateway is reporting. The runtime reporter also runs on gateway
+// startup and on graph reloads outside ConfigManager's activity logger.
+// The signed bundle is named only when the generation record hashes the
+// config now in force. A coalesced burst can end in a signed bundle; its
+// final generation then names the bundle. Other reloads stay generic.
+func ReadBundleAttribution(path string) (BundleAttribution, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return BundleAttribution{}, false
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || !configwrite.IsPrincipalActor(state.Actor) || state.BundleID == "" ||
+		state.BundleVersion == 0 || state.SignerKeyID == "" ||
+		!strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		return BundleAttribution{}, false
+	}
+	return BundleAttribution{
+		Principal: state.Actor, ID: state.BundleID, Version: state.BundleVersion,
+		SignerKeyID: state.SignerKeyID, ChangeSummary: configwrite.BundleChangeSummary(state),
+	}, true
+}
+
+// SetBundleAttribution wires the gateway's config generation reader before
+// the reporter is passed to a runtime graph.
+func (reporter *ReloadReporter) SetBundleAttribution(read func() (BundleAttribution, bool)) {
+	reporter.bundleAttribution = read
 }
 
 func NewReloadReporter(
@@ -204,11 +247,25 @@ func (reporter *ReloadReporter) buildRecord(
 	adminOperation := string(report.Code)
 	if report.Code == runtimegraph.ReportReloadApplied {
 		envelope.Action = "config.change.applied"
-		return builder.BuildLogConfigChangeApplied(observability.LogConfigChangeAppliedInput{
+		input := observability.LogConfigChangeAppliedInput{
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
 			LogLevel: observability.Present(observability.LogLevelInfo), Outcome: outcome,
 			DefenseClawAdminOperation: adminOperation, MandatoryControlPlaneMutation: true,
-		})
+		}
+		if reporter.bundleAttribution != nil {
+			if bundle, ok := reporter.bundleAttribution(); ok {
+				input.DefenseClawAdminPrincipalRef = observability.Present(bundle.Principal)
+				input.DefenseClawAdminActorRef = observability.Present(bundle.Principal)
+				input.ConditionAdminPrincipalKnown = true
+				input.DefenseClawPolicyBundleID = observability.Present(bundle.ID)
+				input.DefenseClawPolicyBundleVersion = observability.Present(int64(bundle.Version))
+				input.DefenseClawPolicyBundleSignerKeyID = observability.Present(bundle.SignerKeyID)
+				if bundle.ChangeSummary != "" {
+					input.DefenseClawPolicyBundleChangeSummary = observability.Present(bundle.ChangeSummary)
+				}
+			}
+		}
+		return builder.BuildLogConfigChangeApplied(input)
 	}
 	envelope.Action = "config.reload.rejected"
 	return builder.BuildLogConfigReloadRejected(observability.LogConfigReloadRejectedInput{

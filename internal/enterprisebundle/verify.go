@@ -19,6 +19,7 @@ import (
 // Warning codes verify adds.
 const (
 	WarnDigestUnverifiable      = "digest_unverifiable"
+	WarnDigestDiffers           = "digest_differs"
 	WarnSecretPresenceUnchecked = "secret_presence_unchecked"
 )
 

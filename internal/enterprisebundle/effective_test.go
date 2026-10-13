@@ -8,17 +8,103 @@ package enterprisebundle_test
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
+
+// A signer and an installed device must hash a bundled custom rule pack the
+// same way, despite their distinct staging and version directory paths.
+func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T) {
+	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
+	const rules = "version: 1\ninjection: []\n"
+	packRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(packRoot, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packRoot, "rules/local-patterns.yaml"), []byte(rules), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packDigest, err := guardrail.RulePackDigest(packRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configYAML := strings.Replace(bundleConfig(t), "guardrail:\n", "guardrail:\n  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+packDigest+"\n", 1)
+	f := newFixture(t, configYAML, func(in *enterprisebundle.ComposeInput) {
+		in.Bundle.Files[pack] = []byte(rules)
+		full := filepath.Join(in.Root, filepath.FromSlash(pack))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(rules), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	spki, err := x509.MarshalPKIXPublicKey(f.key.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorsRaw, err := json.Marshal(enterprisebundle.Anchors{SchemaVersion: 1, TenantID: "acme", DeviceGroups: []string{"eng"}, Keys: []enterprisebundle.AnchorKey{{
+		KeyID: "k1", Alg: "ed25519", PublicKey: base64.StdEncoding.EncodeToString(spki), Status: enterprisebundle.KeyActive,
+		NotBefore: "2026-01-01T00:00:00Z", NotAfter: "2027-01-01T00:00:00Z",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	anchorsPath := filepath.Join(root, "trust", enterprisebundle.AnchorsName)
+	if err := os.MkdirAll(filepath.Dir(anchorsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(anchorsPath, anchorsRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := enterprisebundle.NewStore(filepath.Join(root, "bundles"), filepath.Join(root, "lifecycle"))
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(store.BundlesDir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			}
+			return nil
+		})
+	})
+	driver := &enterprisebundle.Driver{Store: store, AnchorsPath: anchorsPath, Platform: "linux", ProductVersion: "1.0.2", Digester: digester, Now: func() time.Time { return verifyAt }}
+	prepared, err := driver.Prepare(context.Background(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionRoot := store.VersionDir(prepared.Receipt.Dir)
+	installedBundle, err := enterprisebundle.ReadDir(versionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedConfig, installedRaw, err := enterprisebundle.LoadConfig(installedBundle, versionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceDigest, err := digester(context.Background(), installedConfig, installedRaw, "linux", versionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Finish(prepared, prepared.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{Digest: deviceDigest, Applied: true}, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rc := prepared.Receipt; rc.State != enterprisebundle.StateConfirmed || rc.ExpectedDigest != deviceDigest || rc.EffectivePolicyDigest != deviceDigest {
+		t.Fatalf("signed expected %s, device computed %s, receipt %+v", rc.ExpectedDigest, deviceDigest, rc)
+	}
+}
 
 const bundleConfigBase = `config_version: 9
 deployment_mode: managed_enterprise
