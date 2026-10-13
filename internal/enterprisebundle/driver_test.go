@@ -159,6 +159,40 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	}
 }
 
+func TestDriverRefusesComparableDigestBeforeActivation(t *testing.T) {
+	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
+		t.Run(platform, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = platform })
+			manifest, err := enterprisebundle.DecodeManifest(f.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.EffectivePolicy.Digests[platform] = gatewayDigest
+			raw, err := manifest.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := driverFor(t, f)
+			d.Platform = platform
+			activated := false
+			activate := func(*enterprisebundle.Prepared) { activated = true }
+			prepared, err := d.Prepare(t.Context(), f.signed(t, raw), nil)
+			if err == nil {
+				// This is the caller's activation boundary: it must never run.
+				activate(prepared)
+			}
+			if activated || enterprisebundle.CodeOf(err) != enterprisebundle.CodeDigestMismatch ||
+				prepared == nil || prepared.Receipt.State != enterprisebundle.StateFailed {
+				t.Fatalf("prepare activated=%v receipt=%+v err=%v", activated, prepared, err)
+			}
+			version := d.Store.VersionDir(enterprisebundle.VersionDirName(manifest.Version, manifest.BundleID))
+			if _, err := os.Stat(version); !os.IsNotExist(err) {
+				t.Fatalf("mismatched version was promoted: %v", err)
+			}
+		})
+	}
+}
+
 func containsWarning(codes []string, want string) bool {
 	for _, code := range codes {
 		if code == want {

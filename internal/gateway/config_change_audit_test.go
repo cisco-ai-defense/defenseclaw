@@ -101,3 +101,27 @@ func TestConfigChangeActivitySkipsUnchangedConfigBytes(t *testing.T) {
 		t.Fatalf("asset rebuild produced config change by %q", activity.Actor)
 	}
 }
+
+func TestConfigChangeActivityAttributesRollbackToAttemptedBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	staged := []byte("config_version: 9\nguardrail:\n  mode: action\n")
+	restored := []byte("config_version: 9\nguardrail:\n  mode: observe\n")
+	if err := os.WriteFile(path, restored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+		Actor: "operator:old", Lifecycle: true,
+		Bundle:             configwrite.BundleRef{ID: "b-01JA0000000000000000000001", Version: 1, SignerKeyID: "old"},
+		TransactionActor:   "operator:tip",
+		TransactionBundle:  configwrite.BundleRef{ID: "b-01JA0000000000000000000002", Version: 2, SignerKeyID: "new"},
+		TransactionSummary: "failed apply",
+	}, func() (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _, ok := configChangeActivity(path, staged, restored, []string{"guardrail"}, 0, true)
+	if !ok || in.Actor != "operator:tip" || in.Bundle == nil ||
+		in.Bundle.ID != "b-01JA0000000000000000000002" || in.Bundle.ChangeSummary != "failed apply" {
+		t.Fatalf("rollback audit attribution = %+v, %t", in, ok)
+	}
+}

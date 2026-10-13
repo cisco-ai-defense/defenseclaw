@@ -55,6 +55,16 @@ checks the installed config's SHA-256.
 
 ## Signed policy bundles
 
+`<etc>/bundles/receipt.json` is the public summary: any local user can read
+its confirmed bundle id, version and state. On Linux and macOS, `etc/bundles`
+is `0755` and the receipt is `0644`; `inbox` and staging remain `0700`,
+confirmed version directories and assets are `0750`/`0640` for the gateway
+group, and `bundle-state.json` and private receipts stay under the `0700`
+lifecycle directory. On Windows, Users can traverse the state root, `etc`
+and `bundles` through noninheriting read and execute ACEs, and only the public
+receipt has an explicit Users read ACE. The private state, receipts, staging,
+inbox and version assets retain protected ACLs without a Users grant.
+
 | OS | Is bundle N (or newer) enforcing? | Enforcing receipt and latest refusal |
 | --- | --- | --- |
 | Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed) | `enterprise bundle status --json` |

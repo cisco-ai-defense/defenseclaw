@@ -49,6 +49,10 @@ const configReloadDebounce = 500 * time.Millisecond
 
 const configReloadSnapshotAttempts = 3
 
+// A temporary permission refusal during an atomic lifecycle rollback can
+// outlive the fsnotify event that triggered it. Retry without another write.
+const configReloadPermissionRetry = 5 * time.Second
+
 // configReloadInFlight is held from the first file event of a burst until
 // its reload is applied or rejected. `guardrail profile explain` waits for
 // it (awaitConfigReload): an administrator who writes the configuration and
@@ -218,7 +222,9 @@ type ConfigManager struct {
 	// refused, and cleared by the next one that builds. While it stands the
 	// next reload rebuilds the generation even without a config or asset
 	// diff, since the repair is exactly what the diff cannot see.
-	rejected bool
+	rejected                bool
+	permissionRetry         bool
+	permissionRetryInterval time.Duration
 
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
@@ -517,6 +523,12 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	// nothing would ever notice without a periodic probe.
 	envWatchRetryTicker := time.NewTicker(30 * time.Second)
 	defer envWatchRetryTicker.Stop()
+	retryInterval := m.permissionRetryInterval
+	if retryInterval <= 0 {
+		retryInterval = configReloadPermissionRetry
+	}
+	permissionRetryTicker := time.NewTicker(retryInterval)
+	defer permissionRetryTicker.Stop()
 
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
@@ -630,6 +642,16 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 				pendingKinds[configDiffAssets] = true
 				pending = true
 				resetTimer(timer, configReloadDebounce)
+			}
+		case <-permissionRetryTicker.C:
+			m.mu.Lock()
+			retry := m.permissionRetry
+			m.mu.Unlock()
+			if retry && !pending {
+				if err := m.Reload(ctx, "permission_retry"); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[config] reload retry failed: %v\n", err)
+				}
+				syncAssetWatches()
 			}
 		}
 	}
@@ -832,6 +854,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	next, source, err := m.loadStableCandidate(ctx)
 	if err != nil {
 		m.rejected = true
+		m.permissionRetry = errors.Is(err, os.ErrPermission)
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "candidate_invalid")
 		if m.health != nil {
@@ -843,6 +866,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 		return err
 	}
+	m.permissionRetry = false
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
 		m.recordLoadError(ctx, "schema_version")
@@ -1047,6 +1071,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	if applyErr != nil {
 		m.rejected = true
+		m.permissionRetry = errors.Is(applyErr, os.ErrPermission)
 		recordGenerationBuildError(applyErr)
 		m.recordLoadError(ctx, "apply_rejected")
 		if m.health != nil {

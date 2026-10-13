@@ -185,11 +185,26 @@ type Report struct {
 	ComponentName string
 	Generation    uint64
 	OccurredAt    time.Time
+	// Bundle is captured when the reload applies. Delivery may occur after
+	// a failed transaction has rolled config.generation.json back.
+	Bundle              *BundleAttribution
+	AttributionCaptured bool
 	// DeliverySequence and DeliveryIndex form a manager-scoped stable
 	// envelope identity. Production reporters combine them with their process
 	// run ID and idempotently deduplicate retries.
 	DeliverySequence uint64
 	DeliveryIndex    uint32
+}
+
+// BundleAttribution is the principal of the config generation that caused a
+// runtime graph reload. It contains only signed bundle metadata.
+type BundleAttribution struct {
+	Principal, ID, SignerKeyID, ChangeSummary string
+	Version                                   uint64
+}
+
+type bundleAttributionReporter interface {
+	BundleAttribution() (BundleAttribution, bool)
 }
 
 // Reporter emits bounded reload state through the graph supplied by Manager.
@@ -1436,10 +1451,19 @@ func (manager *Manager) newReport(
 	if graph != nil {
 		generation = graph.Generation()
 	}
-	return Report{
+	report := Report{
 		Code: code, Outcome: outcome, FieldPath: fieldPath, ComponentName: component,
 		Generation: generation, OccurredAt: manager.clock.Now().UTC(),
 	}
+	if code == ReportReloadApplied {
+		if source, ok := manager.reporter.(bundleAttributionReporter); ok {
+			report.AttributionCaptured = true
+			if bundle, found := source.BundleAttribution(); found {
+				report.Bundle = &bundle
+			}
+		}
+	}
+	return report
 }
 
 func contextIdentity(err error) error {

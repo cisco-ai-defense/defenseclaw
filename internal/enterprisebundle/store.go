@@ -295,6 +295,9 @@ type Store struct {
 	// assets have been sealed. Windows keeps the staging root private until
 	// the rename; Unix sets its group mode during SealVersion.
 	PublishVersion func(root string) error
+	// PublishReceipt applies the platform's public-file permissions after an
+	// atomic replacement of receipt.json.
+	PublishReceipt func(path string) error
 	// installedVersionDirs are named by the config installed when this run
 	// began. A retry must not replace one while that config can still load it.
 	installedVersionDirs map[string]bool
@@ -449,7 +452,13 @@ func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
 		return err
 	}
-	return configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644)
+	if err := configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	if s.PublishReceipt != nil {
+		return s.PublishReceipt(s.PublicReceiptPath())
+	}
+	return nil
 }
 
 // Latest separates a pre-staging refusal from the latest receipt that

@@ -28,7 +28,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
-	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 var (
@@ -324,9 +323,17 @@ ai_discovery:
 			}
 			if tc.defaultPolicyDir {
 				start, end := strings.Index(source, "guardrail:\n"), strings.Index(source, "asset_policy:\n")
+				// The installed Unix default pack lives under the vendor tree,
+				// which an offline test host need not have. This path-default
+				// check uses a digester over loaded paths below.
 				source = source[:start] + source[end:]
 			}
 			f := newFixture(t, source, func(in *enterprisebundle.ComposeInput) {
+				in.Digester = func(_ context.Context, cfg *config.Config, raw []byte, _, root string) (string, error) {
+					canonical := strings.ReplaceAll(string(raw), root, "${bundle_root}")
+					sum := sha256.Sum256([]byte(fmt.Sprint(cfg.DataDir, cfg.PolicyDir, cfg.Guardrail.RulePackDir, cfg.QuarantineDir, canonical)))
+					return "sha256:" + hex.EncodeToString(sum[:]), nil
+				}
 				if !tc.defaultDataDir {
 					in.Platforms = []string{"linux"}
 				}
@@ -367,29 +374,33 @@ ai_discovery:
 						t.Errorf("%s = %q, want %q", field.name, field.got, want)
 					}
 				}
-				if tc.defaultPolicyDir && cfg.PolicyDir != filepath.Join(root, "policies") {
-					t.Errorf("policy_dir = %q, want default under %q", cfg.PolicyDir, root)
+				// This check loads a Linux target even on a Windows signer;
+				// its omitted policy_dir must use the Unix vendor tree.
+				if tc.defaultPolicyDir && cfg.PolicyDir != "/opt/defenseclaw/share/policies" {
+					t.Errorf("policy_dir = %q, want Unix vendor default", cfg.PolicyDir)
 				}
 			}
-			cfg, raw, err := enterprisebundle.LoadConfig(f.in.Bundle, f.in.Root)
+			cfg, raw, err := enterprisebundle.LoadConfigForPlatform(f.in.Bundle, f.in.Root, "linux")
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkDefaultPaths(cfg, f.in.Root)
-			signedPolicy, err := gateway.ComputeEffectivePolicyFor(context.Background(), cfg, gateway.EffectivePolicyOptions{GOOS: "linux", BundleRoot: f.in.Root, Raw: raw})
+			layout, err := enterprisebundle.StandardDeviceLayout("linux")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkDefaultPaths(cfg, layout.DataDir)
+			signedDigest, err := f.in.Digester(context.Background(), cfg, raw, "linux", f.in.Root)
 			if err != nil {
 				t.Fatal(err)
 			}
 			in := f.input(t, f.bundle, a)
 			in.Digester = func(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
-				checkDefaultPaths(cfg, root)
-				policy, err := gateway.ComputeEffectivePolicyFor(ctx, cfg, gateway.EffectivePolicyOptions{GOOS: goos, BundleRoot: root, Raw: raw})
-				for key, want := range signedPolicy.Components {
-					if got := policy.Components[key]; got != want {
-						t.Errorf("component %s: signed %s, verified %s", key, want, got)
-					}
+				checkDefaultPaths(cfg, layout.DataDir)
+				got, err := f.in.Digester(ctx, cfg, raw, goos, root)
+				if got != signedDigest {
+					t.Errorf("signed %s, verified %s", signedDigest, got)
 				}
-				return policy.Digest, err
+				return got, err
 			}
 			res, err := enterprisebundle.Verify(context.Background(), in)
 			if err != nil || !res.DigestVerified {
@@ -397,6 +408,19 @@ ai_discovery:
 			}
 		})
 	}
+	t.Run("Windows policy_dir omitted", func(t *testing.T) {
+		// Windows Setup ships no Rego bundle under the writable data_dir.
+		// An omitted policy_dir therefore uses the built-in policy.
+		start, end := strings.Index(base, "guardrail:\n"), strings.Index(base, "asset_policy:\n")
+		root, bundle := writeBundle(t, base[:start]+base[end:])
+		cfg, _, err := enterprisebundle.LoadConfigForPlatform(bundle, root, "windows")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.PolicyDir != "" {
+			t.Fatalf("Windows policy_dir = %q, want built-in policy", cfg.PolicyDir)
+		}
+	})
 }
 
 // These settings pass the runtime loader used by the signer, but standalone
@@ -409,7 +433,7 @@ func TestBundleManagedConfigRefusals(t *testing.T) {
 		{"empty policy_dir", "linux", strings.Replace(base, "policy_dir: ", "policy_dir: \"\" # ", 1), "policy_dir", ""},
 		{"wrong Linux data_dir", "linux", base + "data_dir: /var/lib/defenseclaw-enterprise\n", "data_dir", "/var/lib/defenseclaw"},
 		{"wrong macOS data_dir", "darwin", base + "data_dir: /var/lib/defenseclaw-enterprise\n", "data_dir", "/opt/cisco/defenseclaw/runtime"},
-		{"explicit Windows data_dir", "windows", base + "data_dir: C:/ProgramData/Cisco/DefenseClaw/runtime\n", "data_dir", "<registered ProgramData>"},
+		{"explicit Windows data_dir", "windows", base + "data_dir: D:/Other/runtime\n", "data_dir", "standard managed runtime"},
 		{"nonloopback api_bind", "linux", base + "gateway:\n  api_bind: 0.0.0.0\n", "gateway.api_bind", ""},
 		{"wrong api_port", "linux", base + "gateway:\n  api_port: 18971\n", "gateway.api_port", ""},
 	} {

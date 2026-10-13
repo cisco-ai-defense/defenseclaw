@@ -88,6 +88,9 @@ type VerifyInput struct {
 	// when both equal those of the signer.
 	ProductVersion string
 	HostPlatform   string
+	// DeviceLayout is the installed layout on a device. Nil uses the target's
+	// standard layout for offline verification.
+	DeviceLayout *DeviceLayout
 	// SecretPresent reports whether the device holds an enterprise
 	// credential; nil does not check presence (off a device).
 	SecretPresent func(name string) (bool, error)
@@ -204,7 +207,14 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err != nil {
 		return res, refuse(CodeArchiveInvalid, "", "cannot stage the bundle files: %s", boundedDetail(err.Error()))
 	}
-	cfg, rendered, err := LoadConfig(b, root)
+	layout, err := StandardDeviceLayout(in.Platform)
+	if err != nil {
+		return res, refuse(CodeManifestInvalid, "target.platforms", "%s", boundedDetail(err.Error()))
+	}
+	if in.DeviceLayout != nil {
+		layout = *in.DeviceLayout
+	}
+	cfg, rendered, err := LoadConfigForDeviceLayout(b, root, in.Platform, layout)
 	if err != nil {
 		return res, err
 	}
@@ -221,16 +231,21 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	}
 	res.EffectivePolicyDigest = digest
 	res.ExpectedDigest = m.EffectivePolicy.Digests[in.Platform]
-	if in.ProductVersion == m.EffectivePolicy.ProductVersion && in.HostPlatform == m.EffectivePolicy.ComputedOn {
+	standardLayout := layout.IsStandard(in.Platform)
+	if in.ProductVersion == m.EffectivePolicy.ProductVersion && in.HostPlatform == m.EffectivePolicy.ComputedOn && standardLayout {
 		if digest != res.ExpectedDigest {
 			return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s", digest)
 		}
 		res.DigestVerified = true
 	} else {
+		message := "the bundle was signed by another product version or on another platform; files[] hashes still hold, and this host reports its own digest"
+		if !standardLayout {
+			message = "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"
+		}
 		res.Warnings = append(res.Warnings, Warning{
 			Code:     WarnDigestUnverifiable,
 			Platform: in.Platform,
-			Message:  "the bundle was signed by another product version or on another platform; files[] hashes still hold, and this host reports its own digest",
+			Message:  message,
 		})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)

@@ -384,6 +384,9 @@ func TestStageRefusesPathsOutsideTheBundle(t *testing.T) {
 }
 
 func TestStorePromotedTreeHasServiceGroupReadOnlyModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits and group ownership do not describe Windows ACLs; the Windows bundle ACL tests cover that platform")
+	}
 	s := testStore(t)
 	const serviceGID = 4242
 	owned := map[string][2]int{}

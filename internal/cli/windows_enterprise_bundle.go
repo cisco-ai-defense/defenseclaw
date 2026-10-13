@@ -65,13 +65,15 @@ const (
 
 // Seams for tests.
 var (
-	windowsBundleLayout         = managed.StandaloneWindowsLayout
-	windowsBundlePolicy         = readWindowsBundleGatewayPolicy
-	windowsBundleSleep          = time.Sleep
-	windowsBundleTrust          = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
-	windowsBundlePrivateStage   = privateWindowsBundleStage
-	windowsBundleSealVersion    = sealWindowsBundleVersionAssets
-	windowsBundlePublishVersion = publishWindowsBundleVersion
+	windowsBundleLayout          = managed.StandaloneWindowsLayout
+	windowsBundlePolicy          = readWindowsBundleGatewayPolicy
+	windowsBundleSleep           = time.Sleep
+	windowsBundleTrust           = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
+	windowsBundlePrivateStage    = privateWindowsBundleStage
+	windowsBundleSealVersion     = sealWindowsBundleVersionAssets
+	windowsBundlePublishVersion  = publishWindowsBundleVersion
+	windowsBundlePublishReceipt  = publishWindowsBundleReceipt
+	windowsBundleEnsureDirectory = ensureWindowsBundleDirectory
 )
 
 func init() {
@@ -145,8 +147,13 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.PrivateStage = windowsBundlePrivateStage
 	store.SealVersion = windowsBundleSealVersion
 	store.PublishVersion = windowsBundlePublishVersion
+	store.PublishReceipt = windowsBundlePublishReceipt
 	return &enterprisebundle.Driver{
-		Store:       store,
+		Store: store,
+		DeviceLayout: func() *enterprisebundle.DeviceLayout {
+			device := enterprisebundle.DeviceLayoutFromManaged(layout)
+			return &device
+		}(),
 		AnchorsPath: filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName),
 		AnchorTrust: bundleAnchorTrust, Platform: enterprisebundle.PlatformWindows, ProductVersion: appVersion,
 		SecretPresent: bundleSecretPresent, Digester: bundleDigester,
@@ -164,6 +171,63 @@ func privateWindowsBundleStage(root string) error {
 
 func windowsBundlePrivateSDDL() string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+}
+
+func windowsBundleDirectorySDDL(serviceSID string) string {
+	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + serviceSID + ")(A;;0x1200a9;;;BU)"
+}
+
+func windowsBundleReceiptSDDL(serviceSID string) string {
+	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + serviceSID + ")(A;;FR;;;BU)"
+}
+
+func publishWindowsBundleReceipt(path string) error {
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString(windowsBundleReceiptSDDL(service.String()))
+	if err != nil {
+		return err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return err
+	}
+	group, _, err := sd.Group()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, group, dacl, nil)
+}
+
+func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	sddl := windowsBundleDirectorySDDL(service.String())
+	for _, parent := range []string{filepath.Dir(layout.ConfigDir), layout.ConfigDir} {
+		if err := applyWindowsSDDL(parent, sddl); err != nil {
+			return err
+		}
+	}
+	path := filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return applyWindowsSDDL(path, sddl)
 }
 
 // sealWindowsBundleVersionAssets grants the gateway service SID read and
@@ -263,6 +327,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	run := &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
 	opts.bundle = run
+	if err := windowsBundleEnsureDirectory(layout); err != nil {
+		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot protect the policy bundle directory: "+err.Error())
+	}
 	if opts.trustAnchors != "" {
 		if err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath); err != nil {
 			return refuse(string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)), "the trust anchors were not installed: "+err.Error())

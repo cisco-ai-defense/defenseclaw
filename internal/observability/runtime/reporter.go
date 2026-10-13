@@ -70,10 +70,7 @@ type ReloadReporter struct {
 
 // BundleAttribution is the verified generation record of a signed bundle.
 // The gateway supplies it only when the record hashes the config on disk.
-type BundleAttribution struct {
-	Principal, ID, SignerKeyID, ChangeSummary string
-	Version                                   uint64
-}
+type BundleAttribution = runtimegraph.BundleAttribution
 
 // ReadBundleAttribution reads the generation record for the config whose
 // reload the gateway is reporting. The runtime reporter also runs on gateway
@@ -87,9 +84,17 @@ func ReadBundleAttribution(path string) (BundleAttribution, bool) {
 		return BundleAttribution{}, false
 	}
 	state, err := configwrite.ReadGenerationState(path)
-	if err != nil || !configwrite.IsPrincipalActor(state.Actor) || state.BundleID == "" ||
-		state.BundleVersion == 0 || state.SignerKeyID == "" ||
-		!strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+	if err != nil || !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		return BundleAttribution{}, false
+	}
+	if state.TransactionBundleID != "" && configwrite.IsPrincipalActor(state.TransactionActor) &&
+		state.TransactionBundleVersion != 0 && state.TransactionSignerKeyID != "" {
+		return BundleAttribution{Principal: state.TransactionActor, ID: state.TransactionBundleID,
+			Version: state.TransactionBundleVersion, SignerKeyID: state.TransactionSignerKeyID,
+			ChangeSummary: state.TransactionSummary}, true
+	}
+	if !configwrite.IsPrincipalActor(state.Actor) || state.BundleID == "" ||
+		state.BundleVersion == 0 || state.SignerKeyID == "" {
 		return BundleAttribution{}, false
 	}
 	return BundleAttribution{
@@ -102,6 +107,15 @@ func ReadBundleAttribution(path string) (BundleAttribution, bool) {
 // the reporter is passed to a runtime graph.
 func (reporter *ReloadReporter) SetBundleAttribution(read func() (BundleAttribution, bool)) {
 	reporter.bundleAttribution = read
+}
+
+// BundleAttribution is read at report creation, before a bundle rollback can
+// replace the generation record. The report carries it through delivery.
+func (reporter *ReloadReporter) BundleAttribution() (runtimegraph.BundleAttribution, bool) {
+	if reporter.bundleAttribution == nil {
+		return runtimegraph.BundleAttribution{}, false
+	}
+	return reporter.bundleAttribution()
 }
 
 func NewReloadReporter(
@@ -252,17 +266,21 @@ func (reporter *ReloadReporter) buildRecord(
 			LogLevel: observability.Present(observability.LogLevelInfo), Outcome: outcome,
 			DefenseClawAdminOperation: adminOperation, MandatoryControlPlaneMutation: true,
 		}
-		if reporter.bundleAttribution != nil {
-			if bundle, ok := reporter.bundleAttribution(); ok {
-				input.DefenseClawAdminPrincipalRef = observability.Present(bundle.Principal)
-				input.DefenseClawAdminActorRef = observability.Present(bundle.Principal)
-				input.ConditionAdminPrincipalKnown = true
-				input.DefenseClawPolicyBundleID = observability.Present(bundle.ID)
-				input.DefenseClawPolicyBundleVersion = observability.Present(int64(bundle.Version))
-				input.DefenseClawPolicyBundleSignerKeyID = observability.Present(bundle.SignerKeyID)
-				if bundle.ChangeSummary != "" {
-					input.DefenseClawPolicyBundleChangeSummary = observability.Present(bundle.ChangeSummary)
-				}
+		bundle, ok := runtimegraph.BundleAttribution{}, false
+		if report.Bundle != nil {
+			bundle, ok = *report.Bundle, true
+		} else if !report.AttributionCaptured && reporter.bundleAttribution != nil {
+			bundle, ok = reporter.bundleAttribution()
+		}
+		if ok {
+			input.DefenseClawAdminPrincipalRef = observability.Present(bundle.Principal)
+			input.DefenseClawAdminActorRef = observability.Present(bundle.Principal)
+			input.ConditionAdminPrincipalKnown = true
+			input.DefenseClawPolicyBundleID = observability.Present(bundle.ID)
+			input.DefenseClawPolicyBundleVersion = observability.Present(int64(bundle.Version))
+			input.DefenseClawPolicyBundleSignerKeyID = observability.Present(bundle.SignerKeyID)
+			if bundle.ChangeSummary != "" {
+				input.DefenseClawPolicyBundleChangeSummary = observability.Present(bundle.ChangeSummary)
 			}
 		}
 		return builder.BuildLogConfigChangeApplied(input)

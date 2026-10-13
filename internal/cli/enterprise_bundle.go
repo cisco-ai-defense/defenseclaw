@@ -115,6 +115,9 @@ For managed bundles, omit data_dir so each device uses its service state
 directory: /var/lib/defenseclaw on Linux, /opt/cisco/defenseclaw/runtime on
 macOS, or the registered ProgramData\Cisco\DefenseClaw\runtime on Windows.
 /var/lib/defenseclaw-enterprise holds lifecycle receipts, not gateway data.
+An explicit Windows data_dir is signable only when it equals the standard
+C:\ProgramData\Cisco\DefenseClaw\runtime path. A different ProgramData root
+cannot be predicted offline and its device reports digest_unverifiable.
 
 For an HSM or KMS key, run sign with --emit-digest to write the unsigned
 bundle and print the SHA-256 to sign (ecdsa-p256-sha256; an ed25519 key
@@ -516,6 +519,12 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		ProductVersion: appVersion, HostPlatform: runtime.GOOS, Digester: bundleDigester,
 	}
 	if device {
+		layout, err := enterprisebundle.Layout(opts.platform)
+		if err != nil {
+			return err
+		}
+		deviceLayout := enterprisebundle.DeviceLayoutFromManaged(layout)
+		in.DeviceLayout = &deviceLayout
 		in.SecretPresent = bundleSecretPresent
 		// The version floor is the confirmed bundle of bundle-state.json. A
 		// standard account cannot read it (apply checks it again as root);

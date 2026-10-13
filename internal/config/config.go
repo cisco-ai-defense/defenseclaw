@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -2589,6 +2590,23 @@ func LoadRuntimeV8InspectionCandidateFromBytes(configFile string, raw []byte) (*
 	return loadRuntimeV8CandidateFromBytes(configFile, raw, false)
 }
 
+// LoadRuntimeV8InspectionCandidateForLayout decodes an offline bundle as it
+// will be loaded at the target device's config path. The data directory and
+// platform are supplied explicitly so cross-platform signing never inherits
+// the signer's environment or operating system defaults.
+func LoadRuntimeV8InspectionCandidateForLayout(configFile string, raw []byte, dataDir, goos string) (*Config, error) {
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := loadConfigSourceCheckedWithLayout(configFile, append([]byte(nil), raw...), false, false, true, dataDir, goos)
+	if err != nil {
+		return nil, err
+	}
+	applyRuntimeV8DataDirDefaultsForPlatform(candidate, document, candidate.DataDir, goos)
+	return candidate, nil
+}
+
 func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManagedTrust bool) (*Config, error) {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
@@ -2631,6 +2649,10 @@ func ApplyRuntimeV8DataDirDefaultsFromBytes(candidate *Config, source string, ra
 }
 
 func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, dataDir string) {
+	applyRuntimeV8DataDirDefaultsForPlatform(candidate, document, dataDir, runtime.GOOS)
+}
+
+func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAMLDocument, dataDir, goos string) {
 	if candidate == nil || document == nil || strings.TrimSpace(dataDir) == "" {
 		return
 	}
@@ -2662,7 +2684,7 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 				// config, never a folder inside data_dir.
 				candidate.PolicyDir = layout.VendorPolicyDir
 			}
-			standalonePolicyDirDefault(candidate, dataDir, runtime.GOOS)
+			standalonePolicyDirDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("scanners", "codeguard") {
@@ -2680,7 +2702,7 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	if !has("guardrail", "rule_pack_dir") {
 		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
-			standaloneRulePackDefault(candidate, dataDir, runtime.GOOS)
+			standaloneRulePackDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("openshell", "pack_dir") {
@@ -2708,6 +2730,14 @@ func loadConfigSourceChecked(
 	enforceManagedTrust bool,
 	checkPolicyInputs bool,
 ) (*Config, error) {
+	return loadConfigSourceCheckedWithLayout(configFile, sourceBytes, publishProvenance, enforceManagedTrust, checkPolicyInputs, "", runtime.GOOS)
+}
+
+func loadConfigSourceCheckedWithLayout(
+	configFile string, sourceBytes []byte,
+	publishProvenance, enforceManagedTrust, checkPolicyInputs bool,
+	defaultDataDir, targetGOOS string,
+) (*Config, error) {
 	viperLoadMu.Lock()
 	defer viperLoadMu.Unlock()
 
@@ -2721,7 +2751,13 @@ func loadConfigSourceChecked(
 	if strings.TrimSpace(configFile) == "" {
 		configFile = ConfigPath()
 	}
-	configFile = filepath.Clean(configFile)
+	// A Windows signer may inspect a Linux or macOS device layout. Preserve
+	// its Unix config path so standalone layout defaults match the target.
+	if targetGOOS == "linux" || targetGOOS == "darwin" {
+		configFile = path.Clean(configFile)
+	} else {
+		configFile = filepath.Clean(configFile)
+	}
 	dataDir := filepath.Dir(configFile)
 	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
 		filepath.Clean(configuredPath) == configFile {
@@ -2732,6 +2768,9 @@ func loadConfigSourceChecked(
 	// services and the lifecycle require, instead of the config's folder.
 	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes); ok {
 		dataDir = layoutDataDir
+	}
+	if defaultDataDir != "" {
+		dataDir = defaultDataDir
 	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
@@ -2813,7 +2852,7 @@ func loadConfigSourceChecked(
 		}
 		return nil, err
 	}
-	if err := resolveEnterpriseConfig(&cfg, runtime.GOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
+	if err := resolveEnterpriseConfig(&cfg, targetGOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "enterprise_config_invalid")
 		}

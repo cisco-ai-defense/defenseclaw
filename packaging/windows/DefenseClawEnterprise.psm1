@@ -3077,7 +3077,7 @@ function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -3088,6 +3088,8 @@ function New-DefenseClawCanonicalPathAcl {
         'StateDirectory',
         'AdminDirectory',
         'ConfigDirectory',
+        'BundleDirectory',
+        'BundleVersionDirectory',
         'RuntimeDirectory',
         'AuthorizationDirectory',
         'LogDirectory',
@@ -3179,9 +3181,49 @@ function New-DefenseClawCanonicalPathAcl {
                 sid = $GatewayServiceSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
             })
+            $entries.Add([pscustomobject]@{
+                sid = $script:UsersSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
         }
         'ConfigDirectory' {
             # Traverse only; the service cannot open ConfigFile without it.
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+            $entries.Add([pscustomobject]@{
+                sid = $script:UsersSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+        }
+        'BundleDirectory' {
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+            $entries.Add([pscustomobject]@{
+                sid = $script:UsersSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+        }
+        'BundleReceipt' {
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::Read
+            })
+            $entries.Add([pscustomobject]@{
+                sid = $script:UsersSID
+                rights = [Security.AccessControl.FileSystemRights]::Read
+            })
+        }
+        'BundleVersionDirectory' {
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+        }
+        'BundleVersionFile' {
             $entries.Add([pscustomobject]@{
                 sid = $GatewayServiceSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
@@ -3247,14 +3289,19 @@ function New-DefenseClawCanonicalPathAcl {
         }
     }
 
-    $inheritanceFlags = if ($IsDirectory -and $Kind -ne 'ManagedIPCDirectory') {
-        [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
-            [Security.AccessControl.InheritanceFlags]::ContainerInherit
-    }
-    else {
-        [Security.AccessControl.InheritanceFlags]::None
-    }
     foreach ($entry in $entries) {
+        # Users may traverse the public receipt path, but that grant must
+        # never flow to private siblings or bundle version assets.
+        $usersTraverseOnly = $Kind -in @('StateDirectory', 'ConfigDirectory', 'BundleDirectory') -and
+            [string]$entry.sid -eq $script:UsersSID
+        $inheritanceFlags = if ($IsDirectory -and $Kind -notin @('ManagedIPCDirectory', 'BundleVersionDirectory') -and
+            -not $usersTraverseOnly) {
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
         $identity = [Security.Principal.SecurityIdentifier]::new(
             [string]$entry.sid
         )
@@ -3422,7 +3469,7 @@ function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'BundleDirectory', 'BundleReceipt', 'BundleVersionDirectory', 'BundleVersionFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -6728,6 +6775,67 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
     return $true
 }
 
+function Invoke-DefenseClawBundleAclContract {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [switch]$Repair
+    )
+    $bundleDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'bundles'
+    $privateState = Microsoft.PowerShell.Management\Join-Path $Layout.InstallStateDirectory 'bundle-state.json'
+    $receiptsDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.InstallStateDirectory 'receipts'
+    $items = [Collections.Generic.List[object]]::new()
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $bundleDirectory) {
+        Assert-DefenseClawNoReparsePath -Path $bundleDirectory
+        $items.Add([pscustomobject]@{ Path = $bundleDirectory; Kind = 'BundleDirectory' })
+        $pending = [Collections.Generic.Queue[string]]::new()
+        $pending.Enqueue($bundleDirectory)
+        while ($pending.Count -gt 0) {
+            $parent = $pending.Dequeue()
+            foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force)) {
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "bundle store contains a reparse point: $($entry.FullName)"
+                }
+                $relative = $entry.FullName.Substring($bundleDirectory.Length).TrimStart('\')
+                $top = ($relative -split '\\', 2)[0]
+                $kind = if ($relative -ceq 'receipt.json' -and -not $entry.PSIsContainer) {
+                    'BundleReceipt'
+                }
+                elseif ($top -cmatch '^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}$' -and
+                    ($relative -cne $top -or $entry.PSIsContainer)) {
+                    if ($entry.PSIsContainer) { 'BundleVersionDirectory' } else { 'BundleVersionFile' }
+                }
+                elseif ($entry.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }
+                $items.Add([pscustomobject]@{ Path = $entry.FullName; Kind = $kind })
+                if ($entry.PSIsContainer) { $pending.Enqueue($entry.FullName) }
+            }
+        }
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $privateState) {
+        $items.Add([pscustomobject]@{ Path = $privateState; Kind = 'AdminFile' })
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $receiptsDirectory) {
+        Assert-DefenseClawNoReparsePath -Path $receiptsDirectory
+        $items.Add([pscustomobject]@{ Path = $receiptsDirectory; Kind = 'AdminDirectory' })
+        foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $receiptsDirectory -Force)) {
+            if ($entry.PSIsContainer) { throw "private bundle receipts contain a directory: $($entry.FullName)" }
+            $items.Add([pscustomobject]@{ Path = $entry.FullName; Kind = 'AdminFile' })
+        }
+    }
+    foreach ($item in $items) {
+        if ($Repair) {
+            Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind -GatewayServiceSID $GatewayServiceSID
+        }
+        else {
+            $expected = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory ($item.Kind -in @('BundleDirectory', 'BundleVersionDirectory', 'AdminDirectory')) `
+                -Kind $item.Kind `
+                -GatewayServiceSID $GatewayServiceSID
+            Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected
+        }
+    }
+}
+
 function Set-DefenseClawManagedAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -6771,6 +6879,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.InstallStateDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
@@ -18299,9 +18408,11 @@ function New-DefenseClawRequiredRights {
         }
         'State' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'ConfigDirectory' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'Config' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Read
@@ -19079,15 +19190,26 @@ function Assert-DefenseClawEnterpriseDeployment {
     Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `
-        -AllowedReaderSIDs $gatewayReaders `
+        -AllowedReaderSIDs ($gatewayReaders + @($script:UsersSID)) `
         -RequiredRights $stateRights `
         -RejectUntrustedRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigDirectory `
         -AllowedWriterSIDs $adminWriters `
-        -AllowedReaderSIDs $gatewayReaders `
+        -AllowedReaderSIDs ($gatewayReaders + @($script:UsersSID)) `
         -RequiredRights $configDirectoryRights `
         -RejectUntrustedRead
+    foreach ($entry in @(
+        @($Layout.StateRoot, 'StateDirectory'),
+        @($Layout.ConfigDirectory, 'ConfigDirectory')
+    )) {
+        $expected = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind ([string]$entry[1]) `
+            -GatewayServiceSID $gatewaySID
+        Assert-DefenseClawCanonicalPathAcl -Path ([string]$entry[0]) -Expected $expected
+    }
+    Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigPath `
         -AllowedWriterSIDs $adminWriters `
@@ -19693,10 +19815,13 @@ function Assert-DefenseClawGatewayServiceAccess {
         @($Layout.ConfigPath, 'Config', $adminWriters),
         @($Layout.RuntimeDirectory, 'Runtime', $gatewayReaders)
     )) {
+        $readers = if ([string]$check[1] -eq 'ConfigDirectory') {
+            $gatewayReaders + @($script:UsersSID)
+        } else { $gatewayReaders }
         Assert-DefenseClawPathAcl `
             -Path ([string]$check[0]) `
             -AllowedWriterSIDs $check[2] `
-            -AllowedReaderSIDs $gatewayReaders `
+            -AllowedReaderSIDs $readers `
             -RequiredRights (New-DefenseClawRequiredRights -Kind ([string]$check[1]) -GatewayServiceSID $gatewaySID) `
             -RejectUntrustedRead
     }

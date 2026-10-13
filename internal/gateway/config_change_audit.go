@@ -78,8 +78,13 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 	for i, changed := range paths {
 		diff[i] = audit.ActivityDiffEntry{Path: changed, Op: "replace"}
 	}
+	actor, bundleID, bundleVersion, signerKeyID, summary := state.Actor, state.BundleID, state.BundleVersion, state.SignerKeyID, configwrite.BundleChangeSummary(state)
+	if state.TransactionBundleID != "" && configwrite.IsPrincipalActor(state.TransactionActor) {
+		actor, bundleID, bundleVersion = state.TransactionActor, state.TransactionBundleID, state.TransactionBundleVersion
+		signerKeyID, summary = state.TransactionSignerKeyID, state.TransactionSummary
+	}
 	in = audit.ActivityInput{
-		Actor:      state.Actor,
+		Actor:      actor,
 		Action:     audit.ActionConfigUpdate,
 		TargetType: "config",
 		TargetID:   filepath.Base(path),
@@ -93,11 +98,11 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		Diff:     diff,
 		Severity: "INFO",
 	}
-	if state.BundleID != "" {
-		in.Bundle = &audit.PolicyBundle{ID: state.BundleID, Version: state.BundleVersion,
-			SignerKeyID: state.SignerKeyID, ChangeSummary: configwrite.BundleChangeSummary(state)}
-		in.After["bundle_id"], in.After["bundle_version"] = state.BundleID, state.BundleVersion
-		in.After["signer_key_id"] = state.SignerKeyID
+	if bundleID != "" {
+		in.Bundle = &audit.PolicyBundle{ID: bundleID, Version: bundleVersion,
+			SignerKeyID: signerKeyID, ChangeSummary: summary}
+		in.After["bundle_id"], in.After["bundle_version"] = bundleID, bundleVersion
+		in.After["signer_key_id"] = signerKeyID
 	}
 	if lastKnown && (state.Generation > last+1 || state.Generation < last) {
 		// A coalesced bundle is still the signed final policy. Its
@@ -105,7 +110,7 @@ func configChangeActivity(path string, previous, raw []byte, sections []string, 
 		// aggregate path diff could include another writer's changes.
 		// Keep the bundle identity but omit that diff. Other coalesced
 		// writes retain their unattributed audit behavior.
-		bundleFinal := state.Generation > last+1 && in.Bundle != nil && configwrite.IsPrincipalActor(state.Actor)
+		bundleFinal := state.Generation > last+1 && in.Bundle != nil && configwrite.IsPrincipalActor(in.Actor)
 		if bundleFinal {
 			in.Diff = nil
 			in.After["changed_paths"] = 0

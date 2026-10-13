@@ -145,6 +145,18 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			return nil
 		})
 	}
+	// The public bundle parent is traversable; its other children still need
+	// their own protection even if an ACL grants read despite their mode bits.
+	bundles := e.P(filepath.Join(e.Layout.ConfigDir, "bundles"))
+	_ = filepath.WalkDir(bundles, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || writerTemporary(d.Name()) {
+			return nil
+		}
+		if path != bundles && path != filepath.Join(bundles, "receipt.json") {
+			add(path, &yes)
+		}
+		return nil
+	})
 	// A nested vendor pack can gain an ACL without changing its mode bits.
 	// Include every installed entry, not just the top-level managed folders.
 	_ = filepath.WalkDir(e.P(e.Layout.VendorPolicyDir), func(path string, d fs.DirEntry, err error) error {

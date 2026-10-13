@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // A signer and an installed device must hash a bundled custom rule pack the
@@ -36,6 +37,10 @@ func TestBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T)
 }
 
 func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T, platform string) {
+	layout, err := managed.StandaloneLayoutFor(platform)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
 	const rules = "version: 1\ninjection: []\n"
 	packRoot := t.TempDir()
@@ -49,9 +54,10 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
-	configYAML := strings.Replace(bundleConfig(t), "guardrail:\n", "guardrail:\n  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+packDigest+"\n", 1)
+	configYAML := strings.Replace(bundleConfigBase+fmt.Sprintf("data_dir: %q\npolicy_dir: %q\n", layout.DataDir, filepath.Join(t.TempDir(), "absent-policies")), "guardrail:\n", "guardrail:\n  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+packDigest+"\n", 1)
 	f := newFixture(t, configYAML, func(in *enterprisebundle.ComposeInput) {
 		in.HostPlatform = platform
+		in.Platforms = []string{platform}
 		in.Bundle.Files[pack] = []byte(rules)
 		full := filepath.Join(in.Root, filepath.FromSlash(pack))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -99,7 +105,16 @@ func testBundleCustomGuardrailPackSignedDigestMatchesAppliedDigest(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
-	installedConfig, installedRaw, err := enterprisebundle.LoadConfig(installedBundle, versionRoot)
+	installedRaw, err := enterprisebundle.RenderConfig(installedBundle, versionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The managed gateway pins both paths in its service environment. Without
+	// those pins the plain inspection loader defaults audit DB paths under
+	// etc, which is not the device's effective config.
+	t.Setenv(managed.ConfigPathEnv, layout.ConfigPath)
+	t.Setenv("DEFENSECLAW_HOME", layout.DataDir)
+	installedConfig, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, installedRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,8 +216,8 @@ func TestEffectivePolicyDigestsIgnoreTheBundleRoot(t *testing.T) {
 			t.Fatalf("%s: signer %s, device %s", platform, signed[platform], installed[platform])
 		}
 	}
-	if signed["linux"] == signed["darwin"] || signed["darwin"] != signed["windows"] {
-		t.Fatalf("platform digests %v: want linux to differ (kernel policy) and darwin = windows", signed)
+	if signed["linux"] == signed["darwin"] {
+		t.Fatalf("platform digests %v: want linux to differ (kernel policy)", signed)
 	}
 
 	// An edited policy file moves the digest of every platform.
@@ -221,6 +236,124 @@ func TestEffectivePolicyDigestsIgnoreTheBundleRoot(t *testing.T) {
 		if moved[platform] == signed[platform] {
 			t.Fatalf("%s: an edited signature pack kept the digest", platform)
 		}
+	}
+}
+
+// Signing and device verification must load path defaults from the same
+// installed layout while bundle assets live under independent temporary roots.
+func TestBundleDeviceLayoutDigestParity(t *testing.T) {
+	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
+	const rules = "version: 1\ninjection: []\n"
+	packRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(packRoot, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packRoot, "rules/local-patterns.yaml"), []byte(rules), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(packRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range enterprisebundle.Platforms {
+		layout, err := enterprisebundle.StandardDeviceLayout(platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, shape := range []struct {
+			name, policyDir, dataDir string
+		}{
+			{"explicit policy_dir", layout.PolicyDir, layout.DataDir},
+			{"omitted policy_dir", "", layout.DataDir},
+			{"omitted data_dir", layout.PolicyDir, ""},
+			{"both omitted", "", ""},
+		} {
+			t.Run(platform+"/"+shape.name, func(t *testing.T) {
+				configYAML := strings.Replace(bundleConfigBase, "guardrail:\n", "guardrail:\n  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+pin+"\n", 1)
+				if shape.policyDir != "" {
+					configYAML += fmt.Sprintf("policy_dir: %q\n", shape.policyDir)
+				}
+				if shape.dataDir != "" {
+					configYAML += fmt.Sprintf("data_dir: %q\n", shape.dataDir)
+				}
+				f := newFixture(t, configYAML, func(in *enterprisebundle.ComposeInput) {
+					in.Platforms = []string{platform}
+					in.Bundle.Files[pack] = []byte(rules)
+					full := filepath.Join(in.Root, filepath.FromSlash(pack))
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(full, []byte(rules), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				})
+				in := f.input(t, f.bundle, anchors(t, "acme", nil, 0, activeKey("k1", f.key.Public())))
+				in.Platform, in.DeviceLayout = platform, &layout
+				res, err := enterprisebundle.Verify(context.Background(), in)
+				if err != nil || !res.DigestVerified || res.ExpectedDigest != res.EffectivePolicyDigest {
+					t.Fatalf("signed %s, device %s, verified %v: %v", res.ExpectedDigest, res.EffectivePolicyDigest, res.DigestVerified, err)
+				}
+				if platform == enterprisebundle.PlatformWindows && shape.name == "omitted data_dir" {
+					forward := enterprisebundle.DeviceLayout{
+						ConfigPath: strings.ReplaceAll(layout.ConfigPath, `\`, "/"),
+						DataDir:    strings.ReplaceAll(layout.DataDir, `\`, "/"),
+						PolicyDir:  strings.ReplaceAll(layout.PolicyDir, `\`, "/"),
+					}
+					in.DeviceLayout = &forward
+					separators, err := enterprisebundle.Verify(context.Background(), in)
+					if err != nil || !separators.DigestVerified || separators.EffectivePolicyDigest != res.ExpectedDigest {
+						t.Fatalf("Windows drive path separators: %+v, %v", separators, err)
+					}
+					other := enterprisebundle.DeviceLayout{
+						ConfigPath: strings.Replace(layout.ConfigPath, `C:\`, `D:\`, 1),
+						DataDir:    strings.Replace(layout.DataDir, `C:\`, `D:\`, 1),
+						PolicyDir:  strings.Replace(layout.PolicyDir, `C:\`, `D:\`, 1),
+					}
+					in.DeviceLayout = &other
+					unverifiable, err := enterprisebundle.Verify(context.Background(), in)
+					if err != nil || unverifiable.DigestVerified {
+						t.Fatalf("non-standard ProgramData layout: %+v, %v", unverifiable, err)
+					}
+					found := false
+					for _, warning := range unverifiable.Warnings {
+						found = found || warning.Code == enterprisebundle.WarnDigestUnverifiable
+					}
+					if !found {
+						t.Fatalf("non-standard layout warnings: %+v", unverifiable.Warnings)
+					}
+				}
+				// A config byte that changes the effective policy must change
+				// the digest even when the bundle assets are unchanged.
+				edited := &enterprisebundle.Bundle{Files: map[string][]byte{}}
+				for name, body := range f.in.Bundle.Files {
+					edited.Files[name] = body
+				}
+				edited.Files[enterprisebundle.ConfigName] = []byte(strings.Replace(configYAML, "  mode: observe\nai_discovery:", "  mode: action\nai_discovery:", 1))
+				changed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), edited, f.in.Root, []string{platform}, digester)
+				if err != nil || changed[platform] == res.ExpectedDigest {
+					t.Fatalf("changed config digest %v, original %s: %v", changed, res.ExpectedDigest, err)
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsDeviceLayoutPathSeparators(t *testing.T) {
+	standard, err := enterprisebundle.StandardDeviceLayout(enterprisebundle.PlatformWindows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := enterprisebundle.DeviceLayout{
+		ConfigPath: strings.ReplaceAll(standard.ConfigPath, `\`, "/"),
+		DataDir:    strings.ReplaceAll(standard.DataDir, `\`, "/"),
+		PolicyDir:  strings.ReplaceAll(standard.PolicyDir, `\`, "/"),
+	}
+	if !forward.IsStandard(enterprisebundle.PlatformWindows) {
+		t.Fatalf("Windows drive path with forward slashes is not standard: %+v", forward)
+	}
+	forward.DataDir = `D:\Other\runtime`
+	if forward.IsStandard(enterprisebundle.PlatformWindows) {
+		t.Fatal("different ProgramData drive treated as standard")
 	}
 }
 

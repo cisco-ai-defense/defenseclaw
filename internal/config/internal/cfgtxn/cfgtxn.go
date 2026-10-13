@@ -68,16 +68,28 @@ type GenerationState struct {
 	BundleID      string `json:"bundle_id,omitempty"`
 	BundleVersion uint64 `json:"bundle_version,omitempty"`
 	SignerKeyID   string `json:"signer_key_id,omitempty"`
+	// Transaction* identifies the attempted bundle on a rollback generation.
+	// Bundle* above continues to identify the policy that is now enforcing.
+	TransactionActor         string `json:"transaction_actor,omitempty"`
+	TransactionBundleID      string `json:"transaction_bundle_id,omitempty"`
+	TransactionBundleVersion uint64 `json:"transaction_bundle_version,omitempty"`
+	TransactionSignerKeyID   string `json:"transaction_signer_key_id,omitempty"`
+	TransactionSummary       string `json:"transaction_summary,omitempty"`
 }
 
 // Writer is who records a generation and why, and the policy bundle it
 // installs (only the enterprise lifecycle sets the bundle fields).
 type Writer struct {
-	Actor         string
-	Reason        string
-	BundleID      string
-	BundleVersion uint64
-	SignerKeyID   string
+	Actor                    string
+	Reason                   string
+	BundleID                 string
+	BundleVersion            uint64
+	SignerKeyID              string
+	TransactionActor         string
+	TransactionBundleID      string
+	TransactionBundleVersion uint64
+	TransactionSignerKeyID   string
+	TransactionSummary       string
 }
 
 // LockPath returns the writer lock path for a config path.
@@ -265,13 +277,18 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		return GenerationState{}, errors.New("configwrite: generation update without the writer lock")
 	}
 	next := GenerationState{
-		ConfigSHA256:  configSHA256,
-		Actor:         w.Actor,
-		Reason:        w.Reason,
-		WrittenAt:     time.Now().UTC().Format(time.RFC3339),
-		BundleID:      w.BundleID,
-		BundleVersion: w.BundleVersion,
-		SignerKeyID:   w.SignerKeyID,
+		ConfigSHA256:             configSHA256,
+		Actor:                    w.Actor,
+		Reason:                   w.Reason,
+		WrittenAt:                time.Now().UTC().Format(time.RFC3339),
+		BundleID:                 w.BundleID,
+		BundleVersion:            w.BundleVersion,
+		SignerKeyID:              w.SignerKeyID,
+		TransactionActor:         w.TransactionActor,
+		TransactionBundleID:      w.TransactionBundleID,
+		TransactionBundleVersion: w.TransactionBundleVersion,
+		TransactionSignerKeyID:   w.TransactionSignerKeyID,
+		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
 	switch {

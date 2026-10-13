@@ -104,3 +104,104 @@ func TestLifecycleSettlesBundlesAndReportsTheBundleBlock(t *testing.T) {
 		t.Fatalf("status bundle block = %+v", status.Bundle)
 	}
 }
+
+func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			store := h.env.bundleStore()
+			r, err := store.Receive("b-01JA0000000000000000000001", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Fail(r, enterprisebundle.CodeSignatureInvalid, "invalid signature"); err != nil {
+				t.Fatal(err)
+			}
+			state := store.StatePath()
+			if err := os.WriteFile(state, []byte("{\"schema_version\":1,\"floor\":0}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h.owners[state] = [2]int{0, 0}
+			privateReceipt := filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")
+			staging := filepath.Join(store.BundlesDir, ".staging-test")
+			if err := os.Mkdir(staging, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			version := filepath.Join(store.BundlesDir, "v1-JA000000")
+			if err := os.Mkdir(version, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			versionAsset := filepath.Join(version, enterprisebundle.ManifestName)
+			if err := os.WriteFile(versionAsset, []byte("{}"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			service := h.accounts.accounts[h.env.Layout.ServiceUser]
+			for _, path := range []string{store.PublicReceiptPath(), privateReceipt, staging} {
+				h.owners[path] = [2]int{0, 0}
+			}
+			for _, path := range []string{version, versionAsset} {
+				h.owners[path] = [2]int{0, service.GID}
+			}
+			check := func(path string, want os.FileMode) {
+				t.Helper()
+				info, err := os.Lstat(path)
+				if err != nil || info.Mode().Perm() != want {
+					t.Fatalf("%s mode = %v, %v; want %04o", path, info, err, want)
+				}
+			}
+			check(store.BundlesDir, 0o755)
+			check(store.PublicReceiptPath(), 0o644)
+			check(state, 0o600)
+			check(privateReceipt, 0o600)
+			check(h.env.bundleInboxDir(), 0o700)
+			check(staging, 0o700)
+			check(version, 0o750)
+			check(versionAsset, 0o640)
+			if goos == "darwin" {
+				targets := map[string]bool{}
+				for _, target := range h.env.aclTargets(nil, nil) {
+					targets[target.path] = target.private
+				}
+				for _, path := range []string{state, privateReceipt, h.env.bundleInboxDir(), staging, version, versionAsset} {
+					if !targets[path] {
+						t.Fatalf("private bundle path %s is not checked for macOS read ACLs", path)
+					}
+				}
+				if targets[store.PublicReceiptPath()] {
+					t.Fatal("public receipt is treated as private by the macOS ACL check")
+				}
+			}
+			writeFreshLedger(t, h)
+			if err := os.Chmod(versionAsset, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			versionDrift := h.run(Options{Action: ActionVerify})
+			requireError(t, versionDrift, codeVerify)
+			if !strings.Contains(messagesOf(versionDrift.Errors, codeVerify), enterprisebundle.ManifestName) {
+				t.Fatalf("verify missed world-readable version asset: %+v", versionDrift.Errors)
+			}
+			if err := os.Chmod(versionAsset, 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, path := range []string{store.PublicReceiptPath(), state, privateReceipt, h.env.bundleInboxDir(), staging} {
+				if err := os.Chmod(path, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			requireError(t, verify, codeVerify)
+			for _, path := range []string{store.PublicReceiptPath(), state, privateReceipt, h.env.bundleInboxDir(), staging} {
+				if !strings.Contains(messagesOf(verify.Errors, codeVerify), filepath.Base(path)) {
+					t.Fatalf("verify missed %s mode drift: %+v", path, verify.Errors)
+				}
+			}
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			check(store.PublicReceiptPath(), 0o644)
+			check(state, 0o600)
+			check(privateReceipt, 0o600)
+			check(h.env.bundleInboxDir(), 0o700)
+		})
+	}
+}

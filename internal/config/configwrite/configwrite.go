@@ -137,6 +137,11 @@ type Options struct {
 	// Bundle names the signed policy bundle the lifecycle installs; it is
 	// recorded in config.generation.json.
 	Bundle BundleRef
+	// TransactionBundle is the attempted bundle when a rollback restores an
+	// older enforcing bundle. It is used for audit attribution only.
+	TransactionBundle  BundleRef
+	TransactionActor   string
+	TransactionSummary string
 }
 
 // BundleRef names a signed policy bundle in config.generation.json.
@@ -148,7 +153,10 @@ type BundleRef struct {
 
 func (o Options) writer() cfgtxn.Writer {
 	return cfgtxn.Writer{Actor: o.Actor, Reason: o.Reason,
-		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID}
+		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
+		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
+		TransactionBundleVersion: o.TransactionBundle.Version,
+		TransactionSignerKeyID:   o.TransactionBundle.SignerKeyID, TransactionSummary: o.TransactionSummary}
 }
 
 // Result describes a committed write.
@@ -368,8 +376,12 @@ func checkActor(opt Options) error {
 		return errors.New("configwrite: an actor is required")
 	}
 	principal := IsPrincipalActor(opt.Actor)
-	if (principal || opt.Bundle != (BundleRef{})) && !opt.Lifecycle {
+	if (principal || opt.Bundle != (BundleRef{}) || opt.TransactionBundle != (BundleRef{}) || opt.TransactionActor != "") && !opt.Lifecycle {
 		return ErrPrincipalNotLifecycle
+	}
+	if (opt.TransactionBundle == (BundleRef{})) != (opt.TransactionActor == "") ||
+		(opt.TransactionBundle != (BundleRef{}) && (!IsPrincipalActor(opt.TransactionActor) || !validPrincipal(opt.TransactionActor))) {
+		return errors.New("configwrite: rollback transaction requires a bundle principal")
 	}
 	if principal && !validPrincipal(opt.Actor) {
 		return fmt.Errorf("configwrite: actor %q is not control-plane:<tenant>/<admin> or operator:<os-admin>", opt.Actor)

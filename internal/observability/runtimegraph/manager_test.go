@@ -301,6 +301,25 @@ type fakeReporter struct {
 	applied chan *Graph
 }
 
+type attributionReporter struct {
+	fakeReporter
+	current BundleAttribution
+}
+
+func (r *attributionReporter) BundleAttribution() (BundleAttribution, bool) {
+	return r.current, r.current.ID != ""
+}
+
+func TestReloadReportCapturesBundleAtCreation(t *testing.T) {
+	r := &attributionReporter{current: BundleAttribution{Principal: "operator:tip", ID: "b-01JA0000000000000000000033", Version: 3}}
+	m := &Manager{reporter: r, clock: fakeClock{now: time.Now()}}
+	report := m.newReport(nil, ReportReloadApplied, "applied", "", "")
+	r.current = BundleAttribution{}
+	if report.Bundle == nil || report.Bundle.Principal != "operator:tip" || report.Bundle.Version != 3 || !report.AttributionCaptured {
+		t.Fatalf("bundle attribution after rollback = %+v", report)
+	}
+}
+
 type reentrantReporter struct {
 	manager   *Manager
 	candidate Config

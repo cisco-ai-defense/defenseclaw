@@ -72,11 +72,20 @@ const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111
 
 func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 	const sid = "S-1-5-80-1-2-3-4-5"
+	if got, want := windowsBundleDirectorySDDL(sid), "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+sid+")(A;;0x1200a9;;;BU)"; got != want {
+		t.Fatalf("public bundle directory ACL = %q, want %q", got, want)
+	}
+	if got, want := windowsBundleReceiptSDDL(sid), "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;"+sid+")(A;;FR;;;BU)"; got != want {
+		t.Fatalf("public receipt ACL = %q, want %q", got, want)
+	}
 	if got, want := windowsBundlePrivateSDDL(), "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"; got != want {
 		t.Fatalf("private staging ACL = %q, want %q", got, want)
 	}
 	if got, want := windowsBundleVersionSDDL(sid), "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;"+sid+")"; got != want {
 		t.Fatalf("bundle version ACL = %q, want %q", got, want)
+	}
+	if strings.Contains(windowsBundlePrivateSDDL(), ";;;BU)") || strings.Contains(windowsBundleVersionSDDL(sid), ";;;BU)") {
+		t.Fatal("private staging or version assets grant Users access")
 	}
 }
 
@@ -98,10 +107,12 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 		})
 	})
 	savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust := windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust
-	savedPrivate, savedSeal, savedPublish := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion
+	savedPrivate, savedSeal, savedPublish, savedReceipt, savedEnsure := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion, windowsBundlePublishReceipt, windowsBundleEnsureDirectory
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
 		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
+		windowsBundlePublishReceipt = savedReceipt
+		windowsBundleEnsureDirectory = savedEnsure
 	})
 	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
@@ -112,6 +123,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	windowsBundlePrivateStage = func(string) error { return nil }
 	windowsBundleSealVersion = func(string) error { return nil }
 	windowsBundlePublishVersion = func(string) error { return nil }
+	windowsBundlePublishReceipt = func(string) error { return nil }
+	windowsBundleEnsureDirectory = func(layout managed.StandaloneLayout) error {
+		return os.MkdirAll(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), 0o700)
+	}
 	bundleAnchorTrust = nil
 	return layout
 }

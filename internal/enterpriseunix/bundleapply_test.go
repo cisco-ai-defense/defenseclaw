@@ -133,7 +133,8 @@ func testBundleUnixApplyRuntimeAuditCarriesPrincipal(t *testing.T, goos string) 
 // bundle digester that hashes the rendered config.
 type bundleHost struct {
 	*testHost
-	key ed25519.PrivateKey
+	key             ed25519.PrivateKey
+	installedDigest func([]byte) string
 	// frozen makes the gateway keep reporting this digest and reloadError.
 	frozen, reloadError string
 	// extra are bundle files next to config.yaml in every bundle signed.
@@ -144,7 +145,7 @@ type bundleHost struct {
 // installed config.yaml and its recorded generation.
 type bundleRunner struct {
 	*fakeRunner
-	h *testHost
+	h *bundleHost
 }
 
 func (r *bundleRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
@@ -155,9 +156,12 @@ func (r *bundleRunner) Run(ctx context.Context, name string, args ...string) (Co
 	return r.fakeRunner.Run(ctx, name, args...)
 }
 
-func installedPolicy(h *testHost) (string, uint64) {
+func installedPolicy(h *bundleHost) (string, uint64) {
 	raw, _ := os.ReadFile(h.env.P(h.env.Layout.ConfigPath))
 	state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if h.installedDigest != nil {
+		return h.installedDigest(raw), state.Generation
+	}
 	bundlesDir := filepath.Join(h.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
 	for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
 		raw = bytes.ReplaceAll(raw, []byte(filepath.Join(bundlesDir, name)), []byte("${bundle_root}"))
@@ -182,7 +186,7 @@ func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 			return nil
 		})
 	})
-	h.env.Runner = &bundleRunner{fakeRunner: h.runner, h: h}
+	h.env.Runner = &bundleRunner{fakeRunner: h.runner, h: b}
 	gatewayName := unitGateway
 	if goos == "darwin" {
 		gatewayName = labelGateway
@@ -191,7 +195,7 @@ func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 		if !h.healthy || !h.services.isActive(gatewayName) {
 			return 0, nil, errors.New("connection refused")
 		}
-		digest, generation := installedPolicy(h)
+		digest, generation := installedPolicy(b)
 		if b.frozen != "" {
 			digest = b.frozen
 		}
@@ -346,6 +350,7 @@ func bundleConfigs(h *testHost) (v1, v2, restart string) {
 func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	b := newBundleHost(t)
 	v1, v2, restart := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
 	from := len(b.services.calls)
 	r := b.apply(b.dir(1, v1))
 	requireOK(t, r)
@@ -353,7 +358,7 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 		t.Fatalf("after v1: state = %+v", st)
 	}
 	rc := b.receipt(bundleID(1))
-	digest, generation := installedPolicy(b.testHost)
+	digest, generation := installedPolicy(b)
 	if rc.State != enterprisebundle.StateConfirmed || rc.EffectivePolicyDigest != digest || rc.ConfigGeneration != generation || rc.Restart || gatewayTouched(b.testHost, from) {
 		t.Fatalf("v1 receipt = %+v (gateway touched %v)", rc, gatewayTouched(b.testHost, from))
 	}
@@ -370,6 +375,7 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 
 	from = len(b.services.calls)
+	b.mapPromotedBundleOwners(2)
 	requireOK(t, b.apply(b.dir(2, v2)))
 	if rc := b.receipt(bundleID(2)); rc.State != enterprisebundle.StateConfirmed || rc.Restart || gatewayTouched(b.testHost, from) {
 		t.Fatalf("hot bundle: receipt = %+v, gateway touched = %v", rc, gatewayTouched(b.testHost, from))
@@ -379,6 +385,7 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 
 	from = len(b.services.calls)
+	b.mapPromotedBundleOwners(3)
 	path := b.dir(3, restart)
 	requireOK(t, b.apply(path))
 	if rc := b.receipt(bundleID(3)); rc.State != enterprisebundle.StateConfirmed || !rc.Restart || !gatewayTouched(b.testHost, from) {
@@ -395,6 +402,98 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	after, _ := b.env.bundleStore().Receipts()
 	if !r.Noop || r.NoopReason != "already_applied" || len(after) != len(receipts) {
 		t.Fatalf("retry: noop = %v (%s), receipts %d -> %d", r.Noop, r.NoopReason, len(receipts), len(after))
+	}
+}
+
+func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
+	b := newBundleHost(t)
+	stagePackage(t, b.testHost, "1.0.0")
+	requireOK(t, b.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
+	b.extra = map[string]string{pack: "version: 1\ninjection: []\n"}
+	configForPack := func() string {
+		root := t.TempDir()
+		writeRooted(t, filepath.Join(root, "rules/local-patterns.yaml"), b.extra[pack])
+		digest, err := guardrail.RulePackDigest(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := strings.Replace(string(DefaultConfig(b.env.Layout)), "policy_dir: "+b.env.Layout.VendorPolicyDir, "policy_dir: policies", 1)
+		return strings.Replace(cfg, "  rule_pack: default\n",
+			"  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+digest+"\n", 1)
+	}
+	v1 := configForPack()
+	b.mapPromotedBundleOwners(1)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	b.extra[pack] = "version: 1\ninjection: []\n# revised\n"
+	v2 := strings.Replace(configForPack(), "mode: observe", "mode: action", 1)
+	v2 = strings.Replace(v2, "  rule_pack: custom\n", "  block_at: HIGH\n  rule_pack: custom\n", 1)
+	b.mapPromotedBundleOwners(2)
+	from := len(b.services.calls)
+	requireOK(t, b.apply(b.dir(2, v2)))
+	if rc := b.receipt(bundleID(2)); rc.Restart || gatewayTouched(b.testHost, from) {
+		t.Fatalf("policy asset bundle restarted gateway: receipt=%+v calls=%v", rc, b.services.calls[from:])
+	}
+}
+
+// A signer stages config.yaml under a temporary path, while the gateway
+// loads it from the fixed managed path. Both must resolve implicit rule-pack
+// defaults the same way when v2 replaces a confirmed v1 bundle.
+func TestBundleApplyReplacementMatchesSignedManagedPathDefaults(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			const pack = "policies/guardrail/replacement/rules/local-patterns.yaml"
+			b.extra = map[string]string{pack: "version: 1\ninjection: []\n"}
+			packRoot := t.TempDir()
+			writeRooted(t, filepath.Join(packRoot, "rules/local-patterns.yaml"), b.extra[pack])
+			pin, err := guardrail.RulePackDigest(packRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			missingPolicyDir := filepath.Join(t.TempDir(), "absent-policies")
+			v1 := strings.Replace(string(DefaultConfig(b.env.Layout)), "policy_dir: "+b.env.Layout.VendorPolicyDir,
+				"policy_dir: "+missingPolicyDir, 1)
+			v1 = strings.Replace(v1, "  rule_pack: default\n",
+				"  block_at: HIGH\n  rule_pack: replacement\n  custom_packs:\n    replacement:\n      path: policies/guardrail/replacement\n      digest: sha256:"+pin+"\n", 1)
+			v2 := strings.Replace(v1, "mode: observe", "mode: action", 1)
+			v2 = strings.Replace(v2, "block_at: HIGH", "block_at: MEDIUM", 1)
+			if v2 == v1 {
+				t.Fatal("v2 did not change the policy")
+			}
+			canonical := func(raw []byte, root string) []byte {
+				return bytes.ReplaceAll(raw, []byte(root), []byte("${bundle_root}"))
+			}
+			digestOf := func(cfg *config.Config, raw []byte) string {
+				return "sha256:" + sha256Bytes(append(raw, []byte("\n"+cfg.Guardrail.RulePackDir)...))
+			}
+			b.env.BundleDigester = func(_ context.Context, cfg *config.Config, raw []byte, _, root string) (string, error) {
+				return digestOf(cfg, canonical(raw, root)), nil
+			}
+			b.installedDigest = func(raw []byte) string {
+				cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(b.env.Layout.ConfigPath, raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bundlesDir := filepath.Join(b.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
+				for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
+					raw = canonical(raw, filepath.Join(bundlesDir, name))
+				}
+				return digestOf(cfg, raw)
+			}
+			b.mapPromotedBundleOwners(1)
+			first := b.dir(1, v1)
+			b.env.ProductVersion = "1.0.1" // The first signature predates the installed build.
+			requireOK(t, b.apply(first))
+			if rc := b.receipt(bundleID(1)); rc.State != enterprisebundle.StateConfirmed {
+				t.Fatalf("v1 receipt: %+v", rc)
+			}
+			b.mapPromotedBundleOwners(2)
+			requireOK(t, b.apply(b.dir(2, v2)))
+			if rc := b.receipt(bundleID(2)); rc.State != enterprisebundle.StateConfirmed || rc.ExpectedDigest != rc.EffectivePolicyDigest {
+				t.Fatalf("v2 receipt: %+v", rc)
+			}
+		})
 	}
 }
 
@@ -498,6 +597,10 @@ func testBundleShippedRulePackIsReadableByGateway(t *testing.T, goos string) {
 			t.Fatal(err)
 		}
 		want := os.FileMode(0o750)
+		wantGID := account.GID
+		if path == store.BundlesDir {
+			want, wantGID = 0o755, 0
+		}
 		if !info.IsDir() {
 			want = 0o640
 		}
@@ -505,8 +608,8 @@ func testBundleShippedRulePackIsReadableByGateway(t *testing.T, goos string) {
 			t.Errorf("%s mode %04o, want %04o", path, info.Mode().Perm(), want)
 		}
 		uid, gid, err := b.env.OwnerOf(path)
-		if err != nil || uid != 0 || gid != account.GID {
-			t.Errorf("%s owner %d:%d, want root:%d (%v)", path, uid, gid, account.GID, err)
+		if err != nil || uid != 0 || gid != wantGID {
+			t.Errorf("%s owner %d:%d, want root:%d (%v)", path, uid, gid, wantGID, err)
 		}
 	}
 }
@@ -586,6 +689,44 @@ func TestBundleApplyFaultAtEveryPhaseKeepsTheLastGoodBundle(t *testing.T) {
 	}
 }
 
+func TestDarwinFailedBundleRestoresConfigOwnerAndMode(t *testing.T) {
+	b := newBundleHost(t, "darwin")
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	path := b.env.P(b.env.Layout.ConfigPath)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, _, err := statOwnerMode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.env.bundleFault = func(phase string) error {
+		if phase == "transaction" {
+			return errors.New("failed after the staged config was installed")
+		}
+		return nil
+	}
+	b.mapPromotedBundleOwners(2)
+	requireError(t, b.apply(b.dir(2, v2)), codeBundleNotConfirmed)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotUID, gotGID, _, err := statOwnerMode(path)
+	if err != nil || gotUID != uid || gotGID != gid || after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("rolled-back config mode/owner = %04o %d:%d, want %04o %d:%d (%v)",
+			after.Mode().Perm(), gotUID, gotGID, before.Mode().Perm(), uid, gid, err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.BundleID != bundleID(1) || state.TransactionBundleID != bundleID(2) ||
+		state.TransactionActor != "operator:mdm-admin" || state.TransactionBundleVersion != 2 {
+		t.Fatalf("rollback generation lost enforcing or attempted bundle: %+v (%v)", state, err)
+	}
+}
+
 // A run that dies at any point of an apply leaves the host enforcing the
 // last good bundle; the next run recovers (or, after the commit, confirms)
 // and a retry of the same bundle succeeds.
@@ -643,7 +784,7 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	v1, v2, _ := bundleConfigs(b.testHost)
 	requireOK(t, b.apply(b.dir(1, v1)))
 	good := b.read(b.env.Layout.ConfigPath)
-	b.frozen, _ = installedPolicy(b.testHost)
+	b.frozen, _ = installedPolicy(b)
 	b.reloadError = "rule pack refused"
 	r := b.apply(b.dir(2, v2))
 	requireError(t, r, codeBundleNotConfirmed)

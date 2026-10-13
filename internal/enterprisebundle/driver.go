@@ -34,6 +34,7 @@ type Driver struct {
 	AnchorTrust    func(path string) error
 	Platform       string
 	ProductVersion string
+	DeviceLayout   *DeviceLayout
 	Now            func() time.Time
 	// SecretPresent reports whether the device holds a credential.
 	SecretPresent func(name string) (bool, error)
@@ -143,7 +144,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	res, err := Verify(ctx, VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: d.Platform, Now: d.now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: d.ProductVersion, HostPlatform: d.Platform, SecretPresent: d.SecretPresent,
+		ProductVersion: d.ProductVersion, HostPlatform: d.Platform, DeviceLayout: d.DeviceLayout, SecretPresent: d.SecretPresent,
 		Stage:    func(*Bundle) (string, error) { return staging, nil },
 		Digester: d.Digester,
 	})
@@ -163,6 +164,12 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		}
 		p.Receipt, p.AlreadyApplied, p.Config, p.ConfigSHA256 = nil, true, raw, sha256Hex(raw)
 		return p, nil
+	}
+	// Verify computed the effective policy from the staged tree. Enforce the
+	// comparable signed digest here, before promotion hands Config to the
+	// caller's activation transaction. Finish still confirms the live digest.
+	if err := ConfirmPolicyDigests(res.ExpectedDigest, res.EffectivePolicyDigest, res.EffectivePolicyDigest, res.DigestVerified); err != nil {
+		return refuse(err)
 	}
 	m := res.Manifest
 	if err := d.Store.Advance(receipt, StateVerified, func(rc *Receipt) {

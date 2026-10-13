@@ -125,6 +125,27 @@ func renderValue(value, root string, b *Bundle, dirs map[string]bool) (string, e
 // config and the rendered bytes. root must hold the bundle files: the
 // loader and the effective digest read the policy files the config names.
 func LoadConfig(b *Bundle, root string) (*config.Config, []byte, error) {
+	return loadConfigAtPath(b, root, filepath.Join(root, ConfigName), root, "")
+}
+
+// LoadConfigForPlatform resolves defaults using the target's standard managed
+// layout. Offline signing and verification share this path.
+func LoadConfigForPlatform(b *Bundle, root, platform string) (*config.Config, []byte, error) {
+	layout, err := StandardDeviceLayout(platform)
+	if err != nil {
+		return nil, nil, refuse(CodeManifestInvalid, "target.platforms", "%s", boundedDetail(err.Error()))
+	}
+	return LoadConfigForDeviceLayout(b, root, platform, layout)
+}
+
+// LoadConfigForDeviceLayout is the device-side counterpart of the signer
+// load. Its asset root is staging; its path defaults come from the installed
+// config and runtime directories.
+func LoadConfigForDeviceLayout(b *Bundle, root, platform string, layout DeviceLayout) (*config.Config, []byte, error) {
+	return loadConfigAtPath(b, root, layout.ConfigPath, layout.DataDir, platform)
+}
+
+func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*config.Config, []byte, error) {
 	source, ok := b.Files[ConfigName]
 	if !ok {
 		return nil, nil, refuse(CodeFileMissing, ConfigName, "the bundle has no config.yaml")
@@ -139,16 +160,20 @@ func LoadConfig(b *Bundle, root string) (*config.Config, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	configPath := filepath.Join(root, ConfigName)
 	if message, bad := config.ScanManagedEnvSecretReferences(rendered).Refusal(configPath, "with `enterprise secret set --name <name> --from-stdin`", config.EnterpriseSettingsReferenceURL); bad {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(message))
 	}
 	if _, err := config.ParseCompileObservabilityV8(configPath, rendered, config.ObservabilityV8CompileOptions{
-		DefaultDataDir: root, Secrets: bundleSecretProbe{},
+		DefaultDataDir: dataDir, Secrets: bundleSecretProbe{},
 	}); err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
-	cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, rendered)
+	var cfg *config.Config
+	if platform == "" {
+		cfg, err = config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, rendered)
+	} else {
+		cfg, err = config.LoadRuntimeV8InspectionCandidateForLayout(configPath, rendered, dataDir, platform)
+	}
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
@@ -184,8 +209,8 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 			if err != nil {
 				return refuse(CodeConfigInvalid, ConfigName, "windows: %s", boundedDetail(err.Error()))
 			}
-			if _, explicit := doc.Plain["data_dir"]; explicit {
-				return refuse(CodeConfigInvalid, ConfigName, "windows: config data_dir must be omitted; the device uses <registered ProgramData>\\Cisco\\DefenseClaw\\runtime (usually C:\\ProgramData\\Cisco\\DefenseClaw\\runtime)")
+			if _, explicit := doc.Plain["data_dir"]; explicit && !windowsStandardDataDir(cfg.DataDir) {
+				return refuse(CodeConfigInvalid, ConfigName, "windows: explicit data_dir must equal the standard managed runtime directory C:\\ProgramData\\Cisco\\DefenseClaw\\runtime; a device registered under another ProgramData root cannot be signed offline")
 			}
 			if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 				return refuse(CodeConfigInvalid, ConfigName, "windows: config deployment_mode must be %s", managed.DeploymentModeManagedEnterprise)
@@ -220,21 +245,19 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 type PolicyDigester func(ctx context.Context, cfg *config.Config, raw []byte, goos, bundleRoot string) (string, error)
 
 // EffectivePolicyDigests loads the bundle config against root and returns
-// its effective policy digest for each platform. The config is loaded once,
-// on this host; a config whose defaults differ by platform (data_dir, for
-// example) digests as this host resolves it.
+// its effective policy digest for each platform using the standard layout.
 func EffectivePolicyDigests(ctx context.Context, b *Bundle, root string, platforms []string, digest PolicyDigester) (map[string]string, error) {
-	cfg, rendered, err := LoadConfig(b, root)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateTargetConfig(b, cfg, rendered, platforms); err != nil {
-		return nil, err
-	}
 	out := make(map[string]string, len(platforms))
 	for _, platform := range platforms {
 		if !knownPlatform(platform) {
 			return nil, refuse(CodeManifestInvalid, "target.platforms", "unknown platform %s", safePath(platform))
+		}
+		cfg, rendered, err := LoadConfigForPlatform(b, root, platform)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateTargetConfig(b, cfg, rendered, []string{platform}); err != nil {
+			return nil, err
 		}
 		value, err := digest(ctx, cfg, rendered, platform, root)
 		if err != nil {

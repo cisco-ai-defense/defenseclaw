@@ -319,6 +319,14 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
         assert directory.stat().st_mode & 0o777 == 0o755, directory
 
 
+def test_bundle_detection_contract_names_the_public_receipt_and_private_state() -> None:
+    contract = _text(MDM / "contract" / "detection.md")
+    assert "<etc>/bundles/receipt.json" in contract
+    assert "any local user can read" in contract
+    assert "`bundle-state.json` and private receipts stay under the `0700`" in contract
+    assert "noninheriting read and execute ACEs" in contract
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize(
     ("http", "code", "reason"),

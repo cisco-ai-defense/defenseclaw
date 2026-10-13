@@ -2497,6 +2497,14 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
 		}
 	}
+	if l.bundle != nil {
+		if attempted := l.configWriteOptions(); attempted.Bundle != (configwrite.BundleRef{}) {
+			opt.TransactionActor = attempted.Actor
+			opt.TransactionBundle = attempted.Bundle
+			opt.TransactionSummary = l.bundle.receipt.ChangeSummary
+			opt.Lifecycle = true
+		}
+	}
 	_, err = configwrite.Locked(ctx, configPath, opt, func() (bool, error) {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {

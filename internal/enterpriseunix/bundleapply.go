@@ -383,7 +383,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	if readErr != nil {
 		return refuse(readErr)
 	}
-	if err := env.ensureDir(store.BundlesDir, 0o750, fileOwner{UID: 0, GID: record.ServiceGID}); err != nil {
+	if err := env.ensureDir(store.BundlesDir, 0o755, rootOwner()); err != nil {
 		return refuse(fmt.Errorf("prepare the policy bundle store: %w", err))
 	}
 	staging, err := store.Stage(receipt, b)
@@ -409,6 +409,10 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	res, err := enterprisebundle.Verify(ctx, enterprisebundle.VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: env.GOOS, Now: env.Now().UTC(), Confirmed: st.Confirmed(),
 		ProductVersion: env.ProductVersion, HostPlatform: env.GOOS, SecretPresent: env.bundleSecretPresent,
+		DeviceLayout: func() *enterprisebundle.DeviceLayout {
+			layout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
+			return &layout
+		}(),
 		Stage:    func(*enterprisebundle.Bundle) (string, error) { return staging, nil },
 		Digester: env.BundleDigester,
 	})
