@@ -74,10 +74,14 @@ func (e *Env) savePolicyState(record enterprisestatus.PolicyStateRecord) error {
 	return e.writeFileAtomic(e.policyStatePath(), append(data, '\n'), 0o600, rootOwner())
 }
 
-// gatewayPolicyHealth is policy.effective_digest and policy.last_reload_error
-// from a /health body, "" for what the gateway does not publish.
+// gatewayPolicyHealth is policy.effective_digest and the current config or
+// policy reload error from /health, "" for what the gateway does not publish.
 func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 	var health struct {
+		Config struct {
+			State     string `json:"state"`
+			LastError string `json:"last_error"`
+		} `json:"config"`
 		Policy *struct {
 			EffectiveDigest string `json:"effective_digest"`
 			LastReloadError string `json:"last_reload_error"`
@@ -86,7 +90,14 @@ func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
 		return "", ""
 	}
-	return health.Policy.EffectiveDigest, health.Policy.LastReloadError
+	reloadError = health.Policy.LastReloadError
+	if reloadError == "" && health.Config.State == "error" {
+		reloadError = health.Config.LastError
+		if reloadError == "" {
+			reloadError = "gateway config.state=error"
+		}
+	}
+	return health.Policy.EffectiveDigest, reloadError
 }
 
 // computePolicy runs the installed gateway's `policy digest` with the

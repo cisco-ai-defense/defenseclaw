@@ -349,6 +349,16 @@ func (m *ConfigManager) runWithStartupReconcile(ctx context.Context, ready chan<
 	return m.run(ctx, ready)
 }
 
+// A watcher error is not necessarily a config read error. On macOS kqueue
+// watches directory entries and can report EACCES for a private sibling of
+// config.yaml. Reconcile the source and assets; only an actual reload failure
+// should put config health in error.
+func (m *ConfigManager) reconcileWatchError(ctx context.Context, watchErr error) {
+	if err := m.ReloadAssets(ctx, "watch_error"); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(os.Stderr, "[config] watcher error (%v); reconciliation failed: %v\n", watchErr, err)
+	}
+}
+
 func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) error {
 	if m == nil {
 		if startupReady != nil {
@@ -596,8 +606,12 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			pending = true
 			resetTimer(timer, configReloadDebounce)
 		case err := <-fsw.Errors:
-			if err != nil && m.health != nil {
-				m.health.SetConfig(StateError, err.Error(), map[string]interface{}{"path": m.path})
+			if err != nil {
+				// kqueue can report a permission error for another entry in
+				// the watched directory (for example a private bundle inbox).
+				// Check the config and its assets before changing config health.
+				m.reconcileWatchError(ctx, err)
+				syncAssetWatches()
 			}
 		case <-timer.C:
 			if !pending {
@@ -755,8 +769,11 @@ func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watc
 					dirty = true
 				}
 			case watchErr := <-fsw.Errors:
-				if watchErr != nil && m.health != nil {
-					m.health.SetConfig(StateError, watchErr.Error(), map[string]interface{}{"path": m.path})
+				if watchErr != nil {
+					m.reconcileWatchError(ctx, watchErr)
+					if assets.sync != nil {
+						assets.sync()
+					}
 				}
 			case <-timer.C:
 				if dirty {

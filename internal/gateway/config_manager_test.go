@@ -86,6 +86,32 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 }
 
+func TestConfigWatcherErrorReconcilesBeforeChangingHealth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := NewSidecarHealth()
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		return nil
+	})
+	health.SetConfig(StateError, "permission denied", map[string]interface{}{"path": path})
+	mgr.reconcileWatchError(context.Background(), os.ErrPermission)
+	if got := health.Snapshot().Config; got.State != StateRunning || got.LastError != "" {
+		t.Fatalf("readable config after a watcher error: %+v", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reconcileWatchError(context.Background(), os.ErrPermission)
+	if got := health.Snapshot().Config; got.State != StateError || !strings.Contains(got.LastError, path) {
+		t.Fatalf("unreadable config after a watcher error: %+v", got)
+	}
+}
+
 // GAP-0264: the startup reconcile does not parse, validate and compile
 // config.yaml again while the file still holds the bytes the gateway booted
 // from; once they changed it reloads.

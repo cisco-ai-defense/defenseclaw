@@ -199,6 +199,31 @@ func TestEnterpriseBundleStatusWarnsWhenSignedDigestDiffers(t *testing.T) {
 	}
 }
 
+func TestEnterpriseBundleStatusRejectsConfigHealthError(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	digest := "sha256:" + strings.Repeat("8", 64)
+	confirmBundle(t, store, "b-01JA0000000000000000000046", 1, digest)
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{
+			EffectiveDigest: digest, GatewayReportedDigest: digest,
+			LastReloadError: "permission denied", Applied: false,
+		}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || !hasBundleWarning(result.Warnings, "policy_reload_rejected") {
+		t.Fatalf("confirmed digest hid config health error: %s", out)
+	}
+}
+
 func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

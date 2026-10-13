@@ -703,9 +703,31 @@ func TestBundleApplyFaultAtEveryPhaseKeepsTheLastGoodBundle(t *testing.T) {
 func TestDarwinFailedBundleRestoresConfigOwnerAndMode(t *testing.T) {
 	b := newBundleHost(t, "darwin")
 	v1, v2, _ := bundleConfigs(b.testHost)
+	b.extra = map[string]string{"policies/guardrail/custom/rules/marker.yaml": "version: 1\n"}
 	b.mapPromotedBundleOwners(1)
 	requireOK(t, b.apply(b.dir(1, v1)))
 	path := b.env.P(b.env.Layout.ConfigPath)
+	record, err := b.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(path string, mode os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uid, gid, err := b.env.OwnerOf(path)
+		if err != nil || info.Mode().Perm() != mode || uid != 0 || gid != record.ServiceGID {
+			t.Fatalf("%s mode/owner = %04o %d:%d, want %04o 0:%d (%v)", path, info.Mode().Perm(), uid, gid, mode, record.ServiceGID, err)
+		}
+	}
+	pack := b.env.P(filepath.Join(b.env.bundleVersionDir(b.state().Current.Dir), "policies/guardrail/custom/rules/marker.yaml"))
+	packDir := filepath.Dir(pack)
+	check(path, 0o640)
+	check(b.env.P(configwrite.GenerationPath(b.env.Layout.ConfigPath)), 0o640)
+	check(packDir, 0o750)
+	check(pack, 0o640)
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -731,6 +753,10 @@ func TestDarwinFailedBundleRestoresConfigOwnerAndMode(t *testing.T) {
 		t.Fatalf("rolled-back config mode/owner = %04o %d:%d, want %04o %d:%d (%v)",
 			after.Mode().Perm(), gotUID, gotGID, before.Mode().Perm(), uid, gid, err)
 	}
+	// The fake chown ledger cannot model snapshot inode ownership: snapshot
+	// reads the real host uid/gid. The equality above checks restored owner.
+	check(packDir, 0o750)
+	check(pack, 0o640)
 	state, err := configwrite.ReadGenerationState(path)
 	if err != nil || state.BundleID != bundleID(1) || state.TransactionBundleID != bundleID(2) ||
 		state.TransactionActor != "operator:mdm-admin" || state.TransactionBundleVersion != 2 {
@@ -878,6 +904,10 @@ func TestBundleConfirmRejectsGatewayConfigErrorAndRestoresLastGood(t *testing.T)
 	requireOK(t, b.apply(b.dir(1, v1)))
 	good := b.read(b.env.Layout.ConfigPath)
 	b.configError = "permission denied"
+	status := b.run(Options{Action: ActionStatus})
+	if status.Policy == nil || status.Policy.Applied || status.Policy.LastReloadError != b.configError {
+		t.Fatalf("confirmed bundle status ignored gateway config error: %+v", status.Policy)
+	}
 	r := b.apply(b.dir(2, v2))
 	requireError(t, r, codeBundleNotConfirmed)
 	rc := b.receipt(bundleID(2))
