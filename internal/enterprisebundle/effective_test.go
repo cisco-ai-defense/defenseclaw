@@ -421,13 +421,21 @@ func TestBundleDeviceLayoutDigestParity(t *testing.T) {
 						PolicyDir:  strings.Replace(layout.PolicyDir, `C:\`, `D:\`, 1),
 					}
 					in.DeviceLayout = &other
-					unverifiable, err := enterprisebundle.Verify(context.Background(), in)
-					if err != nil || unverifiable.DigestVerified {
-						t.Fatalf("non-standard ProgramData layout: %+v, %v", unverifiable, err)
+					equal, err := enterprisebundle.Verify(context.Background(), in)
+					if err != nil || !equal.DigestVerified || equal.DigestUnverifiable || equal.EffectivePolicyDigest != equal.ExpectedDigest {
+						t.Fatalf("matching digest on non-standard ProgramData layout: %+v, %v", equal, err)
+					}
+					layoutSensitive := in
+					layoutSensitive.Digester = func(context.Context, *config.Config, []byte, string, string) (string, error) {
+						return gatewayDigest, nil
+					}
+					unverifiable, err := enterprisebundle.Verify(context.Background(), layoutSensitive)
+					if err != nil || unverifiable.DigestVerified || unverifiable.DigestUnverifiable || !unverifiable.DigestLayoutUnverifiable {
+						t.Fatalf("different digest on non-standard ProgramData layout: %+v, %v", unverifiable, err)
 					}
 					found := false
 					for _, warning := range unverifiable.Warnings {
-						found = found || warning.Code == enterprisebundle.WarnDigestUnverifiable
+						found = found || warning.Code == enterprisebundle.WarnDigestLayoutUnverifiable
 					}
 					if !found {
 						t.Fatalf("non-standard layout warnings: %+v", unverifiable.Warnings)

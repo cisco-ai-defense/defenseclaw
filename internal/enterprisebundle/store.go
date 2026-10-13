@@ -209,6 +209,26 @@ type Receipt struct {
 	ConfigSHA256 string `json:"config_sha256,omitempty"`
 }
 
+// SetDigestComparison replaces any digest classification from an earlier
+// receipt write with the verification result for this delivery.
+func (r *Receipt) SetDigestComparison(verified, crossVersionOrPlatform, nonstandardLayout bool) {
+	r.DigestComparable = verified
+	r.SetDigestUnverifiable(crossVersionOrPlatform)
+	r.WarningCodes = slices.DeleteFunc(r.WarningCodes, func(code string) bool { return code == WarnDigestLayoutUnverifiable })
+	if nonstandardLayout {
+		r.WarningCodes = append(r.WarningCodes, WarnDigestLayoutUnverifiable)
+	}
+}
+
+// SetDigestUnverifiable replaces the signed-manifest classification without
+// changing whether verification compared and confirmed the digest strings.
+func (r *Receipt) SetDigestUnverifiable(crossVersionOrPlatform bool) {
+	r.WarningCodes = slices.DeleteFunc(r.WarningCodes, func(code string) bool { return code == WarnDigestUnverifiable })
+	if crossVersionOrPlatform {
+		r.WarningCodes = append(r.WarningCodes, WarnDigestUnverifiable)
+	}
+}
+
 // ReceivedAt is the time of the first transition ("" when there is none).
 func (r *Receipt) ReceivedAt() string {
 	if len(r.Transitions) == 0 {
@@ -239,17 +259,14 @@ func (r *Receipt) Refusal() *enterprisestatus.BundleRefusal {
 		WarningCodes: append([]string(nil), r.WarningCodes...), DisabledByBundle: append([]string(nil), r.DisabledByBundle...)}
 }
 
-// DigestWarningCode classifies a difference between the signed expectation
-// and the policy the gateway actually enforces. A cross-build signature
-// cannot be compared, but the difference still deserves a visible warning.
+// DigestWarningCode reports a difference only when the signed and enforcing
+// digests are comparable. Cross-build warnings come from the signed manifest,
+// including when the two digest strings happen to coincide.
 func DigestWarningCode(expected, enforcing string, comparable bool) string {
-	if expected == "" || enforcing == "" || expected == enforcing {
+	if !comparable || expected == "" || enforcing == "" || expected == enforcing {
 		return ""
 	}
-	if comparable {
-		return WarnDigestDiffers
-	}
-	return WarnDigestUnverifiable
+	return WarnDigestDiffers
 }
 
 // Status is the result v2 bundle block for r, naming current when r is not
@@ -799,6 +816,9 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	}
 	if !digestPattern.MatchString(r.EffectivePolicyDigest) {
 		return State{}, fmt.Errorf("bundle receipt %s has no effective policy digest to confirm", r.ReceiptID)
+	}
+	if r.DigestComparable {
+		r.SetDigestUnverifiable(false)
 	}
 	if code := DigestWarningCode(r.ExpectedDigest, r.EffectivePolicyDigest, r.DigestComparable); code != "" && !slices.Contains(r.WarningCodes, code) {
 		r.WarningCodes = append(r.WarningCodes, code)

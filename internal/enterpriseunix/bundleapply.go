@@ -445,10 +445,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
 		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Bytes(staged.Manifest), res.ExpectedDigest
-		rc.DigestComparable = res.DigestVerified
-		if !res.DigestVerified {
-			rc.WarningCodes = append(rc.WarningCodes, enterprisebundle.WarnDigestUnverifiable)
-		}
+		rc.SetDigestComparison(res.DigestVerified, res.DigestUnverifiable, res.DigestLayoutUnverifiable)
 	}); err != nil {
 		return refuse(err)
 	}

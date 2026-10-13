@@ -787,6 +787,61 @@ func TestBundleApplyCrashPointMatrix(t *testing.T) {
 	}
 }
 
+func TestBundleRetryDigestMarkerComesFromThisDelivery(t *testing.T) {
+	for _, signerMatches := range []bool{true, false} {
+		for _, phase := range []string{enterprisebundle.StateVerified, enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
+			name := fmt.Sprintf("match=%t/%s", signerMatches, phase)
+			t.Run(name, func(t *testing.T) {
+				b := newBundleHost(t)
+				v1, v2, _ := bundleConfigs(b.testHost)
+				requireOK(t, b.apply(b.dir(1, v1)))
+				path := b.dir(2, v2)
+				if !signerMatches {
+					b.env.ProductVersion = "1.0.1"
+				}
+				b.env.bundleFault = func(at string) error {
+					if at == phase {
+						panic("crash at " + at)
+					}
+					return nil
+				}
+				func() {
+					defer func() { _ = recover() }()
+					b.apply(path)
+				}()
+				b.env.bundleFault = nil
+				requireOK(t, b.run(Options{Action: ActionEnsure}))
+				failed := b.receipt(bundleID(2))
+				if failed.State != enterprisebundle.StateFailed || failed.ErrorCode != enterprisebundle.CodeInterrupted {
+					t.Fatalf("interrupted receipt = %+v", failed)
+				}
+				requireOK(t, b.apply(path))
+				confirmed := b.receipt(bundleID(2))
+				if confirmed.ReceiptID == failed.ReceiptID || confirmed.State != enterprisebundle.StateConfirmed ||
+					confirmed.ExpectedDigest != confirmed.EffectivePolicyDigest ||
+					confirmed.DigestComparable != signerMatches ||
+					slices.Contains(confirmed.WarningCodes, enterprisebundle.WarnDigestUnverifiable) == signerMatches {
+					t.Fatalf("retried receipt = %+v, failed receipt = %+v", confirmed, failed)
+				}
+				public, err := enterprisestatus.ReadPublicReceipt(b.env.bundleStore().PublicReceiptPath())
+				if err != nil || slices.Contains(public.WarningCodes, enterprisebundle.WarnDigestUnverifiable) == signerMatches {
+					t.Fatalf("public receipt = %+v, %v", public, err)
+				}
+				status := b.run(Options{Action: ActionStatus})
+				if status.Bundle == nil || slices.Contains(status.Bundle.WarningCodes, enterprisebundle.WarnDigestUnverifiable) == signerMatches {
+					t.Fatalf("status bundle = %+v", status.Bundle)
+				}
+				found := slices.ContainsFunc(status.Warnings, func(w enterprisestatus.Message) bool {
+					return w.Code == enterprisebundle.WarnDigestUnverifiable
+				})
+				if found == signerMatches {
+					t.Fatalf("status warnings = %+v", status.Warnings)
+				}
+			})
+		}
+	}
+}
+
 // A gateway that does not report the new policy (it refuses the reload)
 // rolls the transaction back: not_confirmed, the last good config and
 // digest enforce.

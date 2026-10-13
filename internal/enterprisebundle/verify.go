@@ -19,9 +19,10 @@ import (
 
 // Warning codes verify adds.
 const (
-	WarnDigestUnverifiable      = "digest_unverifiable"
-	WarnDigestDiffers           = "digest_differs"
-	WarnSecretPresenceUnchecked = "secret_presence_unchecked"
+	WarnDigestUnverifiable       = "digest_unverifiable"
+	WarnDigestLayoutUnverifiable = "digest_layout_unverifiable"
+	WarnDigestDiffers            = "digest_differs"
+	WarnSecretPresenceUnchecked  = "secret_presence_unchecked"
 )
 
 // Confirmed is the last bundle a device confirmed (bundle-state.json); the
@@ -112,11 +113,14 @@ type VerifyResult struct {
 	Floor          uint64
 	// EffectivePolicyDigest is the digest this host computed for Platform;
 	// ExpectedDigest is the manifest entry; DigestVerified reports that
-	// they were compared and equal (else WarnDigestUnverifiable).
-	EffectivePolicyDigest string
-	ExpectedDigest        string
-	DigestVerified        bool
-	Warnings              []Warning
+	// they were compared and equal. A different signer product version or
+	// platform is the only reason to report WarnDigestUnverifiable.
+	EffectivePolicyDigest    string
+	ExpectedDigest           string
+	DigestVerified           bool
+	DigestUnverifiable       bool
+	DigestLayoutUnverifiable bool
+	Warnings                 []Warning
 }
 
 // Verify runs every bundle check in the order of spec section 4: anchor,
@@ -234,24 +238,28 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	res.EffectivePolicyDigest = digest
 	res.ExpectedDigest = m.EffectivePolicy.Digests[in.Platform]
 	standardLayout := layout.IsStandard(in.Platform)
-	if in.ProductVersion == m.EffectivePolicy.ProductVersion && in.HostPlatform == m.EffectivePolicy.ComputedOn && standardLayout {
+	if DigestComparable(m, in.ProductVersion, in.HostPlatform) {
 		if digest != res.ExpectedDigest {
-			component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details)
-			if component != "" {
-				return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s; component %s differs", digest, boundedDetail(component))
+			if !standardLayout {
+				res.DigestLayoutUnverifiable = true
+				res.Warnings = append(res.Warnings, Warning{Code: WarnDigestLayoutUnverifiable, Platform: in.Platform,
+					Message: "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"})
+			} else {
+				component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details)
+				if component != "" {
+					return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s; component %s differs", digest, boundedDetail(component))
+				}
+				return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s", digest)
 			}
-			return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s", digest)
+		} else {
+			res.DigestVerified = true
 		}
-		res.DigestVerified = true
 	} else {
-		message := "the bundle was signed by another product version or on another platform; files[] hashes still hold, and this host reports its own digest"
-		if !standardLayout {
-			message = "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"
-		}
+		res.DigestUnverifiable = true
 		res.Warnings = append(res.Warnings, Warning{
 			Code:     WarnDigestUnverifiable,
 			Platform: in.Platform,
-			Message:  message,
+			Message:  "the bundle was signed by another product version or on another platform; files[] hashes still hold, and this host reports its own digest",
 		})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
@@ -262,6 +270,12 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	}
 	res.Warnings = append(res.Warnings, sectionWarnings...)
 	return res, nil
+}
+
+// DigestComparable is derived from the signed manifest for each delivery.
+// A receipt from an earlier attempt must never decide comparability.
+func DigestComparable(m *Manifest, productVersion, hostPlatform string) bool {
+	return m != nil && m.EffectivePolicy.ProductVersion == productVersion && m.EffectivePolicy.ComputedOn == hostPlatform
 }
 
 func differingDigestComponent(expected []DigestComponent, actual map[string]string) string {

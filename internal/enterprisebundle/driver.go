@@ -176,10 +176,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
 		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Hex(staged.Manifest), res.ExpectedDigest
-		rc.DigestComparable = res.DigestVerified
-		if !res.DigestVerified {
-			rc.WarningCodes = append(rc.WarningCodes, WarnDigestUnverifiable)
-		}
+		rc.SetDigestComparison(res.DigestVerified, res.DigestUnverifiable, res.DigestLayoutUnverifiable)
 	}); err != nil {
 		return refuse(err)
 	}

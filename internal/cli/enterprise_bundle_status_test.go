@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,7 +80,8 @@ func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id s
 	}
 	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
 		r.ManifestSHA256 = strings.Repeat("f", 64)
-		r.ExpectedDigest, r.DigestComparable = expected, comparable
+		r.ExpectedDigest = expected
+		r.SetDigestComparison(comparable, !comparable, false)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +97,40 @@ func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id s
 	}
 	if _, err := store.Confirm(r); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnterpriseBundleStatusDigestMarkerJSONAndText(t *testing.T) {
+	for _, crossVersion := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cross_version=%t", crossVersion), func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			store := bundleDevice(t, e)
+			digest := "sha256:" + strings.Repeat("8", 64)
+			confirmBundleWithExpected(t, store, "b-01JA0000000000000000000036", 1, digest, digest, !crossVersion)
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+			}
+			jsonOut, code := runBundle(t, "status", "--json")
+			if code != 0 {
+				t.Fatalf("JSON status exit %d: %s", code, jsonOut)
+			}
+			var result bundleStatusResult
+			if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+				t.Fatal(err)
+			}
+			textOut, code := runBundle(t, "status")
+			if code != 0 {
+				t.Fatalf("text status exit %d: %s", code, textOut)
+			}
+			jsonWarning := hasBundleWarning(result.Warnings, enterprisebundle.WarnDigestUnverifiable)
+			textWarning := strings.Contains(textOut, "warning: digest_unverifiable:")
+			if jsonWarning != crossVersion || textWarning != crossVersion || result.LastReceipt == nil || result.Bundle == nil ||
+				slices.Contains(result.LastReceipt.WarningCodes, enterprisebundle.WarnDigestUnverifiable) != crossVersion ||
+				slices.Contains(result.Bundle.WarningCodes, enterprisebundle.WarnDigestUnverifiable) != crossVersion {
+				t.Fatalf("cross_version=%t JSON=%s text=%s", crossVersion, jsonOut, textOut)
+			}
+		})
 	}
 }
 
@@ -157,8 +194,8 @@ func TestEnterpriseBundleStatusWarnsWhenSignedDigestDiffers(t *testing.T) {
 		!strings.Contains(string(publicReceipt), enterprisebundle.WarnDigestDiffers) {
 		t.Fatalf("public receipt omitted signed digest warning: %s (%v)", publicReceipt, err)
 	}
-	if code := enterprisebundle.DigestWarningCode(expected, digest, false); code != enterprisebundle.WarnDigestUnverifiable {
-		t.Fatalf("cross-version digest warning = %q", code)
+	if code := enterprisebundle.DigestWarningCode(expected, digest, false); code != "" {
+		t.Fatalf("non-comparable digest difference inferred a cross-version warning: %q", code)
 	}
 }
 

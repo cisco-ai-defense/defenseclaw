@@ -151,6 +151,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	var currentReceipt *enterprisebundle.Receipt
 	var signedExpected string
 	var digestComparable bool
+	var manifestKnown bool
 	if st.Current != nil {
 		if bundle, err := store.ReadVersion(st.Current); err == nil {
 			if cfg, _, err := enterprisebundle.LoadConfig(bundle, store.VersionDir(st.Current.Dir)); err == nil {
@@ -171,16 +172,27 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		// platform and build can compare the expected and live digests.
 		if raw, err := os.ReadFile(filepath.Join(store.VersionDir(st.Current.Dir), enterprisebundle.ManifestName)); err == nil {
 			if manifest, err := enterprisebundle.DecodeManifest(raw); err == nil {
+				manifestKnown = true
 				signedExpected = manifest.EffectivePolicy.Digests[runtime.GOOS]
-				digestComparable = manifest.EffectivePolicy.ProductVersion == appVersion && manifest.EffectivePolicy.ComputedOn == runtime.GOOS
+				digestComparable = enterprisebundle.DigestComparable(manifest, appVersion, runtime.GOOS)
 			}
 		}
 	}
 	if currentReceipt != nil {
-		if currentReceipt.ExpectedDigest != "" {
+		if !manifestKnown && currentReceipt.ExpectedDigest != "" {
 			signedExpected = currentReceipt.ExpectedDigest
 		}
-		digestComparable = digestComparable || currentReceipt.DigestComparable
+		if manifestKnown {
+			currentReceipt.SetDigestUnverifiable(!digestComparable)
+			if res.LastReceipt != nil && res.LastReceipt.ReceiptID == currentReceipt.ReceiptID {
+				res.LastReceipt.SetDigestUnverifiable(!digestComparable)
+				if res.Bundle != nil {
+					res.Bundle.WarningCodes = append([]string(nil), res.LastReceipt.WarningCodes...)
+				}
+			}
+		} else {
+			digestComparable = currentReceipt.DigestComparable
+		}
 	}
 	addReceiptWarning := func(code string) {
 		if code == "" {
@@ -194,6 +206,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		message := "the gateway's effective policy digest differs from the signed expected digest"
 		if code == enterprisebundle.WarnDigestUnverifiable {
 			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
+		} else if code == enterprisebundle.WarnDigestLayoutUnverifiable {
+			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
 		} else if code == "capability_disabled" {
 			message = "the bundle disabled: " + strings.Join(currentReceipt.DisabledByBundle, ", ")
 		}
@@ -203,6 +217,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
+	} else if manifestKnown && !digestComparable {
+		addReceiptWarning(enterprisebundle.WarnDigestUnverifiable)
 	}
 	if !res.BundleMode {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_missing",

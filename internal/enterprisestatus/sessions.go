@@ -110,14 +110,14 @@ func (r *Result) SetBundleSessions(status SessionRestartStatus) {
 	}
 }
 
-// SetBundleReceiptWarnings exposes a receipt's cross-build digest marker in
-// lifecycle status text as well as in its bundle JSON block.
+// SetBundleReceiptWarnings exposes a receipt's digest markers in lifecycle
+// status text as well as in its bundle JSON block.
 func (r *Result) SetBundleReceiptWarnings() {
 	if r == nil || r.Bundle == nil {
 		return
 	}
 	for _, code := range r.Bundle.WarningCodes {
-		if code != "digest_unverifiable" {
+		if code != "digest_unverifiable" && code != "digest_layout_unverifiable" {
 			continue
 		}
 		for _, warning := range r.Warnings {
@@ -125,6 +125,10 @@ func (r *Result) SetBundleReceiptWarnings() {
 				return
 			}
 		}
-		r.AddWarning(code, "the signed digest could not be compared on this product version or platform; the gateway's enforcing digest was recorded")
+		message := "the signed digest could not be compared on this product version or platform; the gateway's enforcing digest was recorded"
+		if code == "digest_layout_unverifiable" {
+			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
+		}
+		r.AddWarning(code, message)
 	}
 }
