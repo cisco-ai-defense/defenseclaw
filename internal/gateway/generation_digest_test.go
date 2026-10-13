@@ -429,37 +429,6 @@ func TestEffectivePolicyDigestMaterializesDefaults(t *testing.T) {
 	}
 }
 
-func TestBundleRuntimeDigestUsesRecordedVersionRoot(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.yaml")
-	const bundleID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A"
-	bundleRoot := filepath.Join(root, "bundles", enterprisebundle.VersionDirName(7, bundleID))
-	if err := os.MkdirAll(bundleRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	raw := []byte("config_version: 9\n")
-	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(raw)
-	record := fmt.Sprintf(`{"generation":7,"config_sha256":"%x","actor":"operator:alice","written_at":"2026-10-13T00:00:00Z","bundle_id":%q,"bundle_version":7,"signer_key_id":"k1"}`, sum, bundleID)
-	if err := os.WriteFile(filepath.Join(root, "config.generation.json"), []byte(record), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.Config{ConfigFilePath: configPath, DataDir: filepath.Join(root, "runtime"), PluginDir: filepath.Join(bundleRoot, "plugins")}
-	signed, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{BundleRoot: bundleRoot, Raw: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimePolicy, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{Raw: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtimePolicy.Digest != signed.Digest {
-		t.Fatalf("runtime digest %s differs from signed digest %s", runtimePolicy.Digest, signed.Digest)
-	}
-}
-
 func TestBundleRuntimeDigestUsesReceiptSpecificInstalledRoot(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")

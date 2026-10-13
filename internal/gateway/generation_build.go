@@ -194,15 +194,13 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		if len(names) > 1 {
 			return nil, fmt.Errorf("generation: config names more than one bundle version directory")
 		}
-		name := enterprisebundle.VersionDirName(record.BundleVersion, record.BundleID)
 		if len(names) == 1 {
-			name = names[0]
-		}
-		root := filepath.Join(bundlesDir, name)
-		if info, err := os.Stat(root); err == nil && info.IsDir() {
-			in.bundleRoot = root
-		} else if len(names) == 1 {
-			return nil, fmt.Errorf("generation: installed bundle version directory %s is unavailable", root)
+			root := filepath.Join(bundlesDir, names[0])
+			if info, err := os.Stat(root); err == nil && info.IsDir() {
+				in.bundleRoot = root
+			} else {
+				return nil, fmt.Errorf("generation: installed bundle version directory %s is unavailable", root)
+			}
 		}
 	}
 	g.bundleRoot = in.bundleRoot

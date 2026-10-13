@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
 SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-exact-acl-smoke.ps1"
+WINDOWS_BUNDLE = ROOT / "internal" / "cli" / "windows_enterprise_bundle.go"
+GO_STORE = ROOT / "internal" / "enterprisebundle" / "store.go"
 
 
 def _powershell_engines() -> list[str]:
@@ -264,10 +267,16 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
         "$bundleDirectory = Microsoft.PowerShell.Management\\Join-Path "
         "$Layout.ConfigDirectory 'bundles'"
     ) in contract
-    assert "$relative -ceq 'receipt.json' -and -not $entry.PSIsContainer" in contract
-    assert "elseif ($entry.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }" in contract
+    classifier = _extract_function_body(
+        source,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    assert "$RelativePath -ceq 'receipt.json' -and -not $IsDirectory" in classifier
+    assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
+    assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
     assert "'BundleVersionDirectory'" in contract
-    assert "'BundleVersionFile'" in contract
+    assert "'BundleVersionFile'" in classifier
     assert "'bundle-state.json'" in contract
     assert "'receipts'" in contract
     assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
@@ -291,6 +300,73 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
         "Invoke-DefenseClawBundleAclContract -Layout $Layout "
         "-GatewayServiceSID $gatewaySID"
     ) in verifier
+
+
+def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
+    """Cross-check Go naming and SDDL with the PowerShell verifier contract."""
+    module = MODULE.read_text(encoding="utf-8")
+    smoke = SMOKE.read_text(encoding="utf-8")
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    classifier = _extract_function_body(
+        module,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    ps_pattern = re.search(r"\$top -cmatch '([^']+)'", classifier)
+    go_pattern = re.search(r"versionDirPattern\s*= regexp.MustCompile\(`([^`]+)`\)", store)
+    assert ps_pattern and go_pattern
+    assert ps_pattern.group(1) == go_pattern.group(1)
+    pattern = re.compile(ps_pattern.group(1))
+    name = "v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8"
+    assert pattern.fullmatch(name)
+    assert not pattern.fullmatch("v1-AKADPAK8-b-not-a-receipt")
+    assert "($RelativePath -cne $top -or $IsDirectory)" in classifier
+    assert "if ($IsDirectory) { return 'BundleVersionDirectory' }" in classifier
+    assert "return 'BundleVersionFile'" in classifier
+    builder = _extract_function_body(
+        module,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    assert "$versionServiceReadOnly = $Kind -eq 'BundleVersionDirectory' -and" in builder
+    assert "-not $versionServiceReadOnly" in builder
+    for kind in ("BundleVersionDirectory", "BundleVersionFile"):
+        entry = builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        assert "rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute" in entry
+        assert "$script:UsersSID" not in entry
+
+    sid = "S-1-5-80-1-2-3-4-5"
+
+    def creator_sddl(function: str, inherit: str = "") -> str:
+        body = go.split(f"func {function}(", 1)[1].split("\n}", 1)[0]
+        expression = re.search(r"^\s*return (.+)$", body, re.MULTILINE)
+        assert expression
+        parts = re.findall(r'"[^"]*"|\b(?:inherit|serviceSID)\b', expression.group(1))
+        assert re.sub(r'"[^"]*"|\b(?:inherit|serviceSID)\b|[+\s]', "", expression.group(1)) == ""
+        return "".join(
+            {"inherit": inherit, "serviceSID": sid}[part]
+            if part in {"inherit", "serviceSID"} else json.loads(part)
+            for part in parts
+        )
+
+    creators = {
+        "BundleDirectory": creator_sddl("windowsBundleDirectorySDDL"),
+        "BundleReceipt": creator_sddl("windowsBundleReceiptSDDL"),
+        "BundleVersionDirectory": creator_sddl("windowsBundleVersionSDDL", "OICI"),
+        "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
+    }
+    assert 'inherit = "OICI"' in go.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
+    for kind, actual in creators.items():
+        expected = re.search(rf"^\s*{kind} = \"([^\"]+)\"", smoke, re.MULTILINE)
+        assert expected, kind
+        assert actual == expected.group(1).replace("$serviceSID", sid), kind
+        if kind.startswith("BundleVersion"):
+            assert ";;;BU)" not in actual
+            assert f";;;{sid})" in actual
+            assert "0x1200a9" in actual
+    assert "$versionName = 'v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8'" in smoke
+    assert "Get-DefenseClawBundlePathKind -RelativePath $Relative" in smoke
 
 
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:

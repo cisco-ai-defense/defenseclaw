@@ -339,6 +339,26 @@ func TestStoreRefusesAStateThatWouldLowerTheFloor(t *testing.T) {
 	}
 }
 
+func TestReceiptVersionDirectoryNameIsFoundAndCollected(t *testing.T) {
+	s := testStore(t)
+	name := VersionDirNameForReceipt(1, testBundleID(1), "b-01M4VBXHT0DS0QNK83AKADPAK8")
+	if !IsVersionDirName(name) {
+		t.Fatalf("receipt-specific version directory %q was not recognized", name)
+	}
+	if got := VersionDirsNamed([]byte(filepath.Join(s.VersionDir(name), "policies", "rule.yaml")), s.BundlesDir); len(got) != 1 || got[0] != name {
+		t.Fatalf("config references resolved to %q, want %q", got, name)
+	}
+	if err := os.MkdirAll(s.VersionDir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.gc(State{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.VersionDir(name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unheld immutable version directory was not collected: %v", err)
+	}
+}
+
 func TestReceiptsArePrunedAndUnreadableBundlesGetAReceipt(t *testing.T) {
 	s := testStore(t)
 	open := applyThrough(t, s, 1, 1, StateReceived)

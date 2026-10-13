@@ -94,6 +94,34 @@ if ($observed.Count -ne $expected.Count) {
     throw 'canonical ACL smoke did not exercise every managed path kind'
 }
 
+# Classify the exact name emitted by the bundle store before comparing the
+# descriptor. This catches a drift where the builder is right but verify and
+# repair select the administrator-only descriptor for an immutable version.
+$versionName = 'v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8'
+$bundlePaths = @(
+    [pscustomobject]@{ relative = $versionName; directory = $true; kind = 'BundleVersionDirectory' },
+    [pscustomobject]@{ relative = "$versionName\manifest.json"; directory = $false; kind = 'BundleVersionFile' },
+    [pscustomobject]@{ relative = "$versionName\policies"; directory = $true; kind = 'BundleVersionDirectory' },
+    [pscustomobject]@{ relative = "$versionName\policies\rule.yaml"; directory = $false; kind = 'BundleVersionFile' },
+    [pscustomobject]@{ relative = 'receipt.json'; directory = $false; kind = 'BundleReceipt' },
+    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8'; directory = $true; kind = 'AdminDirectory' }
+)
+foreach ($row in $bundlePaths) {
+    $actualKind = & $module {
+        param($Relative, $IsDirectory)
+        Get-DefenseClawBundlePathKind -RelativePath $Relative -IsDirectory $IsDirectory
+    } ([string]$row.relative) ([bool]$row.directory)
+    if ([string]$actualKind -cne [string]$row.kind) {
+        throw "bundle ACL kind mismatch for $($row.relative): $actualKind"
+    }
+    $descriptor = @($observed | Microsoft.PowerShell.Core\Where-Object {
+        [string]$_.kind -ceq [string]$actualKind
+    })[0]
+    if ($null -eq $descriptor -or [string]$descriptor.sddl -cne [string]$expected[[string]$row.kind]) {
+        throw "bundle ACL descriptor mismatch for $($row.relative)"
+    }
+}
+
 foreach ($mismatch in @(
     [pscustomobject]@{ directory = $true; kind = 'AdminFile' },
     [pscustomobject]@{ directory = $false; kind = 'AdminDirectory' }

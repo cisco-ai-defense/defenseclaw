@@ -6768,6 +6768,26 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
     return $true
 }
 
+function Get-DefenseClawBundlePathKind {
+    param(
+        [Parameter(Mandatory)][string]$RelativePath,
+        [Parameter(Mandatory)][bool]$IsDirectory
+    )
+    if ($RelativePath -ceq 'receipt.json' -and -not $IsDirectory) {
+        return 'BundleReceipt'
+    }
+    $top = ($RelativePath -split '\\', 2)[0]
+    # The immutable name includes the receipt ID. Match the same shape as
+    # enterprisebundle.IsVersionDirName, including pre-receipt installations.
+    if ($top -cmatch '^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$' -and
+        ($RelativePath -cne $top -or $IsDirectory)) {
+        if ($IsDirectory) { return 'BundleVersionDirectory' }
+        return 'BundleVersionFile'
+    }
+    if ($IsDirectory) { return 'AdminDirectory' }
+    return 'AdminFile'
+}
+
 function Invoke-DefenseClawBundleAclContract {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -6790,15 +6810,7 @@ function Invoke-DefenseClawBundleAclContract {
                     throw "bundle store contains a reparse point: $($entry.FullName)"
                 }
                 $relative = $entry.FullName.Substring($bundleDirectory.Length).TrimStart('\')
-                $top = ($relative -split '\\', 2)[0]
-                $kind = if ($relative -ceq 'receipt.json' -and -not $entry.PSIsContainer) {
-                    'BundleReceipt'
-                }
-                elseif ($top -cmatch '^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}$' -and
-                    ($relative -cne $top -or $entry.PSIsContainer)) {
-                    if ($entry.PSIsContainer) { 'BundleVersionDirectory' } else { 'BundleVersionFile' }
-                }
-                elseif ($entry.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }
+                $kind = Get-DefenseClawBundlePathKind -RelativePath $relative -IsDirectory ([bool]$entry.PSIsContainer)
                 $items.Add([pscustomobject]@{ Path = $entry.FullName; Kind = $kind })
                 if ($entry.PSIsContainer) { $pending.Enqueue($entry.FullName) }
             }

@@ -128,7 +128,7 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 			if err := os.Mkdir(staging, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			version := filepath.Join(store.BundlesDir, "v1-JA000000")
+			version := filepath.Join(store.BundlesDir, enterprisebundle.VersionDirNameForReceipt(1, r.BundleID, r.ReceiptID))
 			if err := os.Mkdir(version, 0o750); err != nil {
 				t.Fatal(err)
 			}

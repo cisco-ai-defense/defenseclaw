@@ -84,7 +84,7 @@ func TestDriverBundleCapabilityLoss(t *testing.T) {
 					if stateErr != nil || state.Current != nil {
 						t.Fatalf("strict changed current state: %+v, %v", state, stateErr)
 					}
-					version := d.Store.VersionDir(enterprisebundle.VersionDirName(p.Receipt.Version, p.Receipt.BundleID))
+					version := d.Store.VersionDir(enterprisebundle.VersionDirNameForReceipt(p.Receipt.Version, p.Receipt.BundleID, p.Receipt.ReceiptID))
 					if _, statErr := os.Stat(version); !os.IsNotExist(statErr) {
 						t.Fatalf("strict promoted a version: %v", statErr)
 					}
@@ -190,7 +190,7 @@ func TestDriverRefusesComparableDigestBeforeActivation(t *testing.T) {
 				prepared == nil || prepared.Receipt.State != enterprisebundle.StateFailed {
 				t.Fatalf("prepare activated=%v receipt=%+v err=%v", activated, prepared, err)
 			}
-			version := d.Store.VersionDir(enterprisebundle.VersionDirName(manifest.Version, manifest.BundleID))
+			version := d.Store.VersionDir(enterprisebundle.VersionDirNameForReceipt(manifest.Version, manifest.BundleID, prepared.Receipt.ReceiptID))
 			if _, err := os.Stat(version); !os.IsNotExist(err) {
 				t.Fatalf("mismatched version was promoted: %v", err)
 			}
