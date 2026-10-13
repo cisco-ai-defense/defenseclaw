@@ -183,13 +183,26 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.BundleID, g.BundleVersion = record.BundleID, record.BundleVersion
 	if in.bundleRoot == "" && record.Recorded && enterprisebundle.ValidBundleID(record.BundleID) && record.BundleVersion > 0 {
 		// The signer and staged verifier digest paths beneath their bundle
-		// root as ${bundle_root}. The live gateway must use the installed
-		// version directory for the same normalization. The generation record
-		// binds that directory to the config bytes this generation loaded.
-		root := filepath.Join(filepath.Dir(cfg.ConfigFilePath), enterprisebundle.BundlesDirName,
-			enterprisebundle.VersionDirName(record.BundleVersion, record.BundleID))
+		// root as ${bundle_root}. The installed config names the immutable
+		// directory for this receipt; retries of one version use fresh names.
+		bundlesDir := filepath.Join(filepath.Dir(cfg.ConfigFilePath), enterprisebundle.BundlesDirName)
+		raw := in.raw
+		if raw == nil {
+			raw, _ = os.ReadFile(cfg.ConfigFilePath)
+		}
+		names := enterprisebundle.VersionDirsNamed(raw, bundlesDir)
+		if len(names) > 1 {
+			return nil, fmt.Errorf("generation: config names more than one bundle version directory")
+		}
+		name := enterprisebundle.VersionDirName(record.BundleVersion, record.BundleID)
+		if len(names) == 1 {
+			name = names[0]
+		}
+		root := filepath.Join(bundlesDir, name)
 		if info, err := os.Stat(root); err == nil && info.IsDir() {
 			in.bundleRoot = root
+		} else if len(names) == 1 {
+			return nil, fmt.Errorf("generation: installed bundle version directory %s is unavailable", root)
 		}
 	}
 	g.bundleRoot = in.bundleRoot

@@ -251,6 +251,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Policy != nil {
 		fmt.Fprintf(w, "  %s\n", result.PolicyLine())
 	}
+	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		enterprisestatus.WriteSessionEntries(w, *result.Bundle.SessionsRestartRequired)
+	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).
 	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {

@@ -1994,6 +1994,13 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	return home, target, nil
 }
 
+// ValidateWindowsEnterpriseHome pins a recorded profile to its owner SID for
+// a LocalSystem cleanup that does not need the user's active logon session.
+func ValidateWindowsEnterpriseHome(home, sid string) (string, error) {
+	verified, _, err := validateWindowsEnterpriseHome(home, sid)
+	return verified, err
+}
+
 // validateWindowsEnterpriseHomeAnchor treats the profile root as an identity
 // and no-reparse anchor only. Its DACL is owned by Windows/profile-management
 // policy and may legitimately contain inherited AppContainer, OneDrive, or

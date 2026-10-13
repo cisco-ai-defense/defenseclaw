@@ -140,7 +140,7 @@ unsigned bundle, the signature and the public key.`,
 	f.StringVar(&opts.keyID, "key-id", "", "the trust anchor key id of the signing key")
 	f.StringVar(&opts.tenant, "tenant", "", "tenant id (must equal the anchor tenant)")
 	f.StringVar(&opts.deviceGroup, "device-group", "", "target device group")
-	f.Uint64Var(&opts.version, "version", 0, "bundle version, higher than every version the group has applied")
+	f.Uint64Var(&opts.version, "version", 0, "bundle version, above trust anchor min_version and the last confirmed bundle version")
 	f.StringVar(&opts.createdBy, "created-by", "", "principal: operator:<os-admin> or control-plane:<tenant>/<admin>")
 	f.StringVar(&opts.parent, "parent", "", "bundle id this version was composed on")
 	f.StringVar(&opts.rollbackOf, "rollback-of", "", "bundle id whose content this version re-publishes")

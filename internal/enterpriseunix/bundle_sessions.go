@@ -32,13 +32,13 @@ const bundleSessionScanTimeout = 3 * time.Second
 func (e *Env) UnprotectedSessions(parent context.Context) enterprisestatus.SessionRestartStatus {
 	privileged := e.Geteuid != nil && e.Geteuid() == 0
 	if !privileged {
-		return enterprisestatus.UnprotectedSessions(nil, nil, false)
+		return enterprisestatus.ScanSessions(nil, nil, false)
 	}
 	ctx, cancel := context.WithTimeout(parent, bundleSessionScanTimeout)
 	defer cancel()
 	aliases, err := bundleAgentAliases()
 	if err != nil {
-		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}}
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: err.Error()}
 	}
 	var processes []enterprisestatus.SessionProcess
 	switch e.GOOS {
@@ -50,10 +50,13 @@ func (e *Env) UnprotectedSessions(parent context.Context) enterprisestatus.Sessi
 		err = errors.New("unsupported platform")
 	}
 	if err != nil || ctx.Err() != nil {
-		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: err.Error()}
 	}
 	changed := e.bundleManagedSettingsTimes(aliases)
-	return enterprisestatus.UnprotectedSessions(processes, changed, true)
+	return enterprisestatus.ScanSessions(func() ([]enterprisestatus.SessionProcess, error) { return processes, nil }, changed, true)
 }
 
 func bundleAgentAliases() (map[string]string, error) {

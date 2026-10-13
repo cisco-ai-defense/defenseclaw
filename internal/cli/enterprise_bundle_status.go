@@ -145,9 +145,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if res.Bundle != nil {
 		res.Bundle.SessionsRestartRequired = &res.SessionsRestartRequired
 	}
-	if res.SessionsRestartRequired.Count > 0 {
-		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: enterprisestatus.CodeSessionsNeedRestart,
-			Message: "running agent sessions started before managed hooks changed; ask the listed users to restart them"})
+	if code, message := enterprisestatus.SessionWarning(res.SessionsRestartRequired); code != "" {
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
 	}
 	var currentReceipt *enterprisebundle.Receipt
 	var signedExpected string
@@ -274,6 +273,10 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 		fmt.Fprintf(w, "Last refusal: %s version %d: %s at %s\n", r.BundleID, r.Version, r.ErrorCode, r.Time)
 	}
 	fmt.Fprintf(w, "Running sessions needing restart: %d (%s)\n", res.SessionsRestartRequired.Count, res.SessionsRestartRequired.State)
+	if res.SessionsRestartRequired.Reason != "" {
+		fmt.Fprintf(w, "Session scan: %s\n", res.SessionsRestartRequired.Reason)
+	}
+	enterprisestatus.WriteSessionEntries(w, res.SessionsRestartRequired)
 	fmt.Fprintf(w, "Detection-only custom rules: %d\n", res.AlertOnlyRuleCount)
 	if res.GatewayChecked {
 		applied := "no"

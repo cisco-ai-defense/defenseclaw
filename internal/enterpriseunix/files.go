@@ -267,14 +267,16 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("sync %s: %w", path, err)
 	}
-	if err := file.Chmod(mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
-	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
 	}
 	if err := e.Lchown(tmp, owner.UID, owner.GID); err != nil {
 		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	// Apply the final mode after ownership. In particular, the config must
+	// retain its service-group read bit when this inode is published.
+	if err := os.Chmod(tmp, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)

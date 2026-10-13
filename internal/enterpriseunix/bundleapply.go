@@ -446,13 +446,16 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Bytes(staged.Manifest), res.ExpectedDigest
 		rc.DigestComparable = res.DigestVerified
+		if !res.DigestVerified {
+			rc.WarningCodes = append(rc.WarningCodes, enterprisebundle.WarnDigestUnverifiable)
+		}
 	}); err != nil {
 		return refuse(err)
 	}
 	if err := env.fault(enterprisebundle.StateVerified); err != nil {
 		return refuse(err)
 	}
-	versionName := enterprisebundle.VersionDirName(receipt.Version, receipt.BundleID)
+	versionName := enterprisebundle.VersionDirNameForReceipt(receipt.Version, receipt.BundleID, receipt.ReceiptID)
 	rendered, err := enterprisebundle.RenderConfig(staged, env.bundleVersionDir(versionName))
 	if err != nil {
 		return refuse(err)
@@ -588,6 +591,12 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		// receipt is reported off the device.
 		message = "the ensure transaction failed (" + strings.Join(codes, ", ") + ")"
 	}
+	for _, failure := range r.Errors {
+		if strings.Contains(failure.Message, "config.state=error") {
+			message = "the gateway reported config.state=error while loading the bundle config"
+			break
+		}
+	}
 	l.failBundle(ctx, run, record, code, message)
 }
 
@@ -625,12 +634,17 @@ func bundleConfirmationCode(err error) enterprisebundle.Code {
 
 // bundleHealth is the /health policy block a bundle confirm reads.
 type bundleHealth struct {
-	digest, reloadError string
-	configGeneration    uint64
+	digest, reloadError      string
+	configState, configError string
+	configGeneration         uint64
 }
 
 func parseBundleHealth(body []byte) bundleHealth {
 	var health struct {
+		Config struct {
+			State     string `json:"state"`
+			LastError string `json:"last_error"`
+		} `json:"config"`
 		Policy *struct {
 			EffectiveDigest  string `json:"effective_digest"`
 			ConfigGeneration uint64 `json:"config_generation"`
@@ -640,7 +654,8 @@ func parseBundleHealth(body []byte) bundleHealth {
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
 		return bundleHealth{}
 	}
-	return bundleHealth{digest: health.Policy.EffectiveDigest, reloadError: health.Policy.LastReloadError, configGeneration: health.Policy.ConfigGeneration}
+	return bundleHealth{digest: health.Policy.EffectiveDigest, reloadError: health.Policy.LastReloadError,
+		configState: health.Config.State, configError: health.Config.LastError, configGeneration: health.Policy.ConfigGeneration}
 }
 
 // gatewayPolicyNow is what the running gateway reports once ("" when it
@@ -697,7 +712,7 @@ func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requi
 	for {
 		if body, err := l.gatewayHealth(ctx, gateway, serviceUID); err == nil {
 			last = parseBundleHealth(body)
-			if last.digest == want && last.reloadError == "" && (!requireGeneration || last.configGeneration == 0 || last.configGeneration == state.Generation) {
+			if last.digest == want && last.reloadError == "" && last.configState != "error" && (!requireGeneration || last.configGeneration == 0 || last.configGeneration == state.Generation) {
 				if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, want, last.digest, rc.DigestComparable); err != nil {
 					return "", 0, err
 				}
@@ -714,6 +729,8 @@ func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requi
 		}
 	}
 	switch {
+	case last.configState == "error":
+		return "", 0, fmt.Errorf("the gateway reports config.state=error for the bundle config: %s", last.configError)
 	case last.reloadError != "":
 		return "", 0, fmt.Errorf("the gateway refused the bundle policy and keeps enforcing its previous policy: %s", last.reloadError)
 	case last.digest == "":

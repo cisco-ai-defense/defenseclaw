@@ -53,7 +53,7 @@ func CheckFloor(m *Manifest, manifestSHA256 string, confirmed Confirmed, anchorM
 		return false, floor, refuse(CodeVersionNotNewer, "version", "the manifest differs from the confirmed bundle %s version %d", m.BundleID, m.Version)
 	}
 	if m.Version <= floor {
-		return false, floor, refuse(CodeVersionNotNewer, "version", "version %d is not above the floor %d", m.Version, floor)
+		return false, floor, refuse(CodeVersionNotNewer, "version", "version %d is not above the floor %d (set by trust anchor min_version or the last confirmed bundle)", m.Version, floor)
 	}
 	return false, floor, nil
 }

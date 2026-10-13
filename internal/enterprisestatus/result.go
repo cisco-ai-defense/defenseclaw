@@ -249,6 +249,7 @@ const (
 type BundleState struct {
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
+	WarningCodes     []string `json:"warning_codes,omitempty"`
 	Version          uint64   `json:"version"`
 	State            string   `json:"state"`
 	// SessionsRestartRequired is a live scan. A confirmed receipt proves the

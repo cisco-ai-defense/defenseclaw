@@ -159,6 +159,15 @@ func flip(data []byte, i int) []byte {
 	return out
 }
 
+func TestAnchorMinVersionIsExclusiveFloor(t *testing.T) {
+	m := &enterprisebundle.Manifest{Version: 1, BundleID: "b-01JA0000000000000000000032"}
+	_, floor, err := enterprisebundle.CheckFloor(m, strings.Repeat("a", 64), enterprisebundle.Confirmed{}, 1)
+	if floor != 1 || enterprisebundle.CodeOf(err) != enterprisebundle.CodeVersionNotNewer ||
+		!strings.Contains(err.Error(), "version 1 is not above the floor 1 (set by trust anchor min_version or the last confirmed bundle)") {
+		t.Fatalf("floor = %d, refusal = %v", floor, err)
+	}
+}
+
 // The tamper matrix: every change to a signed bundle, its anchors or the
 // device facts is refused with its code, before anything is installed;
 // the untouched bundle verifies with its digest compared.

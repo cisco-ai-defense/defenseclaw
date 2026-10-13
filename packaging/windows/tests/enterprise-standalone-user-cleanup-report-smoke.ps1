@@ -67,6 +67,22 @@ $failures = & $module {
         }
     }
 
+    # Native Claude hooks found in a signed-out profile are removed by the
+    # LocalSystem finalize and counted in the same user registration report.
+    $claudeFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":1,' +
+        '"user_registrations_pending":[],"user_registrations_failed":[]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $claudeResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $claudeFinalize
+    if ($claudeResult.user_registrations_removed -ne 1 -or
+        @($claudeResult.user_registrations_pending).Count -ne 0) {
+        $failures.Add('signed-out Claude cleanup was not reported')
+    }
+
     # A purge names each account whose per-user data went and each one whose
     # data stayed; both lists carry through.
     $purgeFinalize = (

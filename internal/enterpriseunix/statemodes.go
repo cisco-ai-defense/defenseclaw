@@ -20,7 +20,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -61,8 +60,6 @@ var (
 
 // maxStateDepth bounds how deep the state folders are walked.
 const maxStateDepth = 8
-
-var bundleVersionModeName = regexp.MustCompile(`^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}$`)
 
 // stateMode is the owner and mode one state entry is written with. With
 // mask, mode is the most the entry may have: bits beyond it are removed and
@@ -132,7 +129,7 @@ func (e *Env) stateTrees(account Account) []stateTree {
 					return stateMode{mode: 0o700, owner: rootOwner()}
 				}
 				return stateMode{mode: 0o600, owner: rootOwner()}
-			case bundleVersionModeName.MatchString(name) && (rel != name || dir):
+			case enterprisebundle.IsVersionDirName(name) && (rel != name || dir):
 				if dir {
 					return stateMode{mode: 0o750, owner: rootService}
 				}

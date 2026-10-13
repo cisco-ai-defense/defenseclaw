@@ -1975,6 +1975,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 		}
 		fmt.Fprintf(output, "  warning %s: %s\n", message.Code, message.Message)
 	}
+	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		enterprisestatus.WriteSessionEntries(output, *result.Bundle.SessionsRestartRequired)
+	}
 	if result.LogPath != "" {
 		fmt.Fprintf(output, "  Log: %s\n", result.LogPath)
 	}

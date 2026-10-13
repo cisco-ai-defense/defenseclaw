@@ -33,8 +33,9 @@ import (
 //
 // A bundle is copied into <etc>/bundles/.staging-<receipt id> and verified
 // there, never at the path MDM dropped it, then renamed to an immutable
-// <etc>/bundles/v<version>-<id8> directory that the installed config points
-// into. bundle-state.json (current, last_good, floor) and receipts/ live in
+// <etc>/bundles/v<version>-<id8>-<receipt id> directory that the installed
+// config points into. Legacy version names remain readable. bundle-state.json
+// (current, last_good, floor) and receipts/ live in
 // the root-only lifecycle directory. bundle-state.json is replaced
 // atomically and changes only when a bundle is confirmed, so a crash at any
 // point leaves the last good bundle in force and its directory in place.
@@ -73,7 +74,7 @@ const (
 
 var (
 	receiptIDPattern  = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	versionDirPattern = regexp.MustCompile(`^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}$`)
+	versionDirPattern = regexp.MustCompile(`^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$`)
 )
 
 // nextState is the only forward move from each receipt state.
@@ -125,7 +126,7 @@ func (r *Ref) validate() error {
 		return errors.New("version is out of range")
 	case !validSHA256Hex(r.ManifestSHA256):
 		return errors.New("manifest_sha256 is not a SHA-256 digest")
-	case r.Dir != VersionDirName(r.Version, r.BundleID):
+	case !validVersionDir(r.Dir, r.Version, r.BundleID):
 		return errors.New("dir does not name the bundle version directory")
 	}
 	return nil
@@ -260,6 +261,7 @@ func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		Restart: r.Restart, RestartRequired: r.RestartRequired,
 		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
+		WarningCodes:     append([]string(nil), r.WarningCodes...),
 	}
 	if current != nil && (current.BundleID != r.BundleID || r.State != StateConfirmed) {
 		out.CurrentBundleID, out.CurrentVersion = current.BundleID, current.Version
@@ -275,6 +277,22 @@ func VersionDirName(version uint64, bundleID string) string {
 		id8 = id8[len(id8)-8:]
 	}
 	return "v" + strconv.FormatUint(version, 10) + "-" + id8
+}
+
+// VersionDirNameForReceipt gives each delivery an immutable destination.
+// A retry can switch its config to this directory without touching a path
+// named by the installed config, even when the earlier receipt was failed.
+func VersionDirNameForReceipt(version uint64, bundleID, receiptID string) string {
+	return VersionDirName(version, bundleID) + "-" + receiptID
+}
+
+// IsVersionDirName accepts current receipt-specific and legacy version
+// directory names. It is shared by store collection and lifecycle modes.
+func IsVersionDirName(name string) bool { return versionDirPattern.MatchString(name) }
+
+func validVersionDir(name string, version uint64, bundleID string) bool {
+	base := VersionDirName(version, bundleID)
+	return name == base || (strings.HasPrefix(name, base+"-") && receiptIDPattern.MatchString(strings.TrimPrefix(name, base+"-")))
 }
 
 // Store is the bundle store of one device.
@@ -301,9 +319,6 @@ type Store struct {
 	// PublishReceipt applies the platform's public-file permissions after an
 	// atomic replacement of receipt.json.
 	PublishReceipt func(path string) error
-	// installedVersionDirs are named by the config installed when this run
-	// began. A retry must not replace one while that config can still load it.
-	installedVersionDirs map[string]bool
 }
 
 // NewStore returns the store at bundlesDir with its state in lifecycleDir.
@@ -691,31 +706,11 @@ func (s *Store) Promote(r *Receipt) (string, error) {
 	if r.State != StateVerified {
 		return "", fmt.Errorf("promote needs a verified bundle receipt, not %s", r.State)
 	}
-	st, err := s.LoadState()
-	if err != nil {
-		return "", err
-	}
-	name := VersionDirName(r.Version, r.BundleID)
-	if st.held(name) {
-		return "", fmt.Errorf("bundle %s version %d is already in the store", r.BundleID, r.Version)
-	}
-	if s.installedVersionDirs[name] {
-		return "", fmt.Errorf("bundle %s version %d is used by the installed config", r.BundleID, r.Version)
-	}
-	// An applied receipt that is not confirmed yet names a directory the
-	// installed config may point at: removing it to rename this copy into
-	// place would leave the enforcing config without its files.
-	receipts, err := s.Receipts()
-	if err != nil {
-		return "", err
-	}
-	for _, other := range receipts {
-		if other.ReceiptID != r.ReceiptID && other.Dir == name && !Finished(other.State) {
-			return "", fmt.Errorf("bundle %s version %d is in use by the %s receipt %s", r.BundleID, r.Version, other.State, other.ReceiptID)
-		}
-	}
+	name := VersionDirNameForReceipt(r.Version, r.BundleID, r.ReceiptID)
 	staging, target := s.stagingPath(r.ReceiptID), s.VersionDir(name)
-	if err := removeTree(target); err != nil {
+	if _, err := os.Lstat(target); err == nil {
+		return "", fmt.Errorf("bundle version destination %s already exists", name)
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
 	seal := s.SealVersion
@@ -930,7 +925,7 @@ func VersionDirsNamed(raw []byte, bundlesDir string) []string {
 	prefix := regexp.MustCompile(regexp.QuoteMeta(filepath.Clean(bundlesDir)+string(filepath.Separator)) + `([0-9A-Za-z-]+)`)
 	var names []string
 	for _, m := range prefix.FindAllSubmatch(raw, -1) {
-		if name := string(m[1]); versionDirPattern.MatchString(name) && !slices.Contains(names, name) {
+		if name := string(m[1]); IsVersionDirName(name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -946,7 +941,7 @@ func (s *Store) gc(st State, keep map[string]bool) error {
 		for _, entry := range entries {
 			name := entry.Name()
 			stale := strings.HasPrefix(name, stagingPrefix) ||
-				(versionDirPattern.MatchString(name) && !st.held(name) && !keep[name])
+				(IsVersionDirName(name) && !st.held(name) && !keep[name])
 			if stale {
 				errs = append(errs, removeTree(filepath.Join(s.BundlesDir, name)))
 			}

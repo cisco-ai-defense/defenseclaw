@@ -177,10 +177,13 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Hex(staged.Manifest), res.ExpectedDigest
 		rc.DigestComparable = res.DigestVerified
+		if !res.DigestVerified {
+			rc.WarningCodes = append(rc.WarningCodes, WarnDigestUnverifiable)
+		}
 	}); err != nil {
 		return refuse(err)
 	}
-	versionName := VersionDirName(receipt.Version, receipt.BundleID)
+	versionName := VersionDirNameForReceipt(receipt.Version, receipt.BundleID, receipt.ReceiptID)
 	rendered, err := RenderConfig(staged, d.Store.VersionDir(versionName))
 	if err != nil {
 		return refuse(err)
@@ -305,10 +308,6 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 // for a rollback) otherwise, never reported as an apply that did not happen.
 func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (report SettleReport, rollback []*Receipt, err error) {
 	installedDirs := VersionDirsNamed(installedConfig, d.Store.BundlesDir)
-	d.Store.installedVersionDirs = make(map[string]bool, len(installedDirs))
-	for _, name := range installedDirs {
-		d.Store.installedVersionDirs[name] = true
-	}
 	installed := ""
 	if installedConfig != nil {
 		installed = sha256Hex(installedConfig)

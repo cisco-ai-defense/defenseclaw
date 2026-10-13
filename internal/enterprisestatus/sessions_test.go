@@ -4,6 +4,9 @@
 package enterprisestatus
 
 import (
+	"bytes"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,19 +20,16 @@ func TestUnprotectedSessions(t *testing.T) {
 		{PID: 44, User: "bob", Agent: "cursor", StartedAt: changed.Add(-time.Minute)},
 	}
 	for _, tc := range []struct {
-		name       string
-		privileged bool
-		changed    map[string]time.Time
-		wantState  string
-		wantPIDs   []int
+		name     string
+		changed  map[string]time.Time
+		wantPIDs []int
 	}{
-		{"before managed settings", true, map[string]time.Time{"claudecode": changed, "codex": changed}, "known", []int{41, 43}},
-		{"other connector not installed", true, map[string]time.Time{"cursor": changed}, "known", []int{44}},
-		{"requires privileged scan", false, map[string]time.Time{"claudecode": changed}, "unknown", nil},
+		{"before managed settings", map[string]time.Time{"claudecode": changed, "codex": changed}, []int{41, 43}},
+		{"other connector not installed", map[string]time.Time{"cursor": changed}, []int{44}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := UnprotectedSessions(rows, tc.changed, tc.privileged)
-			if got.State != tc.wantState || got.Count != len(tc.wantPIDs) || len(got.Entries) != len(tc.wantPIDs) {
+			got := UnprotectedSessions(rows, tc.changed)
+			if got.State != "known" || got.Count != len(tc.wantPIDs) || len(got.Entries) != len(tc.wantPIDs) {
 				t.Fatalf("sessions = %+v", got)
 			}
 			for i, pid := range tc.wantPIDs {
@@ -43,9 +43,41 @@ func TestUnprotectedSessions(t *testing.T) {
 	for i := range more {
 		more[i] = SessionProcess{PID: 100 + i, User: "alice", Agent: "claudecode", StartedAt: changed.Add(-time.Minute)}
 	}
-	got := UnprotectedSessions(more, map[string]time.Time{"claudecode": changed}, true)
+	got := UnprotectedSessions(more, map[string]time.Time{"claudecode": changed})
 	if got.Count != 25 || len(got.Entries) != 20 {
 		t.Fatalf("bounded entries = %+v", got)
+	}
+}
+
+func TestScanSessionsUsesProcessListerAndExplainsFailure(t *testing.T) {
+	changed := time.Date(2026, 10, 13, 7, 9, 0, 0, time.UTC)
+	lister := func() ([]SessionProcess, error) {
+		return []SessionProcess{{PID: 8664, User: "dcw-std1", Agent: "claudecode", StartedAt: changed.Add(-time.Minute)}}, nil
+	}
+	got := ScanSessions(lister, map[string]time.Time{"claudecode": changed}, true)
+	if got.State != "known" || got.Count != 1 || got.Entries[0].PID != 8664 || got.Entries[0].User != "dcw-std1" || got.Entries[0].StartedAt == "" {
+		t.Fatalf("old session = %+v", got)
+	}
+	if code, message := SessionWarning(got); code != CodeSessionsNeedRestart || !strings.Contains(message, "restart") {
+		t.Fatalf("warning = %s: %s", code, message)
+	}
+	var printed bytes.Buffer
+	WriteSessionEntries(&printed, got)
+	for _, want := range []string{"pid 8664", "user dcw-std1", "2026-10-13T07:08:00Z", "restart the agent"} {
+		if !strings.Contains(printed.String(), want) {
+			t.Fatalf("text omits %q: %s", want, printed.String())
+		}
+	}
+	failed := ScanSessions(func() ([]SessionProcess, error) { return nil, errors.New("process snapshot failed") }, nil, true)
+	if failed.State != "unknown" || failed.Count != 0 || failed.Reason != "process snapshot failed" {
+		t.Fatalf("failed scan = %+v", failed)
+	}
+	if code, message := SessionWarning(failed); code != "sessions_scan_unknown" || !strings.Contains(message, failed.Reason) {
+		t.Fatalf("unknown warning = %s: %s", code, message)
+	}
+	unprivileged := ScanSessions(nil, nil, false)
+	if unprivileged.State != "unknown" || !strings.Contains(unprivileged.Reason, "administrator privileges") {
+		t.Fatalf("unprivileged scan = %+v", unprivileged)
 	}
 }
 
@@ -55,5 +87,25 @@ func TestBundleSessionsPreventCompleteCoverage(t *testing.T) {
 	r.Finish("linux", 0)
 	if r.CoverageComplete || r.SecurityComplete || len(r.Warnings) != 1 || r.Warnings[0].Code != CodeSessionsNeedRestart {
 		t.Fatalf("result with old session = %+v", r)
+	}
+}
+
+func TestUnknownBundleSessionsPreventCompleteCoverage(t *testing.T) {
+	r := &Result{CoverageComplete: true, SecurityComplete: true, Bundle: &BundleState{State: BundleConfirmed}}
+	r.SetBundleSessions(SessionRestartStatus{State: "unknown", Entries: []SessionEntry{}, Reason: "process snapshot failed"})
+	r.Finish("windows", 0)
+	if r.CoverageComplete || r.SecurityComplete || len(r.Warnings) != 1 || r.Warnings[0].Code != "sessions_scan_unknown" ||
+		!strings.Contains(r.Warnings[0].Message, "process snapshot failed") {
+		t.Fatalf("unknown scan was reported as complete: %+v", r)
+	}
+}
+
+func TestBundleDigestUnverifiableMarkerReachesStatus(t *testing.T) {
+	r := &Result{Bundle: &BundleState{State: BundleConfirmed, WarningCodes: []string{"digest_unverifiable"}}}
+	r.SetBundleReceiptWarnings()
+	r.SetBundleReceiptWarnings()
+	if len(r.Warnings) != 1 || r.Warnings[0].Code != "digest_unverifiable" ||
+		!strings.Contains(r.Warnings[0].Message, "enforcing digest was recorded") {
+		t.Fatalf("digest marker omitted or duplicated: %+v", r)
 	}
 }

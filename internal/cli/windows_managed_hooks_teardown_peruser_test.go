@@ -59,6 +59,36 @@ func TestWindowsManagedHooksTeardownPluginConnectorsHaveNoSelector(t *testing.T)
 
 func boolPointerForTest(value bool) *bool { return &value }
 
+func TestWindowsStandaloneUninstallCleansClaudeSettingsWithoutUserSession(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalRemover := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover = originalIdentity, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	calls := 0
+	windowsManagedClaudeSettingsRemover = func(home, sid, state string) (int, error) {
+		calls++
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID || state != runtimeDir {
+			t.Fatalf("Claude cleanup target %s %s %s", home, sid, state)
+		}
+		return 29, nil
+	}
+	for _, purge := range []string{"0", "1"} {
+		t.Setenv(windowsManagedHooksPurgeUserStateEnv, purge)
+		result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+		if len(result.Removed) != 1 || result.Removed[0] != "claudecode/"+manifest.Targets[0].SID ||
+			len(result.Pending) != 0 || len(result.Failed) != 0 {
+			t.Fatalf("purge=%s cleanup result = %+v", purge, result)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("Claude settings cleanup called %d times", calls)
+	}
+}
+
 // Uninstall cleans every per-user registration the guardian made or still
 // owes, as each user; when it cannot act as users at all (an interactive
 // administrator), every registration is reported, never silently skipped.

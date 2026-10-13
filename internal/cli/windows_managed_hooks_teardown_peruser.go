@@ -17,7 +17,32 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// Windows SYSTEM can open an enrolled user's profile even when that user has
+// no logon token. The profile root is checked against the recorded SID; the
+// connector transaction then pins the settings identity and preserves its DACL.
+func removeWindowsManagedClaudeUserSettings(home, sid, runtimeDir string) (int, error) {
+	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	} else if err != nil {
+		return 0, err
+	}
+	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
+	return connector.TransformWindowsClaudeSettingsForUninstall(path, runtimeDir, func(raw []byte) ([]byte, int, error) {
+		return removeWindowsManagedClaudeCommands(raw, launcher)
+	})
+}
+
+var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings
 
 // Standalone per-user connectors (Copilot, Antigravity, Devin, Hermes,
 // OpenCode, Amp) are part of the managed-hook teardown only in a process
@@ -338,21 +363,45 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 	now := time.Now()
 	entries, problems := windowsManagedHooksStandaloneUserCleanups(runtimeDir, manifest, now)
 	result := enterpriseHookUserCleanupResult{Failed: problems}
+	// Claude's current enrollment is machine policy, but older native hook
+	// registrations can remain in user settings. Remove only this profile's
+	// exact launcher path before a purge deletes the launcher.
+	identityErr := enterpriseHookWindowsUserCleanupIdentity()
+	seen := map[string]bool{}
+	for _, target := range manifest.Targets {
+		if target.Connector != "claudecode" || target.UserHome == "" || target.SID == "" || seen[target.SID] {
+			continue
+		}
+		seen[target.SID] = true
+		if identityErr != nil {
+			result.Pending = append(result.Pending, "claudecode/"+target.SID)
+			continue
+		}
+		if n, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, runtimeDir); err != nil {
+			result.Failed = append(result.Failed, "claudecode/"+target.SID+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		} else if n > 0 {
+			result.Removed = append(result.Removed, "claudecode/"+target.SID)
+		}
+	}
+	if identityErr != nil && len(seen) > 0 && len(entries) == 0 {
+		result.Failed = append(result.Failed,
+			windowsManagedHooksRegistrationsNotRemovedPrefix+boundedEnterpriseHookUserCleanupText(identityErr.Error()))
+	}
 	if len(entries) == 0 {
 		return result
 	}
-	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
+	if identityErr != nil {
 		for _, entry := range entries {
 			result.Pending = append(result.Pending, enterpriseHookUserCleanupLabel(entry))
 		}
 		result.Pending = windowsManagedHooksStandaloneRegistrationsLeft(entries, result.Pending)
 		result.Failed = append(result.Failed,
-			windowsManagedHooksRegistrationsNotRemovedPrefix+boundedEnterpriseHookUserCleanupText(err.Error()))
+			windowsManagedHooksRegistrationsNotRemovedPrefix+boundedEnterpriseHookUserCleanupText(identityErr.Error()))
 		return result
 	}
 	_, attempted := runEnterpriseHookUserCleanups(ctx, entries, enterpriseHookWindowsUserCleanupAttempt, now)
-	result.Removed = attempted.Removed
-	result.Pending = windowsManagedHooksStandaloneRegistrationsLeft(entries, attempted.Pending)
+	result.Removed = append(result.Removed, attempted.Removed...)
+	result.Pending = windowsManagedHooksStandaloneRegistrationsLeft(entries, append(result.Pending, attempted.Pending...))
 	result.Failed = append(result.Failed, attempted.Failed...)
 	return result
 }

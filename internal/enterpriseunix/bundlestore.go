@@ -73,6 +73,7 @@ func (l *lifecycle) describeBundle() {
 		l.result.Bundle = summary
 		if summary != nil {
 			l.result.SetBundleSessions(l.env.UnprotectedSessions(context.Background()))
+			l.result.SetBundleReceiptWarnings()
 		}
 	}
 	_, l.result.LastRefusal, _ = store.Latest()

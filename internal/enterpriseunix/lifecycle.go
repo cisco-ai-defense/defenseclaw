@@ -2135,10 +2135,10 @@ func (e *Env) metadataDiffers(path string, mode os.FileMode, owner fileOwner) bo
 }
 
 func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error {
-	if err := os.Chmod(path, mode); err != nil {
+	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
 		return err
 	}
-	return e.Lchown(path, owner.UID, owner.GID)
+	return os.Chmod(path, mode)
 }
 
 // initialManifest seeds an empty guardian manifest so the guardian and the

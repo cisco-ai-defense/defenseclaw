@@ -460,6 +460,35 @@ func TestBundleRuntimeDigestUsesRecordedVersionRoot(t *testing.T) {
 	}
 }
 
+func TestBundleRuntimeDigestUsesReceiptSpecificInstalledRoot(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	const bundleID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A"
+	name := enterprisebundle.VersionDirNameForReceipt(7, bundleID, bundleID)
+	bundleRoot := filepath.Join(root, "bundles", name)
+	if err := os.MkdirAll(bundleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("config_version: 9\nplugin_dir: " + filepath.Join(bundleRoot, "plugins") + "\n")
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	record := fmt.Sprintf(`{"generation":7,"config_sha256":"%x","actor":"operator:alice","written_at":"2026-10-13T00:00:00Z","bundle_id":%q,"bundle_version":7,"signer_key_id":"k1"}`, sum, bundleID)
+	if err := os.WriteFile(filepath.Join(root, "config.generation.json"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{ConfigFilePath: configPath, DataDir: filepath.Join(root, "runtime"), PluginDir: filepath.Join(bundleRoot, "plugins")}
+	signed, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{BundleRoot: bundleRoot, Raw: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePolicy, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{Raw: raw})
+	if err != nil || runtimePolicy.Digest != signed.Digest {
+		t.Fatalf("receipt-specific root digest: signed=%s runtime=%s err=%v", signed.Digest, runtimePolicy.Digest, err)
+	}
+}
+
 // A rebuild with the live digest is unchanged only while the Rego policy
 // fails (or loads) the same way; a new load failure is published (GAP-0043).
 func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {

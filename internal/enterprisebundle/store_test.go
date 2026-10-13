@@ -411,7 +411,7 @@ func TestStorePromotedTreeHasServiceGroupReadOnlyModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.State != StateStaged || r.Dir != VersionDirName(7, r.BundleID) {
+	if r.State != StateStaged || r.Dir != VersionDirNameForReceipt(7, r.BundleID, r.ReceiptID) {
 		t.Fatalf("promoted receipt: %+v", r)
 	}
 	err = filepath.WalkDir(version, func(path string, entry fs.DirEntry, err error) error {
@@ -526,8 +526,8 @@ func containsReceipt(receipts []*Receipt, id, state string) bool {
 }
 
 // A bundle delivered again while its applied receipt waits for settle gets a
-// receipt of its own and cannot replace the version directory the installed
-// config may point at; a confirm never lowers the floor.
+// receipt of its own and its own version directory, leaving the installed
+// config's directory intact; a confirm never lowers the floor.
 func TestStoreKeepsAnAppliedBundleAndTheFloorOnARetry(t *testing.T) {
 	s := testStore(t)
 	applyThrough(t, s, 1, 4, StateConfirmed)
@@ -546,8 +546,8 @@ func TestStoreKeepsAnAppliedBundleAndTheFloorOnARetry(t *testing.T) {
 	if err := s.Advance(again, StateVerified, func(r *Receipt) { r.ManifestSHA256 = applied.ManifestSHA256 }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Promote(again); err == nil || !strings.Contains(err.Error(), "in use") {
-		t.Fatalf("promote over the applied bundle: %v", err)
+	if _, err := s.Promote(again); err != nil || again.Dir == applied.Dir {
+		t.Fatalf("retry did not get a fresh version directory: %v, %s", err, again.Dir)
 	}
 	if _, err := os.Stat(filepath.Join(s.VersionDir(applied.Dir), ConfigName)); err != nil {
 		t.Fatalf("applied version directory lost its config: %v", err)

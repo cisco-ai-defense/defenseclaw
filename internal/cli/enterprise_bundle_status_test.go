@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io/fs"
@@ -23,9 +24,10 @@ import (
 // store in a temp dir and anchors trusted without the root-owner check.
 func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 	t.Helper()
-	savedStore, savedPolicy, savedAnchors, savedTrust := bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust
+	savedStore, savedPolicy, savedAnchors, savedTrust, savedSessions := bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust, bundleSessionStatus
 	t.Cleanup(func() {
 		bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust = savedStore, savedPolicy, savedAnchors, savedTrust
+		bundleSessionStatus = savedSessions
 	})
 	store := enterprisebundle.NewStore(filepath.Join(e.dir, "etc", "bundles"), filepath.Join(e.dir, "lifecycle"))
 	t.Cleanup(func() {
@@ -41,6 +43,9 @@ func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 	bundleDefaultAnchors = func() (string, error) { return e.anchors, nil }
 	bundleAnchorTrust = nil
 	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState { return nil }
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "known", Entries: []enterprisestatus.SessionEntry{}}
+	}
 	return store
 }
 
@@ -233,13 +238,18 @@ func TestEnterpriseBundleStatusSessionGolden(t *testing.T) {
 	store := bundleDevice(t, e)
 	confirmBundle(t, store, "b-01JA0000000000000000000032", 1, "sha256:"+strings.Repeat("1", 64))
 	saved := bundleSessionStatus
+	scans := 0
 	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		scans++
 		return enterprisestatus.SessionRestartStatus{State: "known", Count: 1, Entries: []enterprisestatus.SessionEntry{{PID: 41, User: "alice", Agent: "claudecode", StartedAt: "2026-10-13T07:07:31Z"}}}
 	}
 	t.Cleanup(func() { bundleSessionStatus = saved })
 	out, code := runBundle(t, "status", "--json")
 	if code != 0 {
 		t.Fatalf("status exit %d: %s", code, out)
+	}
+	if scans != 1 {
+		t.Fatalf("status used %d process scans, want one", scans)
 	}
 	var res bundleStatusResult
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
@@ -259,6 +269,27 @@ func TestEnterpriseBundleStatusSessionGolden(t *testing.T) {
 	}
 	if string(got)+"\n" != string(want) {
 		t.Fatalf("status session golden:\n%s\nwant:\n%s", got, want)
+	}
+	var printed bytes.Buffer
+	printStatusText(&printed, &res)
+	for _, want := range []string{"sessions_need_restart", "pid 41", "user alice", "2026-10-13T07:07:31Z", "restart the agent"} {
+		if !strings.Contains(printed.String(), want) {
+			t.Fatalf("status text omits %q: %s", want, printed.String())
+		}
+	}
+}
+
+func TestEnterpriseBundleStatusExplainsUnknownSessionScan(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	confirmBundle(t, store, "b-01JA0000000000000000000032", 1, "sha256:"+strings.Repeat("1", 64))
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: "process snapshot failed"}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 || !strings.Contains(out, `"reason": "process snapshot failed"`) || !strings.Contains(out, `"code": "sessions_scan_unknown"`) {
+		t.Fatalf("unknown scan exit=%d: %s", code, out)
 	}
 }
 

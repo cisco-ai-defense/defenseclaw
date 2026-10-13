@@ -136,7 +136,7 @@ type bundleHost struct {
 	key             ed25519.PrivateKey
 	installedDigest func([]byte) string
 	// frozen makes the gateway keep reporting this digest and reloadError.
-	frozen, reloadError string
+	frozen, reloadError, configError string
 	// extra are bundle files next to config.yaml in every bundle signed.
 	extra map[string]string
 }
@@ -199,8 +199,12 @@ func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 		if b.frozen != "" {
 			digest = b.frozen
 		}
-		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
-			digest, generation, b.reloadError)), nil
+		configState := "running"
+		if b.configError != "" {
+			configState = "error"
+		}
+		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"config":{"state":%q,"last_error":%q},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+			configState, b.configError, digest, generation, b.reloadError)), nil
 	}
 	h.env.BundleDigester = func(_ context.Context, _ *config.Config, raw []byte, _, root string) (string, error) {
 		// As the gateway digest does, the bundle root is ${bundle_root}.
@@ -289,7 +293,7 @@ func (b *bundleHost) apply(path string) *enterprisestatus.Result {
 func (b *bundleHost) mapPromotedBundleOwners(version uint64) {
 	store := b.env.bundleStore()
 	staging := filepath.Join(store.BundlesDir, ".staging-"+bundleID(version))
-	promoted := store.VersionDir(enterprisebundle.VersionDirName(version, bundleID(version)))
+	promoted := store.VersionDir(enterprisebundle.VersionDirNameForReceipt(version, bundleID(version), bundleID(version)))
 	ownerOf := b.env.OwnerOf
 	b.env.OwnerOf = func(path string) (int, int, error) {
 		if path == promoted || strings.HasPrefix(path, promoted+string(filepath.Separator)) {
@@ -392,7 +396,7 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 		t.Fatalf("restart bundle: receipt = %+v, gateway touched = %v", rc, gatewayTouched(b.testHost, from))
 	}
 	// Version directories other than current and last good are gone.
-	if _, err := os.Stat(b.env.P(b.env.bundleVersionDir(enterprisebundle.VersionDirName(1, bundleID(1))))); !os.IsNotExist(err) {
+	if _, err := os.Stat(b.env.P(b.env.bundleVersionDir(enterprisebundle.VersionDirNameForReceipt(1, bundleID(1), bundleID(1))))); !os.IsNotExist(err) {
 		t.Fatalf("v1 directory kept: %v", err)
 	}
 
@@ -523,7 +527,7 @@ func TestBundleApplyReportsAndCanRefuseCapabilityLoss(t *testing.T) {
 			if err != nil || !bytes.Equal(before, after) || b.state().Current.BundleID != bundleID(1) {
 				t.Fatalf("strict changed config or current bundle: %v", err)
 			}
-			if _, err := os.Stat(b.env.P(b.env.bundleVersionDir(enterprisebundle.VersionDirName(2, bundleID(2))))); !os.IsNotExist(err) {
+			if _, err := os.Stat(b.env.P(b.env.bundleVersionDir(enterprisebundle.VersionDirNameForReceipt(2, bundleID(2), bundleID(2))))); !os.IsNotExist(err) {
 				t.Fatalf("strict promoted a version: %v", err)
 			}
 			permissive := b.apply(b.dir(3, off))
@@ -565,7 +569,7 @@ func testBundleShippedRulePackIsReadableByGateway(t *testing.T, goos string) {
 		t.Fatal(err)
 	}
 	b.owners[store.BundlesDir] = [2]int{0, 0}
-	version := store.VersionDir(enterprisebundle.VersionDirName(1, bundleID(1)))
+	version := store.VersionDir(enterprisebundle.VersionDirNameForReceipt(1, bundleID(1), bundleID(1)))
 	b.mapPromotedBundleOwners(1)
 	requireOK(t, b.apply(b.dir(1, cfg)))
 	rc := b.receipt(bundleID(1))
@@ -803,6 +807,24 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	if gen, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath)); err != nil ||
 		gen.BundleID != bundleID(1) || gen.BundleVersion != 1 || !configwrite.IsPrincipalActor(gen.Actor) {
 		t.Fatalf("restored generation = %+v (%v), want bundle 1", gen, err)
+	}
+}
+
+func TestBundleConfirmRejectsGatewayConfigErrorAndRestoresLastGood(t *testing.T) {
+	b := newBundleHost(t, "darwin")
+	v1, v2, _ := bundleConfigs(b.testHost)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	good := b.read(b.env.Layout.ConfigPath)
+	b.configError = "permission denied"
+	r := b.apply(b.dir(2, v2))
+	requireError(t, r, codeBundleNotConfirmed)
+	rc := b.receipt(bundleID(2))
+	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeNotConfirmed || !rc.RolledBack ||
+		!strings.Contains(rc.ErrorMessage, "config.state=error") {
+		t.Fatalf("failed receipt = %+v", rc)
+	}
+	if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(1) || b.read(b.env.Layout.ConfigPath) != good {
+		t.Fatalf("last good config was not restored: state = %+v", st)
 	}
 }
 

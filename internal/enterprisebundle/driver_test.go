@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -108,6 +109,7 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 			{name: "mismatching comparable", comparable: true, mismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
 			{name: "gateway differs from receipt effective", comparable: true, gatewayMismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
 			{name: "non-comparable", mismatch: true},
+			{name: "non-comparable equal digest"},
 		} {
 			t.Run(platform+"/"+tc.name, func(t *testing.T) {
 				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
@@ -153,6 +155,9 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 				}
 				if !tc.comparable && !containsWarning(p.Receipt.WarningCodes, enterprisebundle.WarnDigestUnverifiable) {
 					t.Fatalf("non-comparable digest has no warning: %+v", p.Receipt)
+				}
+				if !tc.comparable && !containsWarning(p.Receipt.Status(state.Current).WarningCodes, enterprisebundle.WarnDigestUnverifiable) {
+					t.Fatal("confirmed bundle status omitted digest_unverifiable")
 				}
 			})
 		}
@@ -396,11 +401,78 @@ func TestDriverSettleRunProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	if err != nil || len(report.Interrupted) != 0 || len(rollback) != 1 {
 		t.Fatalf("settle = %+v, rollback = %+v, err = %v", report, rollback, err)
 	}
-	if _, err := d.Prepare(context.Background(), f.bundle, nil); err == nil {
-		t.Fatal("retry replaced the version directory used by the installed unconfirmed config")
+	retry, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil || retry.Receipt.Dir == first.Receipt.Dir {
+		t.Fatalf("retry needs a fresh version directory: %v, %+v", err, retry.Receipt)
 	}
 	after, err := os.ReadFile(filepath.Join(versionDir, enterprisebundle.ManifestName))
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("installed version directory changed: %v", err)
+	}
+}
+
+func TestRetryCrashWindowsKeepInstalledConfigFilesComplete(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	first, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	switchConfig := func(raw []byte) {
+		t.Helper()
+		if err := configwrite.WriteFileDurable(configPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertInstalled := func(wantDir string) {
+		t.Helper()
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirs := enterprisebundle.VersionDirsNamed(raw, d.Store.BundlesDir)
+		if len(dirs) != 1 || dirs[0] != wantDir {
+			t.Fatalf("installed config names %v, want %s", dirs, wantDir)
+		}
+		bundle, err := enterprisebundle.ReadDir(d.Store.VersionDir(dirs[0]))
+		if err != nil || len(bundle.Files) != len(f.bundle.Files) {
+			t.Fatalf("installed config points at incomplete bundle: %v, files=%d", err, len(bundle.Files))
+		}
+	}
+	switchConfig(first.Config)
+	assertInstalled(first.Receipt.Dir)
+	// Crash after the next delivery is staged, before promotion.
+	staged, err := d.Store.Receive(first.Receipt.BundleID, first.Receipt.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.Stage(staged, f.bundle); err != nil {
+		t.Fatal(err)
+	}
+	assertInstalled(first.Receipt.Dir)
+	// Crash after a retry promotes its own tree, before config commit.
+	retry, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil || retry.Receipt.Dir == first.Receipt.Dir {
+		t.Fatalf("retry promotion = %+v, %v", retry, err)
+	}
+	assertInstalled(first.Receipt.Dir)
+	// Crash after the atomic config switch, before confirmation.
+	switchConfig(retry.Config)
+	assertInstalled(retry.Receipt.Dir)
+	if _, err := os.Stat(d.Store.VersionDir(first.Receipt.Dir)); err != nil {
+		t.Fatalf("old installed directory removed before confirmation: %v", err)
+	}
+	if err := d.Store.Advance(retry.Receipt, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
+		r.EffectivePolicyDigest = r.ExpectedDigest
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Store.Confirm(retry.Receipt); err != nil {
+		t.Fatal(err)
+	}
+	assertInstalled(retry.Receipt.Dir)
+	if _, err := os.Stat(d.Store.VersionDir(first.Receipt.Dir)); !os.IsNotExist(err) {
+		t.Fatalf("superseded directory was not collected after confirmation: %v", err)
 	}
 }

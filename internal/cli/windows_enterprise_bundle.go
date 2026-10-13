@@ -128,6 +128,7 @@ type windowsBundleRun struct {
 	layout   managed.StandaloneLayout
 	driver   *enterprisebundle.Driver
 	prepared *enterprisebundle.Prepared
+	sessions *enterprisestatus.SessionRestartStatus
 	// previous is the installed config.yaml before the run: the last good
 	// config while no bundle is current.
 	previous []byte
@@ -442,7 +443,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	}
 	run := opts.bundle
 	if run == nil {
-		attachWindowsBundleSummary(result, nil, nil)
+		attachWindowsBundleSummary(result, nil, nil, nil)
 		return
 	}
 	opts.bundle = nil
@@ -455,7 +456,9 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		result.NoopReason = "already_applied"
 	}
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
-		p.Receipt.SessionsRestartRequired = platformBundleSessionStatus(run.ctx).Count
+		sessions := platformBundleSessionStatus(run.ctx)
+		run.sessions = &sessions
+		p.Receipt.SessionsRestartRequired = sessions.Count
 		installed := windowsBundleInstalledSHA(run.layout.ConfigPath)
 		var failure []string
 		for _, e := range result.Errors {
@@ -482,7 +485,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil {
 		receipt = p.Receipt
 	}
-	attachWindowsBundleSummary(result, run.driver.Store, receipt)
+	attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
 }
 
 func windowsBundleEnforces(p enterprisebundle.GatewayPolicy) bool {
@@ -537,9 +540,17 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 // attachWindowsBundleSummary sets the result v2 bundle block: the receipt
 // of this run if it reached staging, else the store summary. A store this account
 // cannot read (status as a standard user) adds nothing.
-func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterprisebundle.Store, receipt *enterprisebundle.Receipt) {
+func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterprisebundle.Store, receipt *enterprisebundle.Receipt, sessions *enterprisestatus.SessionRestartStatus) {
 	if result == nil {
 		return
+	}
+	attachSessions := func() {
+		if sessions == nil {
+			status := platformBundleSessionStatus(context.Background())
+			sessions = &status
+		}
+		result.SetBundleSessions(*sessions)
+		result.SetBundleReceiptWarnings()
 	}
 	if store == nil {
 		layout, err := windowsBundleLayout()
@@ -552,28 +563,28 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 		result.LastRefusal = refusal
 	}
 	if result.Bundle != nil {
-		result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
+		attachSessions()
 		return
 	}
 	if receipt != nil && !receipt.IsRefusal() {
 		if st, err := store.LoadState(); err == nil {
 			result.Bundle = receipt.Status(st.Current)
-			result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
+			attachSessions()
 		}
 		return
 	}
 	if summary, err := store.Summary(); err == nil && summary != nil && summary.BundleID != "" {
 		result.Bundle = summary
-		result.SetBundleSessions(platformBundleSessionStatus(context.Background()))
+		attachSessions()
 	}
 }
 
-// platformBundleSessionStatus uses the inventory's Windows process creation
-// times. LocalSystem is needed to inspect runs in every user session.
+// platformBundleSessionStatus uses the same process inventory and activation
+// record as Setup's agent session warning. Bundle commands already require
+// an administrator; they need not run as LocalSystem.
 func platformBundleSessionStatus(parent context.Context) enterprisestatus.SessionRestartStatus {
-	unknown := enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}}
-	if !windowsEnterpriseRunningAsLocalSystem() {
-		return unknown
+	unknown := func(err error) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: err.Error()}
 	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
@@ -582,30 +593,42 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 		err  error
 	}
 	done := make(chan snapshot, 1)
-	go func() { rows, err := inventory.RunningWindowsAgentProcesses(); done <- snapshot{rows, err} }()
+	go func() { rows, err := windowsEnterpriseAgentProcesses(); done <- snapshot{rows, err} }()
 	var scanned snapshot
 	select {
 	case scanned = <-done:
 	case <-ctx.Done():
-		return unknown
+		return unknown(ctx.Err())
 	}
-	if scanned.err != nil || len(scanned.rows) > 4096 {
-		return unknown
+	if scanned.err != nil {
+		return unknown(scanned.err)
+	}
+	if len(scanned.rows) > 4096 {
+		return unknown(fmt.Errorf("process cap reached"))
 	}
 	layout, err := windowsBundleLayout()
 	if err != nil {
-		return unknown
+		return unknown(err)
 	}
 	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
-		return unknown
+		return unknown(err)
 	}
 	programData, err := winpath.TrustedProgramData()
 	if err != nil {
-		return unknown
+		return unknown(err)
 	}
 	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
 	changed := map[string]time.Time{}
+	if metadata, installed := windowsEnterpriseActivationMetadata(); installed {
+		record, activated := readWindowsEnterpriseActivation(filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName))
+		for _, row := range scanned.rows {
+			changed[row.Connector] = activated
+			if at, err := time.Parse(time.RFC3339Nano, record.ConnectorActivatedAt[strings.ToLower(row.Connector)]); err == nil && at.After(changed[row.Connector]) {
+				changed[row.Connector] = at
+			}
+		}
+	}
 	var fallback time.Time
 	if raw, err := os.ReadFile(filepath.Join(layout.LifecycleDir, enterprisestatus.PolicyStateFileName)); err == nil {
 		var state enterprisestatus.PolicyStateRecord
@@ -614,8 +637,10 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 		}
 	}
 	processes := make([]enterprisestatus.SessionProcess, 0, len(scanned.rows))
+	settingsChecked := map[string]bool{}
 	for _, row := range scanned.rows {
-		if _, known := changed[row.Connector]; !known {
+		if !settingsChecked[row.Connector] {
+			settingsChecked[row.Connector] = true
 			target, ok := enterprisepolicy.TargetFor(row.Connector)
 			if ok {
 				paths, err := target.Paths(opts)
@@ -630,13 +655,19 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 					}
 				}
 			}
-			if changed[row.Connector].IsZero() {
-				changed[row.Connector] = fallback
-			}
+		}
+		if changed[row.Connector].IsZero() {
+			changed[row.Connector] = fallback
+		}
+		if changed[row.Connector].IsZero() {
+			return unknown(fmt.Errorf("no managed hook activation time for %s", row.Connector))
+		}
+		if row.User == "" || row.StartedAt.IsZero() {
+			return unknown(fmt.Errorf("cannot inspect owner or start time of agent pid %d", row.PID))
 		}
 		processes = append(processes, enterprisestatus.SessionProcess{PID: row.PID, User: row.User, Agent: row.Connector, StartedAt: row.StartedAt})
 	}
-	return enterprisestatus.UnprotectedSessions(processes, changed, true)
+	return enterprisestatus.ScanSessions(func() ([]enterprisestatus.SessionProcess, error) { return processes, nil }, changed, true)
 }
 
 func windowsBundlePolicyFromResult(result *enterprisestatus.Result) enterprisebundle.GatewayPolicy {
