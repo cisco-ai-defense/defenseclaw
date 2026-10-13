@@ -406,11 +406,11 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	run := &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock}
 	opts.bundle = run
-	// Refusals can finish before the caller reaches the normal result path.
-	// Keep the lock through a successful prepare, but close it on every
-	// early return even if writing the refusal itself fails.
+	// Prepare owns the lock until it hands the run to the lifecycle caller.
+	// A refusal may print a result before returning, but cannot transfer it.
+	handedOff := false
 	defer func() {
-		if done || err != nil {
+		if !handedOff {
 			run.release()
 		}
 	}()
@@ -423,6 +423,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		}
 	}
 	if opts.bundlePath == "" {
+		handedOff = true
 		return false, nil
 	}
 	installed, readConfigErr := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
@@ -464,6 +465,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuse(string(enterprisebundle.CodeApplyFailed), "cannot write the rendered bundle config: "+err.Error())
 	}
 	opts.configPath = path
+	handedOff = true
 	return false, nil
 }
 

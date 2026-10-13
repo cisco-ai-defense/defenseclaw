@@ -189,6 +189,24 @@ func windowsBundleCommand() (*cobra.Command, *bytes.Buffer) {
 	return cmd, &out
 }
 
+// Direct prepare callers own the lock until finish or an explicit release.
+// Register cleanup immediately so a failing assertion cannot strand the
+// Windows handle and prevent TempDir removal.
+func cleanupPreparedWindowsBundle(t *testing.T, opts *windowsEnterpriseLifecycleOptions) {
+	t.Helper()
+	if opts.bundle != nil {
+		run := opts.bundle
+		t.Cleanup(run.release)
+	}
+}
+
+func assertWindowsBundleLockRemoved(t *testing.T, layout managed.StandaloneLayout) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(layout.LifecycleDir, windowsBundleLockName)); err != nil {
+		t.Fatalf("bundle lock remained open: %v", err)
+	}
+}
+
 func TestWindowsBundleStandardUserRefusedBeforeManagedLookup(t *testing.T) {
 	newBundleCLIEnv(t)
 	savedElevated, savedManaged := windowsEnterpriseIsElevated, bundleManagedDevice
@@ -231,6 +249,7 @@ func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", first); done || err != nil {
 		t.Fatalf("first prepare ended: %v", err)
 	}
+	cleanupPreparedWindowsBundle(t, first)
 	firstID := first.bundle.prepared.Receipt.ReceiptID
 	first.bundle.release() // The lifecycle process stopped after staging.
 
@@ -240,6 +259,7 @@ func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); done || err != nil {
 		t.Fatalf("retry prepare ended: %v", err)
 	}
+	cleanupPreparedWindowsBundle(t, retry)
 	defer retry.bundle.release()
 	if retry.bundle.prepared.Receipt.ReceiptID == firstID {
 		t.Fatalf("retry reused the interrupted receipt %s", firstID)
@@ -273,6 +293,7 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", first); done || err != nil {
 		t.Fatalf("first prepare ended: %v", err)
 	}
+	cleanupPreparedWindowsBundle(t, first)
 	rendered := first.bundle.prepared.Config
 	versionDir := first.bundle.driver.Store.VersionDir(first.bundle.prepared.Receipt.Dir)
 	manifest := filepath.Join(versionDir, enterprisebundle.ManifestName)
@@ -292,16 +313,23 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	cmd, _ = windowsBundleCommand()
 	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed,
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
-	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); !done || err == nil {
-		t.Fatalf("retry replaced the installed unconfirmed version: done=%v err=%v", done, err)
+	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); done || err != nil {
+		t.Fatalf("retry prepare ended: done=%v err=%v", done, err)
 	}
-	if err := os.Remove(filepath.Join(layout.LifecycleDir, windowsBundleLockName)); err != nil {
-		t.Fatalf("bundle lock remained open after prepare refusal: %v", err)
+	cleanupPreparedWindowsBundle(t, retry)
+	if retry.bundle.prepared.Receipt.Dir == first.bundle.prepared.Receipt.Dir {
+		t.Fatal("retry reused the installed receipt's version directory")
+	}
+	if _, err := os.Stat(retry.bundle.driver.Store.VersionDir(retry.bundle.prepared.Receipt.Dir)); err != nil {
+		t.Fatalf("retry version directory missing: %v", err)
 	}
 	after, err := os.ReadFile(manifest)
 	if err != nil || !bytes.Equal(after, before) {
 		t.Fatalf("installed version changed: %v", err)
 	}
+	// The retry owns the store lock until its ensure finishes.
+	retry.bundle.release()
+	assertWindowsBundleLockRemoved(t, layout)
 }
 
 // Setup /ensure BUNDLE= on an installed device installs the trust anchors,
@@ -343,6 +371,7 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", opts); done {
 		t.Fatalf("prepare ended the run: %v\n%s", err, out.String())
 	}
+	cleanupPreparedWindowsBundle(t, opts)
 	if opts.configPath != filepath.Join(layout.LifecycleDir, windowsBundleConfigName) {
 		t.Fatalf("the ensure config is %q", opts.configPath)
 	}
@@ -377,6 +406,25 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if len(result.Errors) != 0 || result.Bundle == nil || result.Bundle.State != enterprisebundle.StateConfirmed || result.Bundle.Version != 5 {
 		t.Fatalf("bundle not confirmed: errors %+v bundle %+v", result.Errors, result.Bundle)
 	}
+	// A repeated confirmed delivery is a no-op, but still owns the lock
+	// during prepare and finish.
+	cmd, _ = windowsBundleCommand()
+	again := &windowsEnterpriseLifecycleOptions{bundlePath: signed,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+	if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", again); done || err != nil {
+		t.Fatalf("already-applied prepare: done=%v err=%v", done, err)
+	}
+	cleanupPreparedWindowsBundle(t, again)
+	if again.bundle.prepared == nil || !again.bundle.prepared.AlreadyApplied {
+		t.Fatalf("repeat delivery was not already applied: %+v", again.bundle.prepared)
+	}
+	noOp := newWindowsEnterpriseStandaloneResult("ensure", again)
+	noOp.Noop = true
+	finishWindowsEnterpriseBundle(cmd, again, noOp)
+	if len(noOp.Errors) != 0 || noOp.NoopReason != "already_applied" {
+		t.Fatalf("already-applied result: %+v", noOp)
+	}
+	assertWindowsBundleLockRemoved(t, layout)
 	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
 	if err != nil {
 		t.Fatalf("the run kept the bundle store lock: %v", err)
@@ -410,6 +458,7 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts); done || err != nil {
 		t.Fatalf("prepare: done=%t err=%v", done, err)
 	}
+	cleanupPreparedWindowsBundle(t, opts)
 	run := opts.bundle
 	if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -464,6 +513,7 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts); done {
 		t.Fatalf("prepare ended the run: %v\n%s", err, out.String())
 	}
+	cleanupPreparedWindowsBundle(t, opts)
 	if opts.bundle == nil || opts.bundle.prepared == nil || opts.bundle.prepared.Receipt == nil ||
 		!opts.bundle.prepared.Receipt.DigestComparable {
 		t.Fatalf("Windows-target bundle was not comparable: %+v", opts.bundle)
@@ -487,8 +537,48 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 		result.Bundle.ErrorCode != string(enterprisebundle.CodeDigestMismatch) {
 		t.Fatalf("Windows confirmed a different digest: errors=%+v bundle=%+v", result.Errors, result.Bundle)
 	}
-	lockPath := filepath.Join(layout.LifecycleDir, windowsBundleLockName)
-	if err := os.Remove(lockPath); err != nil {
-		t.Fatalf("bundle lock remained open after digest mismatch: %v", err)
+	assertWindowsBundleLockRemoved(t, layout)
+}
+
+func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
+	for _, kind := range []string{"version_not_newer", "apply_failure"} {
+		t.Run(kind, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			if kind == "version_not_newer" {
+				raw, err := os.ReadFile(e.anchors)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeBundleTestFile(t, e.anchors, bytes.Replace(raw, []byte(`"min_version":0`), []byte(`"min_version":6`), 1))
+			}
+			layout := stubWindowsBundleHost(t)
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			if kind == "version_not_newer" {
+				if !done || err == nil || !strings.Contains(out.String(), kind) {
+					t.Fatalf("version floor refusal: done=%v err=%v output=%s", done, err, out.String())
+				}
+				assertWindowsBundleLockRemoved(t, layout)
+				return
+			}
+			if done || err != nil {
+				t.Fatalf("prepare: done=%v err=%v output=%s", done, err, out.String())
+			}
+			cleanupPreparedWindowsBundle(t, opts)
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			result.AddError("installer_failed", "test ensure transaction failed")
+			finishWindowsEnterpriseBundle(cmd, opts, result)
+			if !windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeApplyFailed)) {
+				t.Fatalf("apply failure was not recorded: %+v", result.Errors)
+			}
+			assertWindowsBundleLockRemoved(t, layout)
+		})
 	}
 }

@@ -108,7 +108,8 @@ guardrail:
 		t.Fatal(err)
 	}
 	t.Run("unmanaged config at the layout path", func(t *testing.T) {
-		cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(linux.ConfigPath, []byte("config_version: 8\nguardrail:\n  enabled: true\n"))
+		cfg, err := LoadRuntimeV8InspectionCandidateForLayout(linux.ConfigPath,
+			[]byte("config_version: 8\nguardrail:\n  enabled: true\n"), linux.ConfigDir, "linux")
 		if err != nil {
 			t.Fatal(err)
 		}
