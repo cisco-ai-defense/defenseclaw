@@ -20,8 +20,36 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+func TestHotBundleUsesVerifiedDigestWithoutRebuildingPolicy(t *testing.T) {
+	want := "sha256:" + strings.Repeat("a", 64)
+	h := newTestHost(t, "linux")
+	path := h.env.P(h.env.Layout.ConfigPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configBytes := []byte("config_version: 8\n")
+	if err := os.WriteFile(path, configBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &lifecycle{env: h.env, bundle: &bundleRun{configSHA: sha256Bytes(configBytes), receipt: &enterprisebundle.Receipt{
+		ExpectedDigest: want, DigestComparable: true,
+	}}}
+	if got, ok := l.bundlePolicyWant(t.Context(), l.bundle.receipt); !ok || got != want {
+		t.Fatalf("verified bundle digest = %q, %v; want %q", got, ok, want)
+	}
+	fallback := "sha256:" + strings.Repeat("b", 64)
+	h.env.Runner = &policyDigestRunner{fakeRunner: h.runner, digest: fallback}
+	if err := os.WriteFile(path, []byte("config_version: 8\nmode: action\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := l.bundlePolicyWant(t.Context(), l.bundle.receipt); !ok || got != fallback {
+		t.Fatalf("changed installed config digest = %q, %v; want fallback %q", got, ok, fallback)
+	}
+}
 
 // TestEnsureAppliesAHotConfigChangeInTheRunningGateway covers GAP-0120: a
 // config change the gateway reloads in place keeps it running (so its policy

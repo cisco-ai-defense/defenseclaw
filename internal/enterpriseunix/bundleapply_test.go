@@ -145,11 +145,13 @@ type bundleHost struct {
 // installed config.yaml and its recorded generation.
 type bundleRunner struct {
 	*fakeRunner
-	h *bundleHost
+	h                 *bundleHost
+	policyDigestCalls int
 }
 
 func (r *bundleRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
 	if strings.Join(args, " ") == "policy digest --json" {
+		r.policyDigestCalls++
 		digest, generation := installedPolicy(r.h)
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`, digest, generation))}, nil
 	}
@@ -380,7 +382,12 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 
 	from = len(b.services.calls)
 	b.mapPromotedBundleOwners(2)
+	runner := b.env.Runner.(*bundleRunner)
+	digestsBefore := runner.policyDigestCalls
 	requireOK(t, b.apply(b.dir(2, v2)))
+	if calls := runner.policyDigestCalls - digestsBefore; calls != 0 {
+		t.Fatalf("hot signed bundle rebuilt its verified policy %d times", calls)
+	}
 	if rc := b.receipt(bundleID(2)); rc.State != enterprisebundle.StateConfirmed || rc.Restart || gatewayTouched(b.testHost, from) {
 		t.Fatalf("hot bundle: receipt = %+v, gateway touched = %v", rc, gatewayTouched(b.testHost, from))
 	}

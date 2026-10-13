@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -126,8 +127,32 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 	env, r := l.env, l.result
 	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
 	computed := false
-	if digest, generation, ok := l.computePolicy(ctx); ok {
-		state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
+	// A same-build bundle already had its rendered policy computed during
+	// verification. Match the installed bytes and writer record to this
+	// transaction before using that digest, including before the receipt is
+	// confirmed.
+	// Avoid a third full generation build in a separate CLI during hot apply.
+	if l.bundle != nil && l.bundle.receipt != nil {
+		rc := l.bundle.receipt
+		wantSHA := rc.ConfigSHA256
+		if wantSHA == "" {
+			wantSHA = l.bundle.configSHA
+		}
+		if rc.DigestComparable && rc.ExpectedDigest != "" && wantSHA != "" {
+			path := env.P(env.Layout.ConfigPath)
+			if sha, err := sha256File(path); err == nil && sha == wantSHA {
+				if generation, err := configwrite.ReadGenerationState(path); err == nil &&
+					generation.BundleID == rc.BundleID && generation.BundleVersion == rc.Version &&
+					generation.ConfigSHA256 == sha {
+					state.EffectiveDigest, state.ConfigGeneration, computed = rc.ExpectedDigest, generation.Generation, true
+				}
+			}
+		}
+	}
+	if !computed {
+		if digest, generation, ok := l.computePolicy(ctx); ok {
+			state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
+		}
 	}
 	if !computed {
 		if record, err := env.loadPolicyState(); err == nil && record != nil {

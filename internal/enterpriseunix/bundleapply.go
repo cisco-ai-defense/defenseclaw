@@ -695,7 +695,7 @@ func (l *lifecycle) recordBundleGeneration(ctx context.Context, record *Deployme
 // It returns that digest and generation.
 func (l *lifecycle) awaitBundlePolicy(ctx context.Context, serviceUID int, requireGeneration bool, rc *enterprisebundle.Receipt) (string, uint64, error) {
 	env := l.env
-	want, _, ok := l.computePolicy(ctx)
+	want, ok := l.bundlePolicyWant(ctx, rc)
 	if !ok {
 		return "", 0, errors.New("the installed gateway cannot compute the effective policy digest of the bundle config, so the gateway cannot confirm it")
 	}
