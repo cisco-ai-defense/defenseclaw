@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -26,7 +27,7 @@ import (
 // no logon token. An elevated owner can clean its own profile too. The profile
 // root is checked against the recorded SID; the connector transaction then
 // pins the settings identity and preserves its DACL.
-func removeWindowsManagedClaudeUserSettings(home, sid, runtimeDir string) (int, error) {
+func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, error) {
 	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil
@@ -40,9 +41,26 @@ func removeWindowsManagedClaudeUserSettings(home, sid, runtimeDir string) (int, 
 		return 0, err
 	}
 	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
-	return connector.TransformWindowsClaudeSettingsForUninstall(path, runtimeDir, func(raw []byte) ([]byte, int, error) {
+	// The managed runtime is owned by Builtin Administrators, including after
+	// Setup runs as SYSTEM. safefile requires its transaction directory to be
+	// owned by the current token, so keep these receipts in that token's
+	// private cache. The path is stable across retries and independent of the
+	// runtime directory, which uninstall may already have retired.
+	transactionDir, err := windowsManagedClaudeTransactionDir()
+	if err != nil {
+		return 0, err
+	}
+	return connector.TransformWindowsClaudeSettingsForUninstall(path, transactionDir, func(raw []byte) ([]byte, int, error) {
 		return removeWindowsManagedClaudeCommands(raw, launcher)
 	})
+}
+
+func windowsManagedClaudeTransactionDir() (string, error) {
+	cache, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		return "", fmt.Errorf("resolve current-token Claude cleanup transaction directory: %w", err)
+	}
+	return filepath.Join(cache, "DefenseClaw", "claude-settings-teardown"), nil
 }
 
 var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings

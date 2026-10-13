@@ -1015,7 +1015,7 @@ func applyWindowsEnterpriseInstallerReport(
 			result.AddWarning("transaction_pending", step)
 		}
 	}
-	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+	addWindowsEnterpriseUserRegistrationWarnings(result, report, opts != nil && opts.purge)
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
@@ -1099,7 +1099,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		))
 	}
 	if len(remaining) > 0 {
-		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+		result.AddError("per_user_state_remaining", fmt.Sprintf(
 			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
 			len(remaining),
 			windowsEnterpriseBoundedLabels(remaining),
@@ -1254,7 +1254,7 @@ const windowsEnterpriseUserRegistrationListMax = 20
 // users who were signed out, those another account could not clean without
 // LocalSystem, and removals that failed. They stay inert (enrollment revoked,
 // hook runtime and binary removed).
-func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport, purge bool) {
 	failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed)
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
 		reason := "those accounts " + windowsEnterpriseNoActiveSession
@@ -1270,20 +1270,30 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			attempted = append(attempted, failure)
 		}
 		failed = attempted
-		result.AddWarning("user_registrations_pending", fmt.Sprintf(
+		message := fmt.Sprintf(
 			"uninstall could not act as %d user connector registration(s) because %s; DefenseClaw's inert registration stays in that account's agent configuration. To remove them, %s. Accounts: %s",
 			len(pending),
 			reason,
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
 			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
-		))
+		)
+		if purge {
+			result.AddError("user_registrations_pending", message)
+		} else {
+			result.AddWarning("user_registrations_pending", message)
+		}
 	}
 	if len(failed) > 0 {
-		result.AddWarning("user_registrations_failed", fmt.Sprintf(
+		message := fmt.Sprintf(
 			"removing DefenseClaw per-user registrations failed: %s. The entries that stay are inert (the managed install is gone); remove the named DefenseClaw entries from those files as that user, or %s",
 			windowsEnterpriseBoundedLabels(failed),
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
-		))
+		)
+		if purge {
+			result.AddError("user_registrations_failed", message)
+		} else {
+			result.AddWarning("user_registrations_failed", message)
+		}
 	}
 }
 

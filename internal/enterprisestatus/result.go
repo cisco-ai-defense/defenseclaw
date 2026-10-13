@@ -144,6 +144,7 @@ type Result struct {
 	Profile            string                        `json:"profile"`
 	Platform           string                        `json:"platform"`
 	ProductVersion     string                        `json:"product_version"`
+	FloorSource        string                        `json:"floor_source,omitempty"`
 	InstalledVersion   string                        `json:"installed_version,omitempty"`
 	Installed          bool                          `json:"installed"`
 	TransactionPending bool                          `json:"transaction_pending"`

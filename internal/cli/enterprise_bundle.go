@@ -249,6 +249,7 @@ type bundleVerifyResult struct {
 	SignerKeyID           string                     `json:"signer_key_id,omitempty"`
 	Alg                   string                     `json:"alg,omitempty"`
 	Floor                 uint64                     `json:"floor"`
+	FloorSource           string                     `json:"floor_source,omitempty"`
 	EffectivePolicyDigest string                     `json:"effective_policy_digest,omitempty"`
 	ExpectedDigest        string                     `json:"expected_digest,omitempty"`
 	DigestVerified        bool                       `json:"digest_verified"`
@@ -560,6 +561,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		res.SignerKeyID, res.Alg = out.Signature.KeyID, out.Signature.Alg
 	}
 	res.Floor = out.Floor
+	res.FloorSource = out.FloorSource
 	res.EffectivePolicyDigest, res.ExpectedDigest, res.DigestVerified = out.EffectivePolicyDigest, out.ExpectedDigest, out.DigestVerified
 	res.Warnings = append(res.Warnings, out.Warnings...)
 	if err != nil {

@@ -163,8 +163,33 @@ func TestAnchorMinVersionIsExclusiveFloor(t *testing.T) {
 	m := &enterprisebundle.Manifest{Version: 1, BundleID: "b-01JA0000000000000000000032"}
 	_, floor, err := enterprisebundle.CheckFloor(m, strings.Repeat("a", 64), enterprisebundle.Confirmed{}, 1)
 	if floor != 1 || enterprisebundle.CodeOf(err) != enterprisebundle.CodeVersionNotNewer ||
-		!strings.Contains(err.Error(), "version 1 is not above the floor 1 (set by trust anchor min_version or the last confirmed bundle)") {
+		!strings.Contains(err.Error(), "version 1 is not above the floor 1 (set by trust anchor min_version)") {
 		t.Fatalf("floor = %d, refusal = %v", floor, err)
+	}
+}
+
+func TestFloorSourceNamesEffectiveAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		confirmed uint64
+		anchor    uint64
+		source    string
+		message   string
+	}{
+		{"anchor", 1, 2, "trust_anchor_min_version", "trust anchor min_version"},
+		{"confirmed", 2, 1, "last_confirmed_bundle", "the last confirmed bundle"},
+		{"both", 2, 2, "both", "trust anchor min_version and the last confirmed bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			confirmed := enterprisebundle.Confirmed{Version: tc.confirmed}
+			if got := enterprisebundle.FloorSource(confirmed, tc.anchor); got != tc.source {
+				t.Fatalf("floor source = %q", got)
+			}
+			_, _, err := enterprisebundle.CheckFloor(&enterprisebundle.Manifest{Version: 1}, "", confirmed, tc.anchor)
+			if err == nil || !strings.Contains(err.Error(), "set by "+tc.message) {
+				t.Fatalf("floor refusal = %v", err)
+			}
+		})
 	}
 }
 

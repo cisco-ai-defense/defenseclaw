@@ -562,7 +562,9 @@ func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
 				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
 			if kind == "version_not_newer" {
-				if !done || err == nil || !strings.Contains(out.String(), kind) {
+				if !done || err == nil || !strings.Contains(out.String(), kind) ||
+					!strings.Contains(out.String(), "set by trust anchor min_version") ||
+					!strings.Contains(out.String(), `"floor_source": "trust_anchor_min_version"`) {
 					t.Fatalf("version floor refusal: done=%v err=%v output=%s", done, err, out.String())
 				}
 				assertWindowsBundleLockRemoved(t, layout)

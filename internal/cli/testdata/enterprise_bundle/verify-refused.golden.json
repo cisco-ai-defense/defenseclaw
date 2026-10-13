@@ -26,6 +26,7 @@
     }
   ],
   "floor": 0,
+  "floor_source": "none",
   "ok": false,
   "platform": "linux",
   "result": "refused",

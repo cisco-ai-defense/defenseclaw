@@ -22,6 +22,7 @@
   "errors": [],
   "expected_digest": "sha256:<digest>",
   "floor": 0,
+  "floor_source": "none",
   "ok": true,
   "platform": "linux",
   "result": "verified",

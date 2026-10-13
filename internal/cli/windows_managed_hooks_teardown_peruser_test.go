@@ -16,8 +16,39 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
+
+func TestWindowsClaudeCleanupTransactionUsesCurrentAccountCache(t *testing.T) {
+	cache, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "foreign-cache"))
+	transactionDir, err := windowsManagedClaudeTransactionDir()
+	if err != nil || transactionDir != filepath.Join(cache, "DefenseClaw", "claude-settings-teardown") {
+		t.Fatalf("transaction directory = %q, %v", transactionDir, err)
+	}
+	settings := filepath.Join(t.TempDir(), "settings.json")
+	launcher := `C:\Users\alice\.local\bin\defenseclaw-hook.exe`
+	raw := []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"command":"C:\\Users\\alice\\.local\\bin\\defenseclaw-hook.exe"},{"command":"other-hook"}]}]}}`)
+	if err := os.WriteFile(settings, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := connector.TransformWindowsClaudeSettingsForUninstall(settings, filepath.Join(t.TempDir(), "private-state"), func(raw []byte) ([]byte, int, error) {
+		return removeWindowsManagedClaudeCommands(raw, launcher)
+	})
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed %d hooks: %v", removed, err)
+	}
+	after, err := os.ReadFile(settings)
+	if err != nil || strings.Contains(string(after), "defenseclaw-hook.exe") || !strings.Contains(string(after), "other-hook") {
+		t.Fatalf("settings after cleanup = %s, %v", after, err)
+	}
+}
 
 func perUserTeardownManifest(connectorName string) enterprisehooks.Manifest {
 	return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{

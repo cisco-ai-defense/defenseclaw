@@ -345,7 +345,10 @@ func TestEnterpriseBundleVerifyUsesTheDeviceFloor(t *testing.T) {
 	}
 	confirmBundle(t, store, "b-01JA0000000000000000000006", 6, "sha256:"+strings.Repeat("3", 64))
 	out, code := runBundle(t, "verify", "--bundle", signed, "--platform", "linux", "--json")
-	if code != bundleFailureExitCode() || !strings.Contains(out, `"version_not_newer"`) || !strings.Contains(out, `"floor": 6`) {
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"version_not_newer"`) ||
+		!strings.Contains(out, `"floor": 6`) ||
+		!strings.Contains(out, `"floor_source": "last_confirmed_bundle"`) ||
+		!strings.Contains(out, "set by the last confirmed bundle") {
 		t.Fatalf("verify below the floor: exit %d:\n%s", code, out)
 	}
 	if err := os.WriteFile(store.StatePath(), []byte(`{"schema_version":1,"floor":"x"}`), 0o600); err != nil {

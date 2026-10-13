@@ -54,9 +54,36 @@ func CheckFloor(m *Manifest, manifestSHA256 string, confirmed Confirmed, anchorM
 		return false, floor, refuse(CodeVersionNotNewer, "version", "the manifest differs from the confirmed bundle %s version %d", m.BundleID, m.Version)
 	}
 	if m.Version <= floor {
-		return false, floor, refuse(CodeVersionNotNewer, "version", "version %d is not above the floor %d (set by trust anchor min_version or the last confirmed bundle)", m.Version, floor)
+		return false, floor, refuse(CodeVersionNotNewer, "version", "version %d is not above the floor %d (set by %s)", m.Version, floor, FloorSourceText(FloorSource(confirmed, anchorMin)))
 	}
 	return false, floor, nil
+}
+
+// FloorSource names the authority that sets the effective device floor.
+func FloorSource(confirmed Confirmed, anchorMin uint64) string {
+	switch {
+	case anchorMin == 0 && confirmed.Version == 0:
+		return "none"
+	case anchorMin > confirmed.Version:
+		return "trust_anchor_min_version"
+	case confirmed.Version > anchorMin:
+		return "last_confirmed_bundle"
+	default:
+		return "both"
+	}
+}
+
+func FloorSourceText(source string) string {
+	switch source {
+	case "trust_anchor_min_version":
+		return "trust anchor min_version"
+	case "last_confirmed_bundle":
+		return "the last confirmed bundle"
+	case "both":
+		return "trust anchor min_version and the last confirmed bundle"
+	default:
+		return "no existing version floor"
+	}
 }
 
 // CheckProductVersion refuses (product_too_old) a running product version
@@ -111,6 +138,7 @@ type VerifyResult struct {
 	Key            *AnchorKey
 	AlreadyApplied bool
 	Floor          uint64
+	FloorSource    string
 	// EffectivePolicyDigest is the digest this host computed for Platform;
 	// ExpectedDigest is the manifest entry; DigestVerified reports that
 	// they were compared and equal. A different signer product version or
@@ -174,6 +202,7 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		return res, refuse(CodeKeyExpired, "created_at", "the bundle was created outside the validity of key %s", sig.KeyID)
 	}
 	manifestSum := sha256.Sum256(b.Manifest)
+	res.FloorSource = FloorSource(in.Confirmed, in.Anchors.MinVersion)
 	res.AlreadyApplied, res.Floor, err = CheckFloor(m, hex.EncodeToString(manifestSum[:]), in.Confirmed, in.Anchors.MinVersion)
 	if err != nil {
 		return res, err

@@ -53,6 +53,9 @@ type Driver struct {
 type Prepared struct {
 	Receipt  *Receipt
 	Manifest *Manifest
+	// FloorSource records the authority that set the verified version floor,
+	// including when verification refused the proposed bundle.
+	FloorSource string
 	// Config is the rendered config.yaml the transaction installs and
 	// ConfigSHA256 its hex SHA-256.
 	Config       []byte
@@ -148,6 +151,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		Stage:    func(*Bundle) (string, error) { return staging, nil },
 		Digester: d.Digester,
 	})
+	p.FloorSource = res.FloorSource
 	p.Warnings = res.Warnings
 	if err != nil {
 		return refuse(err)

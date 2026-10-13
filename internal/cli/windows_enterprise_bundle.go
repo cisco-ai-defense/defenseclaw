@@ -365,8 +365,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return false, nil
 	}
 	requested := opts.bundlePath != "" || opts.trustAnchors != ""
+	floorSource := ""
 	refuse := func(code, message string) (bool, error) {
-		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message)
+		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message, floorSource)
 	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
 		return refuse("invalid_arguments", "--refuse-capability-loss requires --bundle")
@@ -452,6 +453,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	prepared, err := driver.Prepare(ctx, b, readErr)
 	run.prepared = prepared
 	if prepared != nil {
+		floorSource = prepared.FloorSource
 		run.warnings = append(run.warnings, prepared.Warnings...)
 	}
 	if err != nil {
@@ -485,15 +487,16 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 	}
 	return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeBundleRequired), fmt.Sprintf(
 		"this device takes its policy from signed bundles (the MDM installed %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
-		driver.AnchorsPath))
+		driver.AnchorsPath), "")
 }
 
 // writeWindowsBundleRefusal answers a bundle run that ended before the
 // transaction: nothing was installed, so the result is the host as it is
 // with the bundle block of the receipt.
-func writeWindowsBundleRefusal(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message string) error {
+func writeWindowsBundleRefusal(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message, floorSource string) error {
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	applyWindowsEnterpriseRecordedDeployment(result)
+	result.FloorSource = floorSource
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
