@@ -260,32 +260,8 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if loadErr != nil {
 		return nil, fmt.Errorf("config does not load: %w", loadErr)
 	}
-	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return nil, fmt.Errorf("config deployment_mode must be %s", managed.DeploymentModeManagedEnterprise)
-	}
-	if !cfg.StandaloneEnterprise() {
-		return nil, fmt.Errorf("config enterprise.profile must be %s", managed.ProfileStandalone)
-	}
-	// On macOS an unset profile means secure_client to every process that
-	// reads the config without the service pin (hooks, admin shells,
-	// status), so the file itself must say standalone. The loader enforces
-	// this for the host OS; checking the target OS here keeps plans built
-	// on another host honest.
-	if managed.DefaultEnterpriseProfile(e.GOOS) != managed.ProfileStandalone &&
-		cfg.DeclaredEnterpriseProfile() != managed.ProfileStandalone {
-		return nil, fmt.Errorf(
-			"config must set enterprise.profile: %s: on %s a process that reads it without the service pin treats an unset profile as %s",
-			managed.ProfileStandalone, e.GOOS, managed.DefaultEnterpriseProfile(e.GOOS),
-		)
-	}
-	if clean := strings.TrimRight(cfg.DataDir, "/"); clean != e.Layout.DataDir {
-		return nil, fmt.Errorf("config data_dir %q must be %s: the service sandbox only allows writes there", cfg.DataDir, e.Layout.DataDir)
-	}
-	if bind := strings.TrimSpace(cfg.Gateway.APIBind); bind != "" && bind != "127.0.0.1" {
-		return nil, fmt.Errorf("config gateway.api_bind %q must be 127.0.0.1", bind)
-	}
-	if port := cfg.Gateway.APIPort; port != 0 && port != 18970 {
-		return nil, fmt.Errorf("config gateway.api_port %d must be 18970: the socket unit owns that listener", port)
+	if err := config.ValidateManagedStandaloneConfig(raw, cfg, compiled.Plan, e.Layout); err != nil {
+		return nil, err
 	}
 	if err := e.checkRulePackDirs(cfg); err != nil {
 		return nil, err
@@ -347,10 +323,6 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 			continue
 		}
 		path := filepath.Clean(destination.Transport.Path)
-		if e.GOOS == "linux" && !pathWithin(path, e.Layout.DataDir) && !pathWithin(path, e.Layout.LogDir) {
-			return fmt.Errorf("observability destination %q writes %s, outside the folders the gateway service may write (%s and %s); use a path in one of them",
-				destination.Name, path, e.Layout.DataDir, e.Layout.LogDir)
-		}
 		if problem := local.JSONLPathProblem(e.P(path)); problem != "" {
 			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a file only the gateway account can read and write (mode 0600, or a missing file it creates) in a folder only root and the gateway account can write",
 				destination.Name, path, problem)
@@ -515,9 +487,6 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			continue
 		}
 		clean := filepath.Clean(dir)
-		if clean == e.Layout.DataDir || strings.HasPrefix(clean, e.Layout.DataDir+"/") {
-			return fmt.Errorf("config %s %q is inside data_dir, which the gateway service can write; use %s or an administrator-owned directory under %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"), e.Layout.PolicyDir)
-		}
 		if rel, ok := strings.CutPrefix(clean, e.Layout.VendorPolicyDir+"/"); ok {
 			if !vendorPolicyDirExists(vendor, filepath.ToSlash(rel)) {
 				return fmt.Errorf("config %s %q is not a rule pack the product ships", label, dir)

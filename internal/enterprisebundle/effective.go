@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // maxConfigBytes is the config loader's source limit.
@@ -128,11 +129,71 @@ func LoadConfig(b *Bundle, root string) (*config.Config, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(root, ConfigName), rendered)
+	configPath := filepath.Join(root, ConfigName)
+	if message, bad := config.ScanManagedEnvSecretReferences(rendered).Refusal(configPath, "with `enterprise secret set --name <name> --from-stdin`", config.EnterpriseSettingsReferenceURL); bad {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(message))
+	}
+	if _, err := config.ParseCompileObservabilityV8(configPath, rendered, config.ObservabilityV8CompileOptions{
+		DefaultDataDir: root, Secrets: bundleSecretProbe{},
+	}); err != nil {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
+	}
+	cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, rendered)
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
 	return cfg, rendered, nil
+}
+
+// bundleSecretProbe lets the canonical observability compiler check a bundle
+// before the target device's protected credentials are available. Verify's
+// secret_refs check confirms their presence on the device.
+type bundleSecretProbe struct{}
+
+func (bundleSecretProbe) ResolveObservabilitySecret(string) (string, bool) { return "probe", true }
+func (bundleSecretProbe) ResolveObservabilityCredential(string) (string, bool) {
+	return "probe", true
+}
+
+// validateTargetConfig runs the standalone lifecycle's config-only layout
+// checks for each target. Device-specific file and credential checks remain
+// in ensure and Verify, where the device state is available.
+func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platforms []string) error {
+	for _, platform := range platforms {
+		var layout managed.StandaloneLayout
+		var err error
+		switch platform {
+		case PlatformLinux, PlatformDarwin:
+			layout, err = managed.StandaloneLayoutFor(platform)
+		case PlatformWindows:
+			// Windows install roots and API port come from protected machine
+			// registration, which an offline signer cannot read. The schema
+			// and runtime loader ran above; require the declared profile that
+			// the standalone service pins on the target.
+			if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+				return refuse(CodeConfigInvalid, ConfigName, "windows: config deployment_mode must be %s", managed.DeploymentModeManagedEnterprise)
+			}
+			if cfg.DeclaredEnterpriseProfile() != managed.ProfileStandalone {
+				return refuse(CodeConfigInvalid, ConfigName, "windows: config must set enterprise.profile: %s", managed.ProfileStandalone)
+			}
+			continue
+		default:
+			return refuse(CodeManifestInvalid, "target.platforms", "unknown platform %s", safePath(platform))
+		}
+		if err != nil {
+			return refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
+		}
+		compiled, err := config.ParseCompileObservabilityV8(cfg.ConfigFilePath, rendered, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: layout.DataDir, Secrets: bundleSecretProbe{},
+		})
+		if err != nil {
+			return refuse(CodeConfigInvalid, ConfigName, "%s: %s", platform, boundedDetail(err.Error()))
+		}
+		if err := config.ValidateManagedStandaloneConfig(b.Files[ConfigName], cfg, compiled.Plan, layout); err != nil {
+			return refuse(CodeConfigInvalid, ConfigName, "%s: %s", platform, boundedDetail(err.Error()))
+		}
+	}
+	return nil
 }
 
 // PolicyDigester computes the effective policy digest of cfg (loaded from
@@ -148,6 +209,9 @@ type PolicyDigester func(ctx context.Context, cfg *config.Config, raw []byte, go
 func EffectivePolicyDigests(ctx context.Context, b *Bundle, root string, platforms []string, digest PolicyDigester) (map[string]string, error) {
 	cfg, rendered, err := LoadConfig(b, root)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateTargetConfig(b, cfg, rendered, platforms); err != nil {
 		return nil, err
 	}
 	out := make(map[string]string, len(platforms))

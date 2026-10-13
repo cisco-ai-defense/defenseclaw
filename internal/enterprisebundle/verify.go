@@ -207,6 +207,9 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err != nil {
 		return res, err
 	}
+	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
+		return res, err
+	}
 	digest, err := in.Digester(ctx, cfg, rendered, in.Platform, root)
 	if err != nil {
 		return res, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s: %s", in.Platform, boundedDetail(err.Error()))

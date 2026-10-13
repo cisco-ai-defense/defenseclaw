@@ -289,17 +289,23 @@ ai_discovery:
 		name, prefix                     string
 		defaultDataDir, defaultPolicyDir bool
 	}{
-		{name: "data_dir omitted, policy_dir empty", prefix: "policy_dir: \"\"\n", defaultDataDir: true},
 		{name: "data_dir and policy_dir omitted", defaultDataDir: true, defaultPolicyDir: true},
-		{name: "data_dir explicit", prefix: "data_dir: /var/lib/defenseclaw\npolicy_dir: \"\"\n"},
+		{name: "data_dir explicit", prefix: "data_dir: /var/lib/defenseclaw\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := tc.prefix + base
+			if !tc.defaultPolicyDir {
+				_, file, _, _ := runtime.Caller(0)
+				source += fmt.Sprintf("policy_dir: %q\n", filepath.Join(filepath.Dir(file), "..", "..", "policies"))
+			}
 			if tc.defaultPolicyDir {
 				start, end := strings.Index(source, "guardrail:\n"), strings.Index(source, "asset_policy:\n")
 				source = source[:start] + source[end:]
 			}
 			f := newFixture(t, source, func(in *enterprisebundle.ComposeInput) {
+				if !tc.defaultDataDir {
+					in.Platforms = []string{"linux"}
+				}
 				if !tc.defaultPolicyDir {
 					return
 				}
@@ -364,6 +370,79 @@ ai_discovery:
 			res, err := enterprisebundle.Verify(context.Background(), in)
 			if err != nil || !res.DigestVerified {
 				t.Fatalf("signed bundle did not verify after staging elsewhere: digest=%s expected=%s: %v", res.EffectivePolicyDigest, res.ExpectedDigest, err)
+			}
+		})
+	}
+}
+
+// These settings pass the runtime loader used by the signer, but standalone
+// ensure refuses them as config_invalid before installing a bundle.
+func TestBundleManagedConfigRefusals(t *testing.T) {
+	base := bundleConfig(t)
+	for _, tc := range []struct {
+		name, config, key string
+	}{
+		{"empty policy_dir", strings.Replace(base, "policy_dir: ", "policy_dir: \"\" # ", 1), "policy_dir"},
+		{"wrong data_dir", base + "data_dir: /tmp/other\n", "data_dir"},
+		{"nonloopback api_bind", base + "gateway:\n  api_bind: 0.0.0.0\n", "gateway.api_bind"},
+		{"wrong api_port", base + "gateway:\n  api_port: 18971\n", "gateway.api_port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, b := writeBundle(t, tc.config)
+			const pack = "policies/guardrail/default/rules/local-patterns.yaml"
+			packData := []byte("version: 1\ninjection: []\n")
+			b.Files[pack] = packData
+			packPath := filepath.Join(root, filepath.FromSlash(pack))
+			if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(packPath, packData, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			in := enterprisebundle.ComposeInput{
+				Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+				Platforms: []string{"linux"}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+				ProductVersion: "1.0.2", HostPlatform: runtime.GOOS, Digester: digester,
+			}
+			if _, _, err := enterprisebundle.Compose(context.Background(), in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("sign: got %v, want config_invalid naming %s", err, tc.key)
+			}
+
+			// Sign a manifest with matching file hashes to exercise verify's
+			// config validation rather than its signature or file checks.
+			valid := newFixture(t, base, func(in *enterprisebundle.ComposeInput) {
+				in.Bundle.Files[pack] = packData
+				full := filepath.Join(in.Root, filepath.FromSlash(pack))
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, packData, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			modified := valid.signed(t, valid.raw)
+			modified.Files[enterprisebundle.ConfigName] = []byte(tc.config)
+			m, err := enterprisebundle.DecodeManifest(valid.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range m.Files {
+				if m.Files[i].Path == enterprisebundle.ConfigName {
+					sum := sha256.Sum256(modified.Files[enterprisebundle.ConfigName])
+					m.Files[i].SHA256 = hex.EncodeToString(sum[:])
+					m.Files[i].Size = int64(len(modified.Files[enterprisebundle.ConfigName]))
+				}
+			}
+			manifest, err := m.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified = valid.signed(t, manifest)
+			modified.Files[enterprisebundle.ConfigName] = []byte(tc.config)
+			a := anchors(t, "acme", nil, 0, activeKey("k1", valid.key.Public()))
+			verify := valid.input(t, modified, a)
+			if _, err := enterprisebundle.Verify(context.Background(), verify); enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("verify: got %v, want config_invalid naming %s", err, tc.key)
 			}
 		})
 	}
