@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
 SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-exact-acl-smoke.ps1"
 WINDOWS_BUNDLE = ROOT / "internal" / "cli" / "windows_enterprise_bundle.go"
+WINDOWS_BUNDLE_ACL = ROOT / "internal" / "cli" / "windows_enterprise_bundle_acl.go"
 GO_STORE = ROOT / "internal" / "enterprisebundle" / "store.go"
 
 
@@ -97,6 +98,8 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "$security.SetOwner($administrators)" in setter
     assert "$security.SetGroup($administrators)" in setter
     assert "Microsoft.PowerShell.Security\\Set-Acl" in setter
+    assert "SetDirectoryDaclNoFollow" in setter
+    assert "PROTECTED_DACL_SECURITY_INFORMATION" in source
     assert "Assert-DefenseClawCanonicalPathAcl" in setter
     assert "does not have the exact canonical DACL" in setter
     assert "DiscretionaryAclAutoInherited" in setter
@@ -307,6 +310,7 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     module = MODULE.read_text(encoding="utf-8")
     smoke = SMOKE.read_text(encoding="utf-8")
     go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
     store = GO_STORE.read_text(encoding="utf-8")
     classifier = _extract_function_body(
         module,
@@ -339,7 +343,7 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     sid = "S-1-5-80-1-2-3-4-5"
 
     def creator_sddl(function: str, inherit: str = "") -> str:
-        body = go.split(f"func {function}(", 1)[1].split("\n}", 1)[0]
+        body = go_acl.split(f"func {function}(", 1)[1].split("\n}", 1)[0]
         expression = re.search(r"^\s*return (.+)$", body, re.MULTILINE)
         assert expression
         parts = re.findall(r'"[^"]*"|\b(?:inherit|serviceSID)\b', expression.group(1))
@@ -355,18 +359,36 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
         "BundleReceipt": creator_sddl("windowsBundleReceiptSDDL"),
         "BundleVersionDirectory": creator_sddl("windowsBundleVersionSDDL", "OICI"),
         "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
+        "AdminDirectory": creator_sddl("windowsBundlePrivateSDDL"),
+        "AdminFile": creator_sddl("windowsBundleAdminFileSDDL"),
     }
-    assert 'inherit = "OICI"' in go.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
+    assert 'inherit = "OICI"' in go_acl.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
     for kind, actual in creators.items():
-        expected = re.search(rf"^\s*{kind} = \"([^\"]+)\"", smoke, re.MULTILINE)
+        expected = re.search(rf"^\s*{kind} = ([\"'])(.*?)\1", smoke, re.MULTILINE)
         assert expected, kind
-        assert actual == expected.group(1).replace("$serviceSID", sid), kind
+        assert actual == expected.group(2).replace("$serviceSID", sid), kind
+        assert "D:P" in actual, kind
+        assert all("ID" not in ace.split(";", 2)[1] for ace in re.findall(r"\([^)]*\)", actual)), kind
         if kind.startswith("BundleVersion"):
             assert ";;;BU)" not in actual
             assert f";;;{sid})" in actual
             assert "0x1200a9" in actual
     assert "$versionName = 'v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8'" in smoke
     assert "Get-DefenseClawBundlePathKind -RelativePath $Relative" in smoke
+    assert "Kind = 'AdminDirectory'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
+    assert "store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory" in go
+    assert "store.PublishPrivateFile = windowsBundlePublishPrivateFile" in go
+    assert "return createWindowsBundleDirectory(path, windowsBundlePrivateSDDL())" in go
+    assert "return applyWindowsBundleSDDL(path, windowsBundleAdminFileSDDL())" in go
+    assert "store.EnsureStageDirectory = windowsBundleEnsureStageDirectory" in go
+    assert "store.PublishStageFile = windowsBundlePublishStageFile" in go
+    assert "windowsBundleEnsurePrivateDirectory(filepath.Dir(dst))" in go
+    assert "writeWindowsBundleAdminFile(dst, raw)" in go
+    assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
+    assert "s.EnsureStageDirectory(dir, parent)" in store
+    assert "s.PublishStageFile(full)" in store
+    assert "windows.CreateDirectory(name, attributes)" in go
+    assert "windows.PROTECTED_DACL_SECURITY_INFORMATION" in go
 
 
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:

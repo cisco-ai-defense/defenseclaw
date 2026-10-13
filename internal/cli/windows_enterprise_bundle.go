@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -47,10 +48,9 @@ import (
 // its rollback) is the one CONFIG= uses. The bundle becomes current only
 // when the running gateway reports the effective policy of the installed
 // config; otherwise the last good config is installed again and the receipt
-// fails. Both folders inherit the state root ACL: SYSTEM and Administrators
-// write, the gateway service reads; receipts live in the administrator-only
-// install folder. Standalone only: the Secure Client profile never reaches
-// this file.
+// fails. Bundle directories and private receipt state have explicit protected
+// ACLs; receipts live in the administrator-only install folder. Standalone
+// only: the Secure Client profile never reaches this file.
 
 const (
 	windowsBundleConfigName   = "bundle-config.yaml"
@@ -65,15 +65,19 @@ const (
 
 // Seams for tests.
 var (
-	windowsBundleLayout          = managed.StandaloneWindowsLayout
-	windowsBundlePolicy          = readWindowsBundleGatewayPolicy
-	windowsBundleSleep           = time.Sleep
-	windowsBundleTrust           = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
-	windowsBundlePrivateStage    = privateWindowsBundleStage
-	windowsBundleSealVersion     = sealWindowsBundleVersionAssets
-	windowsBundlePublishVersion  = publishWindowsBundleVersion
-	windowsBundlePublishReceipt  = publishWindowsBundleReceipt
-	windowsBundleEnsureDirectory = ensureWindowsBundleDirectory
+	windowsBundleLayout                 = managed.StandaloneWindowsLayout
+	windowsBundlePolicy                 = readWindowsBundleGatewayPolicy
+	windowsBundleSleep                  = time.Sleep
+	windowsBundleTrust                  = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }
+	windowsBundlePrivateStage           = privateWindowsBundleStage
+	windowsBundleEnsureStageDirectory   = ensureWindowsBundleStageDirectory
+	windowsBundlePublishStageFile       = publishWindowsBundlePrivateFile
+	windowsBundleSealVersion            = sealWindowsBundleVersionAssets
+	windowsBundlePublishVersion         = publishWindowsBundleVersion
+	windowsBundlePublishReceipt         = publishWindowsBundleReceipt
+	windowsBundleEnsureDirectory        = ensureWindowsBundleDirectory
+	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
+	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
 )
 
 func init() {
@@ -149,9 +153,13 @@ func (run *windowsBundleRun) release() {
 func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.Driver {
 	store := enterprisebundle.NewStore(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), layout.LifecycleDir)
 	store.PrivateStage = windowsBundlePrivateStage
+	store.EnsureStageDirectory = windowsBundleEnsureStageDirectory
+	store.PublishStageFile = windowsBundlePublishStageFile
 	store.SealVersion = windowsBundleSealVersion
 	store.PublishVersion = windowsBundlePublishVersion
 	store.PublishReceipt = windowsBundlePublishReceipt
+	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
+	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	return &enterprisebundle.Driver{
 		Store: store,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
@@ -173,16 +181,90 @@ func privateWindowsBundleStage(root string) error {
 	return applyWindowsBundleSDDL(root, windowsBundlePrivateSDDL())
 }
 
-func windowsBundlePrivateSDDL() string {
-	return "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+// createWindowsBundleDirectory gives a new directory its final protected
+// descriptor in CreateDirectory. Reapplying it repairs an existing directory.
+func createWindowsBundleDirectory(path, sddl string) error {
+	return createWindowsBundleDirectoryMode(path, sddl, false)
 }
 
-func windowsBundleDirectorySDDL(serviceSID string) string {
-	return "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;" + serviceSID + ")"
+func createWindowsBundleDirectoryMode(path, sddl string, exclusive bool) error {
+	if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := winpath.RejectReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err == nil && exclusive {
+		return os.ErrExist
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		descriptor, descriptorErr := windows.SecurityDescriptorFromString(sddl)
+		if descriptorErr != nil {
+			return descriptorErr
+		}
+		name, nameErr := winpath.UTF16Ptr(path)
+		if nameErr != nil {
+			return nameErr
+		}
+		attributes := &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+			SecurityDescriptor: descriptor,
+		}
+		if createErr := windows.CreateDirectory(name, attributes); createErr != nil {
+			if exclusive || !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+				return createErr
+			}
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("bundle directory is not a regular directory: %s", path)
+	}
+	if err := winpath.RejectReparseChain(path); err != nil {
+		return err
+	}
+	return applyWindowsBundleSDDL(path, sddl)
 }
 
-func windowsBundleReceiptSDDL(serviceSID string) string {
-	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;" + serviceSID + ")"
+func ensureWindowsBundlePrivateDirectory(path string) error {
+	if filepath.Base(path) == enterprisebundle.ReceiptsDirName {
+		if err := ensureWindowsBundlePrivateDirectory(filepath.Dir(path)); err != nil {
+			return err
+		}
+	}
+	return createWindowsBundleDirectory(path, windowsBundlePrivateSDDL())
+}
+
+func ensureWindowsBundleStageDirectory(root, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("staging directory escapes bundle root: %s", path)
+	}
+	if relative == "." {
+		return createWindowsBundleDirectoryMode(root, windowsBundlePrivateSDDL(), true)
+	}
+	if err := createWindowsBundleDirectory(root, windowsBundlePrivateSDDL()); err != nil {
+		return err
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		if err := createWindowsBundleDirectory(current, windowsBundlePrivateSDDL()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func publishWindowsBundlePrivateFile(path string) error {
+	return applyWindowsBundleSDDL(path, windowsBundleAdminFileSDDL())
 }
 
 func publishWindowsBundleReceipt(path string) error {
@@ -229,10 +311,7 @@ func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
 	}
 	sddl := windowsBundleDirectorySDDL(service.String())
 	path := filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	return applyWindowsBundleSDDL(path, sddl)
+	return createWindowsBundleDirectory(path, sddl)
 }
 
 // sealWindowsBundleVersionAssets grants the gateway service SID read and
@@ -273,14 +352,6 @@ func publishWindowsBundleVersion(root string) error {
 		return err
 	}
 	return os.Chmod(root, 0o555)
-}
-
-func windowsBundleVersionSDDL(serviceSID string, directory bool) string {
-	inherit := ""
-	if directory {
-		inherit = "OICI"
-	}
-	return "O:BAG:BAD:P(A;" + inherit + ";FA;;;SY)(A;" + inherit + ";FA;;;BA)(A;;0x1200a9;;;" + serviceSID + ")"
 }
 
 // prepareWindowsEnterpriseBundle runs before the lifecycle reads --config.
@@ -386,7 +457,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuse(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error()))
 	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
-	if err := writeWindowsBundleFile(path, prepared.Config); err != nil {
+	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
 		if prepared.Receipt != nil {
 			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeApplyFailed, "cannot write the rendered bundle config")
 		}
@@ -526,7 +597,7 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 		return "", false
 	}
 	path := filepath.Join(run.layout.LifecycleDir, windowsBundleRollbackName)
-	if err := writeWindowsBundleFile(path, last); err != nil {
+	if err := writeWindowsBundleAdminFile(path, last); err != nil {
 		return "", false
 	}
 	defer os.Remove(path)
@@ -724,8 +795,8 @@ func sha256HexBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// writeWindowsBundleFile replaces path with data. The file inherits the
-// ACL of its administrator-only folder.
+// writeWindowsBundleFile replaces path with data. The caller seals private
+// files with AdminFile after the replacement.
 func writeWindowsBundleFile(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -756,6 +827,13 @@ func writeWindowsBundleFile(path string, data []byte) error {
 	return nil
 }
 
+func writeWindowsBundleAdminFile(path string, data []byte) error {
+	if err := writeWindowsBundleFile(path, data); err != nil {
+		return err
+	}
+	return windowsBundlePublishPrivateFile(path)
+}
+
 // installWindowsBundleAnchors installs the administrator anchor file src
 // as <state root>\etc\trust\bundle-anchors.json once it decodes and passes
 // the trust check, then checks the installed copy the same way.
@@ -767,7 +845,10 @@ func installWindowsBundleAnchors(src, dst string) error {
 	if err != nil {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeAnchorInvalid, Detail: err.Error()}
 	}
-	if err := writeWindowsBundleFile(dst, raw); err != nil {
+	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
+		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+	}
+	if err := writeWindowsBundleAdminFile(dst, raw); err != nil {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 	}
 	if _, err := enterprisebundle.LoadAnchors(dst, bundleAnchorTrust); err != nil {
@@ -780,7 +861,7 @@ func installWindowsBundleAnchors(src, dst string) error {
 // returns at once when another bundle run holds it (lifecycle_busy: the
 // MDM retries on 1618).
 func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
-	if err := os.MkdirAll(lifecycleDir, 0o700); err != nil {
+	if err := windowsBundleEnsurePrivateDirectory(lifecycleDir); err != nil {
 		return nil, err
 	}
 	name, err := windows.UTF16PtrFromString(filepath.Join(lifecycleDir, windowsBundleLockName))
@@ -790,6 +871,10 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
+		return nil, err
+	}
+	if err := windowsBundlePublishPrivateFile(filepath.Join(lifecycleDir, windowsBundleLockName)); err != nil {
+		_ = windows.CloseHandle(handle)
 		return nil, err
 	}
 	overlapped := new(windows.Overlapped)

@@ -308,6 +308,11 @@ type Store struct {
 	// PrivateStage protects a newly created staging directory before files
 	// are copied into it (Windows uses a protected administrator-only ACL).
 	PrivateStage func(root string) error
+	// EnsureStageDirectory creates the staging root and each nested directory.
+	// Windows supplies the protected AdminDirectory descriptor at creation.
+	EnsureStageDirectory func(root, path string) error
+	// PublishStageFile seals a new private staging file before verification.
+	PublishStageFile func(path string) error
 	// SealVersion makes a verified staging tree readable by the gateway
 	// before it is renamed into its immutable version directory. When nil,
 	// the store uses its platform-neutral read-only modes.
@@ -319,6 +324,25 @@ type Store struct {
 	// PublishReceipt applies the platform's public-file permissions after an
 	// atomic replacement of receipt.json.
 	PublishReceipt func(path string) error
+	// EnsurePrivateDirectory creates the lifecycle and receipts directories
+	// with the platform's private descriptor. Nil uses ordinary mkdir.
+	EnsurePrivateDirectory func(path string) error
+	// PublishPrivateFile seals an atomically replaced state or receipt file.
+	PublishPrivateFile func(path string) error
+}
+
+func (s *Store) ensurePrivateDirectory(path string) error {
+	if s.EnsurePrivateDirectory != nil {
+		return s.EnsurePrivateDirectory(path)
+	}
+	return os.MkdirAll(path, 0o700)
+}
+
+func (s *Store) publishPrivateFile(path string) error {
+	if s.PublishPrivateFile != nil {
+		return s.PublishPrivateFile(path)
+	}
+	return nil
 }
 
 // NewStore returns the store at bundlesDir with its state in lifecycleDir.
@@ -397,10 +421,13 @@ func (s *Store) saveState(st State) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.LifecycleDir, 0o700); err != nil {
+	if err := s.ensurePrivateDirectory(s.LifecycleDir); err != nil {
 		return err
 	}
-	return configwrite.WriteFileDurable(s.StatePath(), append(data, '\n'), 0o600)
+	if err := configwrite.WriteFileDurable(s.StatePath(), append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return s.publishPrivateFile(s.StatePath())
 }
 
 func (s *Store) writeReceipt(r *Receipt) error {
@@ -408,10 +435,13 @@ func (s *Store) writeReceipt(r *Receipt) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.receiptsDir(), 0o700); err != nil {
+	if err := s.ensurePrivateDirectory(s.receiptsDir()); err != nil {
 		return err
 	}
 	if err := configwrite.WriteFileDurable(s.receiptPath(r.ReceiptID), append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := s.publishPrivateFile(s.receiptPath(r.ReceiptID)); err != nil {
 		return err
 	}
 	if Finished(r.State) {
@@ -647,7 +677,11 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if s.EnsureStageDirectory != nil {
+		if err := s.EnsureStageDirectory(dir, dir); err != nil {
+			return "", err
+		}
+	} else if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
 	}
 	if s.PrivateStage != nil {
@@ -679,14 +713,26 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	for _, name := range names {
 		full := filepath.Join(dir, filepath.FromSlash(name))
 		parent := filepath.Dir(full)
-		if err := os.MkdirAll(parent, 0o700); err != nil {
+		var dirErr error
+		if s.EnsureStageDirectory != nil {
+			dirErr = s.EnsureStageDirectory(dir, parent)
+		} else {
+			dirErr = os.MkdirAll(parent, 0o700)
+		}
+		if dirErr != nil {
 			_ = removeTree(dir)
-			return "", err
+			return "", dirErr
 		}
 		dirs[parent] = true
 		if err := writeNewFile(full, files[name]); err != nil {
 			_ = removeTree(dir)
 			return "", err
+		}
+		if s.PublishStageFile != nil {
+			if err := s.PublishStageFile(full); err != nil {
+				_ = removeTree(dir)
+				return "", err
+			}
 		}
 	}
 	for d := range dirs {

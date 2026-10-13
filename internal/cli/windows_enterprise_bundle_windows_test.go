@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -92,6 +93,43 @@ func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 	}
 }
 
+func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	path := filepath.Join(t.TempDir(), "install", enterprisebundle.ReceiptsDirName)
+	if err := ensureWindowsBundlePrivateDirectory(path); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := windows.SecurityDescriptorFromString(windowsBundlePrivateSDDL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{filepath.Dir(path), path} {
+		for attempt := 0; attempt < 2; attempt++ {
+			if err := ensureWindowsBundlePrivateDirectory(directory); err != nil {
+				t.Fatal(err)
+			}
+			actual, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			control, _, err := actual.Control()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if control&windows.SE_DACL_PROTECTED == 0 || strings.Contains(actual.String(), "(A;ID;") {
+				t.Fatalf("private directory is not protected: %s: %s", directory, actual.String())
+			}
+			matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+			if err != nil || !matches {
+				t.Fatalf("private directory descriptor differs from AdminDirectory: %s: %s (%v)", directory, actual.String(), err)
+			}
+		}
+	}
+}
+
 // stubWindowsBundleHost points the Windows bundle code at a temp standalone
 // layout whose gateway enforces windowsBundleTestDigest.
 func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
@@ -111,11 +149,15 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	})
 	savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust := windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust
 	savedPrivate, savedSeal, savedPublish, savedReceipt, savedEnsure := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion, windowsBundlePublishReceipt, windowsBundleEnsureDirectory
+	savedEnsurePrivate, savedPublishPrivate := windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile
+	savedEnsureStage, savedPublishStage := windowsBundleEnsureStageDirectory, windowsBundlePublishStageFile
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
 		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
 		windowsBundlePublishReceipt = savedReceipt
 		windowsBundleEnsureDirectory = savedEnsure
+		windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile = savedEnsurePrivate, savedPublishPrivate
+		windowsBundleEnsureStageDirectory, windowsBundlePublishStageFile = savedEnsureStage, savedPublishStage
 	})
 	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy {
@@ -127,6 +169,10 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	windowsBundleSealVersion = func(string) error { return nil }
 	windowsBundlePublishVersion = func(string) error { return nil }
 	windowsBundlePublishReceipt = func(string) error { return nil }
+	windowsBundleEnsurePrivateDirectory = func(path string) error { return os.MkdirAll(path, 0o700) }
+	windowsBundlePublishPrivateFile = func(string) error { return nil }
+	windowsBundleEnsureStageDirectory = func(_, path string) error { return os.MkdirAll(path, 0o700) }
+	windowsBundlePublishStageFile = func(string) error { return nil }
 	windowsBundleEnsureDirectory = func(layout managed.StandaloneLayout) error {
 		return os.MkdirAll(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), 0o700)
 	}

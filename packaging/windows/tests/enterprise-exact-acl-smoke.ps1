@@ -122,6 +122,56 @@ foreach ($row in $bundlePaths) {
     }
 }
 
+# Model a receipt folder created after Setup's first ACL pass, then require
+# repair and verification to agree on the protected AdminDirectory contract.
+$receiptsRepair = & $module {
+    param($GatewaySID)
+    $root = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        'DefenseClaw-ReceiptsAcl-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        $install = [IO.Directory]::CreateDirectory($root).FullName
+        Set-DefenseClawPathAcl -Path $install -Kind AdminDirectory -GatewayServiceSID $GatewaySID
+        $receipts = [IO.Directory]::CreateDirectory(
+            [IO.Path]::Combine($install, 'receipts')
+        ).FullName
+        [IO.File]::WriteAllText([IO.Path]::Combine($receipts, 'r-test.json'), '{}')
+        $native = Initialize-DefenseClawNativeSecurity
+        $created = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $native::GetFileSecurityDescriptor($receipts), 0
+        )
+        if (([int]$created.ControlFlags -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) {
+            throw 'the receipts fixture did not model an inherited DACL'
+        }
+        $config = [IO.Path]::Combine($root, 'etc')
+        $trust = [IO.Directory]::CreateDirectory(
+            [IO.Path]::Combine($config, 'trust')
+        ).FullName
+        [IO.File]::WriteAllText([IO.Path]::Combine($trust, 'bundle-anchors.json'), '{}')
+        $layout = @{
+            InstallStateDirectory = $install
+            ConfigDirectory = $config
+        }
+        foreach ($attempt in 1..2) {
+            Invoke-DefenseClawBundleAclContract `
+                -Layout $layout `
+                -GatewayServiceSID $GatewaySID `
+                -Repair
+            Invoke-DefenseClawBundleAclContract `
+                -Layout $layout `
+                -GatewayServiceSID $GatewaySID
+        }
+        return $true
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+} $serviceSID
+if (-not $receiptsRepair) {
+    throw 'private receipts ACL repair did not complete'
+}
+
 foreach ($mismatch in @(
     [pscustomobject]@{ directory = $true; kind = 'AdminFile' },
     [pscustomobject]@{ directory = $false; kind = 'AdminDirectory' }

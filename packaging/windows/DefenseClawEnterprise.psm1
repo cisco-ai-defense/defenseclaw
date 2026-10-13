@@ -3508,6 +3508,17 @@ function Set-DefenseClawPathAcl {
         -LiteralPath $Path `
         -AclObject $security `
         -ErrorAction Stop
+    if ($isDirectory) {
+        # SetSecurityInfo with PROTECTED_DACL_SECURITY_INFORMATION makes the
+        # inheritance boundary explicit when repairing a Go-created folder.
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $before = $nativeSecurity::GetDirectorySecuritySnapshotNoFollow($Path)
+        [void]$nativeSecurity::SetDirectoryDaclNoFollow(
+            $Path,
+            $security.GetSecurityDescriptorBinaryForm(),
+            [string]$before.Identity
+        )
+    }
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
@@ -6795,9 +6806,17 @@ function Invoke-DefenseClawBundleAclContract {
         [switch]$Repair
     )
     $bundleDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'bundles'
+    $trustDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'trust'
+    $trustAnchors = Microsoft.PowerShell.Management\Join-Path $trustDirectory 'bundle-anchors.json'
     $privateState = Microsoft.PowerShell.Management\Join-Path $Layout.InstallStateDirectory 'bundle-state.json'
     $receiptsDirectory = Microsoft.PowerShell.Management\Join-Path $Layout.InstallStateDirectory 'receipts'
     $items = [Collections.Generic.List[object]]::new()
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $trustDirectory) {
+        $items.Add([pscustomobject]@{ Path = $trustDirectory; Kind = 'AdminDirectory' })
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $trustAnchors) {
+            $items.Add([pscustomobject]@{ Path = $trustAnchors; Kind = 'AdminFile' })
+        }
+    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $bundleDirectory) {
         Assert-DefenseClawNoReparsePath -Path $bundleDirectory
         $items.Add([pscustomobject]@{ Path = $bundleDirectory; Kind = 'BundleDirectory' })
@@ -6818,6 +6837,12 @@ function Invoke-DefenseClawBundleAclContract {
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $privateState) {
         $items.Add([pscustomobject]@{ Path = $privateState; Kind = 'AdminFile' })
+    }
+    foreach ($name in @('bundle.lock', 'bundle-config.yaml', 'bundle-rollback-config.yaml')) {
+        $privateFile = Microsoft.PowerShell.Management\Join-Path $Layout.InstallStateDirectory $name
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $privateFile) {
+            $items.Add([pscustomobject]@{ Path = $privateFile; Kind = 'AdminFile' })
+        }
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $receiptsDirectory) {
         Assert-DefenseClawNoReparsePath -Path $receiptsDirectory

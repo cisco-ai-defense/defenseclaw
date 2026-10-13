@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,54 @@ func storeBundle() *Bundle {
 		ConfigName:                            []byte("config_version: 9\n"),
 		"policies/guardrail/strict/pack.yaml": []byte("name: strict\n"),
 	}}
+}
+
+func TestStoreProtectsPrivateDirectoryAndAtomicFiles(t *testing.T) {
+	s := testStore(t)
+	var directories, files []string
+	s.EnsurePrivateDirectory = func(path string) error {
+		directories = append(directories, path)
+		return os.MkdirAll(path, 0o700)
+	}
+	s.PublishPrivateFile = func(path string) error {
+		files = append(files, path)
+		_, err := os.Lstat(path)
+		return err
+	}
+	r, err := s.Receive(testBundleID(88), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveState(State{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{s.receiptsDir(), s.LifecycleDir}; !reflect.DeepEqual(directories, want) {
+		t.Fatalf("protected directories = %q, want %q", directories, want)
+	}
+	if want := []string{s.receiptPath(r.ReceiptID), s.StatePath()}; !reflect.DeepEqual(files, want) {
+		t.Fatalf("protected files = %q, want %q", files, want)
+	}
+	var stageDirectories, stageFiles []string
+	s.EnsureStageDirectory = func(_, path string) error {
+		stageDirectories = append(stageDirectories, path)
+		return os.MkdirAll(path, 0o700)
+	}
+	s.PublishStageFile = func(path string) error {
+		stageFiles = append(stageFiles, path)
+		_, err := os.Lstat(path)
+		return err
+	}
+	staging, err := s.Stage(r, storeBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(stageDirectories, staging) ||
+		!slices.Contains(stageDirectories, filepath.Join(staging, "policies", "guardrail", "strict")) {
+		t.Fatalf("staging directories did not use the protected creator: %q", stageDirectories)
+	}
+	if len(stageFiles) != len(storeBundle().Files)+2 {
+		t.Fatalf("staging files did not use the protected publisher: %q", stageFiles)
+	}
 }
 
 func digestOf(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
