@@ -527,17 +527,21 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
     payload = json.loads(completed.stdout)
+    descriptor_count = payload.pop("descriptors_checked")
+    pairing_count = payload.pop("installer_verifier_pairings_checked")
+    # The smoke script checks its descriptor kinds against both module
+    # ValidateSet declarations and its installer/verifier pairing table.
+    assert isinstance(descriptor_count, int) and descriptor_count > 0
+    assert pairing_count == descriptor_count
     assert payload == {
         "ok": True,
         "schema_version": 1,
-        "descriptors_checked": 18,
         "stale_explicit_aces_retained": False,
         "object_type_mismatches_rejected": True,
         "auto_inherited_control_flag_accepted": True,
         "ace_mismatches_rejected": True,
         "native_raw_acl_query_checked": True,
         "split_explicit_aces_rejected": True,
-        "installer_verifier_pairings_checked": 18,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
         "managed_ipc_scope_cleanup_exact": True,

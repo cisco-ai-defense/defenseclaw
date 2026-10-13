@@ -676,6 +676,18 @@ check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --instal
 
 step "verify"
 lifecycle 04-verify verify
+# launchd can deliver the path event from the step-04 config replacement after
+# the step-05 no-op ensure has finished. Its redundant ensure is safe, but
+# verify's fixed 5s wait may expire while that job holds the lifecycle lock.
+# Retry only this expected busy result, for at most two minutes on macOS.
+if [ "$kind" = pkg ]; then
+    verify_deadline=$((SECONDS + 120))
+    while [ "$(cat "$results/04-verify.rc")" = 75 ] && [ "$SECONDS" -lt "$verify_deadline" ]; do
+        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/04-verify.json" || break
+        sleep 2
+        lifecycle 04-verify verify
+    done
+fi
 # verify reports whether unprivileged user namespaces are open, a setting of
 # the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
