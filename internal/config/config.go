@@ -442,11 +442,18 @@ type RoutingRemoteConfig struct {
 // default; LookupModelProvenanceOnline is a separate, explicit opt-in that
 // sends recovered public model repository IDs to the fixed Hugging Face API.
 type AIDiscoveryConfig struct {
-	Enabled            bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode               string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin    int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots          []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	Enabled            bool   `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode               string `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin    int    `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec int    `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	// PublishJitterMs bounds the fleet-wide startup/tick jitter applied to
+	// the discovery scan schedule. Zero means "use the mode default": 10 %
+	// of ScanIntervalMin in managed_enterprise, no jitter in every other
+	// mode. A positive value applies as given in every mode and is not
+	// bounded by ScanIntervalMin. A negative value falls back to the mode
+	// default.
+	PublishJitterMs int      `mapstructure:"publish_jitter_ms" yaml:"publish_jitter_ms,omitempty"`
+	ScanRoots       []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
 	// HomeDirs is the list of user home directories the detectors that
 	// walk per-user dotfiles (editor extensions, MCP configs, shell
 	// history, installed applications) should inspect. Empty means

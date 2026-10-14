@@ -149,9 +149,6 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	if err := cmidbroker.ValidateBrokerServiceIdentity(serverConfig); err != nil {
 		return err
 	}
-	if err := validateBrokerPath(options.cmidLibraryPath, "CMID library", false); err != nil {
-		return err
-	}
 	if err := validateBrokerPath(options.logPath, "broker log", true); err != nil {
 		return err
 	}
@@ -174,8 +171,36 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 		logger.Print("stage=provider-registration success=false")
 		return errors.New("managed CMID provider is not registered")
 	}
-	provider, err := cloudreg.New(cloudreg.Config{LibPath: options.cmidLibraryPath})
-	if err != nil || provider == nil {
+	// A full XDR deployment installs Cloud Management last, so cmidapi.dll
+	// is frequently absent when this service first starts. Resolve the
+	// library lazily instead of at startup: the broker serves the pipe
+	// either way, answers token requests with a provider error while the
+	// library is missing (managed inspection stays fail-closed), and
+	// adopts the library on the first request after Cloud Management
+	// lands — no reinstall, repair, or service restart.
+	provider, err := cmidbroker.NewDeferredProvider(cmidbroker.DeferredProviderConfig{
+		PinnedLibraryPath: options.cmidLibraryPath,
+		Discover:          managed.DiscoverCMIDLibrary,
+		// A discovered library is dlopened into this service's account, so
+		// it faces the same path trust an installer-pinned one does.
+		Validate: func(path string) error {
+			return validateBrokerPath(path, "CMID library", false)
+		},
+		Construct: func(path string) (cmidbroker.Provider, error) {
+			built, buildErr := cloudreg.New(cloudreg.Config{LibPath: path})
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			if built == nil {
+				return nil, errors.New("managed CMID provider construction failed")
+			}
+			return built, nil
+		},
+		OnResolved: func(path string) {
+			logger.Printf("stage=provider-resolved success=true library=%s", path)
+		},
+	})
+	if err != nil {
 		logger.Print("stage=provider-construction success=false")
 		return errors.New("managed CMID provider construction failed")
 	}
@@ -183,8 +208,13 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 	err = provider.Refresh(refreshCtx)
 	cancel()
 	if err != nil {
-		logger.Print("stage=provider-refresh success=false category=cmid_refresh_failed")
-		return errors.New("managed CMID provider readiness failed")
+		// Not fatal. Failing here would leave SCM restarting a service
+		// that cannot succeed until an unrelated installer finishes.
+		if errors.Is(err, cmidbroker.ErrLibraryUnavailable) {
+			logger.Print("stage=provider-refresh success=false category=cmid_library_pending")
+		} else {
+			logger.Print("stage=provider-refresh success=false category=cmid_refresh_failed")
+		}
 	}
 
 	server, err := cmidbroker.NewServer(serverConfig, provider, key[:], func(event cmidbroker.Event) {

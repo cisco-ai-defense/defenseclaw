@@ -60,7 +60,7 @@ $failures = & $module {
         throw 'LocalSystem guardian restarted but did not publish fresh required coverage within 90 seconds; last_status=last guardian reconcile failed for opencode'
     }
     function Wait-DefenseClawEnterpriseReadiness {
-        param($Layout, $GatewayServiceName, $GuardianServiceName)
+        param($Layout, $GatewayServiceName, $GuardianServiceName, $RequireBroker, $RequireEnumerator)
         $script:TestCalls.Add('wait:readiness')
     }
     function Restore-DefenseClawTransactionServiceStartModes {

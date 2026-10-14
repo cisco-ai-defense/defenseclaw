@@ -261,12 +261,13 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 // adapter contract so the regression cannot resurface.
 func TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	src := codexHookResponse{
-		Action:       "allow",
-		RawAction:    "block",
-		Severity:     "CRITICAL",
-		Mode:         "observe",
-		EvaluationID: "eval-codex-fixture",
-		RuleIDs:      []string{"SEC-ANTHROPIC"},
+		Action:               "allow",
+		RawAction:            "block",
+		Severity:             "CRITICAL",
+		Mode:                 "observe",
+		EvaluationID:         "eval-codex-fixture",
+		RuleIDs:              []string{"SEC-ANTHROPIC"},
+		SuppressNotification: true,
 	}
 	out := codexResponseToAgentHookResponse(src)
 	if out.EvaluationID != "eval-codex-fixture" {
@@ -275,16 +276,20 @@ func TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	if len(out.RuleIDs) != 1 || out.RuleIDs[0] != "SEC-ANTHROPIC" {
 		t.Errorf("RuleIDs = %v, want [SEC-ANTHROPIC]", out.RuleIDs)
 	}
+	if !out.SuppressNotification {
+		t.Error("asset-policy notification ownership was lost in Codex adapter")
+	}
 }
 
 func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	src := claudeCodeHookResponse{
-		Action:       "allow",
-		RawAction:    "block",
-		Severity:     "CRITICAL",
-		Mode:         "observe",
-		EvaluationID: "eval-claude-fixture",
-		RuleIDs:      []string{"SEC-AWS-KEY", "SEC-GITHUB-TOKEN"},
+		Action:               "allow",
+		RawAction:            "block",
+		Severity:             "CRITICAL",
+		Mode:                 "observe",
+		EvaluationID:         "eval-claude-fixture",
+		RuleIDs:              []string{"SEC-AWS-KEY", "SEC-GITHUB-TOKEN"},
+		SuppressNotification: true,
 	}
 	out := claudeCodeResponseToAgentHookResponse(src)
 	if out.EvaluationID != "eval-claude-fixture" {
@@ -292,6 +297,9 @@ func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.
 	}
 	if len(out.RuleIDs) != 2 {
 		t.Errorf("RuleIDs len = %d, want 2", len(out.RuleIDs))
+	}
+	if !out.SuppressNotification {
+		t.Error("asset-policy notification ownership was lost in Claude Code adapter")
 	}
 }
 

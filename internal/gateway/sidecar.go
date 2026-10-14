@@ -111,6 +111,12 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
+	// inventoryPublish is the managed_enterprise inventory change gate. It is nil
+	// in every other deployment mode. It lives here, not inside the emitter
+	// closures, because those closures are rebuilt on every config reload while
+	// the publish memory must survive reloads.
+	inventoryPublish *managedInventoryPublishState
+
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
@@ -528,6 +534,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		webhooks:                webhooks,
 		hilt:                    hilt,
 		aiDiscovery:             aiDiscovery,
+		inventoryPublish:        newManagedInventoryPublishState(cfg),
 		osNotifier:              osNotifier,
 		apiRestartCh:            make(chan struct{}, 1),
 		fleetReloadCh:           make(chan struct{}, 1),
@@ -1014,7 +1021,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		if discovery != nil {
 			snapshotFn = discovery.Snapshot
 		}
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		inventoryEmit := makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+		)
 		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
@@ -2273,7 +2282,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
-			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter()))
+			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish))
 			// Before the swap, so the restart worker never runs the
 			// replacement with a stale scan-history window.
 			s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)
@@ -2346,7 +2355,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if svc != nil {
 			snapshotFn = svc.Snapshot
 		}
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		inventoryEmit := makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+		)
 		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const hookAPIACLInspectionTimeout = 5 * time.Second
@@ -50,13 +52,16 @@ func hookAPIValidateDirectoryACLWithInspector(path string, timeout time.Duration
 		}
 		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
 		if len(fields) == 0 {
+			// Unreadable `ls -lde` output is a structural failure, not a
+			// permission judgement, so it must not be eligible for the ancestor
+			// advisory downgrade in managed.RelaxAncestorTrustJudgement.
 			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
 		}
 		for _, permission := range strings.Split(fields[0], ",") {
 			switch permission {
 			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
 				"writeattr", "writeextattr", "writesecurity", "chown":
-				return fmt.Errorf("%s has write-capable macOS ACL entry", path)
+				return managed.NewTrustVerdict("%s has write-capable macOS ACL entry", path)
 			}
 		}
 	}

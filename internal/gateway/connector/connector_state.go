@@ -264,7 +264,12 @@ type HookContractLockEntry struct {
 	DefenseClawVersion     string                   `json:"defenseclaw_version,omitempty"`
 	HookFailMode           string                   `json:"hook_fail_mode,omitempty"`
 	RegistrationPosture    *HookRegistrationPosture `json:"registration_posture,omitempty"`
-	UpdatedAt              string                   `json:"updated_at"`
+	// ManagedGatewayServiceName binds a Windows managed publication to the
+	// exact SCM gateway identity that owns its runtime. It contains no token
+	// material and remains stable across ordinary Guardian reconciles, while a
+	// different certification/production scope necessarily changes it.
+	ManagedGatewayServiceName string `json:"managed_gateway_service_name,omitempty"`
+	UpdatedAt                 string `json:"updated_at"`
 }
 
 // HookRegistrationPosture is the non-secret subset of SetupOpts that can
@@ -1129,7 +1134,61 @@ func NewHookContractLockEntryForMode(
 		return HookContractLockEntry{}, err
 	}
 	entry.HookScriptDigests = digests
+	if runtime.GOOS == "windows" {
+		serviceName := strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+		if err := ValidateWindowsManagedGatewayServiceName(serviceName); err != nil {
+			return HookContractLockEntry{}, fmt.Errorf(
+				"managed hook contract gateway service identity: %w",
+				err,
+			)
+		}
+		entry.ManagedGatewayServiceName = serviceName
+	}
 	return entry, nil
+}
+
+// ValidateWindowsManagedHookContractGatewayServiceBinding proves that a
+// protected managed hook-contract entry belongs to the exact gateway service
+// scope selected by the authenticated installer environment OR the policy-
+// resolved service name supplied by the caller. This is a post-publication
+// verification check: setup's preflight drift check deliberately does not
+// call it so a legacy entry without the binding remains repairable by an
+// authenticated Install/Repair operation.
+//
+// When `expectedOverride` is non-empty it takes precedence over
+// `WindowsGatewayServiceNameEnv`; runtime processes (Claude policy /
+// enforcement loops) resolve the expected name from the protected policy and
+// pass it here so a worker without the installer environment can still prove
+// the binding matches the active policy.
+func ValidateWindowsManagedHookContractGatewayServiceBinding(
+	entry HookContractLockEntry,
+	expectedOverride ...string,
+) error {
+	expected := ""
+	for _, candidate := range expectedOverride {
+		if value := strings.TrimSpace(candidate); value != "" {
+			expected = value
+			break
+		}
+	}
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+	}
+	if err := ValidateWindowsManagedGatewayServiceName(expected); err != nil {
+		return fmt.Errorf("current managed gateway service identity: %w", err)
+	}
+	actual := entry.ManagedGatewayServiceName
+	if err := ValidateWindowsManagedGatewayServiceName(actual); err != nil {
+		return fmt.Errorf("persisted managed gateway service identity: %w", err)
+	}
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf(
+			"persisted managed gateway service %q does not match current service %q",
+			actual,
+			expected,
+		)
+	}
+	return nil
 }
 
 func newHookContractLockEntry(
@@ -1290,7 +1349,28 @@ func HookRuntimeRegistrationCurrent(
 	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
 		return false, ErrSetupSelectionSuperseded
 	}
-	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
+	expected, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		defenseClawVersion,
+		opts.ManagedEnterprise && runtime.GOOS == "windows",
+	)
+	if err != nil {
+		return false, fmt.Errorf("build current Codex hook contract: %w", err)
+	}
+	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		// A legacy entry from a pre-binding build carries an empty
+		// ManagedGatewayServiceName. Report "not current" (false, nil) so
+		// the caller's authenticated repair path can rewrite the entry with
+		// the current service identity; a hard error here would skip repair
+		// (healLocked only runs on `return false`), leaving the guard stuck.
+		if strings.TrimSpace(stored.ManagedGatewayServiceName) == "" {
+			return false, nil
+		}
+		if err := ValidateWindowsManagedHookContractGatewayServiceBinding(stored); err != nil {
+			return false, fmt.Errorf("verify Codex hook contract gateway binding: %w", err)
+		}
+	}
 	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
 	removeSharedHookScriptDigests(expected.HookScriptDigests)
 	stored.UpdatedAt = ""

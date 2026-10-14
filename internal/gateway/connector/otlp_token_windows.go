@@ -65,7 +65,7 @@ func otlpValidateOwner(path string, _ os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, false, true)
+	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, false, true, false)
 }
 
 // Removal does not trust or consume token bytes. Once path shape, owner, and
@@ -97,7 +97,7 @@ func otlpPathTokenNeedsSecureReplacement(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, false, true); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, false, true, false); err != nil {
 		return true, nil
 	}
 	if err := otlpWindowsRejectUntrustedReadACEs(path, dacl); err != nil {

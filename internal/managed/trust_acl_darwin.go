@@ -25,11 +25,15 @@ func validateTrustedPathACL(path string) error {
 	}
 	entries, err := ParseDarwinACLListing(string(output), []string{path})
 	if err != nil {
+		// Malformed `ls -lde` output is not a judgement about the permissions
+		// themselves. Keep it a plain error so the ancestor downgrade cannot
+		// swallow an ACL this code failed to read (see
+		// relaxAncestorTrustJudgement).
 		return fmt.Errorf("inspect macOS ACL: %w", err)
 	}
 	for _, entry := range entries[path] {
 		if entry.GrantsWrite() {
-			return fmt.Errorf("%s has write-capable macOS ACL entry", path)
+			return newTrustVerdict("%s has write-capable macOS ACL entry", path)
 		}
 	}
 	return nil

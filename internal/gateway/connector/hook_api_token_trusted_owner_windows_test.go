@@ -60,13 +60,13 @@ func TestHookAPITrustedOwnerSIDIsExactAndOptional(t *testing.T) {
 		}
 		return acl
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEsTrusting("plugin dir", grant(target), true, true, extra); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEsTrusting("plugin dir", grant(target), true, true, false, extra); err != nil {
 		t.Fatalf("target write grant refused with the target as extra owner: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEsTrusting("plugin dir", grant(other), true, true, extra); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEsTrusting("plugin dir", grant(other), true, true, false, extra); err == nil {
 		t.Fatal("another user's write grant was accepted")
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("plugin dir", grant(target), true, true); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("plugin dir", grant(target), true, true, false); err == nil {
 		t.Fatal("target write grant was accepted without an explicit extra owner")
 	}
 }
