@@ -48,67 +48,6 @@ func MachinePolicyPresent(opts Options, connectorName string) (bool, error) {
 	}
 }
 
-// MachinePolicyMayRemain is the fail-closed leftover check the hook
-// runtime makes when the runtime descriptor is gone: true when
-// MachinePolicyPresent finds DefenseClaw's entries, when any of the
-// target's machine files still names the hook binary (or the managed
-// OpenCode plugin) even in a drifted entry, or when a file cannot be read,
-// trusted or parsed. Only a clean uninstall reports false.
-func MachinePolicyMayRemain(opts Options, connectorName string) bool {
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	target, ok := TargetFor(name)
-	if !ok {
-		return false
-	}
-	present, err := MachinePolicyPresent(opts, name)
-	if err != nil || present {
-		return true
-	}
-	paths, err := target.Paths(opts)
-	if err != nil {
-		return false
-	}
-	needles := [][]byte{[]byte(opts.HookBinary)}
-	if opts.goos() != "windows" {
-		// Codex TOML and JSON escaping never touch a unix path, but the
-		// quoted shell form may.
-		needles = append(needles, []byte(shellQuote(opts.HookBinary)))
-	} else {
-		needles = append(needles, []byte(strings.ReplaceAll(opts.HookBinary, `\`, `\\`)))
-	}
-	if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
-		needles = append(needles, []byte(opts.OpenCodePluginPath))
-	}
-	for _, path := range paths {
-		data, exists, err := readPolicyFile(opts, path)
-		if err != nil {
-			return true
-		}
-		if !exists {
-			continue
-		}
-		if ownedWholeFile(path) {
-			return true
-		}
-		for _, needle := range needles {
-			if len(needle) > 0 && bytes.Contains(data, needle) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ownedWholeFile reports files DefenseClaw owns outright (its drop-ins
-// and the Windows Cursor adapter); their mere presence is DefenseClaw policy.
-func ownedWholeFile(path string) bool {
-	base := path
-	if index := strings.LastIndexAny(path, `/\`); index >= 0 {
-		base = path[index+1:]
-	}
-	return base == DefenseClawDropInName || base == cursorWindowsAdapterName
-}
-
 func codexPresent(opts Options) (bool, error) {
 	path, err := CodexRequirementsPath(opts)
 	if err != nil {

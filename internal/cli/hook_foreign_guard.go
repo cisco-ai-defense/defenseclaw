@@ -474,9 +474,6 @@ func foreignHookSessionLocal(name string) bool {
 }
 
 func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
-	if enterpriseManagedHookRuntimeNoop(name) {
-		return enterprisepolicy.GuardDecision{}, fmt.Errorf("standalone hook runtime unavailable")
-	}
 	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
 	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)

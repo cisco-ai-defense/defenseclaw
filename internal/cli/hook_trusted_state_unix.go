@@ -125,6 +125,9 @@ func NativeConnectorHookNoop([]string) bool { return false }
 // the managed runtime from the root-owned descriptor.
 func implicitEnterpriseManagedHook() bool { return false }
 
+// enterpriseManagedHookRuntimeNoop prepares the Unix managed runtime and
+// always returns false. Unix has no launcher tombstone: a missing descriptor
+// remains a fail-closed invocation even after machine policy is removed.
 func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	layout, err := managed.StandaloneLayoutFor(standaloneHookGOOS)
