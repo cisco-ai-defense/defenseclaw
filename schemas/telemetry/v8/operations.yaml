@@ -1182,6 +1182,618 @@ attributes:
     overrides: {min: 0, max: 1000000}
     notes: Makes the host-plane lineage gate observable without exporting the excluded process or event content
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane_mechanism
+  type: string
+  brief: How a running plane observes the host, named on every cycle
+  examples:
+  - Tetragon 1.7.1 (unix socket); fanotify
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Fixed mechanism text from the sensor backends, never process or path content. plane_reason carries the mechanism only while a cycle is clean and loses it on a partial one, so a reader could not tell which backend a degraded cycle ran on; this field is present on every cycle
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.plane_backend
+  type: string
+  brief: Process backend Plane C ran on during this cycle
+  examples:
+  - tetragon
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [tetragon, native]
+    notes: Plane C only. tetragon is the host's own Tetragon read by the root sensor helper; native is the cn_proc and fanotify sources, including after a fallback from Tetragon (the reason is in plane_reason or plane_mechanism)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.events_lost
+  type: int64
+  brief: Events the Plane C backend reported losing since it started
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Cumulative since the backend's stream opened. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.loss_known
+  type: boolean
+  brief: Whether the Plane C backend can report its event losses at all
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: False means the backend's own loss counters could not be read, so events_lost covers only the drops its stream reported. The native sources cannot see their own drops and report no backend at all
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.container_events
+  type: int64
+  brief: Plane C events this cycle that came from container processes
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Counted and routed to the container bucket, never joined to a host agent session. A devcontainer that runs an agent shows here instead of as a host finding
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.login_id
+  type: string
+  brief: Audit login uid of the user behind a root process
+  examples:
+  - '1000'
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 10, pattern: '^[0-9]{1,10}$'}
+    notes: The Linux audit login uid, reported only when the process's own uid is 0 so sudo and su stay attributable. user.id is always the kernel uid and is never replaced by this value
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.event_source
+  type: string
+  brief: Sensor that observed the host-plane event
+  examples:
+  - tetragon
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [tetragon, cn_proc, fanotify, endpoint_security, etw, poll]
+    notes: The backend of the latest observation behind the record. Absent when the backend does not say
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_seen
+  type: boolean
+  brief: Whether a managed hook decision covered the tool call this activity came from
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Managed hosts only. False is agent activity no hook decision covered (an agent's own shell escape, a detached job, an MCP server). The join labels and never blocks. Absent when it does not apply
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_join
+  type: string
+  brief: How a hook decision was matched to the activity
+  examples:
+  - exact
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [exact, temporal]
+    notes: exact is a shell command whose redacted hash equals the decision's; temporal is the same agent and time only. Present only when hook_seen is true, together with the joined session and tool invocation ids
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.outcome
+  type: string
+  brief: What a kernel policy did about the access behind the record
+  examples:
+  - would_block
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [observed, would_block, blocked]
+    notes: On activity and finding records, the strongest outcome a DefenseClaw kernel control reported for the tactic. On kernel_event records, what the customer's own policy did. observed is an access a policy recorded; would_block is a denying action running in monitor mode; blocked is a denial the kernel returned
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.control
+  type: string
+  brief: DefenseClaw kernel control behind the outcome
+  examples:
+  - kernel.ssh_private_key_read
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
+    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.event
+  type: string
+  brief: Kind of state change a kernel policy record reports
+  examples:
+  - uid_ready
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [loaded, mode_changed, removed, operator_override, paused, resumed, orphaned, reconcile_failed, ack_stale, uid_ready, uid_burnin, uid_progress, tetragon_restarted, fallback]
+    notes: One record per state change of the sensor helper's reconciler, never one per kernel event. uid_progress is a user's burn-in progress, every six hours while the user is not ready
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.family
+  type: string
+  brief: Family of DefenseClaw kernel policy a state change is about
+  examples:
+  - controls
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [observe, connect, controls, controls-burnin]
+    notes: observe records file accesses, connect records per-binary connections, controls holds the two enforce-capable controls for users whose burn-in is complete, and controls-burnin holds the same selectors in monitor mode for the rest
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.mode
+  type: string
+  brief: Mode a kernel policy runs in after the state change
+  examples:
+  - monitor
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [monitor, enforce]
+    notes: monitor counts and records, enforce denies with EPERM
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.state
+  type: string
+  brief: State Tetragon reports for a kernel policy
+  examples:
+  - TP_STATE_ENABLED
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Tetragon's own tracing policy state name, kept as reported
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.reason
+  type: string
+  brief: Why a kernel policy state change happened
+  examples:
+  - connector_set_changed
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Short reason code from the reconciler, such as kernel_enforce_ack_stale; never a path or a command
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_owner
+  type: string
+  brief: Whose Tetragon policy produced a kernel event
+  examples:
+  - customer
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [defenseclaw, customer]
+    notes: defenseclaw is a policy the sensor helper recorded loading; customer is every other policy on the host, one named in DefenseClaw's pattern included. DefenseClaw reads the events of customer policies and never adds, changes or deletes one
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_name
+  type: string
+  brief: Name of the Tetragon policy that produced a kernel event
+  examples:
+  - file-sensitive
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 253}
+    notes: The TracingPolicy name as Tetragon reports it, bounded like a Kubernetes object name; a customer policy's name is the customer's own
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.hook_type
+  type: string
+  brief: Kind of kernel hook a policy event came from
+  examples:
+  - lsm
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kprobe, lsm]
+    notes: Tracepoint, uprobe and USDT events of customer policies are not forwarded
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.function
+  type: string
+  brief: Kernel function or LSM hook a policy event came from
+  examples:
+  - security_file_open
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9_][A-Za-z0-9._:/-]*$'}
+    notes: The hooked symbol as Tetragon names it (file_open, security_file_open, tcp_connect, and for a syscall kprobe the architecture's entry symbol such as __x64_sys_openat, so a leading underscore is allowed)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.action
+  type: string
+  brief: Action of the Tetragon policy selector that matched
+  examples:
+  - override
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [cleanup_enforcer_notification, copyfd, dnslookup, followfd, geturl, nopost, notify_enforcer, other, override, post, set, sigkill, signal, tracksock, unfollowfd, untracksock]
+    notes: Tetragon's KprobeAction in lower case without its prefix; other for one this build does not know. override, sigkill and notify_enforcer deny in enforce mode and would deny in monitor mode
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_mode
+  type: string
+  brief: Mode of the Tetragon policy when the event happened
+  examples:
+  - enforce
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [enforce, monitor, unknown]
+    notes: From the sensor helper's latest listing, every 15 seconds, so an event within one listing of a mode change can carry the old mode. monitor covers Tetragon's monitor and monitor_only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.tags
+  type: string[]
+  brief: Tags the Tetragon policy gives its events
+  examples:
+  - [files, sensitive]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 520, max_item_utf8_bytes: 64, max_items: 8}
+    notes: The policy's own tags, at most 8 of 64 bytes each, as the policy author wrote them
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.message
+  type: string
+  brief: Message the Tetragon policy gives its events
+  examples:
+  - sensitive file opened
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: The policy author's fixed message, not anything the process did
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.target
+  type: string
+  brief: File path or network peer a kernel event concerned
+  examples:
+  - ~/.ssh/id_ed25519
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 1024}
+    notes: Content class on purpose, so each destination's redaction profile decides whether it leaves the host. A customer policy's event carries the first file, path or binprm argument's path, or a socket peer as ip:port; a DefenseClaw control's denial carries the path relative to the user's home (~/...). No other argument of a kernel event is ever read
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.count
+  type: int64
+  brief: How many identical kernel events one record stands for
+  examples: [3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 1000000000}
+    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_action
+  type: string
+  brief: Verdict of the managed hook decision joined to the tool call
+  examples:
+  - alert
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [allow, alert]
+    notes: alert is a tool call the hook let run with a finding (an alert, a confirm the user answered, or a would-block of a connector in observe mode); present only when hook_seen is true
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.helper_mode
+  type: string
+  brief: enterprise.tetragon mode the sensor helper runs
+  examples:
+  - observe
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: ['off', consume, observe, enforce]
+    notes: The drop-in's mode with the Plane C cap applied, before the enforce caps (no approval, pause, no BPF LSM) that keep the controls in monitor
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.approval
+  type: string
+  brief: Whether enforce_ack approves this build's kernel controls
+  examples:
+  - approved
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [not_needed, missing, stale, approved]
+    notes: not_needed outside enforce mode; stale is an enforce_ack none of whose digests is this build's, so every user is in monitor until the new digest is approved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_enrolled
+  type: int64
+  brief: Users enrolled for DefenseClaw's kernel controls on the host
+  examples: [3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: From the sensor helper's kernel_status, every cycle
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_enforced
+  type: int64
+  brief: Enrolled users whose kernel controls enforce
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Users whose burn-in is complete, with an anchored agent, while enforce runs unpaused and approved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_burn_in
+  type: int64
+  brief: Enrolled users still in burn-in
+  examples: [2]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Users whose controls stay in monitor until their covered agent time completes with no would-block hit
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.paused
+  type: boolean
+  brief: Whether kernel enforcement is paused on the host
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: The host-wide break-glass pause; every user on the host is in monitor while it holds
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.tetragon.version
+  type: string
+  brief: Version of the host's Tetragon agent the sensor helper reads
+  examples:
+  - v1.7.1
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 32}
+    notes: As Tetragon's GetVersion answered it; absent while Tetragon is not reachable
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.tetragon.installed
+  type: boolean
+  brief: Whether Tetragon's discovery file exists on the host
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: So a host without Tetragon on the native Plane C backend is not read as a fallback
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.would_block_delta
+  type: int64
+  brief: Would-block hits of DefenseClaw's kernel controls this cycle
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the sensor helper's own counter since the previous cycle, every user's, attributed or not
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.blocked_delta
+  type: int64
+  brief: Denials of DefenseClaw's kernel controls this cycle
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the sensor helper's own counter since the previous cycle, every user's, attributed or not
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.customer_events_delta
+  type: int64
+  brief: Events of the host's own Tetragon policies the sensor helper received this cycle
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the helper's seen count since the previous cycle, below an AI agent or not; the agent ones are also kernel_event records
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.covered_hours
+  type: double
+  brief: Covered agent hours of a user's burn-in
+  examples: [40.5]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0.0, max: 1000000.0}
+    notes: Time an anchored agent of the user ran with the event stream connected and lossless, since the last would-block hit or reset; never wall-clock time
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.needed_hours
+  type: double
+  brief: Covered agent hours a user's burn-in needs
+  examples: [168]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0.0, max: 1000000.0}
+    notes: enterprise.tetragon.burn_in, in hours
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.metric.kernel_control
+  type: string
+  brief: Kernel control dimension of the kernel events metric
+  examples:
+  - kernel.ssh_private_key_read
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+    notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
   type: boolean
   brief: Whether the discovered local model is positively identified as quantized
@@ -4228,6 +4840,20 @@ attributes:
     overrides: {enum: [docker, podman, vm, k8s]}
     notes: The OpenShell gateway compute driver; DefenseClaw supports only docker today
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.driver_reason
+  type: string
+  brief: Why a managed sandbox runs on its compute driver
+  examples: [kvm_missing]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [configured, kvm_available, kvm_missing, kvm_access, cpu_virtualization, vm_driver_missing, vm_prerequisite_missing]}
+    notes: configured (the organization set the driver), kvm_available (driver auto and the per-user KVM probe passed), or the probe's reason when the Linux docker fallback replaced the MicroVM driver (enterprise.openshell.driver_fallback docker)
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.image.digest
   type: string
   brief: Content digest of the sandbox workload image
@@ -4241,6 +4867,22 @@ attributes:
     id: digest-v1
     overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
     notes: Digest of the DefenseClaw overlay (or bring-your-own) image the workload runs; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.container.image
+  type: string
+  brief: Image reference of a container that runs an agent outside DefenseClaw
+  examples: ['ghcr.io/example/dev-agent:1.4']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 256
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'
+    notes: The image the container engine reports for the container (repository and tag, a digest-pinned reference, or the image ID of an untagged image); dropped when it is not a plain reference. Never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.policy.version
   type: int64
@@ -4606,6 +5248,566 @@ attributes:
     overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 1024, max_items: 64}
     notes: Relative to the project root and bounded to 64 entries; file names can disclose project content, so each destination's redaction profile governs them
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.binding.id
+  type: string
+  brief: DefenseClaw ingress binding the sandbox's hooks and egress proxy credential authenticate with
+  examples: [sb_3f9a7c21d04e5b6a8c9d0e1f2a3b4c5d]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Opaque DefenseClaw-assigned binding identifier (never the binding token); it joins a sandbox's hook verdicts, egress and findings. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.digest
+  type: string
+  brief: Content digest of the effective sandbox policy the managed gateway resolved for the sandbox
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: Digest of the organization floor combined with the matched guardrail profile's sandbox section; present only on a sandbox the managed gateway governs, so a fleet can tie each sandbox to the exact policy it was held to
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.generation
+  type: int64
+  brief: Configuration generation of the managed gateway that resolved the sandbox policy
+  examples: [4]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 9223372036854775807}
+    notes: The managed gateway's applied generation counter at the last resolve or re-match of this sandbox; it increments on every configuration swap. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.provisional
+  type: boolean
+  brief: Whether the sandbox runs on an offline floor while the directory lookup is outstanding
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True from a create made before the identity lookup resolved until a re-match with the resolved facts; absent when the sandbox is not governed by the managed gateway
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.registration.id
+  type: string
+  brief: Managed gateway registration the sandbox's hooks and policy requests are bound to
+  examples: [reg-q7x2mfd3k5b4oznwj6lhc2ypea]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Opaque gateway-assigned identifier of one sandbox registration (never the sandbox binding token); it joins the sandbox's hook verdicts, asks and policy records to a person's profile. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.previous_digest
+  type: string
+  brief: Effective sandbox policy digest in force before a re-match
+  examples: ['sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: The value defenseclaw.sandbox.policy.digest had before the re-match recorded by the same occurrence
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.previous_profile
+  type: string
+  brief: Guardrail profile that governed the sandbox before a re-match
+  examples: [contractors]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    notes: The value defenseclaw.guardrail.profile.name had before the re-match; absent when the sandbox was held to the organization floor alone
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.rematch.reason
+  type: string
+  brief: Why the managed gateway matched a sandbox's profile again
+  examples: [generation]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [generation, facts, lookup_resolved]}
+    notes: generation is a configuration change; facts is a refresh that changed the principal, directory, tenant or groups; lookup_resolved is a provisional sandbox whose directory lookup has now resolved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.rule
+  type: string
+  brief: Policy rule that decided a managed sandbox record
+  examples: [required_for]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    notes: The operator-configured name of the rule behind the decision (a network policy rule, or the required_for entry a host run matched); the caller's own match only, never another user's. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.managed.reason
+  type: string
+  brief: Machine-readable reason a managed sandbox record was written
+  examples: [no_kvm]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+    notes: A registered snake_case code such as required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.managed.action
+  type: string
+  brief: What the managed layer did about a managed sandbox record
+  examples: [stop]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [refuse, allow, stop, alert, remove]}
+    notes: refuse and allow are for a host run, stop and alert for a foreign sandbox, container or rule that was found, and remove for a network rule taken out of a sandbox policy
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.decision.stored
+  type: boolean
+  brief: Whether the managed gateway kept an ask decision
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True for an always allow, an unblock or a user block kept in the decision store; false for a session-only decision
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.version
+  type: string
+  brief: OpenShell release serving the sandbox
+  examples: [0.1.3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$'
+    notes: The version the daemon verified for the user's OpenShell gateway and driver
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.install_mode
+  type: string
+  brief: How OpenShell is provided on a managed host
+  examples: [prerequisite]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [prerequisite, setup]}
+    notes: enterprise.openshell.install; prerequisite means the administrator installed OpenShell, setup means the daemon installed NVIDIA's release for the user
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.settings.field
+  type: string
+  brief: OpenShell setting that differs from enterprise.openshell
+  examples: [compute_driver]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_.]{0,63}$'
+    notes: The key name only (never its value); a setting the user changed in their own OpenShell configuration
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.subject.key
+  type: string
+  brief: Keyed pseudonym of the account behind a managed sandbox registration
+  examples: ['hmac-sha256:3f2a9c0d5b7e41f68a0c2d9e4b1f7a65c8d3e0b2a4f6918d7c5e3b1a09f8d7c6']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^hmac-sha256:[0-9a-f]{64}$'
+    notes: HMAC-SHA-256 over the kernel and account-database facts of the account, keyed like the other redaction identifiers so a dictionary of names cannot reverse it; it names the same person across hosts only under the same key. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.event
+  type: string
+  brief: What happened to the sandbox process a process or process tree record reports
+  examples: [start]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [start, exit]}
+    notes: On sandbox.process start is a launch and exit its termination; on sandbox.process_tree start is when the process joined the tree (a sample of the sandbox's /proc, an OpenShell PROC launch or a Tetragon exec from the sandbox kernel feed saw it) and exit once it ended
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.source
+  type: string
+  brief: What observed the sandbox process (for the process tree, what saw it first)
+  examples: [ocsf]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [ocsf, sample, tetragon]}
+    notes: ocsf is an OpenShell supervisor PROC record; sample is DefenseClaw's opt-in sample of the sandbox's /proc; tetragon is an exec the host's Tetragon reported through the sandbox kernel feed (process tree only)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.pid
+  type: int64
+  brief: Process ID inside the sandbox of the process a record is about, or of the actor of a connection
+  examples: [42]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 4194304}
+    notes: The sandbox's own PID namespace, as its supervisor or a sample of its /proc reports it, or as the sandbox kernel feed read it when the exec was seen. Absent on a process tree record of a Tetragon exec whose in-sandbox pid could not be read (the process was gone); host_pid and exec_id name it then. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.host_pid
+  type: int64
+  brief: Host process ID of a sandbox process the sandbox kernel feed reported
+  examples: [217400]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 4194304}
+    notes: The host's PID namespace, another pid space than pid; set only on process tree records whose source is tetragon. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.exec_id
+  type: string
+  brief: Tetragon's execution ID of a sandbox process the sandbox kernel feed reported
+  examples: [ZGNjZXJ0LWhvc3Q6NDEyMTc3NDA4ODc4MDoyMTc0MDA=]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 256, pattern: '^[A-Za-z0-9+/]{4,252}={0,2}$'}
+    notes: Unique per process image on the host (Tetragon's base64 of node, boot-relative exec time and host pid); joins a process to its children without pid reuse. Set only on process tree records whose source is tetragon. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.parent_pid
+  type: int64
+  brief: Parent process ID in the sandbox's process namespace
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 4194304}
+    notes: absent while only OpenShell reported the process, which names no parent; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.name
+  type: string
+  brief: Name the sandbox's kernel gives the process (comm)
+  examples: [node]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The process chooses its own name; display text, never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.executable
+  type: string
+  brief: Executable path inside the sandbox of the process a record is about, or of the actor of a connection
+  examples: [/usr/bin/curl]
+  stability: stable
+  owner: defenseclaw
+  field_class: path
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: path-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Untrusted display text the sandboxed process chooses (OpenShell reports what the process claims; a sample reads its /proc exe link); paths can disclose project content, so each destination's redaction profile governs it. Never an attribution decision on its own and never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.command_line
+  type: string
+  brief: Command line of a sandbox process, values that name secrets replaced in the process tree
+  examples: [python3 /work/app/main.py]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Agent-controlled argument vector, so content class on purpose (the process tree keeps its first sixteen arguments, cut to 1024 bytes); each destination's redaction profile governs whether it leaves the host
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.working_directory
+  type: string
+  brief: Working folder of the process, as the sandbox names it
+  examples: [/sandbox/work/myapp]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Folder names can disclose project content; each destination's redaction profile governs it
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.exit_code
+  type: int64
+  brief: Exit code of a sandbox process, when OpenShell reported it
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: -2147483648, max: 2147483647}
+    notes: Present on exit records only, when an OpenShell PROC terminate record or Tetragon's exit reported it; a sample sees only that the process is gone
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.lineage
+  type: string[]
+  brief: Names of the process's ancestors, its parent first
+  examples:
+  - [bash, claude]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides:
+      max_utf8_bytes: 2048
+      max_item_utf8_bytes: 64
+      max_items: 32
+    notes: Process-chosen names of at most 32 ancestors; log-only and subject to destination redaction
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.ssh.activity
+  type: string
+  brief: OpenShell SSH activity of a sandbox SSH record
+  examples: [OPEN]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The OCSF SSH activity OpenShell reports (LISTEN, OPEN, CLOSE and the like), kept as reported
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.ssh.auth
+  type: string
+  brief: Authentication scheme of a sandbox SSH connection
+  examples: [NSSH1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The scheme name OpenShell reports; never a credential
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.latency_ms
+  type: int64
+  brief: Latency of a model call OpenShell's inference route reported
+  examples: [812]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 86400000}
+    notes: Milliseconds, as OpenShell measured them
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.status
+  type: string
+  brief: Status OpenShell reported for a model call of the sandbox
+  examples: [Success]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Kept as reported; Success maps to the completed outcome and anything else to failed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.operation
+  type: string
+  brief: API operation of a model call OpenShell's inference route reported
+  examples: ['messages:create']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: The provider API operation as OpenShell names it, not a gen_ai.operation.name value
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.product
+  type: string
+  brief: IDE or editor product an extension or plugin is installed in
+  examples:
+  - vscode
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'
+    notes: bounded lowercase product token such as vscode, vscode-insiders, cursor, devin-desktop, kiro, intellij_idea, pycharm, android_studio, visual_studio, zed, eclipse, neovim or a connector name for connector plugins
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.id
+  type: string
+  brief: Stable identifier of an IDE extension or plugin
+  examples:
+  - anthropic.claude-code
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 256
+      pattern: '^[^\x00-\x1f\x7f-\x9f]+$'
+    notes: marketplace or manifest identifier as the IDE records it (including printable Unicode and spaces); never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.version
+  type: string
+  brief: Installed version of an IDE extension or plugin
+  examples:
+  - 2.0.14
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._+~-]*$'
+    notes: manifest version string; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.enabled
+  type: string
+  brief: Enabled state of an IDE extension or plugin
+  examples:
+  - enabled
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - enabled
+      - disabled
+      - client_side_unknown
+      - unknown
+    notes: client_side_unknown marks a remote IDE server whose enabled state lives on the client machine
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.ai
+  type: boolean
+  brief: Whether the IDE extension or plugin matches an AI signature
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: true when the plugin id matches ai_signatures.json
+  introduced_in: telemetry-registry-v2
 groups:
 - id: resource.core
   type: resource
@@ -4683,10 +5885,13 @@ groups:
       - workdir
       reserved_keys:
       - defenseclaw.claw.home_dir
+      - defenseclaw.device.id
       - defenseclaw.gateway.host
       - defenseclaw.gateway.port
       - defenseclaw.preset
       - defenseclaw.preset_name
+      - deployment.environment
+      - deployment.mode
       - discovery.source
       - telemetry.sdk.language
       - telemetry.sdk.name
@@ -4735,6 +5940,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - correlation.security
+  - correlation.policy.effective
   attributes:
   - ref: defenseclaw.asset.id
     requirement_level: recommended
@@ -5011,6 +6217,16 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
   - ref: defenseclaw.user.email
     requirement_level: recommended
   - ref: defenseclaw.inventory.connector.source
@@ -5051,6 +6267,72 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.discovery.scanned_at
     requirement_level: recommended
+- id: body.ide.plugin
+  type: body_group
+  brief: One IDE extension or connector plugin installed for one user, with its enabled state and AI flag.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ide.product
+    requirement_level: required
+  - ref: defenseclaw.ide.plugin.id
+    requirement_level: required
+  - ref: defenseclaw.ide.plugin.version
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.enabled
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.ai
+    requirement_level: recommended
+  - ref: defenseclaw.ai.discovery.scan_id
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+- id: body.identity.observed
+  type: body_group
+  brief: Low-rate end-user identity observation, once per user per cache TTL; carries group counts, never group names.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: user.id
+    requirement_level: required
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: required
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.tenant_id
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.group_count
+    requirement_level: recommended
+  - ref: defenseclaw.session.kind
+    requirement_level: recommended
 - id: body.ai.runtime.coverage
   type: body_group
   brief: How much of the host the runtime planes could observe in one cycle.
@@ -5071,6 +6353,38 @@ groups:
     requirement_level: required
   - ref: defenseclaw.ai.runtime.host_plane_gated
     requirement_level: required
+- id: body.ai.runtime.identity
+  type: body_group
+  brief: Who and what a host-plane record is about, which sensor saw it, and what a DefenseClaw kernel control did.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.login_id
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.event_source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.outcome
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.control
+    requirement_level: recommended
 - id: body.ai.runtime.finding
   type: body_group
   brief: One scored AI discovery runtime finding.
@@ -5078,6 +6392,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.ai.runtime.coverage
+  - body.ai.runtime.identity
   attributes: []
   body_fields:
   - ref: defenseclaw.ai.runtime.finding_id
@@ -5105,7 +6420,8 @@ groups:
   brief: One observed host-plane tactic, attributed to an agent.
   stability: stable
   introduced_in: telemetry-registry-v1
-  extends: []
+  extends:
+  - body.ai.runtime.identity
   attributes: []
   body_fields:
   - ref: defenseclaw.ai.runtime.finding_id
@@ -5119,6 +6435,10 @@ groups:
   - ref: defenseclaw.ai.runtime.agent
     requirement_level: required
   - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_seen
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_join
     requirement_level: recommended
 - id: body.ai.runtime.plane_health
   type: body_group
@@ -5136,6 +6456,109 @@ groups:
   - ref: defenseclaw.ai.runtime.plane_running
     requirement_level: required
   - ref: defenseclaw.ai.runtime.plane_reason
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_mechanism
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_backend
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.events_lost
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.loss_known
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.container_events
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.helper_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.approval
+    requirement_level: recommended
+  - ref: defenseclaw.policy.version
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_enrolled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_enforced
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_burn_in
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.paused
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.version
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.installed
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.would_block_delta
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.blocked_delta
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.customer_events_delta
+    requirement_level: recommended
+- id: body.ai.runtime.kernel_event
+  type: body_group
+  brief: One event of the host's own Tetragon policy below an AI agent, attributed to the agent, its user and the hook decision.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.identity
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.agent
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.kernel.policy_owner
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.kernel.policy_name
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.hook_type
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.function
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.action
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.policy_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.tags
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.message
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.target
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.count
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_seen
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_join
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_action
+    requirement_level: recommended
+- id: body.ai.runtime.kernel_policy
+  type: body_group
+  brief: One state change of DefenseClaw's kernel policies on a managed Linux host.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.kernel.event
+    requirement_level: required
+  - ref: defenseclaw.policy.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.family
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.state
+    requirement_level: recommended
+  - ref: defenseclaw.policy.version
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.reason
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.covered_hours
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.needed_hours
     requirement_level: recommended
 - id: body.ai.discovery.run
   type: body_group
@@ -6216,6 +7639,49 @@ groups:
     mandatory_floor: []
     compatibility_profiles:
     - local-observability-v1
+- id: log.ai.runtime.kernel_event
+  type: log
+  brief: One event of the host's own Tetragon policy below an AI agent; DefenseClaw reads these events and never changes the policy.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.kernel_event
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.kernel_event
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ai.runtime.kernel_policy
+  type: log
+  brief: One state change of DefenseClaw's kernel policies, never one per kernel event.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.kernel_policy
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.kernel_policy
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.ai.discovery.completed
   type: log
   brief: Canonical completed continuous AI discovery scan summary.
@@ -6275,6 +7741,20 @@ groups:
   - ref: defenseclaw.user.id_kind
     requirement_level: recommended
   - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.changed
@@ -6348,6 +7828,20 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.discovered
   x-defenseclaw:
@@ -6390,6 +7884,10 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.observed
@@ -6440,6 +7938,20 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.removed
   x-defenseclaw:
@@ -6454,6 +7966,86 @@ groups:
     legacy_bindings:
     - source: internal/observability/event_registry.go
       disposition: preserved
+- id: log.ide.plugin.discovered
+  type: log
+  brief: Canonical ide.plugin.discovered log identity; one record when an IDE plugin first appears for a user.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.discovered
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ide.plugin.changed
+  type: log
+  brief: Canonical ide.plugin.changed log identity; one record when an IDE plugin's version, enabled state or AI flag changes.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.changed
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ide.plugin.removed
+  type: log
+  brief: Canonical ide.plugin.removed log identity; one record when an IDE plugin is no longer installed for a user.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.removed
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.identity.observed
+  type: log
+  brief: Canonical identity.observed log identity; at most once per user per identity-cache TTL.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.identity.observed
+  attributes: []
+  body_fields: []
+  log:
+    event_name: identity.observed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.agent.discovery.completed
   type: log
   brief: Canonical accepted connector installation discovery summary.
@@ -7778,6 +9370,122 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.inventory.ide_plugins
+  type: metric
+  brief: IDE extensions and plugins installed as of the last inventory scan, per IDE product, AI flag and enabled state.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ide.product
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.ai
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.enabled
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.inventory.ide_plugins
+    instrument_type: gauge
+    value_type: int64
+    unit: '{plugin}'
+    description: IDE extensions and plugins installed as of the last inventory scan, per IDE product, AI flag and enabled state.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ide.product
+        label: defenseclaw_ide_product
+      - ref: defenseclaw.ide.plugin.ai
+        label: defenseclaw_ide_plugin_ai
+      - ref: defenseclaw.ide.plugin.enabled
+        label: defenseclaw_ide_plugin_enabled
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.kernel.events
+  type: metric
+  brief: Kernel events of Tetragon policies the gateway recorded, by policy owner, outcome and control.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ai.runtime.kernel.policy_owner
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.outcome
+    requirement_level: recommended
+  - ref: defenseclaw.metric.kernel_control
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.kernel.events
+    instrument_type: counter
+    value_type: int64
+    unit: '{event}'
+    description: Kernel events of Tetragon policies the gateway recorded, by policy owner, outcome and control.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ai.runtime.kernel.policy_owner
+        label: owner
+      - ref: defenseclaw.ai.runtime.kernel.outcome
+        label: outcome
+      - ref: defenseclaw.metric.kernel_control
+        label: control
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.kernel.state
+  type: metric
+  brief: The kernel controls' state on this host, one series per state (value 1), every cycle.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ai.runtime.kernel.helper_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.approval
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.paused
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_backend
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.installed
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.kernel.state
+    instrument_type: gauge
+    value_type: int64
+    unit: '{host}'
+    description: The kernel controls' state on this host, one series per state (value 1), every cycle.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ai.runtime.kernel.helper_mode
+        label: helper_mode
+      - ref: defenseclaw.ai.runtime.kernel.approval
+        label: approval
+      - ref: defenseclaw.ai.runtime.kernel.paused
+        label: paused
+      - ref: defenseclaw.ai.runtime.plane_backend
+        label: backend
+      - ref: defenseclaw.ai.runtime.tetragon.installed
+        label: tetragon_installed
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.ai.components.observations
   type: metric
   brief: Per-(ecosystem,name) confidence emissions; one increment per scan that produced a component rollup.
@@ -10151,10 +11859,11 @@ groups:
       disposition: preserved
 - id: correlation.sandbox
   type: attribute_group
-  brief: OpenShell sandbox identity, image, policy revision, profile, pack, phase, and workspace mode carried by every sandbox-originated log; never a metric label set.
+  brief: OpenShell sandbox identity, image, policy revision, profile, pack, phase, workspace mode and, on a managed host, the matched guardrail profile, effective sandbox policy and registration carried by every sandbox-originated log; never a metric label set.
   stability: stable
   introduced_in: telemetry-registry-v2
-  extends: []
+  extends:
+  - correlation.guardrail.profile
   attributes:
   - ref: defenseclaw.sandbox.id
     requirement_level: recommended
@@ -10163,6 +11872,8 @@ groups:
   - ref: defenseclaw.sandbox.runtime
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver_reason
     requirement_level: recommended
   - ref: defenseclaw.sandbox.image.digest
     requirement_level: recommended
@@ -10176,6 +11887,22 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.sandbox.workdir.mode
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.binding.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.registration.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.digest
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.generation
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.provisional
+    requirement_level: recommended
+  - ref: defenseclaw.openshell.version
+    requirement_level: recommended
+  - ref: defenseclaw.openshell.install_mode
+    requirement_level: recommended
+  - ref: defenseclaw.subject.key
+    requirement_level: recommended
   body_fields: []
 - id: body.policy.updated
   type: body_group
@@ -10184,6 +11911,7 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - body.compliance.activity
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields: []
@@ -10204,7 +11932,13 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.sandbox.name
     requirement_level: required
@@ -10305,6 +12039,791 @@ groups:
     mandatory_floor:
     - enforced_outcome
     - enforcement_state_change
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.process
+  type: body_group
+  brief: Sandbox process body for a process the sandbox started or that exited, as OpenShell's supervisor (or DefenseClaw's opt-in sampling) observed it.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.event
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.executable
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.command_line
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exit_code
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+- id: body.sandbox.ssh
+  type: body_group
+  brief: Sandbox SSH body for OpenShell's record of an SSH listener or connection into the sandbox (a connect, exec or file transfer).
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.ssh.activity
+    requirement_level: required
+  - ref: defenseclaw.sandbox.ssh.auth
+    requirement_level: recommended
+  - ref: client.address
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+- id: body.sandbox.inference
+  type: body_group
+  brief: Sandbox inference body for a model call OpenShell's inference route reported, without any model content.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.status
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.latency_ms
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.operation
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+- id: body.sandbox.process_tree
+  type: body_group
+  brief: Sandbox process tree body for a process that started or exited in an OpenShell sandbox with the process tree on, with its parent and ancestry.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.event
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.host_pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exec_id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.parent_pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.executable
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.command_line
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.working_directory
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exit_code
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.lineage
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+- id: log.sandbox.process
+  type: log
+  brief: Canonical sandbox.process log identity; one record per process start or exit observed in a sandbox, bounded per sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.process
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.process
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.ssh
+  type: log
+  brief: Canonical sandbox.ssh log identity; one record per OpenShell SSH listener or connection event of a sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.ssh
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.ssh
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - allowed
+    - blocked
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.inference
+  type: log
+  brief: Canonical sandbox.inference log identity; one record per model call OpenShell's inference route reported for a sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.inference
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.inference
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.process_tree
+  type: log
+  brief: Canonical sandbox.process_tree log identity; one record when a process joins a sandbox's opt-in process tree and one when it exits.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.process_tree
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.process_tree
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.managed
+  type: body_group
+  brief: 'Common body of the managed sandbox records: the person behind the sandbox, the matched guardrail profile, the effective sandbox policy and the registration.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  - correlation.policy.effective
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  body_fields: []
+- id: body.sandbox.policy.resolved
+  type: body_group
+  brief: 'Managed sandbox policy resolution body: the profile and effective sandbox policy the gateway held a registration to.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.policy.resolved
+  type: log
+  brief: 'Canonical sandbox.policy.resolved log identity; one record when the managed gateway resolves the sandbox policy for a registration, including the offline floor of a provisional one.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.resolved
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.resolved
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.policy.rematched
+  type: body_group
+  brief: 'Managed sandbox re-match body: the profile and policy digest before and after the gateway matched a live registration again.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.rematch.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.previous_profile
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.previous_digest
+    requirement_level: recommended
+- id: log.sandbox.policy.rematched
+  type: log
+  brief: 'Canonical sandbox.policy.rematched log identity; one record when a configuration change or an identity refresh changes the profile or policy of a live registration.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.rematched
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.rematched
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.policy.foreign_rule
+  type: body_group
+  brief: 'Foreign sandbox policy rule body: a network rule the managed layer did not render, and what it did about it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.policy.foreign_rule
+  type: log
+  brief: 'Canonical sandbox.policy.foreign_rule log identity; one record per network rule found in a managed sandbox that no stored decision or rendered policy accounts for.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.foreign_rule
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.foreign_rule
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - skipped
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.ask.decided
+  type: body_group
+  brief: 'Managed sandbox ask decision body: the gateway''s answer to a user''s access request, bounded by the administrator''s floor.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: defenseclaw.sandbox.approval.kind
+    requirement_level: optional
+  - ref: defenseclaw.sandbox.approval.scope
+    requirement_level: optional
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.approval.id
+    requirement_level: recommended
+  - ref: defenseclaw.approval.result
+    requirement_level: required
+  - ref: defenseclaw.sandbox.decision.stored
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.ask.decided
+  type: log
+  brief: 'Canonical sandbox.ask.decided log identity; one record when the managed gateway decides a user''s ask, an unblock or a user block.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.ask.decided
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.ask.decided
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - approved
+    - cancelled
+    - denied
+    - timed_out
+    route_selector: true
+    mandatory_floor:
+    - approval_resolution
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.host_run_refused
+  type: body_group
+  brief: 'Required-sandbox refusal body: a host agent run refused because the user''s profile requires a sandbox for it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.host_run_refused
+  type: log
+  brief: 'Canonical sandbox.host_run_refused log identity; one record when a hook of an agent running on the host is refused because the matched profile requires a sandbox.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.host_run_refused
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.host_run_refused
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.host_run_unavailable
+  type: body_group
+  brief: 'Required-sandbox unavailability body: a required sandbox cannot run on this host, and whether the host run was refused or allowed with an alert.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.host_run_unavailable
+  type: log
+  brief: 'Canonical sandbox.host_run_unavailable log identity; one record when a host agent run needs a sandbox this computer cannot provide.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.host_run_unavailable
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.host_run_unavailable
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - allowed
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.access_refused
+  type: body_group
+  brief: 'Access refusal body: a destination a managed sandbox may not reach, with the rule that refused it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.access_refused
+  type: log
+  brief: 'Canonical sandbox.access_refused log identity; one record when the managed policy refuses a destination to a sandbox or an ask for one.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.access_refused
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.access_refused
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.foreign_sandbox
+  type: body_group
+  brief: 'Foreign sandbox body: a sandbox on the user''s OpenShell gateway that DefenseClaw did not create, and what the managed layer did about it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+- id: log.sandbox.foreign_sandbox
+  type: log
+  brief: 'Canonical sandbox.foreign_sandbox log identity; one record per foreign sandbox found on a managed user''s OpenShell gateway.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.foreign_sandbox
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.foreign_sandbox
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - skipped
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.foreign_container
+  type: body_group
+  brief: 'Foreign container body: an agent container started outside DefenseClaw, reported and never stopped.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.container.image
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+- id: log.sandbox.foreign_container
+  type: log
+  brief: 'Canonical sandbox.foreign_container log identity; one alert-only record per agent container found running outside DefenseClaw.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.foreign_container
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.foreign_container
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.settings_drift
+  type: body_group
+  brief: 'OpenShell settings drift body: a user-changed OpenShell setting that no longer matches enterprise.openshell, which pauses the user''s sandboxes.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.openshell.settings.field
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: recommended
+- id: log.sandbox.settings_drift
+  type: log
+  brief: 'Canonical sandbox.settings_drift log identity; one record when the daemon finds OpenShell settings that differ from enterprise.openshell and refuses sandboxes.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.settings_drift
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.settings_drift
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.transitions
+  type: metric
+  brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.phase.from
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.phase.to
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.transitions
+    instrument_type: counter
+    value_type: int64
+    unit: '{transition}'
+    description: Sandbox lifecycle phase transitions by harness connector and phase pair.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.active
+  type: metric
+  brief: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.active
+    instrument_type: gauge
+    value_type: int64
+    unit: '{sandbox}'
+    description: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.config.bundle.receipt
+  type: log
+  brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.policy.bundle.receipt_id
+    requirement_level: required
+  - ref: defenseclaw.policy.bundle.state
+    requirement_level: required
+  - ref: defenseclaw.policy.bundle.id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.version
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.signer_key_id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.change_summary
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.error_code
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.rolled_back
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.restart
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.enforcing_digest
+    requirement_level: recommended
+  - ref: defenseclaw.policy.effective_digest
+    requirement_level: recommended
+  - ref: defenseclaw.config.generation
+    requirement_level: recommended
+  body_fields: []
+  log:
+    event_name: config.bundle.receipt
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.policy.bundle.applies
+  type: metric
+  brief: Signed policy bundle receipts that ended on a standalone managed device, by result and error code.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.policy.bundle.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.policy.bundle.error_code
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.policy.bundle.applies
+    instrument_type: counter
+    value_type: int64
+    unit: '{apply}'
+    description: Signed policy bundle receipts that ended confirmed or failed, by result and error code.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.policy.bundle.result
+        label: bundle.result
+      - ref: defenseclaw.metric.policy.bundle.error_code
+        label: bundle.error_code
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.policy.bundle.version
+  type: metric
+  brief: Version of the signed policy bundle the standalone managed device enforces.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.policy.bundle.version
+    instrument_type: gauge
+    value_type: int64
+    unit: '{version}'
+    description: Version of the signed policy bundle the standalone managed device enforces.
+    temporality: unspecified
+    empty_labels_reason: One device enforces one bundle; the version is the value and the bundle id stays in the receipt log.
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
     compatibility_profiles:
     - local-observability-v1
 - id: log.fleet.alert
@@ -10506,167 +13025,7 @@ groups:
     mandatory_floor: []
     compatibility_profiles:
     - local-observability-v1
-- id: metric.defenseclaw.sandbox.transitions
-  type: metric
-  brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
-  stability: stable
-  introduced_in: telemetry-registry-v2
-  extends: []
-  attributes:
-  - ref: defenseclaw.connector.source
-    requirement_level: recommended
-  - ref: defenseclaw.sandbox.phase.from
-    requirement_level: recommended
-  - ref: defenseclaw.sandbox.phase.to
-    requirement_level: recommended
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.sandbox.transitions
-    instrument_type: counter
-    value_type: int64
-    unit: '{transition}'
-    description: Sandbox lifecycle phase transitions by harness connector and phase pair.
-    temporality: delta
-    label_projections:
-    - profile: local-observability-v1
-      mappings:
-      - ref: defenseclaw.connector.source
-        label: connector
-  x-defenseclaw:
-    bucket: agent.lifecycle
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-- id: metric.defenseclaw.sandbox.active
-  type: metric
-  brief: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
-  stability: stable
-  introduced_in: telemetry-registry-v2
-  extends: []
-  attributes:
-  - ref: defenseclaw.connector.source
-    requirement_level: recommended
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.sandbox.active
-    instrument_type: gauge
-    value_type: int64
-    unit: '{sandbox}'
-    description: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
-    temporality: unspecified
-    label_projections:
-    - profile: local-observability-v1
-      mappings:
-      - ref: defenseclaw.connector.source
-        label: connector
-  x-defenseclaw:
-    bucket: agent.lifecycle
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-- id: log.config.bundle.receipt
-  type: log
-  brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'
-  stability: stable
-  introduced_in: telemetry-registry-v2
-  extends:
-  - body.compliance.activity
-  attributes:
-  - ref: defenseclaw.policy.bundle.receipt_id
-    requirement_level: required
-  - ref: defenseclaw.policy.bundle.state
-    requirement_level: required
-  - ref: defenseclaw.policy.bundle.id
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.version
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.signer_key_id
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.change_summary
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.error_code
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.rolled_back
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.restart
-    requirement_level: recommended
-  - ref: defenseclaw.policy.bundle.enforcing_digest
-    requirement_level: recommended
-  - ref: defenseclaw.policy.effective_digest
-    requirement_level: recommended
-  - ref: defenseclaw.config.generation
-    requirement_level: recommended
-  body_fields: []
-  log:
-    event_name: config.bundle.receipt
-  x-defenseclaw:
-    bucket: compliance.activity
-    family_schema_version: 1
-    outcome_requirement: required
-    allowed_outcomes:
-    - applied
-    - failed
-    route_selector: true
-    mandatory_floor:
-    - control_plane_mutation
-    compatibility_profiles:
-    - local-observability-v1
-- id: metric.defenseclaw.policy.bundle.applies
-  type: metric
-  brief: Signed policy bundle receipts that ended on a standalone managed device, by result and error code.
-  stability: stable
-  introduced_in: telemetry-registry-v2
-  extends: []
-  attributes:
-  - ref: defenseclaw.metric.policy.bundle.result
-    requirement_level: recommended
-  - ref: defenseclaw.metric.policy.bundle.error_code
-    requirement_level: recommended
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.policy.bundle.applies
-    instrument_type: counter
-    value_type: int64
-    unit: '{apply}'
-    description: Signed policy bundle receipts that ended confirmed or failed, by result and error code.
-    temporality: delta
-    label_projections:
-    - profile: local-observability-v1
-      mappings:
-      - ref: defenseclaw.metric.policy.bundle.result
-        label: bundle.result
-      - ref: defenseclaw.metric.policy.bundle.error_code
-        label: bundle.error_code
-  x-defenseclaw:
-    bucket: compliance.activity
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-- id: metric.defenseclaw.policy.bundle.version
-  type: metric
-  brief: Version of the signed policy bundle the standalone managed device enforces.
-  stability: stable
-  introduced_in: telemetry-registry-v2
-  extends: []
-  attributes: []
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.policy.bundle.version
-    instrument_type: gauge
-    value_type: int64
-    unit: '{version}'
-    description: Version of the signed policy bundle the standalone managed device enforces.
-    temporality: unspecified
-    empty_labels_reason: One device enforces one bundle; the version is the value and the bundle id stays in the receipt log.
-  x-defenseclaw:
-    bucket: compliance.activity
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
+
 producer_identity_sets:
 - id: identity_set.agent_lifecycle
   identities:
@@ -10741,6 +13100,12 @@ producer_identity_sets:
   - event_name: ai.runtime.finding
     bucket: ai.discovery
     family: log.ai.runtime.finding
+  - event_name: ai.runtime.kernel_event
+    bucket: ai.discovery
+    family: log.ai.runtime.kernel_event
+  - event_name: ai.runtime.kernel_policy
+    bucket: ai.discovery
+    family: log.ai.runtime.kernel_policy
   - event_name: ai.runtime.plane_health
     bucket: ai.discovery
     family: log.ai.runtime.plane_health
@@ -10759,6 +13124,15 @@ producer_identity_sets:
   - event_name: ai_component.removed
     bucket: ai.discovery
     family: log.ai_component.removed
+  - event_name: ide.plugin.changed
+    bucket: ai.discovery
+    family: log.ide.plugin.changed
+  - event_name: ide.plugin.discovered
+    bucket: ai.discovery
+    family: log.ide.plugin.discovered
+  - event_name: ide.plugin.removed
+    bucket: ai.discovery
+    family: log.ide.plugin.removed
 - id: identity_set.asset_lifecycle
   identities:
   - event_name: asset.activated
@@ -10861,6 +13235,9 @@ producer_identity_sets:
     family: log.scan.started
 - id: identity_set.compliance_activity
   identities:
+  - event_name: identity.observed
+    bucket: compliance.activity
+    family: log.identity.observed
   - event_name: alert.acknowledgement.requested
     bucket: compliance.activity
     family: log.alert.acknowledgement.requested
@@ -10925,6 +13302,9 @@ producer_identity_sets:
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.doctor
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.enterprise.exempt.user
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.gateway.approval.denied
@@ -12762,6 +15142,11 @@ producer_identity_sets:
   - event_name: sandbox.workspace
     bucket: enforcement.action
     family: log.sandbox.workspace
+- id: identity_set.sandbox_process_tree
+  identities:
+  - event_name: sandbox.process_tree
+    bucket: agent.lifecycle
+    family: log.sandbox.process_tree
 - id: identity_set.sandbox_egress
   identities:
   - event_name: egress.allowed
@@ -12770,6 +15155,23 @@ producer_identity_sets:
   - event_name: egress.blocked
     bucket: network.egress
     family: log.egress.blocked
+  - event_name: egress.completed
+    bucket: network.egress
+    family: log.egress.completed
+  - event_name: egress.failed
+    bucket: network.egress
+    family: log.egress.failed
+- id: identity_set.sandbox_activity
+  identities:
+  - event_name: sandbox.process
+    bucket: tool.activity
+    family: log.sandbox.process
+  - event_name: sandbox.ssh
+    bucket: compliance.activity
+    family: log.sandbox.ssh
+  - event_name: sandbox.inference
+    bucket: model.io
+    family: log.sandbox.inference
 - id: identity_set.sandbox_approval
   identities:
   - event_name: approval.requested
@@ -12778,11 +15180,47 @@ producer_identity_sets:
   - event_name: approval.resolved
     bucket: compliance.activity
     family: log.approval.resolved
+  - event_name: sandbox.ask.decided
+    bucket: compliance.activity
+    family: log.sandbox.ask.decided
 - id: identity_set.sandbox_policy
   identities:
   - event_name: policy.updated
     bucket: compliance.activity
     family: log.policy.updated
+  - event_name: sandbox.policy.resolved
+    bucket: compliance.activity
+    family: log.sandbox.policy.resolved
+- id: identity_set.sandbox_policy_rematched
+  identities:
+  - event_name: sandbox.policy.rematched
+    bucket: compliance.activity
+    family: log.sandbox.policy.rematched
+- id: identity_set.sandbox_policy_foreign_rule
+  identities:
+  - event_name: sandbox.policy.foreign_rule
+    bucket: enforcement.action
+    family: log.sandbox.policy.foreign_rule
+- id: identity_set.sandbox_managed
+  identities:
+  - event_name: sandbox.host_run_refused
+    bucket: enforcement.action
+    family: log.sandbox.host_run_refused
+  - event_name: sandbox.host_run_unavailable
+    bucket: enforcement.action
+    family: log.sandbox.host_run_unavailable
+  - event_name: sandbox.access_refused
+    bucket: enforcement.action
+    family: log.sandbox.access_refused
+  - event_name: sandbox.foreign_sandbox
+    bucket: enforcement.action
+    family: log.sandbox.foreign_sandbox
+  - event_name: sandbox.foreign_container
+    bucket: compliance.activity
+    family: log.sandbox.foreign_container
+  - event_name: sandbox.settings_drift
+    bucket: enforcement.action
+    family: log.sandbox.settings_drift
 - id: identity_set.sandbox_health
   identities:
   - event_name: subsystem.lifecycle
@@ -12852,7 +15290,9 @@ producer_identity_sets:
   - event_name: fleet.threat_intel.push
     bucket: security.finding
     family: log.fleet.threat_intel.push
+
 producer_mappings:
+
 - producer: gateway_event
   key: verdict
   source: internal/gatewaylog/events.go
@@ -13634,6 +16074,26 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.repaired
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: enterprise-exempt-user
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.enterprise.exempt.user
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
@@ -15879,6 +18339,17 @@ producer_mappings:
     bucket: enforcement.action
     compatibility_only: true
 - producer: audit_action
+  key: sandbox-activity
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_activity
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
   key: sandbox-approval
   source: internal/audit/actions.go
   event_name_policy: context_required
@@ -15944,6 +18415,18 @@ producer_mappings:
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-process
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_process_tree
+  severity_policy: canonical_or_info
+  mandatory_rules: []
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2
@@ -15962,108 +18445,40 @@ producer_mappings:
     introduced_in: telemetry-registry-v2
     disposition: translate_to_v8
 - producer: audit_action
-  key: fleet.alert
+  key: sandbox.managed
   source: internal/audit/actions.go
   event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_alert
-  severity_policy: canonical_or_info
-  mandatory_rules:
-  - durable_health_transition
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.device.command
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_device_command
+  allowed_context_identity_set: identity_set.sandbox_managed
   severity_policy: canonical_or_info
   mandatory_rules:
   - enforced_outcome
   companion_rules: []
   compatibility:
-    introduced_in: telemetry-registry-v3
+    introduced_in: telemetry-registry-v2
     disposition: translate_to_v8
 - producer: audit_action
-  key: fleet.device.decommission
+  key: sandbox.policy.foreign_rule
   source: internal/audit/actions.go
   event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_device_decommission
-  severity_policy: canonical_or_info
-  mandatory_rules: []
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.device.heartbeat
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_device_heartbeat
-  severity_policy: canonical_or_info
-  mandatory_rules: []
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.device.offline
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_device_offline
+  allowed_context_identity_set: identity_set.sandbox_policy_foreign_rule
   severity_policy: canonical_or_info
   mandatory_rules:
-  - durable_health_transition
+  - enforced_outcome
   companion_rules: []
   compatibility:
-    introduced_in: telemetry-registry-v3
+    introduced_in: telemetry-registry-v2
     disposition: translate_to_v8
 - producer: audit_action
-  key: fleet.device.registered
+  key: sandbox.policy.rematched
   source: internal/audit/actions.go
   event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_device_registered
-  severity_policy: canonical_or_info
-  mandatory_rules: []
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.policy.emergency
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_policy_emergency
+  allowed_context_identity_set: identity_set.sandbox_policy_rematched
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation
   companion_rules: []
   compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.policy.push
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_policy_push
-  severity_policy: canonical_or_info
-  mandatory_rules:
-  - control_plane_mutation
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
-    disposition: translate_to_v8
-- producer: audit_action
-  key: fleet.threat_intel.push
-  source: internal/audit/actions.go
-  event_name_policy: context_required
-  allowed_context_identity_set: identity_set.fleet_threat_intel_push
-  severity_policy: canonical_or_info
-  mandatory_rules: []
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v3
+    introduced_in: telemetry-registry-v2
     disposition: translate_to_v8
 - producer: audit_action
   key: scan
@@ -16892,6 +19307,110 @@ producer_mappings:
     event_name: legacy.audit.tool.unblock
     bucket: enforcement.action
     compatibility_only: true
+- producer: audit_action
+  key: fleet.device.registered
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_registered
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.heartbeat
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_heartbeat
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.offline
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_offline
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.decommission
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_decommission
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.command
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_command
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.policy.push
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_policy_push
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.policy.emergency
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_policy_emergency
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.threat_intel.push
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_threat_intel_push
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.alert
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_alert
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
 - producer: audit_action
   key: upgrade
   source: internal/audit/actions.go
