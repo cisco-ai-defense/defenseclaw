@@ -363,6 +363,9 @@ const (
 	ActionFleetPolicyEmergency    Action = "fleet.policy.emergency"
 	ActionFleetThreatIntel        Action = "fleet.threat_intel.push"
 	ActionFleetAlert              Action = "fleet.alert"
+	ActionFleetDeviceReregistered Action = "fleet.device.reregistered"
+	ActionFleetTokenRotated       Action = "fleet.token.rotated"
+	ActionFleetDeviceKeyRotated   Action = "fleet.device.key_rotated"
 )
 
 // AllActions returns every registered audit action. Used by
@@ -598,6 +601,9 @@ func AllActions() []Action {
 		ActionFleetPolicyEmergency,
 		ActionFleetThreatIntel,
 		ActionFleetAlert,
+		ActionFleetDeviceReregistered,
+		ActionFleetTokenRotated,
+		ActionFleetDeviceKeyRotated,
 	}
 }
 

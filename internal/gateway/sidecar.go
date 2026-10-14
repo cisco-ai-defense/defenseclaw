@@ -7898,9 +7898,11 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
-	// Wire the Edge Connector fleet management API. The manager and verdict
-	// cache are lightweight in-process singletons; metrics are connected once
-	// so Prometheus scrapes reflect live fleet state.
+	// Wire the Edge Connector fleet management API only when enabled.
+	// Fleet is enabled when fleet.enabled=true in config.yaml, OR when a
+	// broker URL is configured (backward compat with env-var-only setups).
+	fleetEnabled := s.currentConfig().Fleet.Enabled || s.currentConfig().Fleet.EffectiveMQTTBrokerURL() != "" || s.currentConfig().Fleet.ResolvedAPIToken() != ""
+	if fleetEnabled {
 	fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
 		// Stderr line for immediate local visibility (unchanged).
 		fmt.Fprintf(os.Stderr, "[fleet-alert] type=%s device=%d severity=%s: %s\n",
@@ -8000,6 +8002,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if brokerURL := s.currentConfig().Fleet.EffectiveMQTTBrokerURL(); brokerURL != "" {
 		clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
 		tcpClient := fleetmqtt.NewPahoClient(brokerURL, clientID)
+		tcpClient.SetCredentials(
+			s.currentConfig().Fleet.ResolvedMQTTUser(),
+			s.currentConfig().Fleet.ResolvedMQTTPass(),
+		)
 
 		fleetMQTTClient = tcpClient
 		bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
@@ -8097,6 +8103,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		fleetOpts = append(fleetOpts, fleet.WithDecommissionStore(deviceStore))
 	}
 	api.SetFleetAPI(fleet.NewAPI(ctx, fleetMgr, fleetCache, fleetOpts...))
+	} // end fleetEnabled
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token

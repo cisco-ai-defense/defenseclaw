@@ -27,6 +27,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// Fleet audit action constants — mirror internal/audit/actions.go values.
+// Defined here to avoid circular imports (fleet cannot import audit).
+const (
+	auditDeviceRegistered   = "fleet.device.registered"
+	auditDeviceReregistered = "fleet.device.reregistered"
+	auditDeviceCommand      = "fleet.device.command"
+	auditPolicyPush         = "fleet.policy.push"
+	auditPolicyEmergency    = "fleet.policy.emergency"
+	auditThreatIntel        = "fleet.threat_intel.push"
+	auditDecommission       = "fleet.device.decommission"
+	auditTokenRotated       = "fleet.token.rotated"
+	auditKeyRotated         = "fleet.device.key_rotated"
+)
+
 // FleetSettings carries fleet configuration values resolved from
 // config.yaml by the gateway sidecar. Defined here (not imported from
 // internal/config) to avoid circular imports. The sidecar populates
@@ -507,7 +521,7 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 				deviceKeyHex = hex.EncodeToString(deviceKey)
 			}
 		}
-		a.emitAudit("fleet.device.reregistered",
+		a.emitAudit(auditDeviceReregistered,
 			fmt.Sprintf("%d", dev.DeviceID),
 			fmt.Sprintf("tenant:%d fleet:%d", req.TenantID, req.FleetID))
 		resp := map[string]any{
@@ -571,7 +585,7 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		deviceKeyHex = hex.EncodeToString(deviceKey)
 	}
 
-	a.emitAudit("fleet.device.registered",
+	a.emitAudit(auditDeviceRegistered,
 		fmt.Sprintf("%d", dev.DeviceID),
 		fmt.Sprintf("tenant=%d fleet=%d hw=%s fw=%s policy_v=%d",
 			req.TenantID, req.FleetID, req.HWProfile, req.FWVersion, req.PolicyVersion))
@@ -683,7 +697,7 @@ func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.emitAudit("fleet.device.command",
+	a.emitAudit(auditDeviceCommand,
 		fmt.Sprintf("%d", deviceFullID),
 		fmt.Sprintf("command=%s command_id=%s", req.Command, commandID))
 
@@ -833,7 +847,7 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[fleet-api] MarkDistributed(%d, %d, v%d) failed: %v", req.TenantID, req.FleetID, version, err)
 	}
 
-	a.emitAudit("fleet.policy.push",
+	a.emitAudit(auditPolicyPush,
 		fmt.Sprintf("tenant=%d/fleet=%d", req.TenantID, req.FleetID),
 		fmt.Sprintf("version=%d profile=%s blob_size=%d", version, req.Profile, len(signed)))
 
@@ -960,7 +974,7 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.emitAudit("fleet.policy.emergency",
+	a.emitAudit(auditPolicyEmergency,
 		fmt.Sprintf("tenant=%d/fleet=%d", req.TenantID, req.FleetID),
 		fmt.Sprintf("command=%s", req.Command))
 	a.emitAlert("HIGH",
@@ -1042,7 +1056,7 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.emitAudit("fleet.threat_intel.push",
+	a.emitAudit(auditThreatIntel,
 		fmt.Sprintf("threat-intel-push.%d", len(req.RevokeAllowHash)),
 		fmt.Sprintf("revoked_count:%d emergency:%v", len(req.RevokeAllowHash), req.Emergency))
 
@@ -1138,7 +1152,7 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.emitAudit("fleet.device.decommission",
+	a.emitAudit(auditDecommission,
 		batchID,
 		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d key_delete_failed:%d",
 			len(req.Devices), decommissioned, len(notFound), len(keyDeleteFailed)))
@@ -1215,7 +1229,7 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 	a.lastTokenRotation = time.Now()
 	log.Printf("INFO: fleet API token rotated (in-memory only, env var DCLAW_FLEET_API_TOKEN not updated)")
 
-	a.emitAudit("fleet.token.rotated", "DCLAW_FLEET_API_TOKEN",
+	a.emitAudit(auditTokenRotated, "DCLAW_FLEET_API_TOKEN",
 		"Fleet API token rotated — old token is now invalid")
 
 	if r.TLS == nil {
@@ -1297,7 +1311,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	a.rotationMu.Unlock()
 	newKeyHex := hex.EncodeToString(newKey)
 
-	a.emitAudit("fleet.device.key_rotated",
+	a.emitAudit(auditKeyRotated,
 		fmt.Sprintf("%d", deviceID),
 		"Device key rotated — old key is now invalid")
 

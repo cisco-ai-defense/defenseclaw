@@ -3794,6 +3794,17 @@ func setDefaults(dataDir string) {
 	// in gatewayShouldConnectForConfiguredConnector. See the field
 	// doc on GatewayConfig.FleetMode for the override semantics.
 	viper.SetDefault("gateway.fleet_mode", "auto")
+
+	// Fleet defaults — all off/empty by default so fleet costs nothing when unused.
+	viper.SetDefault("fleet.enabled", false)
+	viper.SetDefault("fleet.api_token_env", "DCLAW_FLEET_API_TOKEN")
+	viper.SetDefault("fleet.mqtt_user_env", "DCLAW_MQTT_USER")
+	viper.SetDefault("fleet.mqtt_pass_env", "DCLAW_MQTT_PASS")
+	viper.SetDefault("fleet.ota_key_env", "DCLAW_OTA_KEY")
+	viper.SetDefault("fleet.emergency_key_env", "DCLAW_EMERGENCY_KEY")
+	viper.SetDefault("fleet.device_key_env", "DCLAW_DEVICE_KEY")
+	viper.SetDefault("fleet.verdict_cache_size", 4096)
+
 	viper.SetDefault("gateway.config_reload.mode", "hot")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)

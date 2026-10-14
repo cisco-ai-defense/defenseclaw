@@ -102,7 +102,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
+      "security_note": "CGNAT egress guard \u2014 prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
     },
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
@@ -131,7 +131,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
+      "security_note": "Hook contract verification \u2014 prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
     },
     {
       "name": "DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS",
@@ -152,7 +152,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts."
+      "security_note": "MCP scan-target SSRF guard \u2014 prevents a scan request from reaching IMDS / loopback / private hosts."
     },
     {
       "name": "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS",
@@ -177,7 +177,7 @@
         }
       ],
       "since": "0.8.1",
-      "security_note": "Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
+      "security_note": "Private-upstream SSRF guard exemption \u2014 allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
     },
     {
       "name": "DEFENSECLAW_ANTHROPIC_PROBE_MODEL",
@@ -342,7 +342,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook PATH lockdown — a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
+      "security_note": "Hook PATH lockdown \u2014 a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
     },
     {
       "name": "DEFENSECLAW_BIN",
@@ -418,7 +418,7 @@
     {
       "name": "DEFENSECLAW_CISCO_CA_BUNDLE",
       "category": "test_fixture",
-      "purpose": "CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, `osslsigncode verify -CAfile <bundle>` uses the supplied bundle instead of the system trust store — the Workstream A round-trip CI test sets this to a disposable CA that signs a `Cisco Systems, Inc.` CN so the assemble.sh flow can be exercised on Linux runners without a real production certificate. MUST remain unset for production AVC assembly and any release build; a rogue bundle here would let a non-Cisco signer pass the signature preflight (`assert-cisco-signature`). Enforced by convention only — there is no runtime check that refuses set-when-in-production because the assembler is not aware of environment class.",
+      "purpose": "CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, `osslsigncode verify -CAfile <bundle>` uses the supplied bundle instead of the system trust store \u2014 the Workstream A round-trip CI test sets this to a disposable CA that signs a `Cisco Systems, Inc.` CN so the assemble.sh flow can be exercised on Linux runners without a real production certificate. MUST remain unset for production AVC assembly and any release build; a rogue bundle here would let a non-Cisco signer pass the signature preflight (`assert-cisco-signature`). Enforced by convention only \u2014 there is no runtime check that refuses set-when-in-production because the assembler is not aware of environment class.",
       "default": "unset",
       "accepted_values": [
         "<path to PEM bundle>",
@@ -635,7 +635,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "Authentication material path — the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path."
+      "security_note": "Authentication material path \u2014 the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path."
     },
     {
       "name": "DEFENSECLAW_CMID_BROKER_PIPE",
@@ -657,7 +657,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "Local IPC identity boundary — the installer pins this value in the protected gateway service registry environment; partial configuration fails closed."
+      "security_note": "Local IPC identity boundary \u2014 the installer pins this value in the protected gateway service registry environment; partial configuration fails closed."
     },
     {
       "name": "DEFENSECLAW_CMID_BROKER_SERVICE_NAME",
@@ -679,7 +679,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "SCM identity boundary — changing this value cannot redirect the client because only exact production and certification tuples are accepted."
+      "security_note": "SCM identity boundary \u2014 changing this value cannot redirect the client because only exact production and certification tuples are accepted."
     },
     {
       "name": "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
@@ -700,7 +700,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account."
+      "security_note": "Per-bearer Codex authentication on loopback \u2014 prevents same-host user-to-user impersonation when multiple users share an OS account."
     },
     {
       "name": "DEFENSECLAW_CODEX_POLICY_ENTRY_PATH",
@@ -889,7 +889,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
+      "security_note": "Managed config path separation \u2014 lets system services read admin-owned policy without making the runtime data directory admin-writable."
     },
     {
       "name": "DEFENSECLAW_CONNECTOR",
@@ -1166,7 +1166,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
+      "security_note": "Immutable managed-mode boundary \u2014 prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) \u2014 the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_DEV",
@@ -1448,7 +1448,7 @@
       "consumers": [
         {
           "location": "internal/config/env_config.go",
-          "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"
+          "description": "trustEnvConfigFile short-circuits when set \u2014 production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"
         },
         {
           "location": "internal/config/env_config_windows.go",
@@ -1582,7 +1582,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Loopback-only enforcement — a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
+      "security_note": "Loopback-only enforcement \u2014 a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
     },
     {
       "name": "DEFENSECLAW_GATEWAY_BIN",
@@ -2054,7 +2054,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
+      "security_note": "Privileged repair authorization \u2014 must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
       "name": "DEFENSECLAW_HOOK_HOME",
@@ -2137,7 +2137,7 @@
     {
       "name": "DEFENSECLAW_HOOK_PATH_TRUSTED",
       "category": "hook_internal",
-      "purpose": "Companion name to DEFENSECLAW_HOOK_PATH that an agent process might set. The hook-hardening preamble explicitly unsets it before locking down PATH, so a compromised agent cannot mark a hostile PATH as trusted. There is no read site — the variable is intentionally stripped.",
+      "purpose": "Companion name to DEFENSECLAW_HOOK_PATH that an agent process might set. The hook-hardening preamble explicitly unsets it before locking down PATH, so a compromised agent cannot mark a hostile PATH as trusted. There is no read site \u2014 the variable is intentionally stripped.",
       "default": "unset (always stripped before PATH lockdown)",
       "accepted_values": [
         "unset"
@@ -2152,7 +2152,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
+      "security_note": "Hook PATH lockdown \u2014 stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
     },
     {
       "name": "DEFENSECLAW_HOOK_SOCKET",
@@ -2430,7 +2430,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer root selection — upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
+      "security_note": "Installer root selection \u2014 upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
     },
     {
       "name": "DEFENSECLAW_INTEGRATION_ENABLED",
@@ -2546,7 +2546,7 @@
         }
       ],
       "since": "0.8.4",
-      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists. Managed Windows also fixes the parent to the trusted Program Files DefenseClaw IPC directory."
+      "security_note": "Local-only socket path override \u2014 managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists. Managed Windows also fixes the parent to the trusted Program Files DefenseClaw IPC directory."
     },
     {
       "name": "DEFENSECLAW_JSONL_DISABLE",
@@ -3259,7 +3259,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed enforcement fail-closed boundary — the value is generated by the privileged hook installer and is not an operator security opt-out."
+      "security_note": "Managed enforcement fail-closed boundary \u2014 the value is generated by the privileged hook installer and is not an operator security opt-out."
     },
     {
       "name": "DEFENSECLAW_MASTER_KEY",
@@ -3387,7 +3387,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
+      "security_note": "Executable selection \u2014 a non-default value changes which local program the compatibility bridge launches."
     },
     {
       "name": "DEFENSECLAW_OPENCLAW_MAIN",
@@ -3763,7 +3763,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
+      "security_note": "Installer-only override \u2014 treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
       "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
@@ -4430,7 +4430,7 @@
         }
       ],
       "since": "0.8.5",
-      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
+      "security_note": "Uninstaller-only executable override \u2014 uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
     },
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
@@ -5872,7 +5872,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
+      "security_note": "Tight binary-discovery trust list \u2014 prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
     },
     {
       "name": "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
@@ -5893,7 +5893,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Client-IP attribution — trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
+      "security_note": "Client-IP attribution \u2014 trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
     },
     {
       "name": "DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT",
@@ -5944,7 +5944,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Codex response guardrail enforcement — prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
+      "security_note": "Codex response guardrail enforcement \u2014 prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
       "replacement_hint": "Leave unset for normal guarded operation; use only while diagnosing proxy incompatibility."
     },
     {
@@ -5970,7 +5970,7 @@
         }
       ],
       "since": "0.8.6",
-      "security_note": "Unix managed-runtime writer identity — a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
+      "security_note": "Unix managed-runtime writer identity \u2014 a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
     },
     {
       "name": "DEFENSECLAW_UNSIGNED_PE",
@@ -6700,7 +6700,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation."
+      "security_note": "Authenticated service evidence \u2014 only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED",
@@ -6725,7 +6725,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective."
+      "security_note": "Authenticated service evidence \u2014 protected local policy bytes alone do not establish which Claude managed-policy source is effective."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED",
@@ -6746,7 +6746,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Compatibility-only service claim — it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
+      "security_note": "Compatibility-only service claim \u2014 it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER",
@@ -6767,7 +6767,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Privileged code-selection boundary — the resolved installer and adjacent module must pass the native trust checks before elevation."
+      "security_note": "Privileged code-selection boundary \u2014 the resolved installer and adjacent module must pass the native trust checks before elevation."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME",
@@ -6791,7 +6791,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Service-identity boundary — changing this value changes which virtual service SID is authorized to read managed runtime secrets."
+      "security_note": "Service-identity boundary \u2014 changing this value changes which virtual service SID is authorized to read managed runtime secrets."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
@@ -6860,7 +6860,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed-runtime writer identity — only the installer-pinned gateway service SID may receive the corresponding write grants."
+      "security_note": "Managed-runtime writer identity \u2014 only the installer-pinned gateway service SID may receive the corresponding write grants."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_LOG",
@@ -6885,7 +6885,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Service output path — the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
+      "security_note": "Service output path \u2014 the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_NAME",
@@ -6906,7 +6906,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+      "security_note": "Installer-owned service switch \u2014 production values belong in the protected per-service registry Environment value, not an interactive user environment."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE",
@@ -7162,5 +7162,91 @@
       "since": "1.0.1",
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
     }
-  ]
+  ],
+  "DCLAW_FLEET_API_TOKEN": {
+    "description": "Fleet management API bearer token (hex-encoded).",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "authentication",
+    "config_key": "fleet.api_token_env"
+  },
+  "DCLAW_FLEET_TENANT_TOKENS": {
+    "description": "Comma-separated tenant-scoped tokens (token:tid,... format).",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "authentication",
+    "config_key": "fleet.tenant_tokens_env"
+  },
+  "DCLAW_MQTT_BROKER_URL": {
+    "description": "MQTT broker address for fleet bridge (host:port).",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "config_key": "fleet.mqtt_broker_url"
+  },
+  "DCLAW_MQTT_USER": {
+    "description": "MQTT broker username.",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "authentication",
+    "config_key": "fleet.mqtt_user_env"
+  },
+  "DCLAW_MQTT_PASS": {
+    "description": "MQTT broker password.",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "authentication",
+    "config_key": "fleet.mqtt_pass_env"
+  },
+  "DCLAW_OTA_KEY": {
+    "description": "OTA policy signing key (hex-encoded, 32 bytes).",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "signing",
+    "config_key": "fleet.ota_key_env"
+  },
+  "DCLAW_EMERGENCY_KEY": {
+    "description": "Emergency command signing key (hex-encoded, 32 bytes). Falls back to DCLAW_OTA_KEY.",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "signing",
+    "config_key": "fleet.emergency_key_env"
+  },
+  "DCLAW_DEVICE_KEY": {
+    "description": "Fleet-wide device HMAC key (hex-encoded, 32 bytes). Per-device keys override.",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "security_impact": "authentication",
+    "config_key": "fleet.device_key_env"
+  },
+  "DCLAW_FLEET_AUTO_REGISTER": {
+    "description": "Allow devices to self-register via MQTT heartbeat.",
+    "since": "1.1.0",
+    "managed_policy": "ignore",
+    "security_impact": "registration",
+    "config_key": "fleet.auto_register"
+  },
+  "DCLAW_PRODUCTION": {
+    "description": "Enable production mode (reject zero keys, require TLS).",
+    "since": "1.1.0",
+    "managed_policy": "tighten_only"
+  },
+  "DCLAW_DEV_MODE": {
+    "description": "Enable development mode (relaxed key requirements). Inverse of DCLAW_PRODUCTION.",
+    "since": "1.1.0",
+    "managed_policy": "ignore",
+    "security_impact": "weakens_security"
+  },
+  "DCLAW_ALLOW_KEY_OVER_HTTP": {
+    "description": "Allow device key delivery over plaintext HTTP (testing only).",
+    "since": "1.1.0",
+    "managed_policy": "ignore",
+    "security_impact": "weakens_security",
+    "config_key": "fleet.allow_key_over_http"
+  },
+  "DCLAW_TRUST_PROXY_HEADERS": {
+    "description": "Trust X-Forwarded-Proto from reverse proxies.",
+    "since": "1.1.0",
+    "managed_policy": "allow",
+    "config_key": "fleet.trust_proxy_headers"
+  }
 }

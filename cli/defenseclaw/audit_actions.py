@@ -319,6 +319,9 @@ ACTION_FLEET_POLICY_PUSH: Final[str]         = "fleet.policy.push"
 ACTION_FLEET_POLICY_EMERGENCY: Final[str]    = "fleet.policy.emergency"
 ACTION_FLEET_THREAT_INTEL: Final[str]        = "fleet.threat_intel.push"
 ACTION_FLEET_ALERT: Final[str]               = "fleet.alert"
+ACTION_FLEET_DEVICE_REREGISTERED: Final[str] = "fleet.device.reregistered"
+ACTION_FLEET_TOKEN_ROTATED: Final[str]       = "fleet.token.rotated"
+ACTION_FLEET_DEVICE_KEY_ROTATED: Final[str]  = "fleet.device.key_rotated"
 
 
 ALL_ACTIONS: Final[tuple[str, ...]] = (
@@ -546,6 +549,9 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_FLEET_POLICY_EMERGENCY,
     ACTION_FLEET_THREAT_INTEL,
     ACTION_FLEET_ALERT,
+    ACTION_FLEET_DEVICE_REREGISTERED,
+    ACTION_FLEET_TOKEN_ROTATED,
+    ACTION_FLEET_DEVICE_KEY_ROTATED,
 )
 
 

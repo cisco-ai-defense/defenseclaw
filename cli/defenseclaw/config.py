@@ -3302,6 +3302,53 @@ class RoutingConfig:
 
 
 @dataclass
+class FleetConfig:
+    """Edge Connector fleet management configuration.
+
+    Mirrors internal/config.FleetConfig. Secret fields hold the NAME of the
+    environment variable (the _env pattern), not the secret itself.
+    """
+
+    enabled: bool = False
+    api_token_env: str = ""
+    tenant_tokens_env: str = ""
+    mqtt_broker_url: str = ""
+    mqtt_user_env: str = ""
+    mqtt_pass_env: str = ""
+    mqtt_require_tls: bool = False
+    ota_key_env: str = ""
+    emergency_key_env: str = ""
+    device_key_env: str = ""
+    auto_register: bool = False
+    allow_key_over_http: bool = False
+    trust_proxy_headers: bool = False
+    verdict_cache_size: int = 4096
+    require_client_id: bool = False
+    policy_compiler_path: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        if self.enabled:
+            d["enabled"] = True
+        for fld in (
+            "api_token_env", "tenant_tokens_env", "mqtt_broker_url",
+            "mqtt_user_env", "mqtt_pass_env", "ota_key_env",
+            "emergency_key_env", "device_key_env", "policy_compiler_path",
+        ):
+            v = getattr(self, fld)
+            if v:
+                d[fld] = v
+        for fld in ("mqtt_require_tls", "auto_register", "allow_key_over_http",
+                     "trust_proxy_headers", "require_client_id"):
+            v = getattr(self, fld)
+            if v:
+                d[fld] = v
+        if self.verdict_cache_size and self.verdict_cache_size != 4096:
+            d["verdict_cache_size"] = self.verdict_cache_size
+        return d
+
+
+@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -3759,6 +3806,7 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     # enterprise.openshell as loaded. Load only: Python never writes the
@@ -7046,6 +7094,7 @@ def load(
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        fleet=_merge_fleet(raw.get("fleet")),
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
@@ -7330,6 +7379,30 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+    )
+
+
+def _merge_fleet(raw: dict[str, Any] | None) -> FleetConfig:
+    """Build a :class:`FleetConfig` from the YAML ``fleet:`` block."""
+    if not isinstance(raw, dict):
+        return FleetConfig()
+    return FleetConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        api_token_env=str(raw.get("api_token_env", "") or ""),
+        tenant_tokens_env=str(raw.get("tenant_tokens_env", "") or ""),
+        mqtt_broker_url=str(raw.get("mqtt_broker_url", "") or ""),
+        mqtt_user_env=str(raw.get("mqtt_user_env", "") or ""),
+        mqtt_pass_env=str(raw.get("mqtt_pass_env", "") or ""),
+        mqtt_require_tls=_coerce_bool(raw.get("mqtt_require_tls", False)),
+        ota_key_env=str(raw.get("ota_key_env", "") or ""),
+        emergency_key_env=str(raw.get("emergency_key_env", "") or ""),
+        device_key_env=str(raw.get("device_key_env", "") or ""),
+        auto_register=_coerce_bool(raw.get("auto_register", False)),
+        allow_key_over_http=_coerce_bool(raw.get("allow_key_over_http", False)),
+        trust_proxy_headers=_coerce_bool(raw.get("trust_proxy_headers", False)),
+        verdict_cache_size=_as_int(raw.get("verdict_cache_size", 4096), 4096),
+        require_client_id=_coerce_bool(raw.get("require_client_id", False)),
+        policy_compiler_path=str(raw.get("policy_compiler_path", "") or ""),
     )
 
 

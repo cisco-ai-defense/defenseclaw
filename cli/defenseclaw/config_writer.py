@@ -120,6 +120,15 @@ RESTART_KEYS = (
     "tenant_id",
     "workspace_id",
     "discovery_source",
+    # Fleet keys that require a restart (MQTT connections, signing keys).
+    "fleet.mqtt_broker_url",
+    "fleet.mqtt_require_tls",
+    "fleet.ota_key_env",
+    "fleet.emergency_key_env",
+    "fleet.device_key_env",
+    "fleet.mqtt_user_env",
+    "fleet.mqtt_pass_env",
+    "fleet.enabled",
 )
 
 _log = logging.getLogger(__name__)

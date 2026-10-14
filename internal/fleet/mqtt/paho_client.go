@@ -38,6 +38,17 @@ type PahoClient struct {
 	// connected is set to true after the first successful CONNACK.
 	// autopaho reconnects internally, so this stays true once set.
 	connected bool
+
+	// Config-injected credentials (set via SetCredentials before Connect).
+	cfgUser string
+	cfgPass string
+}
+
+// SetCredentials sets MQTT credentials resolved from config.yaml.
+// Must be called before Connect. Falls back to DCLAW_MQTT_USER/PASS env vars.
+func (c *PahoClient) SetCredentials(user, pass string) {
+	c.cfgUser = user
+	c.cfgPass = pass
 }
 
 // NewPahoClient creates a new Paho-backed MQTT client.
@@ -110,9 +121,15 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 		}
 	}
 
-	// Read optional MQTT credentials
-	mqttUser := os.Getenv("DCLAW_MQTT_USER")
-	mqttPass := os.Getenv("DCLAW_MQTT_PASS")
+	// Read MQTT credentials: config-injected values first, env var fallback.
+	mqttUser := c.cfgUser
+	if mqttUser == "" {
+		mqttUser = os.Getenv("DCLAW_MQTT_USER")
+	}
+	mqttPass := c.cfgPass
+	if mqttPass == "" {
+		mqttPass = os.Getenv("DCLAW_MQTT_PASS")
+	}
 
 	cfg := autopaho.ClientConfig{
 		ServerUrls:                    []*url.URL{brokerURL},

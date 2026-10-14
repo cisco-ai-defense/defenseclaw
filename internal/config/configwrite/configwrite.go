@@ -361,6 +361,13 @@ var restartKeys = []string{
 	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
+	// Fleet keys that require a restart (MQTT connections, signing keys).
+	// Hot-reloadable fleet keys: auto_register, allow_key_over_http,
+	// trust_proxy_headers, require_client_id, verdict_cache_size.
+	"fleet.mqtt_broker_url", "fleet.mqtt_require_tls",
+	"fleet.ota_key_env", "fleet.emergency_key_env", "fleet.device_key_env",
+	"fleet.mqtt_user_env", "fleet.mqtt_pass_env",
+	"fleet.enabled",
 }
 
 // ManagedRestartRequired is RestartRequired for a managed standalone host. It
