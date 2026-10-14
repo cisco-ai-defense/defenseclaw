@@ -732,7 +732,10 @@ func privateSecurityDescriptorIsSafeForSubject(
 		}
 	}
 	foundOwner := false
-	foundSystem := false
+	// A LocalSystem subject's owner grant also is the SYSTEM grant. Requiring
+	// two distinct ACEs here would reject the canonical single-ACE DACL that
+	// creation and repair write for SYSTEM-owned directories.
+	foundSystem := identity.sid.Equals(system)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {

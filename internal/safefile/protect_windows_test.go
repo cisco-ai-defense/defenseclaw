@@ -563,7 +563,9 @@ func TestWindowsPrivateDACLImpersonatedPolicyRequiresProtection(t *testing.T) {
 }
 
 func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owned.json")
+	dir := privateTestTempDir(t)
+	ownWindowsTestPath(t, dir)
+	path := filepath.Join(dir, "owned.json")
 	if err := WritePrivate(path, []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +666,51 @@ func TestPrivateDirectoryCreationDescriptorValidatesForEachOwner(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The Claude uninstall transaction prepares this directory through
+// ProtectDirectory, then immediately checks it with ValidatePrivateDirectory.
+// On a SYSTEM test run, the path mirrors the SYSTEM profile beneath the test's
+// temporary root so it never writes to the real profile.
+func TestPrivatePurgeTransactionDirectoryOnCurrentToken(t *testing.T) {
+	path := filepath.Join(privateTestTempDir(t), "systemprofile", "AppData", "Local", "DefenseClaw", "claude-settings-teardown")
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatalf("prepare purge transaction directory: %v", err)
+	}
+	if err := ValidatePrivateDirectory(path); err != nil {
+		t.Fatalf("validate purge transaction directory: %v", err)
+	}
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatalf("reuse purge transaction directory: %v", err)
+	}
+	if err := ValidatePrivateDirectory(path); err != nil {
+		t.Fatalf("validate reused purge transaction directory: %v", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("purge transaction directory: %s", path)
+	t.Logf("purge transaction SDDL: %s", sd.String())
+}
+
+func privateTestTempDir(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("SAFEFILE_TEST_TMPDIR")
+	if root == "" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "safefile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove test directory: %v", err)
+		}
+	})
+	return dir
 }
 
 func TestProtectDirectoryRepairsAdministratorsDrift(t *testing.T) {
