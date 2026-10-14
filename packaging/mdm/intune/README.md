@@ -45,7 +45,9 @@ Intune's execution contexts shape the design:
 - **macOS.** Shell scripts run as root unless you choose the signed-in user.
   They must be smaller than 1 MB and are stopped after 60 minutes. Intune
   does not support running them through a proxy. Intune passes them no
-  arguments, so the wrapper's settings block carries every value.
+  arguments, so the wrapper's settings block carries every value. Use inline
+  config without a bundle, or an inline signed bundle with trust anchors and
+  an empty inline config block.
 - **Linux.** Platform scripts run as the signed-in user unless you choose
   **Root**. The first root run can ask the user for consent. Custom
   compliance discovery scripts always run in the user's context, so they

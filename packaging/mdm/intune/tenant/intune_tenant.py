@@ -868,19 +868,35 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
     return 0
 
 
+def _inline_wrapper_block(content: bytes, function: bytes, marker: bytes) -> bytes | None:
+    # Accept CRLF: a wrapper saved by a Windows editor must still be checked.
+    match = re.search(
+        rb"(?ms)^" + re.escape(function) + rb"\(\) \{\r?\n\s*cat <<'" + re.escape(marker)
+        + rb"'\r?\n(.*?)^" + re.escape(marker) + rb"\r?$",
+        content,
+    )
+    return match.group(1) if match else None
+
+
 def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     if args.retries is not None and not 0 <= args.retries <= 3:
         raise SystemExit("error: --retries must be between 0 and 3")
     content = read_script(args.file, SHELL_SCRIPT_MAX_BYTES)
     if not content.startswith(b"#!"):
         raise SystemExit("error: macOS script must start with a #! interpreter line")
-    settings = re.search(
-        # Accept CRLF: a wrapper saved by a Windows editor must not skip the empty-block check.
-        rb"(?ms)^dc_inline_config\(\) \{\r?\n\s*cat <<'DEFENSECLAW_CONFIG'\r?\n(.*?)^DEFENSECLAW_CONFIG\r?$",
-        content,
-    )
-    if settings is not None and not settings.group(1).strip():
-        raise SystemExit("error: fill in the macOS wrapper settings block before upload")
+    config = _inline_wrapper_block(content, b"dc_inline_config", b"DEFENSECLAW_CONFIG")
+    bundle = _inline_wrapper_block(content, b"dc_inline_bundle", b"DC_BUNDLE_BASE64")
+    anchors = _inline_wrapper_block(content, b"dc_inline_trust_anchors", b"DC_TRUST_ANCHORS_JSON")
+    if any(block is not None for block in (config, bundle, anchors)):
+        has_config = bool(config and config.strip())
+        has_bundle = bool(bundle and bundle.strip())
+        has_anchors = bool(anchors and anchors.strip())
+        if has_config and has_bundle:
+            raise SystemExit("error: a signed bundle carries its own config; empty the inline config block")
+        if has_bundle and not has_anchors:
+            raise SystemExit("error: a signed bundle requires inline trust anchors")
+        if not has_config and not has_bundle:
+            raise SystemExit("error: fill in the macOS wrapper settings block before upload")
     if args.frequency is not None and not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
         raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
     print(f"script: {args.file} ({len(content)} bytes, sha256 {hashlib.sha256(content).hexdigest()[:16]}...)")

@@ -86,9 +86,10 @@ DC_HTTPS_PROXY=""           # proxy for the download only
 DC_LOG=""                   # default: the platform log path below
 DC_STAGING_DIR=""           # root-only folder for the staged copy (default: /var/lib/defenseclaw-mdm on Linux, /var/tmp on macOS)
 
-# Inline administrator config for script-only MDMs: put the YAML between the
-# markers. Never put credentials here - MDM script bodies are not secret
-# storage; deliver credentials with --secret-file or --secret-stdin.
+# Inline administrator config for script-only MDMs without a signed bundle.
+# Leave this block empty when using an inline bundle, which carries its own
+# config. Never put credentials here - MDM script bodies are not secret storage;
+# deliver credentials with --secret-file or --secret-stdin.
 dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
 DEFENSECLAW_CONFIG

@@ -642,18 +642,36 @@ def test_intune_read_script_accepts_utf8_without_bom(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path, newline: str) -> None:
-    # CRLF covers a wrapper saved by a Windows editor; the empty-block check must still run.
+def test_intune_macos_script_validates_before_graph_calls(
+    tmp_path: Path, newline: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The helper checks the wrapper's inline settings before any Graph call.
     intune = _load(INTUNE)
     script = tmp_path / "wrapper.sh"
-    script.write_bytes(
-        "#!/bin/sh\ndc_inline_config() {\n    cat <<'DEFENSECLAW_CONFIG'\nDEFENSECLAW_CONFIG\n}\n"
-        .replace("\n", newline)
-        .encode()
-    )
+    template = (ROOT / "packaging/mdm/macos/defenseclaw-enterprise.sh").read_text(encoding="ascii")
     args = argparse.Namespace(file=str(script), name="test", frequency="PT1H", retries=3, group=None, apply=False)
-    with pytest.raises(SystemExit, match="settings block"):
-        intune.cmd_macos_script(object(), args)
+
+    class Graph:
+        def get_all(self, _path: str) -> list[dict]:
+            return []
+
+    def upload(config: str = "", bundle: str = "", anchors: str = "") -> int:
+        content = template
+        for marker, value in (("DEFENSECLAW_CONFIG", config), ("DC_BUNDLE_BASE64", bundle),
+                              ("DC_TRUST_ANCHORS_JSON", anchors)):
+            content = content.replace(f"\n{marker}\n", f"\n{value}{marker}\n", 1)
+        script.write_bytes(content.replace("\n", newline).encode("ascii"))
+        return intune.cmd_macos_script(Graph(), args)
+
+    assert upload(config="config_version: 9\n") == 0
+    assert upload(bundle="YQ==\n", anchors="{}\n") == 0
+    assert capsys.readouterr().out.count("would create macOS shell script") == 2
+    with pytest.raises(SystemExit, match="a signed bundle carries its own config; empty the inline config block"):
+        upload(config="config_version: 9\n", bundle="YQ==\n", anchors="{}\n")
+    with pytest.raises(SystemExit, match="a signed bundle requires inline trust anchors"):
+        upload(bundle="YQ==\n")
+    with pytest.raises(SystemExit, match="fill in the macOS wrapper settings block before upload"):
+        upload()
     script.write_bytes("#!/bin/sh\necho ok\n".replace("\n", newline).encode())
     args.frequency = "bad"
     with pytest.raises(SystemExit, match="frequency"):
