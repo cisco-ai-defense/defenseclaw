@@ -91,23 +91,7 @@ func ValidateTelemetryResourceAttributes(values map[string]any) error {
 	for _, descriptor := range fixed {
 		fixedByKey[descriptor.key] = descriptor
 	}
-	aliasCanonical := map[string]string{
-		"deployment.environment": "deployment.environment.name",
-		"deployment.mode":        "defenseclaw.deployment.mode",
-		"defenseclaw.device.id":  "defenseclaw.device.public_key_fingerprint",
-	}
-	aliasDescriptors := map[string]familyFieldDescriptor{
-		"deployment.environment": familyFieldDescriptor{key: "deployment.environment", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassMetadata, constraints: familyFieldConstraints{maxUTF8Bytes: 4096}, source: familyValueInput},
-		"deployment.mode":        familyFieldDescriptor{key: "deployment.mode", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassMetadata, constraints: familyFieldConstraints{maxUTF8Bytes: 4096}, source: familyValueInput},
-		"defenseclaw.device.id":  familyFieldDescriptor{key: "defenseclaw.device.id", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassIdentifier, constraints: familyFieldConstraints{maxUTF8Bytes: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9:+._/-]*$"}, source: familyValueInput},
-	}
-	aliasOrder := []string{
-		"deployment.environment",
-		"deployment.mode",
-		"defenseclaw.device.id",
-	}
 	seenFixed := make(map[string]struct{}, len(fixed))
-	aliasValues := make(map[string]string, len(aliasCanonical))
 	normalizedCustom := make(map[string]struct{})
 	customCount := 0
 	totalBytes := 0
@@ -127,13 +111,6 @@ func ValidateTelemetryResourceAttributes(values map[string]any) error {
 				return err
 			}
 			seenFixed[key] = struct{}{}
-			continue
-		}
-		if descriptor, ok := aliasDescriptors[key]; ok {
-			if err := validateFamilyFieldValue(descriptor, value); err != nil {
-				return err
-			}
-			aliasValues[key] = value.(string)
 			continue
 		}
 		text, ok := value.(string)
@@ -160,23 +137,6 @@ func ValidateTelemetryResourceAttributes(values map[string]any) error {
 		}
 		if _, present := seenFixed[descriptor.key]; !present {
 			return familyBuildFailure(FamilyBuildMissingRequired)
-		}
-	}
-	for _, alias := range aliasOrder {
-		aliasValue, aliasPresent := aliasValues[alias]
-		if !aliasPresent {
-			continue
-		}
-		canonicalValue, present := values[aliasCanonical[alias]]
-		if !present {
-			return familyBuildFailure(FamilyBuildMissingRequired)
-		}
-		canonicalText, ok := canonicalValue.(string)
-		if !ok {
-			return familyBuildFailure(FamilyBuildInvalidType)
-		}
-		if canonicalText != aliasValue {
-			return familyBuildFailure(FamilyBuildConstraint)
 		}
 	}
 	return nil
@@ -281,16 +241,30 @@ type LogAIDiscoveryCompletedInput struct {
 }
 
 type LogAIRuntimeActivityInput struct {
-	Envelope                       FamilyEnvelopeInput
-	Severity                       Optional[Severity]
-	LogLevel                       Optional[LogLevel]
-	Outcome                        Outcome
-	DefenseClawAIRuntimeFindingID  string
-	DefenseClawAIRuntimeTactic     string
-	DefenseClawAIRuntimeTechnique  string
-	DefenseClawAIRuntimeChainStage int64
-	DefenseClawAIRuntimeAgent      string
-	DefenseClawAIRuntimeProcess    Optional[string]
+	Envelope                          FamilyEnvelopeInput
+	Severity                          Optional[Severity]
+	LogLevel                          Optional[LogLevel]
+	Outcome                           Outcome
+	UserID                            Optional[string]
+	DefenseClawUserIDKind             Optional[string]
+	DefenseClawUserName               Optional[string]
+	DefenseClawUserLoginID            Optional[string]
+	DefenseClawUserPrincipal          Optional[string]
+	DefenseClawUserDomain             Optional[string]
+	DefenseClawUserDirectory          Optional[string]
+	DefenseClawUserPrincipalAssurance Optional[string]
+	DefenseClawAgentIdentityID        Optional[string]
+	DefenseClawAIRuntimeEventSource   Optional[string]
+	DefenseClawAIRuntimeKernelOutcome Optional[string]
+	DefenseClawAIRuntimeKernelControl Optional[string]
+	DefenseClawAIRuntimeFindingID     string
+	DefenseClawAIRuntimeTactic        string
+	DefenseClawAIRuntimeTechnique     string
+	DefenseClawAIRuntimeChainStage    int64
+	DefenseClawAIRuntimeAgent         string
+	DefenseClawAIRuntimeProcess       Optional[string]
+	DefenseClawAIRuntimeHookSeen      Optional[bool]
+	DefenseClawAIRuntimeHookJoin      Optional[string]
 }
 
 type LogAIRuntimeFindingInput struct {
@@ -304,6 +278,18 @@ type LogAIRuntimeFindingInput struct {
 	DefenseClawAIRuntimeConnectionsUnattributed int64
 	DefenseClawAIRuntimeHostPlaneObservations   int64
 	DefenseClawAIRuntimeHostPlaneGated          int64
+	UserID                                      Optional[string]
+	DefenseClawUserIDKind                       Optional[string]
+	DefenseClawUserName                         Optional[string]
+	DefenseClawUserLoginID                      Optional[string]
+	DefenseClawUserPrincipal                    Optional[string]
+	DefenseClawUserDomain                       Optional[string]
+	DefenseClawUserDirectory                    Optional[string]
+	DefenseClawUserPrincipalAssurance           Optional[string]
+	DefenseClawAgentIdentityID                  Optional[string]
+	DefenseClawAIRuntimeEventSource             Optional[string]
+	DefenseClawAIRuntimeKernelOutcome           Optional[string]
+	DefenseClawAIRuntimeKernelControl           Optional[string]
 	DefenseClawAIRuntimeFindingID               string
 	DefenseClawAIRuntimeScore                   int64
 	DefenseClawAIRuntimeSeverity                string
@@ -316,21 +302,90 @@ type LogAIRuntimeFindingInput struct {
 	DefenseClawAIRuntimeProviders               Optional[[]string]
 }
 
+type LogAIRuntimeKernelEventInput struct {
+	Envelope                              FamilyEnvelopeInput
+	Severity                              Optional[Severity]
+	LogLevel                              Optional[LogLevel]
+	Outcome                               Outcome
+	UserID                                Optional[string]
+	DefenseClawUserIDKind                 Optional[string]
+	DefenseClawUserName                   Optional[string]
+	DefenseClawUserLoginID                Optional[string]
+	DefenseClawUserPrincipal              Optional[string]
+	DefenseClawUserDomain                 Optional[string]
+	DefenseClawUserDirectory              Optional[string]
+	DefenseClawUserPrincipalAssurance     Optional[string]
+	DefenseClawAgentIdentityID            Optional[string]
+	DefenseClawAIRuntimeEventSource       Optional[string]
+	DefenseClawAIRuntimeKernelOutcome     Optional[string]
+	DefenseClawAIRuntimeKernelControl     Optional[string]
+	DefenseClawAIRuntimeAgent             string
+	DefenseClawAIRuntimeKernelPolicyOwner string
+	DefenseClawAIRuntimeKernelPolicyName  string
+	DefenseClawAIRuntimeProcess           Optional[string]
+	DefenseClawAIRuntimeKernelHookType    Optional[string]
+	DefenseClawAIRuntimeKernelFunction    Optional[string]
+	DefenseClawAIRuntimeKernelAction      Optional[string]
+	DefenseClawAIRuntimeKernelPolicyMode  Optional[string]
+	DefenseClawAIRuntimeKernelTags        Optional[[]string]
+	DefenseClawAIRuntimeKernelMessage     Optional[string]
+	DefenseClawAIRuntimeKernelTarget      Optional[string]
+	DefenseClawAIRuntimeKernelCount       Optional[int64]
+	DefenseClawAIRuntimeHookSeen          Optional[bool]
+	DefenseClawAIRuntimeHookJoin          Optional[string]
+	DefenseClawAIRuntimeHookAction        Optional[string]
+}
+
+type LogAIRuntimeKernelPolicyInput struct {
+	Envelope                               FamilyEnvelopeInput
+	Severity                               Optional[Severity]
+	LogLevel                               Optional[LogLevel]
+	Outcome                                Outcome
+	DefenseClawAIRuntimeKernelEvent        string
+	DefenseClawPolicyID                    Optional[string]
+	DefenseClawAIRuntimeKernelFamily       Optional[string]
+	DefenseClawAIRuntimeKernelMode         Optional[string]
+	DefenseClawAIRuntimeKernelState        Optional[string]
+	DefenseClawPolicyVersion               Optional[string]
+	UserID                                 Optional[string]
+	DefenseClawUserIDKind                  Optional[string]
+	DefenseClawAIRuntimeKernelReason       Optional[string]
+	DefenseClawAIRuntimeKernelCoveredHours Optional[float64]
+	DefenseClawAIRuntimeKernelNeededHours  Optional[float64]
+}
+
 type LogAIRuntimePlaneHealthInput struct {
-	Envelope                                    FamilyEnvelopeInput
-	Severity                                    Optional[Severity]
-	LogLevel                                    Optional[LogLevel]
-	Outcome                                     Outcome
-	DefenseClawAIRuntimeProcessesObserved       int64
-	DefenseClawAIRuntimeProcessesSkipped        int64
-	DefenseClawAIRuntimeConnectionsObserved     int64
-	DefenseClawAIRuntimeConnectionsUnattributed int64
-	DefenseClawAIRuntimeHostPlaneObservations   int64
-	DefenseClawAIRuntimeHostPlaneGated          int64
-	DefenseClawAIRuntimePlane                   string
-	DefenseClawAIRuntimePlaneAvailable          bool
-	DefenseClawAIRuntimePlaneRunning            bool
-	DefenseClawAIRuntimePlaneReason             Optional[string]
+	Envelope                                      FamilyEnvelopeInput
+	Severity                                      Optional[Severity]
+	LogLevel                                      Optional[LogLevel]
+	Outcome                                       Outcome
+	DefenseClawAIRuntimeProcessesObserved         int64
+	DefenseClawAIRuntimeProcessesSkipped          int64
+	DefenseClawAIRuntimeConnectionsObserved       int64
+	DefenseClawAIRuntimeConnectionsUnattributed   int64
+	DefenseClawAIRuntimeHostPlaneObservations     int64
+	DefenseClawAIRuntimeHostPlaneGated            int64
+	DefenseClawAIRuntimePlane                     string
+	DefenseClawAIRuntimePlaneAvailable            bool
+	DefenseClawAIRuntimePlaneRunning              bool
+	DefenseClawAIRuntimePlaneReason               Optional[string]
+	DefenseClawAIRuntimePlaneMechanism            Optional[string]
+	DefenseClawAIRuntimePlaneBackend              Optional[string]
+	DefenseClawAIRuntimeEventsLost                Optional[int64]
+	DefenseClawAIRuntimeLossKnown                 Optional[bool]
+	DefenseClawAIRuntimeContainerEvents           Optional[int64]
+	DefenseClawAIRuntimeKernelHelperMode          Optional[string]
+	DefenseClawAIRuntimeKernelApproval            Optional[string]
+	DefenseClawPolicyVersion                      Optional[string]
+	DefenseClawAIRuntimeKernelUsersEnrolled       Optional[int64]
+	DefenseClawAIRuntimeKernelUsersEnforced       Optional[int64]
+	DefenseClawAIRuntimeKernelUsersBurnIn         Optional[int64]
+	DefenseClawAIRuntimeKernelPaused              Optional[bool]
+	DefenseClawAIRuntimeTetragonVersion           Optional[string]
+	DefenseClawAIRuntimeTetragonInstalled         Optional[bool]
+	DefenseClawAIRuntimeKernelWouldBlockDelta     Optional[int64]
+	DefenseClawAIRuntimeKernelBlockedDelta        Optional[int64]
+	DefenseClawAIRuntimeKernelCustomerEventsDelta Optional[int64]
 }
 
 type LogAIComponentChangedInput struct {
@@ -368,6 +423,13 @@ type LogAIComponentChangedInput struct {
 	UserID                                   Optional[string]
 	DefenseClawUserIDKind                    Optional[string]
 	DefenseClawUserName                      Optional[string]
+	DefenseClawUserPrincipal                 Optional[string]
+	DefenseClawUserDomain                    Optional[string]
+	DefenseClawUserDirectory                 Optional[string]
+	DefenseClawUserPrincipalAssurance        Optional[string]
+	DefenseClawAgentIdentityID               Optional[string]
+	DefenseClawSandboxID                     Optional[string]
+	DefenseClawSandboxName                   Optional[string]
 }
 
 type LogAIComponentConfidenceChangedInput struct {
@@ -429,6 +491,13 @@ type LogAIComponentDiscoveredInput struct {
 	UserID                                   Optional[string]
 	DefenseClawUserIDKind                    Optional[string]
 	DefenseClawUserName                      Optional[string]
+	DefenseClawUserPrincipal                 Optional[string]
+	DefenseClawUserDomain                    Optional[string]
+	DefenseClawUserDirectory                 Optional[string]
+	DefenseClawUserPrincipalAssurance        Optional[string]
+	DefenseClawAgentIdentityID               Optional[string]
+	DefenseClawSandboxID                     Optional[string]
+	DefenseClawSandboxName                   Optional[string]
 }
 
 type LogAIComponentObservedInput struct {
@@ -458,6 +527,11 @@ type LogAIComponentObservedInput struct {
 	UserID                                          Optional[string]
 	DefenseClawUserIDKind                           Optional[string]
 	DefenseClawUserName                             Optional[string]
+	DefenseClawUserPrincipal                        Optional[string]
+	DefenseClawUserDomain                           Optional[string]
+	DefenseClawUserDirectory                        Optional[string]
+	DefenseClawUserPrincipalAssurance               Optional[string]
+	DefenseClawAgentIdentityID                      Optional[string]
 	DefenseClawUserEmail                            Optional[string]
 	DefenseClawInventoryConnectorSource             Optional[string]
 	DefenseClawInventoryConnectorToolInspectionMode Optional[string]
@@ -488,6 +562,8 @@ type LogAIComponentObservedInput struct {
 	DefenseClawAIModelProvenanceDerivation          Optional[string]
 	DefenseClawAIModelProvenanceSource              Optional[string]
 	DefenseClawAIModelProvenanceConfidence          Optional[string]
+	DefenseClawSandboxID                            Optional[string]
+	DefenseClawSandboxName                          Optional[string]
 }
 
 type LogAIComponentRemovedInput struct {
@@ -525,6 +601,13 @@ type LogAIComponentRemovedInput struct {
 	UserID                                   Optional[string]
 	DefenseClawUserIDKind                    Optional[string]
 	DefenseClawUserName                      Optional[string]
+	DefenseClawUserPrincipal                 Optional[string]
+	DefenseClawUserDomain                    Optional[string]
+	DefenseClawUserDirectory                 Optional[string]
+	DefenseClawUserPrincipalAssurance        Optional[string]
+	DefenseClawAgentIdentityID               Optional[string]
+	DefenseClawSandboxID                     Optional[string]
+	DefenseClawSandboxName                   Optional[string]
 }
 
 type LogAlertAcknowledgementRequestedInput struct {
@@ -591,6 +674,8 @@ type LogAssetActivatedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -619,6 +704,8 @@ type LogAssetAdmittedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -647,6 +734,8 @@ type LogAssetDisabledInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -674,6 +763,8 @@ type LogAssetDiscoveredInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -702,6 +793,8 @@ type LogAssetQuarantinedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -730,6 +823,8 @@ type LogAssetRegisteredInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -758,6 +853,8 @@ type LogAssetReleasedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -786,6 +883,8 @@ type LogAssetRemovedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -814,6 +913,8 @@ type LogAssetUpdatedInput struct {
 	DefenseClawPolicyVersion            Optional[string]
 	DefenseClawEnforcementID            Optional[string]
 	DefenseClawApprovalID               Optional[string]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 	DefenseClawAssetID                  string
 	DefenseClawAssetType                Optional[string]
 	DefenseClawAssetTransition          string
@@ -1183,194 +1284,81 @@ type LogDiagnosticSnapshotInput struct {
 	DefenseClawDiagnosticMessage   Optional[string]
 }
 
-type LogFleetAlertInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	MandatoryDurableHealthTransition bool
+type LogIdePluginChangedInput struct {
+	Envelope                          FamilyEnvelopeInput
+	Severity                          Optional[Severity]
+	LogLevel                          Optional[LogLevel]
+	DefenseClawIdeProduct             string
+	DefenseClawIdePluginID            string
+	DefenseClawIdePluginVersion       Optional[string]
+	DefenseClawIdePluginEnabled       Optional[string]
+	DefenseClawIdePluginAI            Optional[bool]
+	DefenseClawAIDiscoveryScanID      Optional[string]
+	UserID                            Optional[string]
+	DefenseClawUserIDKind             Optional[string]
+	DefenseClawUserName               Optional[string]
+	DefenseClawUserPrincipal          Optional[string]
+	DefenseClawUserDomain             Optional[string]
+	DefenseClawUserDirectory          Optional[string]
+	DefenseClawUserIdentitySource     Optional[string]
+	DefenseClawUserPrincipalAssurance Optional[string]
 }
 
-type LogFleetDeviceCommandInput struct {
-	Envelope                        FamilyEnvelopeInput
-	Severity                        Optional[Severity]
-	LogLevel                        Optional[LogLevel]
-	Outcome                         Outcome
-	DefenseClawAdminOperation       string
-	DefenseClawAdminPrincipalRef    Optional[string]
-	DefenseClawAdminAuthnMethod     Optional[string]
-	DefenseClawAdminChangeSetHash   Optional[string]
-	DefenseClawAdminActorRef        Optional[string]
-	DefenseClawAdminOrigin          Optional[string]
-	DefenseClawAdminTargetRef       Optional[string]
-	DefenseClawAdminBeforeSummary   Optional[string]
-	DefenseClawAdminAfterSummary    Optional[string]
-	DefenseClawAdminBeforeState     Optional[string]
-	DefenseClawAdminAfterState      Optional[string]
-	DefenseClawAdminDiff            Optional[string]
-	DefenseClawAdminReason          Optional[string]
-	DefenseClawAdminReasonDetail    Optional[string]
-	DefenseClawAdminRevision        Optional[string]
-	DefenseClawAdminCurrentRevision Optional[string]
-	DefenseClawAdminChangeCount     Optional[int64]
-	ConditionAdminPrincipalKnown    bool
-	MandatoryEnforcedOutcome        bool
+type LogIdePluginDiscoveredInput struct {
+	Envelope                          FamilyEnvelopeInput
+	Severity                          Optional[Severity]
+	LogLevel                          Optional[LogLevel]
+	DefenseClawIdeProduct             string
+	DefenseClawIdePluginID            string
+	DefenseClawIdePluginVersion       Optional[string]
+	DefenseClawIdePluginEnabled       Optional[string]
+	DefenseClawIdePluginAI            Optional[bool]
+	DefenseClawAIDiscoveryScanID      Optional[string]
+	UserID                            Optional[string]
+	DefenseClawUserIDKind             Optional[string]
+	DefenseClawUserName               Optional[string]
+	DefenseClawUserPrincipal          Optional[string]
+	DefenseClawUserDomain             Optional[string]
+	DefenseClawUserDirectory          Optional[string]
+	DefenseClawUserIdentitySource     Optional[string]
+	DefenseClawUserPrincipalAssurance Optional[string]
 }
 
-type LogFleetDeviceDecommissionInput struct {
-	Envelope                            FamilyEnvelopeInput
-	Severity                            Optional[Severity]
-	LogLevel                            Optional[LogLevel]
-	Outcome                             Outcome
-	DefenseClawEvaluationID             Optional[string]
-	DefenseClawFindingID                Optional[string]
-	DefenseClawScanID                   Optional[string]
-	DefenseClawPolicyID                 Optional[string]
-	DefenseClawPolicyVersion            Optional[string]
-	DefenseClawEnforcementID            Optional[string]
-	DefenseClawApprovalID               Optional[string]
-	DefenseClawAssetID                  string
-	DefenseClawAssetType                Optional[string]
-	DefenseClawAssetTransition          string
-	DefenseClawAssetPreviousState       Optional[string]
-	DefenseClawAssetResultingState      Optional[string]
-	DefenseClawAssetTargetRef           Optional[string]
-	DefenseClawAssetTargetPath          Optional[string]
-	DefenseClawAssetTransitionReason    Optional[string]
-	DefenseClawAssetTransitionCode      Optional[string]
-	DefenseClawAssetTransitionInitiator Optional[string]
-	DefenseClawAssetInstallAction       Optional[string]
-	DefenseClawAssetFileAction          Optional[string]
-	DefenseClawAssetRuntimeAction       Optional[string]
+type LogIdePluginRemovedInput struct {
+	Envelope                          FamilyEnvelopeInput
+	Severity                          Optional[Severity]
+	LogLevel                          Optional[LogLevel]
+	DefenseClawIdeProduct             string
+	DefenseClawIdePluginID            string
+	DefenseClawIdePluginVersion       Optional[string]
+	DefenseClawIdePluginEnabled       Optional[string]
+	DefenseClawIdePluginAI            Optional[bool]
+	DefenseClawAIDiscoveryScanID      Optional[string]
+	UserID                            Optional[string]
+	DefenseClawUserIDKind             Optional[string]
+	DefenseClawUserName               Optional[string]
+	DefenseClawUserPrincipal          Optional[string]
+	DefenseClawUserDomain             Optional[string]
+	DefenseClawUserDirectory          Optional[string]
+	DefenseClawUserIdentitySource     Optional[string]
+	DefenseClawUserPrincipalAssurance Optional[string]
 }
 
-type LogFleetDeviceHeartbeatInput struct {
-	Envelope                      FamilyEnvelopeInput
-	Severity                      Optional[Severity]
-	LogLevel                      Optional[LogLevel]
-	Outcome                       Outcome
-	DefenseClawHealthSubsystem    string
-	DefenseClawHealthState        string
-	DefenseClawHealthErrorSummary Optional[string]
-	DefenseClawSchemaErrorCode    Optional[string]
-}
-
-type LogFleetDeviceOfflineInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	MandatoryDurableHealthTransition bool
-}
-
-type LogFleetDeviceRegisteredInput struct {
-	Envelope                            FamilyEnvelopeInput
-	Severity                            Optional[Severity]
-	LogLevel                            Optional[LogLevel]
-	Outcome                             Outcome
-	DefenseClawEvaluationID             Optional[string]
-	DefenseClawFindingID                Optional[string]
-	DefenseClawScanID                   Optional[string]
-	DefenseClawPolicyID                 Optional[string]
-	DefenseClawPolicyVersion            Optional[string]
-	DefenseClawEnforcementID            Optional[string]
-	DefenseClawApprovalID               Optional[string]
-	DefenseClawAssetID                  string
-	DefenseClawAssetType                Optional[string]
-	DefenseClawAssetTransition          string
-	DefenseClawAssetPreviousState       Optional[string]
-	DefenseClawAssetResultingState      Optional[string]
-	DefenseClawAssetTargetRef           Optional[string]
-	DefenseClawAssetTargetPath          Optional[string]
-	DefenseClawAssetTransitionReason    Optional[string]
-	DefenseClawAssetTransitionCode      Optional[string]
-	DefenseClawAssetTransitionInitiator Optional[string]
-	DefenseClawAssetInstallAction       Optional[string]
-	DefenseClawAssetFileAction          Optional[string]
-	DefenseClawAssetRuntimeAction       Optional[string]
-}
-
-type LogFleetPolicyEmergencyInput struct {
-	Envelope                        FamilyEnvelopeInput
-	Severity                        Optional[Severity]
-	LogLevel                        Optional[LogLevel]
-	Outcome                         Outcome
-	DefenseClawAdminOperation       string
-	DefenseClawAdminPrincipalRef    Optional[string]
-	DefenseClawAdminAuthnMethod     Optional[string]
-	DefenseClawAdminChangeSetHash   Optional[string]
-	DefenseClawAdminActorRef        Optional[string]
-	DefenseClawAdminOrigin          Optional[string]
-	DefenseClawAdminTargetRef       Optional[string]
-	DefenseClawAdminBeforeSummary   Optional[string]
-	DefenseClawAdminAfterSummary    Optional[string]
-	DefenseClawAdminBeforeState     Optional[string]
-	DefenseClawAdminAfterState      Optional[string]
-	DefenseClawAdminDiff            Optional[string]
-	DefenseClawAdminReason          Optional[string]
-	DefenseClawAdminReasonDetail    Optional[string]
-	DefenseClawAdminRevision        Optional[string]
-	DefenseClawAdminCurrentRevision Optional[string]
-	DefenseClawAdminChangeCount     Optional[int64]
-	ConditionAdminPrincipalKnown    bool
-	MandatoryControlPlaneMutation   bool
-}
-
-type LogFleetPolicyPushInput struct {
-	Envelope                        FamilyEnvelopeInput
-	Severity                        Optional[Severity]
-	LogLevel                        Optional[LogLevel]
-	Outcome                         Outcome
-	DefenseClawAdminOperation       string
-	DefenseClawAdminPrincipalRef    Optional[string]
-	DefenseClawAdminAuthnMethod     Optional[string]
-	DefenseClawAdminChangeSetHash   Optional[string]
-	DefenseClawAdminActorRef        Optional[string]
-	DefenseClawAdminOrigin          Optional[string]
-	DefenseClawAdminTargetRef       Optional[string]
-	DefenseClawAdminBeforeSummary   Optional[string]
-	DefenseClawAdminAfterSummary    Optional[string]
-	DefenseClawAdminBeforeState     Optional[string]
-	DefenseClawAdminAfterState      Optional[string]
-	DefenseClawAdminDiff            Optional[string]
-	DefenseClawAdminReason          Optional[string]
-	DefenseClawAdminReasonDetail    Optional[string]
-	DefenseClawAdminRevision        Optional[string]
-	DefenseClawAdminCurrentRevision Optional[string]
-	DefenseClawAdminChangeCount     Optional[int64]
-	ConditionAdminPrincipalKnown    bool
-	MandatoryControlPlaneMutation   bool
-}
-
-type LogFleetThreatIntelPushInput struct {
-	Envelope                                    FamilyEnvelopeInput
-	Severity                                    Optional[Severity]
-	LogLevel                                    Optional[LogLevel]
-	Outcome                                     Outcome
-	DefenseClawAIRuntimeProcessesObserved       int64
-	DefenseClawAIRuntimeProcessesSkipped        int64
-	DefenseClawAIRuntimeConnectionsObserved     int64
-	DefenseClawAIRuntimeConnectionsUnattributed int64
-	DefenseClawAIRuntimeHostPlaneObservations   int64
-	DefenseClawAIRuntimeHostPlaneGated          int64
-	DefenseClawAIRuntimeFindingID               string
-	DefenseClawAIRuntimeScore                   int64
-	DefenseClawAIRuntimeSeverity                string
-	DefenseClawAIRuntimeProcess                 string
-	DefenseClawAIRuntimeCorrelationVerdict      string
-	DefenseClawAIRuntimeCorrelationReason       string
-	DefenseClawAIRuntimeAgent                   Optional[string]
-	DefenseClawAIRuntimeCmdline                 Optional[string]
-	DefenseClawAIRuntimeSignals                 Optional[[]string]
-	DefenseClawAIRuntimeProviders               Optional[[]string]
+type LogIdentityObservedInput struct {
+	Envelope                          FamilyEnvelopeInput
+	Severity                          Optional[Severity]
+	LogLevel                          Optional[LogLevel]
+	UserID                            string
+	DefenseClawUserPrincipalAssurance string
+	DefenseClawUserIDKind             Optional[string]
+	DefenseClawUserName               Optional[string]
+	DefenseClawUserPrincipal          Optional[string]
+	DefenseClawUserDomain             Optional[string]
+	DefenseClawUserDirectory          Optional[string]
+	DefenseClawUserTenantID           Optional[string]
+	DefenseClawUserIdentitySource     Optional[string]
+	DefenseClawUserGroupCount         Optional[int64]
+	DefenseClawSessionKind            Optional[string]
 }
 
 type LogObservabilityProfileChangedInput struct {
@@ -1426,39 +1414,54 @@ type LogPolicyReloadRejectedInput struct {
 }
 
 type LogPolicyUpdatedInput struct {
-	Envelope                        FamilyEnvelopeInput
-	Severity                        Optional[Severity]
-	LogLevel                        Optional[LogLevel]
-	Outcome                         Outcome
-	DefenseClawAdminOperation       string
-	DefenseClawAdminPrincipalRef    Optional[string]
-	DefenseClawAdminAuthnMethod     Optional[string]
-	DefenseClawAdminChangeSetHash   Optional[string]
-	DefenseClawAdminActorRef        Optional[string]
-	DefenseClawAdminOrigin          Optional[string]
-	DefenseClawAdminTargetRef       Optional[string]
-	DefenseClawAdminBeforeSummary   Optional[string]
-	DefenseClawAdminAfterSummary    Optional[string]
-	DefenseClawAdminBeforeState     Optional[string]
-	DefenseClawAdminAfterState      Optional[string]
-	DefenseClawAdminDiff            Optional[string]
-	DefenseClawAdminReason          Optional[string]
-	DefenseClawAdminReasonDetail    Optional[string]
-	DefenseClawAdminRevision        Optional[string]
-	DefenseClawAdminCurrentRevision Optional[string]
-	DefenseClawAdminChangeCount     Optional[int64]
-	DefenseClawSandboxID            Optional[string]
-	DefenseClawSandboxName          Optional[string]
-	DefenseClawSandboxRuntime       Optional[string]
-	DefenseClawSandboxDriver        Optional[string]
-	DefenseClawSandboxImageDigest   Optional[string]
-	DefenseClawSandboxPolicyVersion Optional[int64]
-	DefenseClawSandboxProfile       Optional[string]
-	DefenseClawSandboxPack          Optional[string]
-	DefenseClawSandboxPhase         Optional[string]
-	DefenseClawSandboxWorkdirMode   Optional[string]
-	ConditionAdminPrincipalKnown    bool
-	MandatoryControlPlaneMutation   bool
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawAdminOperation               string
+	DefenseClawAdminPrincipalRef            Optional[string]
+	DefenseClawAdminAuthnMethod             Optional[string]
+	DefenseClawAdminChangeSetHash           Optional[string]
+	DefenseClawAdminActorRef                Optional[string]
+	DefenseClawAdminOrigin                  Optional[string]
+	DefenseClawAdminTargetRef               Optional[string]
+	DefenseClawAdminBeforeSummary           Optional[string]
+	DefenseClawAdminAfterSummary            Optional[string]
+	DefenseClawAdminBeforeState             Optional[string]
+	DefenseClawAdminAfterState              Optional[string]
+	DefenseClawAdminDiff                    Optional[string]
+	DefenseClawAdminReason                  Optional[string]
+	DefenseClawAdminReasonDetail            Optional[string]
+	DefenseClawAdminRevision                Optional[string]
+	DefenseClawAdminCurrentRevision         Optional[string]
+	DefenseClawAdminChangeCount             Optional[int64]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	ConditionAdminPrincipalKnown            bool
+	MandatoryControlPlaneMutation           bool
 }
 
 type LogRedactionFailedClosedInput struct {
@@ -1499,28 +1502,602 @@ type LogRedactionProfileUpdatedInput struct {
 	MandatoryControlPlaneMutation   bool
 }
 
+type LogSandboxAccessRefusedInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	ServerAddress                           Optional[string]
+	ServerPort                              Optional[int64]
+	DefenseClawSandboxPolicyRule            Optional[string]
+	DefenseClawSandboxManagedReason         Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxAskDecidedInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxApprovalKind          Optional[string]
+	DefenseClawSandboxApprovalScope         Optional[string]
+	ServerAddress                           Optional[string]
+	ServerPort                              Optional[int64]
+	DefenseClawApprovalID                   Optional[string]
+	DefenseClawApprovalResult               string
+	DefenseClawSandboxDecisionStored        Optional[bool]
+	DefenseClawSandboxManagedReason         Optional[string]
+	MandatoryApprovalResolution             bool
+}
+
+type LogSandboxForeignContainerInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxContainerImage        Optional[string]
+	DefenseClawSandboxManagedAction         string
+}
+
+type LogSandboxForeignSandboxInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxManagedAction         string
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxHostRunRefusedInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxManagedReason         string
+	DefenseClawSandboxPolicyRule            Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxHostRunUnavailableInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxManagedReason         string
+	DefenseClawSandboxManagedAction         string
+	DefenseClawSandboxPolicyRule            Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxInferenceInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  string
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	GenAIProviderName                       Optional[string]
+	GenAIRequestModel                       Optional[string]
+	DefenseClawSandboxInferenceStatus       Optional[string]
+	DefenseClawSandboxInferenceLatencyMs    Optional[int64]
+	DefenseClawSandboxInferenceOperation    Optional[string]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	GenAIConversationID                     Optional[string]
+}
+
 type LogSandboxLifecycleInput struct {
-	Envelope                           FamilyEnvelopeInput
-	Severity                           Optional[Severity]
-	LogLevel                           Optional[LogLevel]
-	Outcome                            Outcome
-	DefenseClawSandboxID               Optional[string]
-	DefenseClawSandboxName             string
-	DefenseClawSandboxRuntime          Optional[string]
-	DefenseClawSandboxDriver           Optional[string]
-	DefenseClawSandboxImageDigest      Optional[string]
-	DefenseClawSandboxPolicyVersion    Optional[int64]
-	DefenseClawSandboxProfile          Optional[string]
-	DefenseClawSandboxPack             Optional[string]
-	DefenseClawSandboxPhase            string
-	DefenseClawSandboxWorkdirMode      Optional[string]
-	DefenseClawSandboxPhasePrevious    Optional[string]
-	DefenseClawSandboxLifecycleTrigger Optional[string]
-	DefenseClawSandboxExitCode         Optional[int64]
-	DefenseClawSandboxConditionType    Optional[string]
-	DefenseClawSandboxConditionStatus  Optional[string]
-	DefenseClawSandboxConditionReason  Optional[string]
-	DefenseClawSandboxConditionMessage Optional[string]
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  string
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 string
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawSandboxPhasePrevious         Optional[string]
+	DefenseClawSandboxLifecycleTrigger      Optional[string]
+	DefenseClawSandboxExitCode              Optional[int64]
+	DefenseClawSandboxConditionType         Optional[string]
+	DefenseClawSandboxConditionStatus       Optional[string]
+	DefenseClawSandboxConditionReason       Optional[string]
+	DefenseClawSandboxConditionMessage      Optional[string]
+}
+
+type LogSandboxPolicyForeignRuleInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  string
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	ServerAddress                           Optional[string]
+	ServerPort                              Optional[int64]
+	DefenseClawSandboxManagedAction         string
+	DefenseClawSandboxPolicyRule            Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxPolicyRematchedInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxPolicyRematchReason   string
+	DefenseClawSandboxPolicyPreviousProfile Optional[string]
+	DefenseClawSandboxPolicyPreviousDigest  Optional[string]
+	MandatoryControlPlaneMutation           bool
+}
+
+type LogSandboxPolicyResolvedInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawSandboxManagedReason         Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxProcessInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  string
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawSandboxProcessEvent          string
+	DefenseClawSandboxProcessSource         Optional[string]
+	DefenseClawSandboxProcessPid            Optional[int64]
+	DefenseClawSandboxProcessExecutable     Optional[string]
+	DefenseClawSandboxProcessCommandLine    Optional[string]
+	DefenseClawSandboxProcessExitCode       Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	GenAIConversationID                     Optional[string]
+}
+
+type LogSandboxProcessTreeInput struct {
+	Envelope                                  FamilyEnvelopeInput
+	Severity                                  Optional[Severity]
+	LogLevel                                  Optional[LogLevel]
+	DefenseClawGuardrailProfileName           Optional[string]
+	DefenseClawGuardrailProfileDigest         Optional[string]
+	DefenseClawGuardrailProfileMatch          Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup   Optional[string]
+	DefenseClawSandboxID                      Optional[string]
+	DefenseClawSandboxName                    string
+	DefenseClawSandboxRuntime                 Optional[string]
+	DefenseClawSandboxDriver                  Optional[string]
+	DefenseClawSandboxDriverReason            Optional[string]
+	DefenseClawSandboxImageDigest             Optional[string]
+	DefenseClawSandboxPolicyVersion           Optional[int64]
+	DefenseClawSandboxProfile                 Optional[string]
+	DefenseClawSandboxPack                    Optional[string]
+	DefenseClawSandboxPhase                   Optional[string]
+	DefenseClawSandboxWorkdirMode             Optional[string]
+	DefenseClawSandboxBindingID               Optional[string]
+	DefenseClawSandboxRegistrationID          Optional[string]
+	DefenseClawSandboxPolicyDigest            Optional[string]
+	DefenseClawSandboxPolicyGeneration        Optional[int64]
+	DefenseClawSandboxPolicyProvisional       Optional[bool]
+	DefenseClawOpenshellVersion               Optional[string]
+	DefenseClawOpenshellInstallMode           Optional[string]
+	DefenseClawSubjectKey                     Optional[string]
+	DefenseClawSandboxProcessEvent            string
+	DefenseClawSandboxProcessPid              Optional[int64]
+	DefenseClawSandboxProcessSource           Optional[string]
+	DefenseClawSandboxProcessHostPid          Optional[int64]
+	DefenseClawSandboxProcessExecID           Optional[string]
+	DefenseClawSandboxProcessParentPid        Optional[int64]
+	DefenseClawSandboxProcessName             Optional[string]
+	DefenseClawSandboxProcessExecutable       Optional[string]
+	DefenseClawSandboxProcessCommandLine      Optional[string]
+	DefenseClawSandboxProcessWorkingDirectory Optional[string]
+	DefenseClawSandboxProcessExitCode         Optional[int64]
+	DefenseClawSandboxProcessLineage          Optional[[]string]
+	UserID                                    Optional[string]
+	DefenseClawUserIDKind                     Optional[string]
+	DefenseClawUserName                       Optional[string]
+	GenAIConversationID                       Optional[string]
+}
+
+type LogSandboxSettingsDriftInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawPolicyEffectiveDigest        Optional[string]
+	DefenseClawPolicyGeneration             Optional[int64]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
+	DefenseClawUserPrincipal                Optional[string]
+	DefenseClawOpenshellSettingsField       string
+	DefenseClawSandboxManagedAction         Optional[string]
+	MandatoryEnforcedOutcome                bool
+}
+
+type LogSandboxSshInput struct {
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  string
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	DefenseClawSandboxSshActivity           string
+	DefenseClawSandboxSshAuth               Optional[string]
+	ClientAddress                           Optional[string]
+	UserID                                  Optional[string]
+	DefenseClawUserIDKind                   Optional[string]
+	DefenseClawUserName                     Optional[string]
 }
 
 type LogSandboxWorkspaceInput struct {
@@ -1528,16 +2105,29 @@ type LogSandboxWorkspaceInput struct {
 	Severity                                Optional[Severity]
 	LogLevel                                Optional[LogLevel]
 	Outcome                                 Outcome
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
 	DefenseClawSandboxID                    Optional[string]
 	DefenseClawSandboxName                  string
 	DefenseClawSandboxRuntime               Optional[string]
 	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
 	DefenseClawSandboxImageDigest           Optional[string]
 	DefenseClawSandboxPolicyVersion         Optional[int64]
 	DefenseClawSandboxProfile               Optional[string]
 	DefenseClawSandboxPack                  Optional[string]
 	DefenseClawSandboxPhase                 Optional[string]
 	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
 	DefenseClawEvaluationID                 Optional[string]
 	DefenseClawFindingID                    Optional[string]
 	DefenseClawScanID                       Optional[string]
@@ -1590,92 +2180,144 @@ type LogSqliteWriteFailedInput struct {
 }
 
 type LogSubsystemDegradedInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	DefenseClawSandboxID             Optional[string]
-	DefenseClawSandboxName           Optional[string]
-	DefenseClawSandboxRuntime        Optional[string]
-	DefenseClawSandboxDriver         Optional[string]
-	DefenseClawSandboxImageDigest    Optional[string]
-	DefenseClawSandboxPolicyVersion  Optional[int64]
-	DefenseClawSandboxProfile        Optional[string]
-	DefenseClawSandboxPack           Optional[string]
-	DefenseClawSandboxPhase          Optional[string]
-	DefenseClawSandboxWorkdirMode    Optional[string]
-	MandatoryDurableHealthTransition bool
-	MandatoryManagedAidFailOpen      bool
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawHealthSubsystem              string
+	DefenseClawHealthState                  string
+	DefenseClawHealthErrorSummary           Optional[string]
+	DefenseClawSchemaErrorCode              Optional[string]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	MandatoryDurableHealthTransition        bool
+	MandatoryManagedAidFailOpen             bool
 }
 
 type LogSubsystemLifecycleInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	DefenseClawSandboxID             Optional[string]
-	DefenseClawSandboxName           Optional[string]
-	DefenseClawSandboxRuntime        Optional[string]
-	DefenseClawSandboxDriver         Optional[string]
-	DefenseClawSandboxImageDigest    Optional[string]
-	DefenseClawSandboxPolicyVersion  Optional[int64]
-	DefenseClawSandboxProfile        Optional[string]
-	DefenseClawSandboxPack           Optional[string]
-	DefenseClawSandboxPhase          Optional[string]
-	DefenseClawSandboxWorkdirMode    Optional[string]
-	MandatoryDurableHealthTransition bool
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawHealthSubsystem              string
+	DefenseClawHealthState                  string
+	DefenseClawHealthErrorSummary           Optional[string]
+	DefenseClawSchemaErrorCode              Optional[string]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	MandatoryDurableHealthTransition        bool
 }
 
 type LogSubsystemReadyInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	DefenseClawSandboxID             Optional[string]
-	DefenseClawSandboxName           Optional[string]
-	DefenseClawSandboxRuntime        Optional[string]
-	DefenseClawSandboxDriver         Optional[string]
-	DefenseClawSandboxImageDigest    Optional[string]
-	DefenseClawSandboxPolicyVersion  Optional[int64]
-	DefenseClawSandboxProfile        Optional[string]
-	DefenseClawSandboxPack           Optional[string]
-	DefenseClawSandboxPhase          Optional[string]
-	DefenseClawSandboxWorkdirMode    Optional[string]
-	MandatoryDurableHealthTransition bool
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawHealthSubsystem              string
+	DefenseClawHealthState                  string
+	DefenseClawHealthErrorSummary           Optional[string]
+	DefenseClawSchemaErrorCode              Optional[string]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	MandatoryDurableHealthTransition        bool
 }
 
 type LogSubsystemRestoredInput struct {
-	Envelope                         FamilyEnvelopeInput
-	Severity                         Optional[Severity]
-	LogLevel                         Optional[LogLevel]
-	Outcome                          Outcome
-	DefenseClawHealthSubsystem       string
-	DefenseClawHealthState           string
-	DefenseClawHealthErrorSummary    Optional[string]
-	DefenseClawSchemaErrorCode       Optional[string]
-	DefenseClawSandboxID             Optional[string]
-	DefenseClawSandboxName           Optional[string]
-	DefenseClawSandboxRuntime        Optional[string]
-	DefenseClawSandboxDriver         Optional[string]
-	DefenseClawSandboxImageDigest    Optional[string]
-	DefenseClawSandboxPolicyVersion  Optional[int64]
-	DefenseClawSandboxProfile        Optional[string]
-	DefenseClawSandboxPack           Optional[string]
-	DefenseClawSandboxPhase          Optional[string]
-	DefenseClawSandboxWorkdirMode    Optional[string]
-	MandatoryDurableHealthTransition bool
+	Envelope                                FamilyEnvelopeInput
+	Severity                                Optional[Severity]
+	LogLevel                                Optional[LogLevel]
+	Outcome                                 Outcome
+	DefenseClawHealthSubsystem              string
+	DefenseClawHealthState                  string
+	DefenseClawHealthErrorSummary           Optional[string]
+	DefenseClawSchemaErrorCode              Optional[string]
+	DefenseClawGuardrailProfileName         Optional[string]
+	DefenseClawGuardrailProfileDigest       Optional[string]
+	DefenseClawGuardrailProfileMatch        Optional[string]
+	DefenseClawGuardrailProfileMatchedGroup Optional[string]
+	DefenseClawSandboxID                    Optional[string]
+	DefenseClawSandboxName                  Optional[string]
+	DefenseClawSandboxRuntime               Optional[string]
+	DefenseClawSandboxDriver                Optional[string]
+	DefenseClawSandboxDriverReason          Optional[string]
+	DefenseClawSandboxImageDigest           Optional[string]
+	DefenseClawSandboxPolicyVersion         Optional[int64]
+	DefenseClawSandboxProfile               Optional[string]
+	DefenseClawSandboxPack                  Optional[string]
+	DefenseClawSandboxPhase                 Optional[string]
+	DefenseClawSandboxWorkdirMode           Optional[string]
+	DefenseClawSandboxBindingID             Optional[string]
+	DefenseClawSandboxRegistrationID        Optional[string]
+	DefenseClawSandboxPolicyDigest          Optional[string]
+	DefenseClawSandboxPolicyGeneration      Optional[int64]
+	DefenseClawSandboxPolicyProvisional     Optional[bool]
+	DefenseClawOpenshellVersion             Optional[string]
+	DefenseClawOpenshellInstallMode         Optional[string]
+	DefenseClawSubjectKey                   Optional[string]
+	MandatoryDurableHealthTransition        bool
 }
 
 type LogTelemetryAuthenticationFailedInput struct {
@@ -2036,6 +2678,14 @@ type MetricDefenseClawHTTPRequestDurationInput struct {
 	HTTPResponseStatusCode Optional[int64]
 }
 
+type MetricDefenseClawInventoryIdePluginsInput struct {
+	Envelope                    FamilyEnvelopeInput
+	Value                       int64
+	DefenseClawIdeProduct       Optional[string]
+	DefenseClawIdePluginAI      Optional[bool]
+	DefenseClawIdePluginEnabled Optional[string]
+}
+
 type MetricDefenseClawJudgePersistBatchSizeInput struct {
 	Envelope FamilyEnvelopeInput
 	Value    int64
@@ -2060,6 +2710,24 @@ type MetricDefenseClawJudgeSemaphoreDepthInput struct {
 type MetricDefenseClawJudgeSemaphoreDropsInput struct {
 	Envelope FamilyEnvelopeInput
 	Value    int64
+}
+
+type MetricDefenseClawKernelEventsInput struct {
+	Envelope                              FamilyEnvelopeInput
+	Value                                 int64
+	DefenseClawAIRuntimeKernelPolicyOwner Optional[string]
+	DefenseClawAIRuntimeKernelOutcome     Optional[string]
+	DefenseClawMetricKernelControl        Optional[string]
+}
+
+type MetricDefenseClawKernelStateInput struct {
+	Envelope                              FamilyEnvelopeInput
+	Value                                 int64
+	DefenseClawAIRuntimeKernelHelperMode  Optional[string]
+	DefenseClawAIRuntimeKernelApproval    Optional[string]
+	DefenseClawAIRuntimeKernelPaused      Optional[bool]
+	DefenseClawAIRuntimePlaneBackend      Optional[string]
+	DefenseClawAIRuntimeTetragonInstalled Optional[bool]
 }
 
 type MetricDefenseClawManagedAidFailOpenDecisionsInput struct {
@@ -2711,6 +3379,8 @@ type SpanAssetTransitionInput struct {
 	DefenseClawPolicyVersion                      Optional[string]
 	DefenseClawEnforcementID                      Optional[string]
 	DefenseClawApprovalID                         Optional[string]
+	DefenseClawPolicyEffectiveDigest              Optional[string]
+	DefenseClawPolicyGeneration                   Optional[int64]
 	DefenseClawAssetID                            string
 	DefenseClawAssetType                          Optional[string]
 	DefenseClawAssetTransition                    string
@@ -3154,48 +3824,152 @@ func (builder *FamilyBuilder) BuildLogAIDiscoveryCompleted(input LogAIDiscoveryC
 }
 
 func (builder *FamilyBuilder) BuildLogAIRuntimeActivity(input LogAIRuntimeActivityInput) (Record, error) {
-	generatedValue5, generatedPresent5 := input.DefenseClawAIRuntimeProcess.Get()
+	generatedValue0, generatedPresent0 := input.UserID.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawUserIDKind.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawUserName.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawUserLoginID.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawUserPrincipal.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawUserDomain.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawUserDirectory.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawAIRuntimeEventSource.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAIRuntimeKernelOutcome.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawAIRuntimeKernelControl.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAIRuntimeProcess.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAIRuntimeHookSeen.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAIRuntimeHookJoin.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.finding_id", value: input.DefenseClawAIRuntimeFindingID, present: true}, {key: "defenseclaw.ai.runtime.tactic", value: input.DefenseClawAIRuntimeTactic, present: true}, {key: "defenseclaw.ai.runtime.technique", value: input.DefenseClawAIRuntimeTechnique, present: true}, {key: "defenseclaw.ai.runtime.chain_stage", value: input.DefenseClawAIRuntimeChainStage, present: true}, {key: "defenseclaw.ai.runtime.agent", value: input.DefenseClawAIRuntimeAgent, present: true}, {key: "defenseclaw.ai.runtime.process", value: generatedValue5, present: generatedPresent5}},
+		values:     familyFieldValues{{key: "user.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.user.id_kind", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.user.name", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.user.login_id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.user.principal", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.user.domain", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.user.directory", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.principal.assurance", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.agent.identity.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.runtime.event_source", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.runtime.kernel.outcome", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.runtime.kernel.control", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.runtime.finding_id", value: input.DefenseClawAIRuntimeFindingID, present: true}, {key: "defenseclaw.ai.runtime.tactic", value: input.DefenseClawAIRuntimeTactic, present: true}, {key: "defenseclaw.ai.runtime.technique", value: input.DefenseClawAIRuntimeTechnique, present: true}, {key: "defenseclaw.ai.runtime.chain_stage", value: input.DefenseClawAIRuntimeChainStage, present: true}, {key: "defenseclaw.ai.runtime.agent", value: input.DefenseClawAIRuntimeAgent, present: true}, {key: "defenseclaw.ai.runtime.process", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.runtime.hook_seen", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.runtime.hook_join", value: generatedValue19, present: generatedPresent19}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIRuntimeActivityDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
 func (builder *FamilyBuilder) BuildLogAIRuntimeFinding(input LogAIRuntimeFindingInput) (Record, error) {
-	generatedValue12, generatedPresent12 := input.DefenseClawAIRuntimeAgent.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAIRuntimeCmdline.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAIRuntimeSignals.Get()
-	if generatedPresent14 {
-		generatedValue14 = append([]string(nil), generatedValue14...)
+	generatedValue6, generatedPresent6 := input.UserID.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserIDKind.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawUserName.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawUserLoginID.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawUserPrincipal.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawUserDomain.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawUserDirectory.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAIRuntimeEventSource.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAIRuntimeKernelOutcome.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAIRuntimeKernelControl.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawAIRuntimeAgent.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawAIRuntimeCmdline.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawAIRuntimeSignals.Get()
+	if generatedPresent26 {
+		generatedValue26 = append([]string(nil), generatedValue26...)
 	}
-	generatedValue15, generatedPresent15 := input.DefenseClawAIRuntimeProviders.Get()
-	if generatedPresent15 {
-		generatedValue15 = append([]string(nil), generatedValue15...)
+	generatedValue27, generatedPresent27 := input.DefenseClawAIRuntimeProviders.Get()
+	if generatedPresent27 {
+		generatedValue27 = append([]string(nil), generatedValue27...)
 	}
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.processes_observed", value: input.DefenseClawAIRuntimeProcessesObserved, present: true}, {key: "defenseclaw.ai.runtime.processes_skipped", value: input.DefenseClawAIRuntimeProcessesSkipped, present: true}, {key: "defenseclaw.ai.runtime.connections_observed", value: input.DefenseClawAIRuntimeConnectionsObserved, present: true}, {key: "defenseclaw.ai.runtime.connections_unattributed", value: input.DefenseClawAIRuntimeConnectionsUnattributed, present: true}, {key: "defenseclaw.ai.runtime.host_plane_observations", value: input.DefenseClawAIRuntimeHostPlaneObservations, present: true}, {key: "defenseclaw.ai.runtime.host_plane_gated", value: input.DefenseClawAIRuntimeHostPlaneGated, present: true}, {key: "defenseclaw.ai.runtime.finding_id", value: input.DefenseClawAIRuntimeFindingID, present: true}, {key: "defenseclaw.ai.runtime.score", value: input.DefenseClawAIRuntimeScore, present: true}, {key: "defenseclaw.ai.runtime.severity", value: input.DefenseClawAIRuntimeSeverity, present: true}, {key: "defenseclaw.ai.runtime.process", value: input.DefenseClawAIRuntimeProcess, present: true}, {key: "defenseclaw.ai.runtime.correlation_verdict", value: input.DefenseClawAIRuntimeCorrelationVerdict, present: true}, {key: "defenseclaw.ai.runtime.correlation_reason", value: input.DefenseClawAIRuntimeCorrelationReason, present: true}, {key: "defenseclaw.ai.runtime.agent", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.runtime.cmdline", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.runtime.signals", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.runtime.providers", value: generatedValue15, present: generatedPresent15}},
+		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.processes_observed", value: input.DefenseClawAIRuntimeProcessesObserved, present: true}, {key: "defenseclaw.ai.runtime.processes_skipped", value: input.DefenseClawAIRuntimeProcessesSkipped, present: true}, {key: "defenseclaw.ai.runtime.connections_observed", value: input.DefenseClawAIRuntimeConnectionsObserved, present: true}, {key: "defenseclaw.ai.runtime.connections_unattributed", value: input.DefenseClawAIRuntimeConnectionsUnattributed, present: true}, {key: "defenseclaw.ai.runtime.host_plane_observations", value: input.DefenseClawAIRuntimeHostPlaneObservations, present: true}, {key: "defenseclaw.ai.runtime.host_plane_gated", value: input.DefenseClawAIRuntimeHostPlaneGated, present: true}, {key: "user.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.id_kind", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.user.name", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.user.login_id", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.user.principal", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.user.domain", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.user.directory", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.user.principal.assurance", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.agent.identity.id", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.runtime.event_source", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.runtime.kernel.outcome", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.runtime.kernel.control", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.runtime.finding_id", value: input.DefenseClawAIRuntimeFindingID, present: true}, {key: "defenseclaw.ai.runtime.score", value: input.DefenseClawAIRuntimeScore, present: true}, {key: "defenseclaw.ai.runtime.severity", value: input.DefenseClawAIRuntimeSeverity, present: true}, {key: "defenseclaw.ai.runtime.process", value: input.DefenseClawAIRuntimeProcess, present: true}, {key: "defenseclaw.ai.runtime.correlation_verdict", value: input.DefenseClawAIRuntimeCorrelationVerdict, present: true}, {key: "defenseclaw.ai.runtime.correlation_reason", value: input.DefenseClawAIRuntimeCorrelationReason, present: true}, {key: "defenseclaw.ai.runtime.agent", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.runtime.cmdline", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.runtime.signals", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.runtime.providers", value: generatedValue27, present: generatedPresent27}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIRuntimeFindingDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogAIRuntimePlaneHealth(input LogAIRuntimePlaneHealthInput) (Record, error) {
-	generatedValue9, generatedPresent9 := input.DefenseClawAIRuntimePlaneReason.Get()
+func (builder *FamilyBuilder) BuildLogAIRuntimeKernelEvent(input LogAIRuntimeKernelEventInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.UserID.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawUserIDKind.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawUserName.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawUserLoginID.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawUserPrincipal.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawUserDomain.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawUserDirectory.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawAIRuntimeEventSource.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAIRuntimeKernelOutcome.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawAIRuntimeKernelControl.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAIRuntimeProcess.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAIRuntimeKernelHookType.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAIRuntimeKernelFunction.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAIRuntimeKernelAction.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAIRuntimeKernelPolicyMode.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAIRuntimeKernelTags.Get()
+	if generatedPresent20 {
+		generatedValue20 = append([]string(nil), generatedValue20...)
+	}
+	generatedValue21, generatedPresent21 := input.DefenseClawAIRuntimeKernelMessage.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawAIRuntimeKernelTarget.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawAIRuntimeKernelCount.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawAIRuntimeHookSeen.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawAIRuntimeHookJoin.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawAIRuntimeHookAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.processes_observed", value: input.DefenseClawAIRuntimeProcessesObserved, present: true}, {key: "defenseclaw.ai.runtime.processes_skipped", value: input.DefenseClawAIRuntimeProcessesSkipped, present: true}, {key: "defenseclaw.ai.runtime.connections_observed", value: input.DefenseClawAIRuntimeConnectionsObserved, present: true}, {key: "defenseclaw.ai.runtime.connections_unattributed", value: input.DefenseClawAIRuntimeConnectionsUnattributed, present: true}, {key: "defenseclaw.ai.runtime.host_plane_observations", value: input.DefenseClawAIRuntimeHostPlaneObservations, present: true}, {key: "defenseclaw.ai.runtime.host_plane_gated", value: input.DefenseClawAIRuntimeHostPlaneGated, present: true}, {key: "defenseclaw.ai.runtime.plane", value: input.DefenseClawAIRuntimePlane, present: true}, {key: "defenseclaw.ai.runtime.plane_available", value: input.DefenseClawAIRuntimePlaneAvailable, present: true}, {key: "defenseclaw.ai.runtime.plane_running", value: input.DefenseClawAIRuntimePlaneRunning, present: true}, {key: "defenseclaw.ai.runtime.plane_reason", value: generatedValue9, present: generatedPresent9}},
+		values:     familyFieldValues{{key: "user.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.user.id_kind", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.user.name", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.user.login_id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.user.principal", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.user.domain", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.user.directory", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.principal.assurance", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.agent.identity.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.runtime.event_source", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.runtime.kernel.outcome", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.runtime.kernel.control", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.runtime.agent", value: input.DefenseClawAIRuntimeAgent, present: true}, {key: "defenseclaw.ai.runtime.kernel.policy_owner", value: input.DefenseClawAIRuntimeKernelPolicyOwner, present: true}, {key: "defenseclaw.ai.runtime.kernel.policy_name", value: input.DefenseClawAIRuntimeKernelPolicyName, present: true}, {key: "defenseclaw.ai.runtime.process", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.runtime.kernel.hook_type", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.runtime.kernel.function", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.runtime.kernel.action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.runtime.kernel.policy_mode", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.runtime.kernel.tags", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.runtime.kernel.message", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.runtime.kernel.target", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.runtime.kernel.count", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.runtime.hook_seen", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.runtime.hook_join", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.runtime.hook_action", value: generatedValue26, present: generatedPresent26}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogAIRuntimeKernelEventDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogAIRuntimeKernelPolicy(input LogAIRuntimeKernelPolicyInput) (Record, error) {
+	generatedValue1, generatedPresent1 := input.DefenseClawPolicyID.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawAIRuntimeKernelFamily.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawAIRuntimeKernelMode.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawAIRuntimeKernelState.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawPolicyVersion.Get()
+	generatedValue6, generatedPresent6 := input.UserID.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserIDKind.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawAIRuntimeKernelReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawAIRuntimeKernelCoveredHours.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAIRuntimeKernelNeededHours.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.kernel.event", value: input.DefenseClawAIRuntimeKernelEvent, present: true}, {key: "defenseclaw.policy.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.ai.runtime.kernel.family", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.runtime.kernel.mode", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.runtime.kernel.state", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.policy.version", value: generatedValue5, present: generatedPresent5}, {key: "user.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.id_kind", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.runtime.kernel.reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.runtime.kernel.covered_hours", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.runtime.kernel.needed_hours", value: generatedValue10, present: generatedPresent10}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogAIRuntimeKernelPolicyDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogAIRuntimePlaneHealth(input LogAIRuntimePlaneHealthInput) (Record, error) {
+	generatedValue9, generatedPresent9 := input.DefenseClawAIRuntimePlaneReason.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAIRuntimePlaneMechanism.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawAIRuntimePlaneBackend.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAIRuntimeEventsLost.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAIRuntimeLossKnown.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAIRuntimeContainerEvents.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAIRuntimeKernelHelperMode.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAIRuntimeKernelApproval.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawPolicyVersion.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAIRuntimeKernelUsersEnrolled.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAIRuntimeKernelUsersEnforced.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAIRuntimeKernelUsersBurnIn.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAIRuntimeKernelPaused.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawAIRuntimeTetragonVersion.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawAIRuntimeTetragonInstalled.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawAIRuntimeKernelWouldBlockDelta.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawAIRuntimeKernelBlockedDelta.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawAIRuntimeKernelCustomerEventsDelta.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.processes_observed", value: input.DefenseClawAIRuntimeProcessesObserved, present: true}, {key: "defenseclaw.ai.runtime.processes_skipped", value: input.DefenseClawAIRuntimeProcessesSkipped, present: true}, {key: "defenseclaw.ai.runtime.connections_observed", value: input.DefenseClawAIRuntimeConnectionsObserved, present: true}, {key: "defenseclaw.ai.runtime.connections_unattributed", value: input.DefenseClawAIRuntimeConnectionsUnattributed, present: true}, {key: "defenseclaw.ai.runtime.host_plane_observations", value: input.DefenseClawAIRuntimeHostPlaneObservations, present: true}, {key: "defenseclaw.ai.runtime.host_plane_gated", value: input.DefenseClawAIRuntimeHostPlaneGated, present: true}, {key: "defenseclaw.ai.runtime.plane", value: input.DefenseClawAIRuntimePlane, present: true}, {key: "defenseclaw.ai.runtime.plane_available", value: input.DefenseClawAIRuntimePlaneAvailable, present: true}, {key: "defenseclaw.ai.runtime.plane_running", value: input.DefenseClawAIRuntimePlaneRunning, present: true}, {key: "defenseclaw.ai.runtime.plane_reason", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.runtime.plane_mechanism", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.runtime.plane_backend", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.runtime.events_lost", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.runtime.loss_known", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.runtime.container_events", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.runtime.kernel.helper_mode", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.runtime.kernel.approval", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.policy.version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.runtime.kernel.users_enrolled", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.runtime.kernel.users_enforced", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.runtime.kernel.users_burn_in", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.runtime.kernel.paused", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.runtime.tetragon.version", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.runtime.tetragon.installed", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.runtime.kernel.would_block_delta", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.runtime.kernel.blocked_delta", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.runtime.kernel.customer_events_delta", value: generatedValue26, present: generatedPresent26}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIRuntimePlaneHealthDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
@@ -3234,12 +4008,19 @@ func (builder *FamilyBuilder) BuildLogAIComponentChanged(input LogAIComponentCha
 	generatedValue28, generatedPresent28 := input.UserID.Get()
 	generatedValue29, generatedPresent29 := input.DefenseClawUserIDKind.Get()
 	generatedValue30, generatedPresent30 := input.DefenseClawUserName.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawUserPrincipal.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawUserDomain.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawUserDirectory.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawSandboxID.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawSandboxName.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Absent[Outcome](),
-		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}},
+		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.user.principal", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.user.domain", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.user.directory", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.user.principal.assurance", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.agent.identity.id", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.id", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.sandbox.name", value: generatedValue37, present: generatedPresent37}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIComponentChangedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
@@ -3306,12 +4087,19 @@ func (builder *FamilyBuilder) BuildLogAIComponentDiscovered(input LogAIComponent
 	generatedValue28, generatedPresent28 := input.UserID.Get()
 	generatedValue29, generatedPresent29 := input.DefenseClawUserIDKind.Get()
 	generatedValue30, generatedPresent30 := input.DefenseClawUserName.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawUserPrincipal.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawUserDomain.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawUserDirectory.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawSandboxID.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawSandboxName.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Absent[Outcome](),
-		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}},
+		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.user.principal", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.user.domain", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.user.directory", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.user.principal.assurance", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.agent.identity.id", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.id", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.sandbox.name", value: generatedValue37, present: generatedPresent37}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIComponentDiscoveredDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
@@ -3339,45 +4127,52 @@ func (builder *FamilyBuilder) BuildLogAIComponentObserved(input LogAIComponentOb
 	generatedValue20, generatedPresent20 := input.UserID.Get()
 	generatedValue21, generatedPresent21 := input.DefenseClawUserIDKind.Get()
 	generatedValue22, generatedPresent22 := input.DefenseClawUserName.Get()
-	generatedValue23, generatedPresent23 := input.DefenseClawUserEmail.Get()
-	generatedValue24, generatedPresent24 := input.DefenseClawInventoryConnectorSource.Get()
-	generatedValue25, generatedPresent25 := input.DefenseClawInventoryConnectorToolInspectionMode.Get()
-	generatedValue26, generatedPresent26 := input.DefenseClawInventoryConnectorSubprocessPolicy.Get()
-	generatedValue27, generatedPresent27 := input.DefenseClawInventoryMcpTransport.Get()
-	generatedValue28, generatedPresent28 := input.DefenseClawInventoryMcpCommandBasename.Get()
-	generatedValue29, generatedPresent29 := input.DefenseClawInventoryMcpURLHost.Get()
-	generatedValue30, generatedPresent30 := input.DefenseClawInventoryMcpAuthProviderType.Get()
-	generatedValue31, generatedPresent31 := input.DefenseClawInventoryMcpDisabled.Get()
-	generatedValue32, generatedPresent32 := input.DefenseClawAgentDiscoveryConnector.Get()
-	generatedValue33, generatedPresent33 := input.DefenseClawAgentDiscoveryInstalled.Get()
-	generatedValue34, generatedPresent34 := input.DefenseClawAgentDiscoveryHasConfig.Get()
-	generatedValue35, generatedPresent35 := input.DefenseClawAgentDiscoveryConfigBasename.Get()
-	generatedValue36, generatedPresent36 := input.DefenseClawAgentDiscoveryConfigPathHash.Get()
-	generatedValue37, generatedPresent37 := input.DefenseClawAgentDiscoveryHasBinary.Get()
-	generatedValue38, generatedPresent38 := input.DefenseClawAgentDiscoveryBinaryBasename.Get()
-	generatedValue39, generatedPresent39 := input.DefenseClawAgentDiscoveryBinaryPathHash.Get()
-	generatedValue40, generatedPresent40 := input.DefenseClawAgentDiscoveryVersion.Get()
-	generatedValue41, generatedPresent41 := input.DefenseClawAgentDiscoveryProbeStatus.Get()
-	generatedValue42, generatedPresent42 := input.DefenseClawAgentDiscoveryScannedAt.Get()
-	generatedValue43, generatedPresent43 := input.DefenseClawAIModelProvenancePublisher.Get()
-	generatedValue44, generatedPresent44 := input.DefenseClawAIModelProvenanceCountryCode.Get()
-	generatedValue45, generatedPresent45 := input.DefenseClawAIModelProvenanceRootModel.Get()
-	generatedValue46, generatedPresent46 := input.DefenseClawAIModelProvenanceBaseModels.Get()
-	if generatedPresent46 {
-		generatedValue46 = append([]string(nil), generatedValue46...)
+	generatedValue23, generatedPresent23 := input.DefenseClawUserPrincipal.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawUserDomain.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawUserDirectory.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserEmail.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawInventoryConnectorSource.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawInventoryConnectorToolInspectionMode.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawInventoryConnectorSubprocessPolicy.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawInventoryMcpTransport.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawInventoryMcpCommandBasename.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawInventoryMcpURLHost.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawInventoryMcpAuthProviderType.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawInventoryMcpDisabled.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawAgentDiscoveryConnector.Get()
+	generatedValue38, generatedPresent38 := input.DefenseClawAgentDiscoveryInstalled.Get()
+	generatedValue39, generatedPresent39 := input.DefenseClawAgentDiscoveryHasConfig.Get()
+	generatedValue40, generatedPresent40 := input.DefenseClawAgentDiscoveryConfigBasename.Get()
+	generatedValue41, generatedPresent41 := input.DefenseClawAgentDiscoveryConfigPathHash.Get()
+	generatedValue42, generatedPresent42 := input.DefenseClawAgentDiscoveryHasBinary.Get()
+	generatedValue43, generatedPresent43 := input.DefenseClawAgentDiscoveryBinaryBasename.Get()
+	generatedValue44, generatedPresent44 := input.DefenseClawAgentDiscoveryBinaryPathHash.Get()
+	generatedValue45, generatedPresent45 := input.DefenseClawAgentDiscoveryVersion.Get()
+	generatedValue46, generatedPresent46 := input.DefenseClawAgentDiscoveryProbeStatus.Get()
+	generatedValue47, generatedPresent47 := input.DefenseClawAgentDiscoveryScannedAt.Get()
+	generatedValue48, generatedPresent48 := input.DefenseClawAIModelProvenancePublisher.Get()
+	generatedValue49, generatedPresent49 := input.DefenseClawAIModelProvenanceCountryCode.Get()
+	generatedValue50, generatedPresent50 := input.DefenseClawAIModelProvenanceRootModel.Get()
+	generatedValue51, generatedPresent51 := input.DefenseClawAIModelProvenanceBaseModels.Get()
+	if generatedPresent51 {
+		generatedValue51 = append([]string(nil), generatedValue51...)
 	}
-	generatedValue47, generatedPresent47 := input.DefenseClawAIModelProvenanceQuantized.Get()
-	generatedValue48, generatedPresent48 := input.DefenseClawAIModelProvenanceQuantization.Get()
-	generatedValue49, generatedPresent49 := input.DefenseClawAIModelProvenanceDistilled.Get()
-	generatedValue50, generatedPresent50 := input.DefenseClawAIModelProvenanceDerivation.Get()
-	generatedValue51, generatedPresent51 := input.DefenseClawAIModelProvenanceSource.Get()
-	generatedValue52, generatedPresent52 := input.DefenseClawAIModelProvenanceConfidence.Get()
+	generatedValue52, generatedPresent52 := input.DefenseClawAIModelProvenanceQuantized.Get()
+	generatedValue53, generatedPresent53 := input.DefenseClawAIModelProvenanceQuantization.Get()
+	generatedValue54, generatedPresent54 := input.DefenseClawAIModelProvenanceDistilled.Get()
+	generatedValue55, generatedPresent55 := input.DefenseClawAIModelProvenanceDerivation.Get()
+	generatedValue56, generatedPresent56 := input.DefenseClawAIModelProvenanceSource.Get()
+	generatedValue57, generatedPresent57 := input.DefenseClawAIModelProvenanceConfidence.Get()
+	generatedValue58, generatedPresent58 := input.DefenseClawSandboxID.Get()
+	generatedValue59, generatedPresent59 := input.DefenseClawSandboxName.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Absent[Outcome](),
-		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.inventory.item.name", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.inventory.item.description", value: generatedValue19, present: generatedPresent19}, {key: "user.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.user.id_kind", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.user.name", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.user.email", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.inventory.connector.source", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.inventory.connector.tool_inspection_mode", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.inventory.connector.subprocess_policy", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.inventory.mcp.transport", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.inventory.mcp.command_basename", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.inventory.mcp.url_host", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.inventory.mcp.auth_provider_type", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.inventory.mcp.disabled", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.agent.discovery.connector", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.agent.discovery.installed", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.agent.discovery.has_config", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.agent.discovery.config_basename", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.agent.discovery.config_path_hash", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.agent.discovery.has_binary", value: generatedValue37, present: generatedPresent37}, {key: "defenseclaw.agent.discovery.binary_basename", value: generatedValue38, present: generatedPresent38}, {key: "defenseclaw.agent.discovery.binary_path_hash", value: generatedValue39, present: generatedPresent39}, {key: "defenseclaw.agent.discovery.version", value: generatedValue40, present: generatedPresent40}, {key: "defenseclaw.agent.discovery.probe_status", value: generatedValue41, present: generatedPresent41}, {key: "defenseclaw.agent.discovery.scanned_at", value: generatedValue42, present: generatedPresent42}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue43, present: generatedPresent43}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue44, present: generatedPresent44}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue45, present: generatedPresent45}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue46, present: generatedPresent46}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue47, present: generatedPresent47}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue48, present: generatedPresent48}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue49, present: generatedPresent49}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue50, present: generatedPresent50}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue51, present: generatedPresent51}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue52, present: generatedPresent52}},
+		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.inventory.item.name", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.inventory.item.description", value: generatedValue19, present: generatedPresent19}, {key: "user.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.user.id_kind", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.user.name", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.user.principal", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.user.domain", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.user.directory", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.principal.assurance", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.agent.identity.id", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.email", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.inventory.connector.source", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.inventory.connector.tool_inspection_mode", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.inventory.connector.subprocess_policy", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.inventory.mcp.transport", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.inventory.mcp.command_basename", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.inventory.mcp.url_host", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.inventory.mcp.auth_provider_type", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.inventory.mcp.disabled", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.agent.discovery.connector", value: generatedValue37, present: generatedPresent37}, {key: "defenseclaw.agent.discovery.installed", value: generatedValue38, present: generatedPresent38}, {key: "defenseclaw.agent.discovery.has_config", value: generatedValue39, present: generatedPresent39}, {key: "defenseclaw.agent.discovery.config_basename", value: generatedValue40, present: generatedPresent40}, {key: "defenseclaw.agent.discovery.config_path_hash", value: generatedValue41, present: generatedPresent41}, {key: "defenseclaw.agent.discovery.has_binary", value: generatedValue42, present: generatedPresent42}, {key: "defenseclaw.agent.discovery.binary_basename", value: generatedValue43, present: generatedPresent43}, {key: "defenseclaw.agent.discovery.binary_path_hash", value: generatedValue44, present: generatedPresent44}, {key: "defenseclaw.agent.discovery.version", value: generatedValue45, present: generatedPresent45}, {key: "defenseclaw.agent.discovery.probe_status", value: generatedValue46, present: generatedPresent46}, {key: "defenseclaw.agent.discovery.scanned_at", value: generatedValue47, present: generatedPresent47}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue48, present: generatedPresent48}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue49, present: generatedPresent49}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue50, present: generatedPresent50}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue51, present: generatedPresent51}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue52, present: generatedPresent52}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue53, present: generatedPresent53}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue54, present: generatedPresent54}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue55, present: generatedPresent55}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue56, present: generatedPresent56}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue57, present: generatedPresent57}, {key: "defenseclaw.sandbox.id", value: generatedValue58, present: generatedPresent58}, {key: "defenseclaw.sandbox.name", value: generatedValue59, present: generatedPresent59}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIComponentObservedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
@@ -3416,12 +4211,19 @@ func (builder *FamilyBuilder) BuildLogAIComponentRemoved(input LogAIComponentRem
 	generatedValue28, generatedPresent28 := input.UserID.Get()
 	generatedValue29, generatedPresent29 := input.DefenseClawUserIDKind.Get()
 	generatedValue30, generatedPresent30 := input.DefenseClawUserName.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawUserPrincipal.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawUserDomain.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawUserDirectory.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawUserPrincipalAssurance.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawAgentIdentityID.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawSandboxID.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawSandboxName.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Absent[Outcome](),
-		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}},
+		values:     familyFieldValues{{key: "defenseclaw.ai.component.id", value: input.DefenseClawAIComponentID, present: true}, {key: "defenseclaw.ai.component.type", value: input.DefenseClawAIComponentType, present: true}, {key: "defenseclaw.ai.discovery.detector", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.discovery.signal", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.discovery.confidence", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.ai.discovery.signal_id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.ai.discovery.source", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.ai.component.vendor", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.ai.component.product", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.ai.component.identity_score", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.ai.component.identity_band", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.ai.component.presence_score", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.component.presence_band", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.component.install_count", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.component.workspace_count", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.ai.component.detector_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.ai.component.policy_version", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.ai.model.provenance.publisher", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.ai.model.provenance.country_code", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.ai.model.provenance.root_model", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.ai.model.provenance.base_models", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.ai.model.provenance.quantized", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.ai.model.provenance.quantization", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.ai.model.provenance.distilled", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.ai.model.provenance.derivation", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.ai.model.provenance.source", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.ai.model.provenance.confidence", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.user.principal", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.user.domain", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.user.directory", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.user.principal.assurance", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.agent.identity.id", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.id", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.sandbox.name", value: generatedValue37, present: generatedPresent37}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAIComponentRemovedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
@@ -3511,23 +4313,25 @@ func (builder *FamilyBuilder) BuildLogAssetActivated(input LogAssetActivatedInpu
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetActivatedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3541,23 +4345,25 @@ func (builder *FamilyBuilder) BuildLogAssetAdmitted(input LogAssetAdmittedInput)
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetAdmittedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3571,23 +4377,25 @@ func (builder *FamilyBuilder) BuildLogAssetDisabled(input LogAssetDisabledInput)
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetDisabledDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3601,23 +4409,25 @@ func (builder *FamilyBuilder) BuildLogAssetDiscovered(input LogAssetDiscoveredIn
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Absent[Outcome](),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetDiscoveredDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3631,23 +4441,25 @@ func (builder *FamilyBuilder) BuildLogAssetQuarantined(input LogAssetQuarantined
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetQuarantinedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3661,23 +4473,25 @@ func (builder *FamilyBuilder) BuildLogAssetRegistered(input LogAssetRegisteredIn
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetRegisteredDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3691,23 +4505,25 @@ func (builder *FamilyBuilder) BuildLogAssetReleased(input LogAssetReleasedInput)
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetReleasedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3721,23 +4537,25 @@ func (builder *FamilyBuilder) BuildLogAssetRemoved(input LogAssetRemovedInput) (
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetRemovedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -3751,23 +4569,25 @@ func (builder *FamilyBuilder) BuildLogAssetUpdated(input LogAssetUpdatedInput) (
 	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
 	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
 	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawAssetType.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetResultingState.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetFileAction.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetRuntimeAction.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.resulting_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.target_ref", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_path", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_reason", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_code", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.install_action", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.file_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.runtime_action", value: generatedValue21, present: generatedPresent21}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogAssetUpdatedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcementStateChange), privateInput)
@@ -4250,242 +5070,97 @@ func (builder *FamilyBuilder) BuildLogDiagnosticSnapshot(input LogDiagnosticSnap
 	return builder.buildGeneratedResolvedLog(generatedLogDiagnosticSnapshotDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogFleetAlert(input LogFleetAlertInput) (Record, error) {
-	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
+func (builder *FamilyBuilder) BuildLogIdePluginChanged(input LogIdePluginChangedInput) (Record, error) {
+	generatedValue2, generatedPresent2 := input.DefenseClawIdePluginVersion.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawIdePluginEnabled.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawIdePluginAI.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawAIDiscoveryScanID.Get()
+	generatedValue6, generatedPresent6 := input.UserID.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserIDKind.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawUserName.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawUserPrincipal.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawUserDomain.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawUserDirectory.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawUserIdentitySource.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawUserPrincipalAssurance.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}},
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "defenseclaw.ide.product", value: input.DefenseClawIdeProduct, present: true}, {key: "defenseclaw.ide.plugin.id", value: input.DefenseClawIdePluginID, present: true}, {key: "defenseclaw.ide.plugin.version", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ide.plugin.enabled", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ide.plugin.ai", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "user.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.id_kind", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.user.name", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.user.principal", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.user.domain", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.user.directory", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.user.identity.source", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.user.principal.assurance", value: generatedValue13, present: generatedPresent13}},
 		conditions: familyConditionFacts{},
 	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetAlertDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition), privateInput)
+	return builder.buildGeneratedResolvedLog(generatedLogIdePluginChangedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogFleetDeviceCommand(input LogFleetDeviceCommandInput) (Record, error) {
-	generatedValue1, generatedPresent1 := input.DefenseClawAdminPrincipalRef.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawAdminAuthnMethod.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawAdminChangeSetHash.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawAdminActorRef.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawAdminOrigin.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawAdminTargetRef.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawAdminBeforeSummary.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAdminAfterSummary.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawAdminBeforeState.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAdminAfterState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAdminDiff.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAdminReason.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAdminReasonDetail.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAdminRevision.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAdminCurrentRevision.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAdminChangeCount.Get()
-	privateInput := familyLogBuildInput{
-		envelope: input.Envelope,
-		severity: input.Severity,
-		logLevel: input.LogLevel,
-		outcome:  Present(input.Outcome),
-		values:   familyFieldValues{{key: "defenseclaw.admin.operation", value: input.DefenseClawAdminOperation, present: true}, {key: "defenseclaw.admin.principal_ref", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.admin.authn_method", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.admin.change_set_hash", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.admin.actor_ref", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.admin.origin", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.admin.target_ref", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.admin.before_summary", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.admin.after_summary", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.admin.before_state", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.admin.after_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.admin.diff", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.admin.reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.admin.reason_detail", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.admin.revision", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.admin.current_revision", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.admin.change_count", value: generatedValue16, present: generatedPresent16}},
-		conditions: familyConditionFacts{
-			{
-				id: "admin-principal-known-v1",
-				state: func() familyConditionState {
-					if input.ConditionAdminPrincipalKnown {
-						return familyConditionTrue
-					}
-					return familyConditionFalse
-				}(),
-			},
-		},
-	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetDeviceCommandDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
-}
-
-func (builder *FamilyBuilder) BuildLogFleetDeviceDecommission(input LogFleetDeviceDecommissionInput) (Record, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawEvaluationID.Get()
-	generatedValue1, generatedPresent1 := input.DefenseClawFindingID.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawScanID.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawPolicyID.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
+func (builder *FamilyBuilder) BuildLogIdePluginDiscovered(input LogIdePluginDiscoveredInput) (Record, error) {
+	generatedValue2, generatedPresent2 := input.DefenseClawIdePluginVersion.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawIdePluginEnabled.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawIdePluginAI.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawAIDiscoveryScanID.Get()
+	generatedValue6, generatedPresent6 := input.UserID.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserIDKind.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawUserName.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawUserPrincipal.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawUserDomain.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawUserDirectory.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawUserIdentitySource.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawUserPrincipalAssurance.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "defenseclaw.ide.product", value: input.DefenseClawIdeProduct, present: true}, {key: "defenseclaw.ide.plugin.id", value: input.DefenseClawIdePluginID, present: true}, {key: "defenseclaw.ide.plugin.version", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ide.plugin.enabled", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ide.plugin.ai", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "user.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.id_kind", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.user.name", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.user.principal", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.user.domain", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.user.directory", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.user.identity.source", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.user.principal.assurance", value: generatedValue13, present: generatedPresent13}},
 		conditions: familyConditionFacts{},
 	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetDeviceDecommissionDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+	return builder.buildGeneratedResolvedLog(generatedLogIdePluginDiscoveredDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogFleetDeviceHeartbeat(input LogFleetDeviceHeartbeatInput) (Record, error) {
-	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
+func (builder *FamilyBuilder) BuildLogIdePluginRemoved(input LogIdePluginRemovedInput) (Record, error) {
+	generatedValue2, generatedPresent2 := input.DefenseClawIdePluginVersion.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawIdePluginEnabled.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawIdePluginAI.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawAIDiscoveryScanID.Get()
+	generatedValue6, generatedPresent6 := input.UserID.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserIDKind.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawUserName.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawUserPrincipal.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawUserDomain.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawUserDirectory.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawUserIdentitySource.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawUserPrincipalAssurance.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}},
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "defenseclaw.ide.product", value: input.DefenseClawIdeProduct, present: true}, {key: "defenseclaw.ide.plugin.id", value: input.DefenseClawIdePluginID, present: true}, {key: "defenseclaw.ide.plugin.version", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ide.plugin.enabled", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ide.plugin.ai", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.ai.discovery.scan_id", value: generatedValue5, present: generatedPresent5}, {key: "user.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.id_kind", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.user.name", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.user.principal", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.user.domain", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.user.directory", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.user.identity.source", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.user.principal.assurance", value: generatedValue13, present: generatedPresent13}},
 		conditions: familyConditionFacts{},
 	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetDeviceHeartbeatDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+	return builder.buildGeneratedResolvedLog(generatedLogIdePluginRemovedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogFleetDeviceOffline(input LogFleetDeviceOfflineInput) (Record, error) {
-	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
+func (builder *FamilyBuilder) BuildLogIdentityObserved(input LogIdentityObservedInput) (Record, error) {
+	generatedValue2, generatedPresent2 := input.DefenseClawUserIDKind.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawUserName.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawUserPrincipal.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawUserDomain.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawUserDirectory.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawUserTenantID.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawUserIdentitySource.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawUserGroupCount.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSessionKind.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}},
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "user.id", value: input.UserID, present: true}, {key: "defenseclaw.user.principal.assurance", value: input.DefenseClawUserPrincipalAssurance, present: true}, {key: "defenseclaw.user.id_kind", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.user.name", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.user.principal", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.user.domain", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.user.directory", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.user.tenant_id", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.user.identity.source", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.user.group_count", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.session.kind", value: generatedValue10, present: generatedPresent10}},
 		conditions: familyConditionFacts{},
 	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetDeviceOfflineDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition), privateInput)
-}
-
-func (builder *FamilyBuilder) BuildLogFleetDeviceRegistered(input LogFleetDeviceRegisteredInput) (Record, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawEvaluationID.Get()
-	generatedValue1, generatedPresent1 := input.DefenseClawFindingID.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawScanID.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawPolicyID.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawPolicyVersion.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawEnforcementID.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawApprovalID.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAssetType.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetResultingState.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetFileAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetRuntimeAction.Get()
-	privateInput := familyLogBuildInput{
-		envelope:   input.Envelope,
-		severity:   input.Severity,
-		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.finding.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.scan.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.policy.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.policy.version", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.enforcement.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.approval.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.asset.resulting_state", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.target_ref", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.asset.target_path", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition_reason", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.transition_code", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.install_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.file_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.runtime_action", value: generatedValue19, present: generatedPresent19}},
-		conditions: familyConditionFacts{},
-	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetDeviceRegisteredDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
-}
-
-func (builder *FamilyBuilder) BuildLogFleetPolicyEmergency(input LogFleetPolicyEmergencyInput) (Record, error) {
-	generatedValue1, generatedPresent1 := input.DefenseClawAdminPrincipalRef.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawAdminAuthnMethod.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawAdminChangeSetHash.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawAdminActorRef.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawAdminOrigin.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawAdminTargetRef.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawAdminBeforeSummary.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAdminAfterSummary.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawAdminBeforeState.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAdminAfterState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAdminDiff.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAdminReason.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAdminReasonDetail.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAdminRevision.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAdminCurrentRevision.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAdminChangeCount.Get()
-	privateInput := familyLogBuildInput{
-		envelope: input.Envelope,
-		severity: input.Severity,
-		logLevel: input.LogLevel,
-		outcome:  Present(input.Outcome),
-		values:   familyFieldValues{{key: "defenseclaw.admin.operation", value: input.DefenseClawAdminOperation, present: true}, {key: "defenseclaw.admin.principal_ref", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.admin.authn_method", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.admin.change_set_hash", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.admin.actor_ref", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.admin.origin", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.admin.target_ref", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.admin.before_summary", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.admin.after_summary", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.admin.before_state", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.admin.after_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.admin.diff", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.admin.reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.admin.reason_detail", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.admin.revision", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.admin.current_revision", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.admin.change_count", value: generatedValue16, present: generatedPresent16}},
-		conditions: familyConditionFacts{
-			{
-				id: "admin-principal-known-v1",
-				state: func() familyConditionState {
-					if input.ConditionAdminPrincipalKnown {
-						return familyConditionTrue
-					}
-					return familyConditionFalse
-				}(),
-			},
-		},
-	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetPolicyEmergencyDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryControlPlaneMutation), privateInput)
-}
-
-func (builder *FamilyBuilder) BuildLogFleetPolicyPush(input LogFleetPolicyPushInput) (Record, error) {
-	generatedValue1, generatedPresent1 := input.DefenseClawAdminPrincipalRef.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawAdminAuthnMethod.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawAdminChangeSetHash.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawAdminActorRef.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawAdminOrigin.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawAdminTargetRef.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawAdminBeforeSummary.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawAdminAfterSummary.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawAdminBeforeState.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawAdminAfterState.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAdminDiff.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawAdminReason.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAdminReasonDetail.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAdminRevision.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAdminCurrentRevision.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAdminChangeCount.Get()
-	privateInput := familyLogBuildInput{
-		envelope: input.Envelope,
-		severity: input.Severity,
-		logLevel: input.LogLevel,
-		outcome:  Present(input.Outcome),
-		values:   familyFieldValues{{key: "defenseclaw.admin.operation", value: input.DefenseClawAdminOperation, present: true}, {key: "defenseclaw.admin.principal_ref", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.admin.authn_method", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.admin.change_set_hash", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.admin.actor_ref", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.admin.origin", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.admin.target_ref", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.admin.before_summary", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.admin.after_summary", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.admin.before_state", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.admin.after_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.admin.diff", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.admin.reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.admin.reason_detail", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.admin.revision", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.admin.current_revision", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.admin.change_count", value: generatedValue16, present: generatedPresent16}},
-		conditions: familyConditionFacts{
-			{
-				id: "admin-principal-known-v1",
-				state: func() familyConditionState {
-					if input.ConditionAdminPrincipalKnown {
-						return familyConditionTrue
-					}
-					return familyConditionFalse
-				}(),
-			},
-		},
-	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetPolicyPushDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryControlPlaneMutation), privateInput)
-}
-
-func (builder *FamilyBuilder) BuildLogFleetThreatIntelPush(input LogFleetThreatIntelPushInput) (Record, error) {
-	generatedValue12, generatedPresent12 := input.DefenseClawAIRuntimeAgent.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAIRuntimeCmdline.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAIRuntimeSignals.Get()
-	if generatedPresent14 {
-		generatedValue14 = append([]string(nil), generatedValue14...)
-	}
-	generatedValue15, generatedPresent15 := input.DefenseClawAIRuntimeProviders.Get()
-	if generatedPresent15 {
-		generatedValue15 = append([]string(nil), generatedValue15...)
-	}
-	privateInput := familyLogBuildInput{
-		envelope:   input.Envelope,
-		severity:   input.Severity,
-		logLevel:   input.LogLevel,
-		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.ai.runtime.processes_observed", value: input.DefenseClawAIRuntimeProcessesObserved, present: true}, {key: "defenseclaw.ai.runtime.processes_skipped", value: input.DefenseClawAIRuntimeProcessesSkipped, present: true}, {key: "defenseclaw.ai.runtime.connections_observed", value: input.DefenseClawAIRuntimeConnectionsObserved, present: true}, {key: "defenseclaw.ai.runtime.connections_unattributed", value: input.DefenseClawAIRuntimeConnectionsUnattributed, present: true}, {key: "defenseclaw.ai.runtime.host_plane_observations", value: input.DefenseClawAIRuntimeHostPlaneObservations, present: true}, {key: "defenseclaw.ai.runtime.host_plane_gated", value: input.DefenseClawAIRuntimeHostPlaneGated, present: true}, {key: "defenseclaw.ai.runtime.finding_id", value: input.DefenseClawAIRuntimeFindingID, present: true}, {key: "defenseclaw.ai.runtime.score", value: input.DefenseClawAIRuntimeScore, present: true}, {key: "defenseclaw.ai.runtime.severity", value: input.DefenseClawAIRuntimeSeverity, present: true}, {key: "defenseclaw.ai.runtime.process", value: input.DefenseClawAIRuntimeProcess, present: true}, {key: "defenseclaw.ai.runtime.correlation_verdict", value: input.DefenseClawAIRuntimeCorrelationVerdict, present: true}, {key: "defenseclaw.ai.runtime.correlation_reason", value: input.DefenseClawAIRuntimeCorrelationReason, present: true}, {key: "defenseclaw.ai.runtime.agent", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.ai.runtime.cmdline", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.ai.runtime.signals", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.ai.runtime.providers", value: generatedValue15, present: generatedPresent15}},
-		conditions: familyConditionFacts{},
-	}
-	return builder.buildGeneratedResolvedLog(generatedLogFleetThreatIntelPushDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+	return builder.buildGeneratedResolvedLog(generatedLogIdentityObservedDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
 func (builder *FamilyBuilder) BuildLogObservabilityProfileChanged(input LogObservabilityProfileChangedInput) (Record, error) {
@@ -4581,22 +5256,37 @@ func (builder *FamilyBuilder) BuildLogPolicyUpdated(input LogPolicyUpdatedInput)
 	generatedValue14, generatedPresent14 := input.DefenseClawAdminRevision.Get()
 	generatedValue15, generatedPresent15 := input.DefenseClawAdminCurrentRevision.Get()
 	generatedValue16, generatedPresent16 := input.DefenseClawAdminChangeCount.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawSandboxID.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawSandboxName.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue20, generatedPresent20 := input.DefenseClawSandboxDriver.Get()
-	generatedValue21, generatedPresent21 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue22, generatedPresent22 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue23, generatedPresent23 := input.DefenseClawSandboxProfile.Get()
-	generatedValue24, generatedPresent24 := input.DefenseClawSandboxPack.Get()
-	generatedValue25, generatedPresent25 := input.DefenseClawSandboxPhase.Get()
-	generatedValue26, generatedPresent26 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawSandboxID.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawSandboxName.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSandboxDriver.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxProfile.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxPack.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawSandboxPhase.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue38, generatedPresent38 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue39, generatedPresent39 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue40, generatedPresent40 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue41, generatedPresent41 := input.DefenseClawSubjectKey.Get()
 	privateInput := familyLogBuildInput{
 		envelope: input.Envelope,
 		severity: input.Severity,
 		logLevel: input.LogLevel,
 		outcome:  Present(input.Outcome),
-		values:   familyFieldValues{{key: "defenseclaw.admin.operation", value: input.DefenseClawAdminOperation, present: true}, {key: "defenseclaw.admin.principal_ref", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.admin.authn_method", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.admin.change_set_hash", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.admin.actor_ref", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.admin.origin", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.admin.target_ref", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.admin.before_summary", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.admin.after_summary", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.admin.before_state", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.admin.after_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.admin.diff", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.admin.reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.admin.reason_detail", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.admin.revision", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.admin.current_revision", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.admin.change_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.id", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.name", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.runtime", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.sandbox.driver", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.profile", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.sandbox.pack", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.phase", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue26, present: generatedPresent26}},
+		values:   familyFieldValues{{key: "defenseclaw.admin.operation", value: input.DefenseClawAdminOperation, present: true}, {key: "defenseclaw.admin.principal_ref", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.admin.authn_method", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.admin.change_set_hash", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.admin.actor_ref", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.admin.origin", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.admin.target_ref", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.admin.before_summary", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.admin.after_summary", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.admin.before_state", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.admin.after_state", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.admin.diff", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.admin.reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.admin.reason_detail", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.admin.revision", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.admin.current_revision", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.admin.change_count", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.policy.effective_digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.guardrail.profile.name", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.id", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.sandbox.name", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.runtime", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.driver", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.profile", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.pack", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.sandbox.phase", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue37, present: generatedPresent37}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue38, present: generatedPresent38}, {key: "defenseclaw.openshell.version", value: generatedValue39, present: generatedPresent39}, {key: "defenseclaw.openshell.install_mode", value: generatedValue40, present: generatedPresent40}, {key: "defenseclaw.subject.key", value: generatedValue41, present: generatedPresent41}},
 		conditions: familyConditionFacts{
 			{
 				id: "admin-principal-known-v1",
@@ -4664,74 +5354,710 @@ func (builder *FamilyBuilder) BuildLogRedactionProfileUpdated(input LogRedaction
 	return builder.buildGeneratedResolvedLog(generatedLogRedactionProfileUpdatedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryControlPlaneMutation), privateInput)
 }
 
-func (builder *FamilyBuilder) BuildLogSandboxLifecycle(input LogSandboxLifecycleInput) (Record, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawSandboxID.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSandboxDriver.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxProfile.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxPack.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxWorkdirMode.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPhasePrevious.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawSandboxLifecycleTrigger.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawSandboxExitCode.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawSandboxConditionType.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawSandboxConditionStatus.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawSandboxConditionReason.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawSandboxConditionMessage.Get()
+func (builder *FamilyBuilder) BuildLogSandboxAccessRefused(input LogSandboxAccessRefusedInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue29, generatedPresent29 := input.ServerAddress.Get()
+	generatedValue30, generatedPresent30 := input.ServerPort.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxPolicyRule.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawSandboxManagedReason.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.sandbox.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.sandbox.driver", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.profile", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.pack", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.phase", value: input.DefenseClawSandboxPhase, present: true}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.phase.previous", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.lifecycle.trigger", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.exit_code", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.condition.type", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.condition.status", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.condition.reason", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.condition.message", value: generatedValue16, present: generatedPresent16}},
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "server.address", value: generatedValue29, present: generatedPresent29}, {key: "server.port", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.policy.rule", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.sandbox.managed.reason", value: generatedValue32, present: generatedPresent32}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxAccessRefusedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxAskDecided(input LogSandboxAskDecidedInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxApprovalKind.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxApprovalScope.Get()
+	generatedValue31, generatedPresent31 := input.ServerAddress.Get()
+	generatedValue32, generatedPresent32 := input.ServerPort.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawApprovalID.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawSandboxDecisionStored.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawSandboxManagedReason.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.approval.kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.approval.scope", value: generatedValue30, present: generatedPresent30}, {key: "server.address", value: generatedValue31, present: generatedPresent31}, {key: "server.port", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.approval.id", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.approval.result", value: input.DefenseClawApprovalResult, present: true}, {key: "defenseclaw.sandbox.decision.stored", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.managed.reason", value: generatedValue36, present: generatedPresent36}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxAskDecidedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryApprovalResolution), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxForeignContainer(input LogSandboxForeignContainerInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxContainerImage.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.container.image", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.managed.action", value: input.DefenseClawSandboxManagedAction, present: true}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxForeignContainerDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxForeignSandbox(input LogSandboxForeignSandboxInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.managed.action", value: input.DefenseClawSandboxManagedAction, present: true}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxForeignSandboxDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxHostRunRefused(input LogSandboxHostRunRefusedInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxPolicyRule.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.managed.reason", value: input.DefenseClawSandboxManagedReason, present: true}, {key: "defenseclaw.sandbox.policy.rule", value: generatedValue30, present: generatedPresent30}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxHostRunRefusedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxHostRunUnavailable(input LogSandboxHostRunUnavailableInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxPolicyRule.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.managed.reason", value: input.DefenseClawSandboxManagedReason, present: true}, {key: "defenseclaw.sandbox.managed.action", value: input.DefenseClawSandboxManagedAction, present: true}, {key: "defenseclaw.sandbox.policy.rule", value: generatedValue31, present: generatedPresent31}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxHostRunUnavailableDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxInference(input LogSandboxInferenceInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.GenAIProviderName.Get()
+	generatedValue24, generatedPresent24 := input.GenAIRequestModel.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawSandboxInferenceStatus.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSandboxInferenceLatencyMs.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawSandboxInferenceOperation.Get()
+	generatedValue28, generatedPresent28 := input.UserID.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawUserIDKind.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawUserName.Get()
+	generatedValue31, generatedPresent31 := input.GenAIConversationID.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "gen_ai.provider.name", value: generatedValue23, present: generatedPresent23}, {key: "gen_ai.request.model", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.inference.status", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.inference.latency_ms", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.inference.operation", value: generatedValue27, present: generatedPresent27}, {key: "user.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.user.id_kind", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.name", value: generatedValue30, present: generatedPresent30}, {key: "gen_ai.conversation.id", value: generatedValue31, present: generatedPresent31}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxInferenceDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxLifecycle(input LogSandboxLifecycleInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.UserID.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawUserIDKind.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawUserName.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSandboxPhasePrevious.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawSandboxLifecycleTrigger.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawSandboxExitCode.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxConditionType.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxConditionStatus.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxConditionReason.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawSandboxConditionMessage.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: input.DefenseClawSandboxPhase, present: true}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "user.id", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.user.id_kind", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.user.name", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.phase.previous", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.lifecycle.trigger", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.sandbox.exit_code", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.condition.type", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.condition.status", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.condition.reason", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.sandbox.condition.message", value: generatedValue32, present: generatedPresent32}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSandboxLifecycleDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
 }
 
+func (builder *FamilyBuilder) BuildLogSandboxPolicyForeignRule(input LogSandboxPolicyForeignRuleInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue29, generatedPresent29 := input.ServerAddress.Get()
+	generatedValue30, generatedPresent30 := input.ServerPort.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawSandboxPolicyRule.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "server.address", value: generatedValue29, present: generatedPresent29}, {key: "server.port", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.managed.action", value: input.DefenseClawSandboxManagedAction, present: true}, {key: "defenseclaw.sandbox.policy.rule", value: generatedValue32, present: generatedPresent32}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxPolicyForeignRuleDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxPolicyRematched(input LogSandboxPolicyRematchedInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxPolicyPreviousProfile.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxPolicyPreviousDigest.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.policy.rematch.reason", value: input.DefenseClawSandboxPolicyRematchReason, present: true}, {key: "defenseclaw.sandbox.policy.previous_profile", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.policy.previous_digest", value: generatedValue31, present: generatedPresent31}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxPolicyRematchedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryControlPlaneMutation), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxPolicyResolved(input LogSandboxPolicyResolvedInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxManagedReason.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.managed.reason", value: generatedValue29, present: generatedPresent29}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxPolicyResolvedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxProcess(input LogSandboxProcessInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawSandboxProcessSource.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawSandboxProcessPid.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSandboxProcessExecutable.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawSandboxProcessCommandLine.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawSandboxProcessExitCode.Get()
+	generatedValue29, generatedPresent29 := input.UserID.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawUserIDKind.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawUserName.Get()
+	generatedValue32, generatedPresent32 := input.GenAIConversationID.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.process.event", value: input.DefenseClawSandboxProcessEvent, present: true}, {key: "defenseclaw.sandbox.process.source", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.process.pid", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.process.executable", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.process.command_line", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.sandbox.process.exit_code", value: generatedValue28, present: generatedPresent28}, {key: "user.id", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.user.id_kind", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.user.name", value: generatedValue31, present: generatedPresent31}, {key: "gen_ai.conversation.id", value: generatedValue32, present: generatedPresent32}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxProcessDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxProcessTree(input LogSandboxProcessTreeInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawSandboxProcessPid.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawSandboxProcessSource.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSandboxProcessHostPid.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawSandboxProcessExecID.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawSandboxProcessParentPid.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawSandboxProcessName.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxProcessExecutable.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawSandboxProcessCommandLine.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawSandboxProcessWorkingDirectory.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawSandboxProcessExitCode.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawSandboxProcessLineage.Get()
+	if generatedPresent34 {
+		generatedValue34 = append([]string(nil), generatedValue34...)
+	}
+	generatedValue35, generatedPresent35 := input.UserID.Get()
+	generatedValue36, generatedPresent36 := input.DefenseClawUserIDKind.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawUserName.Get()
+	generatedValue38, generatedPresent38 := input.GenAIConversationID.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Absent[Outcome](),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.process.event", value: input.DefenseClawSandboxProcessEvent, present: true}, {key: "defenseclaw.sandbox.process.pid", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.process.source", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.process.host_pid", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.process.exec_id", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.sandbox.process.parent_pid", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.process.name", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.process.executable", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.process.command_line", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.sandbox.process.working_directory", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.sandbox.process.exit_code", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.sandbox.process.lineage", value: generatedValue34, present: generatedPresent34}, {key: "user.id", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.user.id_kind", value: generatedValue36, present: generatedPresent36}, {key: "defenseclaw.user.name", value: generatedValue37, present: generatedPresent37}, {key: "gen_ai.conversation.id", value: generatedValue38, present: generatedPresent38}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxProcessTreeDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxSettingsDrift(input LogSandboxSettingsDriftInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue25, generatedPresent25 := input.UserID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawUserIDKind.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserName.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserPrincipal.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawSandboxManagedAction.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.policy.effective_digest", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.policy.generation", value: generatedValue24, present: generatedPresent24}, {key: "user.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.user.id_kind", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.name", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.principal", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.openshell.settings.field", value: input.DefenseClawOpenshellSettingsField, present: true}, {key: "defenseclaw.sandbox.managed.action", value: generatedValue30, present: generatedPresent30}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxSettingsDriftDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome), privateInput)
+}
+
+func (builder *FamilyBuilder) BuildLogSandboxSsh(input LogSandboxSshInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawSandboxSshAuth.Get()
+	generatedValue25, generatedPresent25 := input.ClientAddress.Get()
+	generatedValue26, generatedPresent26 := input.UserID.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawUserIDKind.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawUserName.Get()
+	privateInput := familyLogBuildInput{
+		envelope:   input.Envelope,
+		severity:   input.Severity,
+		logLevel:   input.LogLevel,
+		outcome:    Present(input.Outcome),
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.ssh.activity", value: input.DefenseClawSandboxSshActivity, present: true}, {key: "defenseclaw.sandbox.ssh.auth", value: generatedValue24, present: generatedPresent24}, {key: "client.address", value: generatedValue25, present: generatedPresent25}, {key: "user.id", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.user.id_kind", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.user.name", value: generatedValue28, present: generatedPresent28}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedResolvedLog(generatedLogSandboxSshDescriptor{}, resolveGeneratedLogMandatory(false), privateInput)
+}
+
 func (builder *FamilyBuilder) BuildLogSandboxWorkspace(input LogSandboxWorkspaceInput) (Record, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawSandboxID.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSandboxDriver.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxProfile.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxPack.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawSandboxPhase.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxWorkdirMode.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawEvaluationID.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawFindingID.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawScanID.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawPolicyID.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawPolicyVersion.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawEnforcementID.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawApprovalID.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawEnforcementRequestedAction.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawEnforcementEffectiveAction.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawEnforcementInitiator.Get()
-	generatedValue20, generatedPresent20 := input.DefenseClawEnforcementPreviousState.Get()
-	generatedValue21, generatedPresent21 := input.DefenseClawEnforcementResultingState.Get()
-	generatedValue22, generatedPresent22 := input.DefenseClawEnforcementFailureClass.Get()
-	generatedValue24, generatedPresent24 := input.DefenseClawSandboxWorkspaceSnapshotKind.Get()
-	generatedValue25, generatedPresent25 := input.DefenseClawSandboxWorkspaceSnapshotRef.Get()
-	generatedValue26, generatedPresent26 := input.DefenseClawSandboxWorkspacePullMode.Get()
-	generatedValue27, generatedPresent27 := input.DefenseClawSandboxWorkspaceFileCount.Get()
-	generatedValue28, generatedPresent28 := input.DefenseClawSandboxWorkspaceLinesAdded.Get()
-	generatedValue29, generatedPresent29 := input.DefenseClawSandboxWorkspaceLinesRemoved.Get()
-	generatedValue30, generatedPresent30 := input.DefenseClawSandboxWorkspaceFlaggedCount.Get()
-	generatedValue31, generatedPresent31 := input.DefenseClawSandboxWorkspaceByteCount.Get()
-	generatedValue32, generatedPresent32 := input.DefenseClawSandboxWorkspacePaths.Get()
-	if generatedPresent32 {
-		generatedValue32 = append([]string(nil), generatedValue32...)
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxProfile.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPack.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxPhase.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSubjectKey.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawEvaluationID.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawFindingID.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawScanID.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawPolicyID.Get()
+	generatedValue27, generatedPresent27 := input.DefenseClawPolicyVersion.Get()
+	generatedValue28, generatedPresent28 := input.DefenseClawEnforcementID.Get()
+	generatedValue29, generatedPresent29 := input.DefenseClawApprovalID.Get()
+	generatedValue30, generatedPresent30 := input.DefenseClawEnforcementRequestedAction.Get()
+	generatedValue31, generatedPresent31 := input.DefenseClawEnforcementEffectiveAction.Get()
+	generatedValue32, generatedPresent32 := input.DefenseClawEnforcementInitiator.Get()
+	generatedValue33, generatedPresent33 := input.DefenseClawEnforcementPreviousState.Get()
+	generatedValue34, generatedPresent34 := input.DefenseClawEnforcementResultingState.Get()
+	generatedValue35, generatedPresent35 := input.DefenseClawEnforcementFailureClass.Get()
+	generatedValue37, generatedPresent37 := input.DefenseClawSandboxWorkspaceSnapshotKind.Get()
+	generatedValue38, generatedPresent38 := input.DefenseClawSandboxWorkspaceSnapshotRef.Get()
+	generatedValue39, generatedPresent39 := input.DefenseClawSandboxWorkspacePullMode.Get()
+	generatedValue40, generatedPresent40 := input.DefenseClawSandboxWorkspaceFileCount.Get()
+	generatedValue41, generatedPresent41 := input.DefenseClawSandboxWorkspaceLinesAdded.Get()
+	generatedValue42, generatedPresent42 := input.DefenseClawSandboxWorkspaceLinesRemoved.Get()
+	generatedValue43, generatedPresent43 := input.DefenseClawSandboxWorkspaceFlaggedCount.Get()
+	generatedValue44, generatedPresent44 := input.DefenseClawSandboxWorkspaceByteCount.Get()
+	generatedValue45, generatedPresent45 := input.DefenseClawSandboxWorkspacePaths.Get()
+	if generatedPresent45 {
+		generatedValue45 = append([]string(nil), generatedValue45...)
 	}
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.sandbox.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.sandbox.driver", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.profile", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.pack", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.phase", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.evaluation.id", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.finding.id", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.scan.id", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.policy.id", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.policy.version", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.enforcement.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.approval.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.enforcement.requested_action", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.enforcement.effective_action", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.enforcement.initiator", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.enforcement.previous_state", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.enforcement.resulting_state", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.enforcement.failure_class", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.workspace.operation", value: input.DefenseClawSandboxWorkspaceOperation, present: true}, {key: "defenseclaw.sandbox.workspace.snapshot.kind", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.sandbox.workspace.snapshot.ref", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.sandbox.workspace.pull.mode", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.sandbox.workspace.file_count", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.sandbox.workspace.lines_added", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.sandbox.workspace.lines_removed", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.sandbox.workspace.flagged_count", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.sandbox.workspace.byte_count", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.sandbox.workspace.paths", value: generatedValue32, present: generatedPresent32}},
+		values:     familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: input.DefenseClawSandboxName, present: true}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.profile", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.pack", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.phase", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.openshell.version", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.openshell.install_mode", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.subject.key", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.evaluation.id", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.finding.id", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.scan.id", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.policy.id", value: generatedValue26, present: generatedPresent26}, {key: "defenseclaw.policy.version", value: generatedValue27, present: generatedPresent27}, {key: "defenseclaw.enforcement.id", value: generatedValue28, present: generatedPresent28}, {key: "defenseclaw.approval.id", value: generatedValue29, present: generatedPresent29}, {key: "defenseclaw.enforcement.requested_action", value: generatedValue30, present: generatedPresent30}, {key: "defenseclaw.enforcement.effective_action", value: generatedValue31, present: generatedPresent31}, {key: "defenseclaw.enforcement.initiator", value: generatedValue32, present: generatedPresent32}, {key: "defenseclaw.enforcement.previous_state", value: generatedValue33, present: generatedPresent33}, {key: "defenseclaw.enforcement.resulting_state", value: generatedValue34, present: generatedPresent34}, {key: "defenseclaw.enforcement.failure_class", value: generatedValue35, present: generatedPresent35}, {key: "defenseclaw.sandbox.workspace.operation", value: input.DefenseClawSandboxWorkspaceOperation, present: true}, {key: "defenseclaw.sandbox.workspace.snapshot.kind", value: generatedValue37, present: generatedPresent37}, {key: "defenseclaw.sandbox.workspace.snapshot.ref", value: generatedValue38, present: generatedPresent38}, {key: "defenseclaw.sandbox.workspace.pull.mode", value: generatedValue39, present: generatedPresent39}, {key: "defenseclaw.sandbox.workspace.file_count", value: generatedValue40, present: generatedPresent40}, {key: "defenseclaw.sandbox.workspace.lines_added", value: generatedValue41, present: generatedPresent41}, {key: "defenseclaw.sandbox.workspace.lines_removed", value: generatedValue42, present: generatedPresent42}, {key: "defenseclaw.sandbox.workspace.flagged_count", value: generatedValue43, present: generatedPresent43}, {key: "defenseclaw.sandbox.workspace.byte_count", value: generatedValue44, present: generatedPresent44}, {key: "defenseclaw.sandbox.workspace.paths", value: generatedValue45, present: generatedPresent45}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSandboxWorkspaceDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryEnforcedOutcome || input.MandatoryEnforcementStateChange), privateInput)
@@ -4768,22 +6094,35 @@ func (builder *FamilyBuilder) BuildLogSqliteWriteFailed(input LogSqliteWriteFail
 func (builder *FamilyBuilder) BuildLogSubsystemDegraded(input LogSubsystemDegradedInput) (Record, error) {
 	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
 	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawSandboxProfile.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawSandboxPack.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPhase.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxName.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxDriver.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxProfile.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxPack.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPhase.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSubjectKey.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.profile", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.pack", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.phase", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue13, present: generatedPresent13}},
+		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.profile.name", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.name", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.runtime", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.driver", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.profile", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.pack", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.phase", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.openshell.version", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.openshell.install_mode", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.subject.key", value: generatedValue26, present: generatedPresent26}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSubsystemDegradedDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition || input.MandatoryManagedAidFailOpen), privateInput)
@@ -4792,22 +6131,35 @@ func (builder *FamilyBuilder) BuildLogSubsystemDegraded(input LogSubsystemDegrad
 func (builder *FamilyBuilder) BuildLogSubsystemLifecycle(input LogSubsystemLifecycleInput) (Record, error) {
 	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
 	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawSandboxProfile.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawSandboxPack.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPhase.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxName.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxDriver.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxProfile.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxPack.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPhase.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSubjectKey.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.profile", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.pack", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.phase", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue13, present: generatedPresent13}},
+		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.profile.name", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.name", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.runtime", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.driver", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.profile", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.pack", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.phase", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.openshell.version", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.openshell.install_mode", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.subject.key", value: generatedValue26, present: generatedPresent26}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSubsystemLifecycleDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition), privateInput)
@@ -4816,22 +6168,35 @@ func (builder *FamilyBuilder) BuildLogSubsystemLifecycle(input LogSubsystemLifec
 func (builder *FamilyBuilder) BuildLogSubsystemReady(input LogSubsystemReadyInput) (Record, error) {
 	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
 	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawSandboxProfile.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawSandboxPack.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPhase.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxName.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxDriver.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxProfile.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxPack.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPhase.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSubjectKey.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.profile", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.pack", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.phase", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue13, present: generatedPresent13}},
+		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.profile.name", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.name", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.runtime", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.driver", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.profile", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.pack", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.phase", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.openshell.version", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.openshell.install_mode", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.subject.key", value: generatedValue26, present: generatedPresent26}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSubsystemReadyDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition), privateInput)
@@ -4840,22 +6205,35 @@ func (builder *FamilyBuilder) BuildLogSubsystemReady(input LogSubsystemReadyInpu
 func (builder *FamilyBuilder) BuildLogSubsystemRestored(input LogSubsystemRestoredInput) (Record, error) {
 	generatedValue2, generatedPresent2 := input.DefenseClawHealthErrorSummary.Get()
 	generatedValue3, generatedPresent3 := input.DefenseClawSchemaErrorCode.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawSandboxID.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawSandboxName.Get()
-	generatedValue6, generatedPresent6 := input.DefenseClawSandboxRuntime.Get()
-	generatedValue7, generatedPresent7 := input.DefenseClawSandboxDriver.Get()
-	generatedValue8, generatedPresent8 := input.DefenseClawSandboxImageDigest.Get()
-	generatedValue9, generatedPresent9 := input.DefenseClawSandboxPolicyVersion.Get()
-	generatedValue10, generatedPresent10 := input.DefenseClawSandboxProfile.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawSandboxPack.Get()
-	generatedValue12, generatedPresent12 := input.DefenseClawSandboxPhase.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailProfileDigest.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailProfileMatch.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawGuardrailProfileMatchedGroup.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawSandboxID.Get()
+	generatedValue9, generatedPresent9 := input.DefenseClawSandboxName.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawSandboxRuntime.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawSandboxDriver.Get()
+	generatedValue12, generatedPresent12 := input.DefenseClawSandboxDriverReason.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawSandboxImageDigest.Get()
+	generatedValue14, generatedPresent14 := input.DefenseClawSandboxPolicyVersion.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawSandboxProfile.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawSandboxPack.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawSandboxPhase.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawSandboxWorkdirMode.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawSandboxBindingID.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawSandboxRegistrationID.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawSandboxPolicyDigest.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawSandboxPolicyGeneration.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawSandboxPolicyProvisional.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawOpenshellVersion.Get()
+	generatedValue25, generatedPresent25 := input.DefenseClawOpenshellInstallMode.Get()
+	generatedValue26, generatedPresent26 := input.DefenseClawSubjectKey.Get()
 	privateInput := familyLogBuildInput{
 		envelope:   input.Envelope,
 		severity:   input.Severity,
 		logLevel:   input.LogLevel,
 		outcome:    Present(input.Outcome),
-		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.sandbox.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.sandbox.name", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.sandbox.runtime", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.sandbox.driver", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.profile", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.pack", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.phase", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue13, present: generatedPresent13}},
+		values:     familyFieldValues{{key: "defenseclaw.health.subsystem", value: input.DefenseClawHealthSubsystem, present: true}, {key: "defenseclaw.health.state", value: input.DefenseClawHealthState, present: true}, {key: "defenseclaw.health.error_summary", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.schema.error_code", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.profile.name", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.profile.digest", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.profile.match", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.guardrail.profile.matched_group", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.sandbox.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.sandbox.name", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.sandbox.runtime", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.sandbox.driver", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.sandbox.driver_reason", value: generatedValue12, present: generatedPresent12}, {key: "defenseclaw.sandbox.image.digest", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.sandbox.policy.version", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.sandbox.profile", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.sandbox.pack", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.sandbox.phase", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.sandbox.workdir.mode", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.sandbox.binding.id", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.sandbox.registration.id", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.sandbox.policy.digest", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.sandbox.policy.generation", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.sandbox.policy.provisional", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.openshell.version", value: generatedValue24, present: generatedPresent24}, {key: "defenseclaw.openshell.install_mode", value: generatedValue25, present: generatedPresent25}, {key: "defenseclaw.subject.key", value: generatedValue26, present: generatedPresent26}},
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedResolvedLog(generatedLogSubsystemRestoredDescriptor{}, resolveGeneratedLogMandatory(input.MandatoryDurableHealthTransition), privateInput)
@@ -5383,6 +6761,19 @@ func (builder *FamilyBuilder) BuildMetricDefenseClawHTTPRequestDuration(input Me
 	return builder.buildGeneratedMetric(generatedMetricDefenseClawHTTPRequestDurationDescriptor{}, privateInput)
 }
 
+func (builder *FamilyBuilder) BuildMetricDefenseClawInventoryIdePlugins(input MetricDefenseClawInventoryIdePluginsInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawIdeProduct.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawIdePluginAI.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawIdePluginEnabled.Get()
+	privateInput := familyMetricBuildInput{
+		envelope:   input.Envelope,
+		value:      familyInt64MetricNumber(input.Value),
+		labels:     familyFieldValues{{key: "defenseclaw.ide.product", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.ide.plugin.ai", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.ide.plugin.enabled", value: generatedValue2, present: generatedPresent2}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedMetric(generatedMetricDefenseClawInventoryIdePluginsDescriptor{}, privateInput)
+}
+
 func (builder *FamilyBuilder) BuildMetricDefenseClawJudgePersistBatchSize(input MetricDefenseClawJudgePersistBatchSizeInput) (Record, error) {
 	privateInput := familyMetricBuildInput{
 		envelope:   input.Envelope,
@@ -5432,6 +6823,34 @@ func (builder *FamilyBuilder) BuildMetricDefenseClawJudgeSemaphoreDrops(input Me
 		conditions: familyConditionFacts{},
 	}
 	return builder.buildGeneratedMetric(generatedMetricDefenseClawJudgeSemaphoreDropsDescriptor{}, privateInput)
+}
+
+func (builder *FamilyBuilder) BuildMetricDefenseClawKernelEvents(input MetricDefenseClawKernelEventsInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawAIRuntimeKernelPolicyOwner.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawAIRuntimeKernelOutcome.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawMetricKernelControl.Get()
+	privateInput := familyMetricBuildInput{
+		envelope:   input.Envelope,
+		value:      familyInt64MetricNumber(input.Value),
+		labels:     familyFieldValues{{key: "defenseclaw.ai.runtime.kernel.policy_owner", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.ai.runtime.kernel.outcome", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.metric.kernel_control", value: generatedValue2, present: generatedPresent2}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedMetric(generatedMetricDefenseClawKernelEventsDescriptor{}, privateInput)
+}
+
+func (builder *FamilyBuilder) BuildMetricDefenseClawKernelState(input MetricDefenseClawKernelStateInput) (Record, error) {
+	generatedValue0, generatedPresent0 := input.DefenseClawAIRuntimeKernelHelperMode.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawAIRuntimeKernelApproval.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawAIRuntimeKernelPaused.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawAIRuntimePlaneBackend.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawAIRuntimeTetragonInstalled.Get()
+	privateInput := familyMetricBuildInput{
+		envelope:   input.Envelope,
+		value:      familyInt64MetricNumber(input.Value),
+		labels:     familyFieldValues{{key: "defenseclaw.ai.runtime.kernel.helper_mode", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.ai.runtime.kernel.approval", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.ai.runtime.kernel.paused", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.ai.runtime.plane_backend", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.ai.runtime.tetragon.installed", value: generatedValue4, present: generatedPresent4}},
+		conditions: familyConditionFacts{},
+	}
+	return builder.buildGeneratedMetric(generatedMetricDefenseClawKernelStateDescriptor{}, privateInput)
 }
 
 func (builder *FamilyBuilder) BuildMetricDefenseClawManagedAidFailOpenDecisions(input MetricDefenseClawManagedAidFailOpenDecisionsInput) (Record, error) {
@@ -6419,18 +7838,20 @@ func (builder *FamilyBuilder) BuildSpanAssetTransition(input SpanAssetTransition
 	generatedValue7, generatedPresent7 := input.DefenseClawPolicyVersion.Get()
 	generatedValue8, generatedPresent8 := input.DefenseClawEnforcementID.Get()
 	generatedValue9, generatedPresent9 := input.DefenseClawApprovalID.Get()
-	generatedValue11, generatedPresent11 := input.DefenseClawAssetType.Get()
-	generatedValue13, generatedPresent13 := input.DefenseClawAssetPreviousState.Get()
-	generatedValue14, generatedPresent14 := input.DefenseClawAssetResultingState.Get()
-	generatedValue15, generatedPresent15 := input.DefenseClawAssetTargetRef.Get()
-	generatedValue16, generatedPresent16 := input.DefenseClawAssetTargetPath.Get()
-	generatedValue17, generatedPresent17 := input.DefenseClawAssetTransitionReason.Get()
-	generatedValue18, generatedPresent18 := input.DefenseClawAssetTransitionCode.Get()
-	generatedValue19, generatedPresent19 := input.DefenseClawAssetTransitionInitiator.Get()
-	generatedValue20, generatedPresent20 := input.DefenseClawAssetInstallAction.Get()
-	generatedValue21, generatedPresent21 := input.DefenseClawAssetFileAction.Get()
-	generatedValue22, generatedPresent22 := input.DefenseClawAssetRuntimeAction.Get()
-	generatedValue23, generatedPresent23 := input.ErrorType.Get()
+	generatedValue10, generatedPresent10 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue11, generatedPresent11 := input.DefenseClawPolicyGeneration.Get()
+	generatedValue13, generatedPresent13 := input.DefenseClawAssetType.Get()
+	generatedValue15, generatedPresent15 := input.DefenseClawAssetPreviousState.Get()
+	generatedValue16, generatedPresent16 := input.DefenseClawAssetResultingState.Get()
+	generatedValue17, generatedPresent17 := input.DefenseClawAssetTargetRef.Get()
+	generatedValue18, generatedPresent18 := input.DefenseClawAssetTargetPath.Get()
+	generatedValue19, generatedPresent19 := input.DefenseClawAssetTransitionReason.Get()
+	generatedValue20, generatedPresent20 := input.DefenseClawAssetTransitionCode.Get()
+	generatedValue21, generatedPresent21 := input.DefenseClawAssetTransitionInitiator.Get()
+	generatedValue22, generatedPresent22 := input.DefenseClawAssetInstallAction.Get()
+	generatedValue23, generatedPresent23 := input.DefenseClawAssetFileAction.Get()
+	generatedValue24, generatedPresent24 := input.DefenseClawAssetRuntimeAction.Get()
+	generatedValue25, generatedPresent25 := input.ErrorType.Get()
 	generatedResourceValue4, generatedResourcePresent4 := input.ResourceHostName.Get()
 	generatedResourceValue5, generatedResourcePresent5 := input.ResourceHostArch.Get()
 	generatedResourceValue6, generatedResourcePresent6 := input.ResourceOsType.Get()
@@ -6455,7 +7876,7 @@ func (builder *FamilyBuilder) BuildSpanAssetTransition(input SpanAssetTransition
 		status:            input.Status,
 		resource:          resource,
 		scope:             input.Scope,
-		values:            familyFieldValues{{key: "defenseclaw.connector.source", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.run.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.operation.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.evaluation.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.finding.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.scan.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.policy.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.version", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.enforcement.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.approval.id", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.resulting_state", value: generatedValue14, present: generatedPresent14}, {key: "defenseclaw.asset.target_ref", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.target_path", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.transition_reason", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.transition_code", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.install_action", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.file_action", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.asset.runtime_action", value: generatedValue22, present: generatedPresent22}, {key: "error.type", value: generatedValue23, present: generatedPresent23}},
+		values:            familyFieldValues{{key: "defenseclaw.connector.source", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.run.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.operation.id", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.evaluation.id", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.finding.id", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.scan.id", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.policy.id", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.version", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.enforcement.id", value: generatedValue8, present: generatedPresent8}, {key: "defenseclaw.approval.id", value: generatedValue9, present: generatedPresent9}, {key: "defenseclaw.policy.effective_digest", value: generatedValue10, present: generatedPresent10}, {key: "defenseclaw.policy.generation", value: generatedValue11, present: generatedPresent11}, {key: "defenseclaw.asset.id", value: input.DefenseClawAssetID, present: true}, {key: "defenseclaw.asset.type", value: generatedValue13, present: generatedPresent13}, {key: "defenseclaw.asset.transition", value: input.DefenseClawAssetTransition, present: true}, {key: "defenseclaw.asset.previous_state", value: generatedValue15, present: generatedPresent15}, {key: "defenseclaw.asset.resulting_state", value: generatedValue16, present: generatedPresent16}, {key: "defenseclaw.asset.target_ref", value: generatedValue17, present: generatedPresent17}, {key: "defenseclaw.asset.target_path", value: generatedValue18, present: generatedPresent18}, {key: "defenseclaw.asset.transition_reason", value: generatedValue19, present: generatedPresent19}, {key: "defenseclaw.asset.transition_code", value: generatedValue20, present: generatedPresent20}, {key: "defenseclaw.asset.transition_initiator", value: generatedValue21, present: generatedPresent21}, {key: "defenseclaw.asset.install_action", value: generatedValue22, present: generatedPresent22}, {key: "defenseclaw.asset.file_action", value: generatedValue23, present: generatedPresent23}, {key: "defenseclaw.asset.runtime_action", value: generatedValue24, present: generatedPresent24}, {key: "error.type", value: generatedValue25, present: generatedPresent25}},
 		conditions: familyConditionFacts{
 			{
 				id: "connector-known-v1",
@@ -6982,12 +8403,15 @@ type SpanAgentTransitionContentRedactedEventInput struct {
 type SpanAgentTransitionHookDecisionEventInput struct {
 	TimeUnixNano                        uint64
 	DroppedAttributesCount              Optional[uint32]
+	DefenseClawGuardrailProfileName     Optional[string]
 	DefenseClawEvaluationID             Optional[string]
 	DefenseClawGuardrailRawAction       Optional[string]
 	DefenseClawGuardrailEffectiveAction Optional[string]
 	DefenseClawSecuritySeverity         Optional[string]
 	DefenseClawGuardrailWouldBlock      Optional[bool]
 	DefenseClawGuardrailEnforced        Optional[bool]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 }
 
 type SpanAssetScanEnforcementRequestedEventInput struct {
@@ -7125,12 +8549,15 @@ type SpanNetworkRequestEnforcementRequestedEventInput struct {
 type SpanNetworkRequestGuardrailDecisionEventInput struct {
 	TimeUnixNano                        uint64
 	DroppedAttributesCount              Optional[uint32]
+	DefenseClawGuardrailProfileName     Optional[string]
 	DefenseClawEvaluationID             Optional[string]
 	DefenseClawGuardrailDecision        Optional[string]
 	DefenseClawGuardrailEffectiveAction Optional[string]
 	DefenseClawSecuritySeverity         Optional[string]
 	DefenseClawGuardrailWouldBlock      Optional[bool]
 	DefenseClawGuardrailEnforced        Optional[bool]
+	DefenseClawPolicyEffectiveDigest    Optional[string]
+	DefenseClawPolicyGeneration         Optional[int64]
 }
 
 type SpanTelemetryNormalizeTelemetryDroppedEventInput struct {
@@ -7189,17 +8616,20 @@ func NewSpanAgentTransitionContentRedactedEvent(input SpanAgentTransitionContent
 }
 
 func NewSpanAgentTransitionHookDecisionEvent(input SpanAgentTransitionHookDecisionEventInput) (TraceEventInput, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawEvaluationID.Get()
-	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailRawAction.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailEffectiveAction.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSecuritySeverity.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailWouldBlock.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailEnforced.Get()
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawEvaluationID.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailRawAction.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailEffectiveAction.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSecuritySeverity.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailWouldBlock.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailEnforced.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
 	return TraceEventInput{
 		TimeUnixNano:           input.TimeUnixNano,
 		DroppedAttributesCount: input.DroppedAttributesCount,
 		contract:               generatedSpanAgentTransitionHookDecisionEventContract(),
-		values:                 familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.raw_action", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.effective_action", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.security.severity", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.would_block", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.enforced", value: generatedValue5, present: generatedPresent5}},
+		values:                 familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.evaluation.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.raw_action", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.effective_action", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.security.severity", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.would_block", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.enforced", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}},
 		conditions:             familyConditionFacts{},
 	}, nil
 }
@@ -7411,17 +8841,20 @@ func NewSpanNetworkRequestEnforcementRequestedEvent(input SpanNetworkRequestEnfo
 }
 
 func NewSpanNetworkRequestGuardrailDecisionEvent(input SpanNetworkRequestGuardrailDecisionEventInput) (TraceEventInput, error) {
-	generatedValue0, generatedPresent0 := input.DefenseClawEvaluationID.Get()
-	generatedValue1, generatedPresent1 := input.DefenseClawGuardrailDecision.Get()
-	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailEffectiveAction.Get()
-	generatedValue3, generatedPresent3 := input.DefenseClawSecuritySeverity.Get()
-	generatedValue4, generatedPresent4 := input.DefenseClawGuardrailWouldBlock.Get()
-	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailEnforced.Get()
+	generatedValue0, generatedPresent0 := input.DefenseClawGuardrailProfileName.Get()
+	generatedValue1, generatedPresent1 := input.DefenseClawEvaluationID.Get()
+	generatedValue2, generatedPresent2 := input.DefenseClawGuardrailDecision.Get()
+	generatedValue3, generatedPresent3 := input.DefenseClawGuardrailEffectiveAction.Get()
+	generatedValue4, generatedPresent4 := input.DefenseClawSecuritySeverity.Get()
+	generatedValue5, generatedPresent5 := input.DefenseClawGuardrailWouldBlock.Get()
+	generatedValue6, generatedPresent6 := input.DefenseClawGuardrailEnforced.Get()
+	generatedValue7, generatedPresent7 := input.DefenseClawPolicyEffectiveDigest.Get()
+	generatedValue8, generatedPresent8 := input.DefenseClawPolicyGeneration.Get()
 	return TraceEventInput{
 		TimeUnixNano:           input.TimeUnixNano,
 		DroppedAttributesCount: input.DroppedAttributesCount,
 		contract:               generatedSpanNetworkRequestGuardrailDecisionEventContract(),
-		values:                 familyFieldValues{{key: "defenseclaw.evaluation.id", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.guardrail.decision", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.effective_action", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.security.severity", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.guardrail.would_block", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.enforced", value: generatedValue5, present: generatedPresent5}},
+		values:                 familyFieldValues{{key: "defenseclaw.guardrail.profile.name", value: generatedValue0, present: generatedPresent0}, {key: "defenseclaw.evaluation.id", value: generatedValue1, present: generatedPresent1}, {key: "defenseclaw.guardrail.decision", value: generatedValue2, present: generatedPresent2}, {key: "defenseclaw.guardrail.effective_action", value: generatedValue3, present: generatedPresent3}, {key: "defenseclaw.security.severity", value: generatedValue4, present: generatedPresent4}, {key: "defenseclaw.guardrail.would_block", value: generatedValue5, present: generatedPresent5}, {key: "defenseclaw.guardrail.enforced", value: generatedValue6, present: generatedPresent6}, {key: "defenseclaw.policy.effective_digest", value: generatedValue7, present: generatedPresent7}, {key: "defenseclaw.policy.generation", value: generatedValue8, present: generatedPresent8}},
 		conditions:             familyConditionFacts{},
 	}, nil
 }
