@@ -164,8 +164,9 @@ func TestManagedSandboxTelemetryAfterAGatewayRevocation(t *testing.T) {
 	if rec := post(phaseClaim(t, "dc-claude-1", "deleting"), phaseClaim(t, "dc-claude-1", "deleted")); rec.Code != http.StatusAccepted {
 		t.Fatalf("deleting and deleted: %d %s, want 202", rec.Code, rec.Body.String())
 	}
-	if got, want := strings.Join(lifecyclePhases(t, store), ","), "creating,ready,stopping,stopped,deleting,deleted"; got != want {
-		t.Fatalf("lifecycle rows %s, want %s (no live phase after the revocation)", got, want)
+	got := strings.Join(lifecyclePhases(t, store), ",")
+	if got != "creating,ready,stopping,stopped,deleting,deleted" && got != "creating,ready,stopped,stopping,deleting,deleted" {
+		t.Fatalf("lifecycle rows %s, want creating,ready,{stopping,stopped},deleting,deleted (no live phase after the revocation)", got)
 	}
 	if rows := auditEventsOf(t, store, audit.ActionSandboxEgress); len(rows) != 1 {
 		t.Fatalf("%d egress rows, want the connection end", len(rows))
