@@ -47,6 +47,9 @@ import (
 // gateway observes its config. The runtime graph's own reload audit row must
 // retain that identity, even when it is the only config.change.applied row.
 func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("configwrite.Locked UID-based actor is not available on Windows")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	raw := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability: {}\n", fixture.dataDir))
 	const id = "b-01JA0000000000000000000033"

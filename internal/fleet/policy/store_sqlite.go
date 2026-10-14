@@ -35,12 +35,14 @@ type SQLitePolicyStore struct {
 // NewSQLitePolicyStore opens (or creates) a SQLite database at the given path
 // and initializes the policies table.
 func NewSQLitePolicyStore(dbPath string) (*SQLitePolicyStore, error) {
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if info, err := os.Stat(dbPath); os.IsNotExist(err) {
 		f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("create sqlite %s: %w", dbPath, err)
 		}
 		f.Close()
+	} else if err == nil && info.Mode().Perm()&0077 != 0 {
+		_ = os.Chmod(dbPath, 0600)
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {

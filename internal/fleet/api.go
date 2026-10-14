@@ -43,7 +43,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const tenantDenied uint16 = 65535
 
 const (
 	auditDeviceRegistered   = "fleet.device.registered"
@@ -238,23 +237,23 @@ func (a *API) emitAlert(severity, summary string, details map[string]any) {
 }
 
 // tenantFromRequest extracts the tenant scope for the authenticated request.
-func (a *API) tenantFromRequest(r *http.Request) uint16 {
+// Returns (tenantID, true) on success. tenantID 0 means admin (global scope).
+// Returns (0, false) when authentication fails.
+func (a *API) tenantFromRequest(r *http.Request) (uint16, bool) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return tenantDenied
+		return 0, false
 	}
 	got := strings.TrimPrefix(auth, "Bearer ")
 	if got == "" {
-		return tenantDenied
+		return 0, false
 	}
 
-	// Rotated admin token — global access (tenant 0 = admin).
 	tp := a.currentToken.Load()
 	if tp != nil && *tp != "" && subtle.ConstantTimeCompare([]byte(got), []byte(*tp)) == 1 {
-		return 0
+		return 0, true
 	}
 
-	// Check tenant-scoped tokens.
 	a.tenantScopesMu.RLock()
 	for tok, tid := range a.tenantScopes {
 		if tok == "" || tid == 0 {
@@ -262,18 +261,18 @@ func (a *API) tenantFromRequest(r *http.Request) uint16 {
 		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) == 1 {
 			a.tenantScopesMu.RUnlock()
-			return tid
+			return tid, true
 		}
 	}
 	a.tenantScopesMu.RUnlock()
 
-	return tenantDenied
+	return 0, false
 }
 
 // authorizedForDevice checks if the request is authorized for this device's tenant.
 func (a *API) authorizedForDevice(r *http.Request, tenantID uint16) bool {
-	tid := a.tenantFromRequest(r)
-	if tid == tenantDenied {
+	tid, ok := a.tenantFromRequest(r)
+	if !ok {
 		return false
 	}
 	return tid == 0 || tid == tenantID
@@ -411,7 +410,7 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		limit = maxPageSize
 	}
 
-	tid := a.tenantFromRequest(r)
+	tid, _ := a.tenantFromRequest(r)
 	allDevices := a.manager.ListDevices()
 	health := a.manager.GetFleetHealth()
 
@@ -836,7 +835,7 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := a.tenantFromRequest(r)
+	callerTenant, _ := a.tenantFromRequest(r)
 	if callerTenant != 0 && callerTenant != req.TenantID {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -916,7 +915,7 @@ func (a *API) listPolicyVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := a.tenantFromRequest(r)
+	callerTenant, _ := a.tenantFromRequest(r)
 	if callerTenant != 0 && callerTenant != uint16(tenantID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -970,7 +969,7 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := a.tenantFromRequest(r)
+	callerTenant, _ := a.tenantFromRequest(r)
 	if callerTenant != 0 && callerTenant != req.TenantID {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -1028,7 +1027,7 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 
-	if a.tenantFromRequest(r) != 0 {
+	if tid, ok := a.tenantFromRequest(r); !ok || tid != 0 {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "threat intel push requires admin access",
 		})
@@ -1138,7 +1137,7 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	var keyDeleteFailed []uint64
 	deadline := time.Now().Add(30 * time.Second)
 
-	requestTID := a.tenantFromRequest(r)
+	requestTID, _ := a.tenantFromRequest(r)
 	var tenantDenied []uint64
 
 	for _, d := range req.Devices {
@@ -1225,6 +1224,11 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 // rotateToken handles POST /token/rotate — generates a new 32-byte random
 // fleet API token, updates DCLAW_FLEET_API_TOKEN in the process environment,
 func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
+	tid, ok := a.tenantFromRequest(r)
+	if !ok || tid != 0 {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token rotation requires admin credentials"})
+		return
+	}
 	if r.TLS == nil {
 		fwdProto := r.Header.Get("X-Forwarded-Proto")
 		allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
@@ -1282,6 +1286,12 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 
 // rotateDeviceKey handles POST /devices/{id}/rotate-key — generates a new 32-byte
 func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
+	callerTID, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "device key rotation requires valid credentials"})
+		return
+	}
+	_ = callerTID
 	if r.TLS == nil {
 		fwdProto := r.Header.Get("X-Forwarded-Proto")
 		allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
