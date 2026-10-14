@@ -61,6 +61,34 @@ cmake .. -DDCLAW_PROFILE=EDGE      # for edge gateways
 
 ---
 
+## Production Deployment
+
+### Required Environment Variables
+
+| Variable | Description |
+|---|---|
+| `DCLAW_AUDIT_KEY` | Hex-encoded 32-byte HMAC key for tamper-evident audit chain |
+| `DCLAW_OTA_KEY` | Hex-encoded 32-byte key for OTA policy signature verification |
+| `DCLAW_MQTT_BROKER_URL` | `mqtts://` URL for the MQTT broker (TLS required in production) |
+| `DCLAW_DEVICE_KEY` | Hex-encoded 32-byte per-device HMAC key for verdict signing |
+
+### Required systemd Configuration
+
+The edge-connector writes its IPC socket to `/run/defenseclaw/`. Create the
+directory via systemd:
+
+```ini
+[Service]
+RuntimeDirectory=defenseclaw
+RuntimeDirectoryMode=0750
+User=defenseclaw
+EnvironmentFile=/etc/defenseclaw/edge-connector.env
+```
+
+Generate keys with: `python3 -c "import secrets; print(secrets.token_hex(32))"`
+
+---
+
 ## Configuration
 
 ### Step 1: Edit the Policy

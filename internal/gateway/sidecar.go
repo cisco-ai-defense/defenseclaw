@@ -8052,7 +8052,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
 		}
 
-		policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, nil)
+		policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, &fleetpolicy.Config{
+			CompilerPath: s.currentConfig().Fleet.EffectivePolicyCompilerPath(),
+		})
 
 		fleetSettings := fleet.FleetSettings{
 			APIToken:          s.currentConfig().Fleet.ResolvedAPIToken(),

@@ -1151,23 +1151,21 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
-			if a.keyStore != nil {
-				var keyErr error
-				for attempt := 0; attempt < 3; attempt++ {
-					if keyErr = a.keyStore.DeleteDeviceKey(fullID); keyErr == nil {
-						break
-					}
-					time.Sleep(50 * time.Millisecond)
+		if a.keyStore != nil {
+			var keyErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				if keyErr = a.keyStore.DeleteDeviceKey(fullID); keyErr == nil {
+					break
 				}
-				if keyErr != nil {
-					log.Printf("WARN: device key deletion failed for %d: %v", fullID, keyErr)
-					keyDeleteFailed = append(keyDeleteFailed, fullID)
-				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			// Notify the MQTT bridge so it immediately rejects any further
-			// messages (heartbeats, registrations, verdict requests) from
-			// this device without waiting for a process restart.
+			if keyErr != nil {
+				log.Printf("WARN: device key deletion failed for %d, skipping decommission: %v", fullID, keyErr)
+				keyDeleteFailed = append(keyDeleteFailed, fullID)
+				continue
+			}
+		}
+		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
 			if a.bridge != nil {
 				a.bridge.MarkDecommissioned(fullID)
 			}
