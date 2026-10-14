@@ -167,23 +167,37 @@ int dclaw_paho_read(Network *net, unsigned char *buf, int len, int timeout_ms) {
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
     if (net->tls_active) {
         int ret = dclaw_tls_read(buf, (size_t)len, timeout_ms);
-        if (ret == -2) return 0;  /* timeout → Paho retries */
+        if (ret == -2) return 0;
         return (ret > 0) ? ret : -1;
     }
 #endif
-    struct pollfd pfd = { .fd = net->my_socket, .events = POLLIN };
-    int rc = poll(&pfd, 1, timeout_ms);
-    if (rc <= 0) return 0;  /* timeout or error → Paho retries */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t deadline_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000
+                           + (uint64_t)timeout_ms;
 
     int bytes = 0;
     while (bytes < len) {
-        ssize_t n = read(net->my_socket, buf + bytes, (size_t)(len - bytes));
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+        int remaining = (int)(deadline_ms - now_ms);
+        if (remaining <= 0) break;
+
+        struct pollfd pfd = { .fd = net->my_socket, .events = POLLIN };
+        int rc = poll(&pfd, 1, remaining);
+        if (rc < 0) {
             if (errno == EINTR) continue;
             return -1;
         }
-        if (n == 0) return -1; /* connection closed */
+        if (rc == 0) break;
+
+        ssize_t n = read(net->my_socket, buf + bytes, (size_t)(len - bytes));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
         bytes += (int)n;
     }
     return bytes;
@@ -525,31 +539,32 @@ int dclaw_mqtt_connect(void) {
         return -1;
     }
 
-    /* Step 4: Subscribe to device topics via Paho */
-    char topic[128];
+    /* Step 4: Subscribe to device topics via Paho.
+     * Each subscription needs its own persistent buffer because Paho's
+     * MQTTSubscribe stores the topic filter POINTER, not a copy. */
+    static char topic_verdict[128];
+    static char topic_policy[128];
+    static char topic_emergency[128];
 
-    /* Subscribe to verdict responses (device-specific) */
-    snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/%u/verdict/resp",
+    snprintf(topic_verdict, sizeof(topic_verdict), "defenseclaw/%u/%u/%u/verdict/resp",
              s->device.tenant_id, s->device.fleet_id, s->device.device_id);
-    if (MQTTSubscribe(&mqtt_ctx.paho, topic, QOS1, paho_message_handler) != SUCCESS) {
+    if (MQTTSubscribe(&mqtt_ctx.paho, topic_verdict, QOS1, paho_message_handler) != SUCCESS) {
         fprintf(stderr, "[DCLAW-MQTT] Subscribe to verdict/resp failed\n");
         mqtt_mark_disconnected();
         return -1;
     }
 
-    /* Subscribe to OTA policy updates (fleet-wide) */
-    snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/ota/policy",
+    snprintf(topic_policy, sizeof(topic_policy), "defenseclaw/%u/%u/ota/policy",
              s->device.tenant_id, s->device.fleet_id);
-    if (MQTTSubscribe(&mqtt_ctx.paho, topic, QOS1, paho_message_handler) != SUCCESS) {
+    if (MQTTSubscribe(&mqtt_ctx.paho, topic_policy, QOS1, paho_message_handler) != SUCCESS) {
         fprintf(stderr, "[DCLAW-MQTT] Subscribe to ota/policy failed\n");
         mqtt_mark_disconnected();
         return -1;
     }
 
-    /* Subscribe to emergency broadcasts (fleet-wide) */
-    snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/ota/emergency",
+    snprintf(topic_emergency, sizeof(topic_emergency), "defenseclaw/%u/%u/ota/emergency",
              s->device.tenant_id, s->device.fleet_id);
-    if (MQTTSubscribe(&mqtt_ctx.paho, topic, QOS1, paho_message_handler) != SUCCESS) {
+    if (MQTTSubscribe(&mqtt_ctx.paho, topic_emergency, QOS1, paho_message_handler) != SUCCESS) {
         fprintf(stderr, "[DCLAW-MQTT] Subscribe to ota/emergency failed\n");
         mqtt_mark_disconnected();
         return -1;

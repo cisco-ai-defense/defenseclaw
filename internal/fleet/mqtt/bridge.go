@@ -192,8 +192,6 @@ type Bridge struct {
 
 	decommStore DecommissionChecker
 
-	requireClientID bool
-
 	// Stats for observability
 	mu                  sync.RWMutex
 	heartbeatsProcessed uint64
@@ -298,11 +296,6 @@ func (b *Bridge) SetKeyProvider(kp DeviceKeyProvider) {
 func (b *Bridge) SetDecommissionStore(ds DecommissionChecker) {
 	b.decommStore = ds
 }
-
-// SetRequireClientID enforces that all MQTT messages must carry a non-empty
-// composite client ID. When true AND production mode, messages with empty
-// client IDs are rejected.
-func (b *Bridge) SetRequireClientID(v bool) { b.requireClientID = v }
 
 // Start connects to the MQTT broker and begins processing messages.
 // It blocks until the context is cancelled or Stop() is called.
@@ -472,11 +465,6 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
-	if b.requireClientID && isProductionMode() && msg.ClientID == "" {
-		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — empty client ID (require_client_id=true)")
-		b.incErrors()
-		return
-	}
 	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
 		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()
@@ -591,11 +579,6 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
-	if b.requireClientID && isProductionMode() && msg.ClientID == "" {
-		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — empty client ID (require_client_id=true)")
-		b.incErrors()
-		return
-	}
 	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
 		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()
@@ -700,11 +683,6 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	if b.requireClientID && isProductionMode() && msg.ClientID == "" {
-		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — empty client ID (require_client_id=true)")
-		b.incErrors()
-		return
-	}
 	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
 		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()

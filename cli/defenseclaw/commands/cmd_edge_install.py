@@ -751,7 +751,6 @@ def edge_install(
             ux.echo("  Service is running.")
             ux.echo("  Next: run 'defenseclaw setup mqtt-broker' to set up the MQTT broker.")
         else:
-            # P1 fix: Do NOT print "Done" when systemd install fails.
             ux.echo()
             ux.err(
                 "Systemd service installation failed. The edge-connector binary\n"

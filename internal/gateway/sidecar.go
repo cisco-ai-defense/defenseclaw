@@ -8042,47 +8042,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 				bridge.AllowAutoRegistration = true
 				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled")
 			}
-			if fleetCfg.RequireClientID {
-				bridge.SetRequireClientID(true)
-			}
-
-			initialErr := tcpClient.Connect(ctx)
-			if initialErr != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connect to %s failed: %v — will retry in background\n", brokerURL, initialErr)
-				go func() {
-					backoff := 1 * time.Second
-					const maxBackoff = 30 * time.Second
-					for {
-						select {
-						case <-ctx.Done():
-							fmt.Fprintln(os.Stderr, "[sidecar] fleet MQTT startup retry cancelled")
-							return
-						case <-time.After(backoff):
-						}
-						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retrying connect to %s\n", brokerURL)
-						if err := tcpClient.Connect(ctx); err != nil {
-							fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retry failed: %v (next in %v)\n", err, backoff*2)
-							backoff *= 2
-							if backoff > maxBackoff {
-								backoff = maxBackoff
-							}
-							continue
-						}
-						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connected to %s after retry — starting bridge\n", brokerURL)
-						if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
-							fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
-						}
-						return
-					}
-				}()
-			} else {
-				go func() {
-					if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
-						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
-					}
-				}()
-				fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", brokerURL)
-			}
+			go func() {
+				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+				}
+			}()
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", brokerURL)
 		} else {
 			fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
 		}

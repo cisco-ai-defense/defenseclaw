@@ -304,7 +304,6 @@ def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
     if write_ok:
         ux.ok(f"Wrote {key} to {svc_env_path}")
     else:
-        # P1 fix: Never print the actual key value to the terminal.
         # The value is already persisted in ~/.defenseclaw/.env.
         redacted = "<see ~/.defenseclaw/.env>"
         ux.warn(
