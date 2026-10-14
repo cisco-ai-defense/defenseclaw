@@ -266,8 +266,8 @@ class RegistryStructureTests(unittest.TestCase):
             if e.name == "MIGRATION_DEFENSECLAW_HOME":
                 continue
             self.assertTrue(
-                e.name.startswith("DEFENSECLAW_"),
-                f"{e.name} must start with DEFENSECLAW_",
+                e.name.startswith("DEFENSECLAW_") or e.name.startswith("DCLAW_"),
+                f"{e.name} must start with DEFENSECLAW_ or DCLAW_",
             )
 
     def test_high_impact_security_optouts_surface_in_doctor(self) -> None:

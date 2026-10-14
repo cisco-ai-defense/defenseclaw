@@ -209,7 +209,7 @@ set_target_properties(dclaw_shared PROPERTIES
 
 # Link mbedTLS for STANDARD/EDGE profiles
 if(DCLAW_MQTT_ENABLED)
-    # BLK-1 fix: Support both mbedTLS 3.x and 4.x.
+    # Support both mbedTLS 3.x and 4.x.
     # mbedTLS 4.x has extensive API changes (removed entropy/ctr_drbg,
     # renamed mbedcrypto to tfpsacrypto, removed ssl_conf_rng/min_version).
     # Phase 1 uses mbedTLS 3.x for TLS; mbedTLS 4.x falls through to the
@@ -225,7 +225,7 @@ if(DCLAW_MQTT_ENABLED)
         if(MBEDTLS_LIB)
             get_filename_component(_MBEDTLS_LIBDIR ${MBEDTLS_LIB} DIRECTORY)
             get_filename_component(_MBEDTLS_PREFIX ${_MBEDTLS_LIBDIR} DIRECTORY)
-            # BLK-1 fix: Only use mbedTLS if it's 3.x (has entropy.h).
+            # Only use mbedTLS if it's 3.x (has entropy.h).
             # mbedTLS 4.x has incompatible API changes; fall through to built-in crypto.
             if(EXISTS "${_MBEDTLS_PREFIX}/include/mbedtls/entropy.h")
                 target_link_libraries(dclaw_core PRIVATE mbedtls mbedcrypto mbedx509)

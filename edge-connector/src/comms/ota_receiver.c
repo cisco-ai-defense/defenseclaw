@@ -893,7 +893,7 @@ int dclaw_ipc_release_lockdown(void) {
 #define EMERGENCY_MAGIC_0       0xDC
 #define EMERGENCY_MAGIC_1       0xE9
 
-#define LOCKDOWN_RELEASE_SEQ_OFFSET (EMERGENCY_FLASH_OFFSET + EMERGENCY_FLASH_SIZE)
+#define LOCKDOWN_RELEASE_SEQ_OFFSET (HAL_FLASH_CONFIG_OFFSET + 32)
 
 uint32_t dclaw_load_lockdown_release_seq(void) {
     uint8_t buf[4];

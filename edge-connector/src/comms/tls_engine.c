@@ -156,8 +156,11 @@ int dclaw_tls_init(void) {
 #endif
     /* mbedTLS 4.x: RNG is automatic via PSA Crypto (psa_crypto_init above) */
 
-#ifdef MBEDTLS_SSL_HAVE_GCM
     static const int ciphersuites[] = {
+#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
+        MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
+        MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
+#endif
         MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
         MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -165,19 +168,6 @@ int dclaw_tls_init(void) {
         0
     };
     mbedtls_ssl_conf_ciphersuites(&tls_conf, ciphersuites);
-#endif
-
-#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
-    static const int tls13_suites[] = {
-        MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
-        MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
-#if defined(MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256)
-        MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256,
-#endif
-        0
-    };
-    mbedtls_ssl_conf_tls13_ciphersuites(&tls_conf, tls13_suites);
-#endif
 
     mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 

@@ -469,6 +469,24 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 </Accordion>
 </Accordions>
 
+## Fleet management (Edge Connector)
+
+| Variable | What it does |
+| --- | --- |
+| `DCLAW_ALLOW_KEY_OVER_HTTP`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow device key delivery over plaintext HTTP (testing only).<br/>**Read by:** `internal/fleet/api.go` |
+| `DCLAW_DEVICE_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Fleet-wide device HMAC key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/mqtt/bridge.go` |
+| `DCLAW_DEV_MODE`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Enable development mode (relaxed key requirements).<br/>**Read by:** `internal/fleet/mqtt/broker.go` |
+| `DCLAW_EMERGENCY_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Emergency command signing key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/policy/policy.go` |
+| `DCLAW_FLEET_API_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Fleet management API bearer token (hex-encoded).<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_FLEET_AUTO_REGISTER`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow devices to self-register via MQTT heartbeat.<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_FLEET_TENANT_TOKENS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Comma-separated tenant-scoped tokens (token:tid,... format).<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_MQTT_BROKER_URL`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker address for fleet bridge (host:port).<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_MQTT_PASS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker password.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
+| `DCLAW_MQTT_USER`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker username.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
+| `DCLAW_OTA_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | OTA policy signing key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/policy/signer.go` |
+| `DCLAW_PRODUCTION`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Enable production mode (reject zero keys, require TLS).<br/>**Read by:** `internal/fleet/mqtt/broker.go` |
+| `DCLAW_TRUST_PROXY_HEADERS`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Trust X-Forwarded-Proto from reverse proxies.<br/>**Read by:** `internal/fleet/api.go` |
+
 {/* AUTOGEN-END: env-vars */}
 
 ## Managed enterprise deployments

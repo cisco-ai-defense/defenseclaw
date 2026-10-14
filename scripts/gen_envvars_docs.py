@@ -94,6 +94,7 @@ _CATEGORY_TITLES = {
     CATEGORY_UPGRADE_INTERNAL: "Upgrade-internal (do not override)",
     CATEGORY_SPLUNK_BRIDGE: "Splunk-bridge bundle",
     CATEGORY_TEST_FIXTURE: "Test fixtures (test-only)",
+    CATEGORY_FLEET: "Fleet management (Edge Connector)",
 }
 
 _SENTINEL_BEGIN_MDX = "{/* AUTOGEN-BEGIN: env-vars */}"
