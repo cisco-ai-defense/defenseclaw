@@ -43,7 +43,6 @@ import (
 	"github.com/google/uuid"
 )
 
-
 const (
 	auditDeviceRegistered   = "fleet.device.registered"
 	auditDeviceReregistered = "fleet.device.reregistered"
