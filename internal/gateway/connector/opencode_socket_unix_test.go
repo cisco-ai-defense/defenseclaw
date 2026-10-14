@@ -117,7 +117,7 @@ func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 		mu.Lock()
 		requests++
 		mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"hook_output": map[string]any{"decision": "allow"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"action": "allow", "hook_output": map[string]any{"decision": "allow"}})
 	})}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })

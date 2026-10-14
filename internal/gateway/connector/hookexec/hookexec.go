@@ -375,6 +375,12 @@ func Run(ctx context.Context, opts Options) int {
 		return blockExit
 	}
 	failMode := normalizeFailMode(opts.FailMode)
+	if managedNativeDecision(opts) {
+		// The protected managed profile cannot inherit an open availability
+		// setting from a connector or the caller's environment.
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
@@ -1037,7 +1043,7 @@ func validCopilotEvent(event string) bool {
 func (sp spec) decide(opts Options, body []byte) int {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+		return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
 	}
 	if sp.connector == "hermes" {
 		return decideHermes(opts, sp, fields)
@@ -1045,13 +1051,18 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
-			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
+		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts) {
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
 		}
 		action = "allow"
 	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
+	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
+		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
+		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
+		return failResponse(opts, sp, "closed", "missing native output in gateway response")
+	}
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -1166,7 +1177,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 		// (compacted onto one line).
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, body); err != nil {
-			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
 		}
 		fmt.Fprintln(opts.Stdout, compact.String())
 		return 0
@@ -1174,6 +1185,36 @@ func (sp spec) decide(opts Options, body []byte) int {
 	default:
 		return 0
 	}
+}
+
+func managedNativeDecision(opts Options) bool {
+	return opts.ManagedEnterprise && !opts.SecureClient
+}
+
+func managedDecisionFailMode(opts Options) string {
+	if managedNativeDecision(opts) {
+		return "closed"
+	}
+	return normalizeFailMode(opts.FailMode)
+}
+
+func managedNativeBlockableEvent(connector, event string) bool {
+	switch connector {
+	case "cursor":
+		switch strings.ToLower(strings.TrimSpace(event)) {
+		case "beforesubmitprompt", "pretooluse", "beforereadfile", "beforetabfileread", "beforeshellexecution", "beforemcpexecution":
+			return true
+		}
+	case "copilot":
+		return event == "preToolUse" || event == "permissionRequest"
+	case "devin":
+		return event == "PreToolUse"
+	case "kiro":
+		return event == "PreToolUse" || event == "UserPromptSubmit"
+	case "opencode":
+		return event == "tool.execute.before"
+	}
+	return false
 }
 
 func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int {
@@ -1816,6 +1857,14 @@ func foreignHookStopEvent(connector, event string) bool {
 		case "agentStop", "subagentStop", "sessionEnd",
 			// VS Code Local harness (--hook-surface vscode-local).
 			"Stop", "SubagentStop":
+			return true
+		}
+	case "kiro":
+		return event == "Stop" || event == "PostToolUse"
+	case "opencode":
+		switch event {
+		case "session.created", "session.updated", "session.status", "session.idle",
+			"session.compacted", "session.error", "session.deleted", "tool.execute.after":
 			return true
 		}
 	}

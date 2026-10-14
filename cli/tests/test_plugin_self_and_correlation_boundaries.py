@@ -133,11 +133,14 @@ def _render_bridge_publication(
     foreign_guard: str = "",
     install_marker: str = "",
     listener_proof: str = "",
+    managed: bool = False,
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
         "opencode": "opencode-plugin.js",
     }[connector]
+    if managed and connector == "opencode":
+        template_name = "opencode-plugin-managed.js"
     template = (_bridge_host_templates(repository_root) / template_name).read_text(
         encoding="utf-8"
     )
@@ -573,26 +576,43 @@ def test_bridge_rendered_with_the_listener_proof_stays_first_party(
     ("connector", "template_names"),
     [
         ("amp", ("amp-plugin.ts", "amp-plugin-secure-client.ts")),
-        ("opencode", ("opencode-plugin.js", "opencode-plugin-secure-client.js")),
+        ("opencode", ("opencode-plugin.js", "opencode-plugin-managed.js", "opencode-plugin-secure-client.js")),
     ],
 )
 def test_bridge_template_fingerprints_match_gateway_sources(
     connector: str,
-    template_names: tuple[str, str],
+    template_names: tuple[str, ...],
 ) -> None:
-    # The current template and the pinned copy the Secure Client profile
-    # renders are both DefenseClaw's own bridge.
+    # Current, managed standalone and pinned Secure Client templates are
+    # all DefenseClaw's own bridge.
     repository_root = Path(__file__).resolve().parents[2]
     # The current template is fingerprinted by its host bytes (its OpenShell
     # sandbox branches resolved to the host ones); the pinned copy has none.
-    current, pinned = template_names
+    *current_variants, pinned = template_names
     hooks = repository_root / "internal" / "gateway" / "connector" / "hooks"
     digests = {
-        hashlib.sha256((_bridge_host_templates(repository_root) / current).read_bytes()).hexdigest(),
-        hashlib.sha256((hooks / pinned).read_bytes()).hexdigest(),
+        hashlib.sha256((_bridge_host_templates(repository_root) / name).read_bytes()).hexdigest()
+        for name in current_variants
     }
+    digests.add(hashlib.sha256((hooks / pinned).read_bytes()).hexdigest())
 
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
+
+
+def test_managed_opencode_bridge_stays_first_party(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / ".config/opencode/plugins/defenseclaw.js"
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    published = _render_bridge_publication(
+        repository_root, data_dir, connector="opencode", managed=True
+    )
+    _write_bridge_publication(data_dir, target, connector="opencode", payload=published)
+    assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
 
 def test_tampered_plugin_at_expected_install_path_is_not_exempt(

@@ -13,7 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
@@ -45,7 +47,7 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-open allow + would_block", evalResp)
 	}
 
-	resp := safeHookPanicResponse("codex", "PreToolUse", "stack trace would go here")
+	resp := api.safeHookPanicResponse(context.Background(), connector.HookProfile{Name: "codex"}, "codex", req)
 	if resp.Action != "allow" {
 		t.Errorf("panic action = %q, want allow", resp.Action)
 	}
@@ -67,6 +69,42 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	)
 	if len(panicMetrics) != 1 {
 		t.Fatalf("generated panic metrics=%d; recovered hook must not require a legacy Provider", len(panicMetrics))
+	}
+}
+
+func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	api := &APIServer{scannerCfg: cfg}
+	for _, tc := range []struct {
+		connector, toolEvent, stopEvent, nativeField string
+	}{
+		{"cursor", "beforeShellExecution", "stop", "permission"},
+		{"copilot", "preToolUse", "agentStop", "permissionDecision"},
+		{"devin", "PreToolUse", "Stop", "decision"},
+		{"kiro", "PreToolUse", "Stop", "decision"},
+		{"opencode", "tool.execute.before", "session.idle", "decision"},
+	} {
+		profile := api.hookProfileForRequest(context.Background(), tc.connector)
+		req := agentHookRequest{ConnectorName: tc.connector, HookEventName: tc.toolEvent}
+		resp, panicked := api.safeEvaluateHook(context.Background(), tc.connector, req, nil, nil, hookProfileRuntime{
+			Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+				panic("managed evaluator panic")
+			},
+		})
+		if !panicked || resp.Action != "block" || resp.WouldBlock || len(resp.HookOutput) == 0 {
+			t.Errorf("%s: panic response = %+v, panicked=%v", tc.connector, resp, panicked)
+			continue
+		}
+		if _, ok := resp.HookOutput[tc.nativeField]; !ok {
+			t.Errorf("%s: native output = %+v, missing %s", tc.connector, resp.HookOutput, tc.nativeField)
+		}
+		stop := api.safeHookPanicResponse(context.Background(), profile, tc.connector,
+			agentHookRequest{HookEventName: tc.stopEvent})
+		if stop.Action != "allow" {
+			t.Errorf("%s %s: lifecycle panic action = %q, want allow", tc.connector, tc.stopEvent, stop.Action)
+		}
 	}
 }
 

@@ -3270,12 +3270,12 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 	}
 }
 
-func TestCopilotShellBootstrapFailuresAlwaysOpen(t *testing.T) {
-	// The host render; the OpenShell sandbox variant of the same template
-	// fails closed instead (TestCopilotSandboxPolicyShape).
-	for _, managed := range []bool{false, true} {
+func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
+	// Per-user and Secure Client retain their shipped response bytes.
+	for _, tc := range []struct{ managed, secureClient bool }{{false, false}, {true, true}} {
 		script, err := renderHookTemplate("copilot-hook.sh", templateData{
-			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: managed, TokenFile: ".hook-copilot.token", ScopedToken: true,
+			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: tc.managed, SecureClient: tc.secureClient,
+			TokenFile: ".hook-copilot.token", ScopedToken: true,
 		})
 		if err != nil {
 			t.Fatal(err)

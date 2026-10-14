@@ -44,7 +44,7 @@ const DC_HOOK_SOCKET: string = ""
 const DC_FOREIGN_GUARD: string = ""
 const DC_INSTALL_MARKER: string = ""
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
+const DC_FAIL_MODE: string = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}" // "open" or "closed"
 // Standalone managed installs talk to the gateway's peer-authorized unix hook
 // socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user who

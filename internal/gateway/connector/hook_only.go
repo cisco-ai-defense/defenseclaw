@@ -1574,6 +1574,7 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		ListenerProofJS:    managedPluginListenerProofJS(opts),
 		FailMode:           failMode,
 		Managed:            opts.ManagedEnterprise,
+		SecureClient:       shellHookSecureClientProfile(opts),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)

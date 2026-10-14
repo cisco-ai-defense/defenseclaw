@@ -611,6 +611,17 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 }
 
+func TestManagedOpenCodeBridgeRejectsInvalidGatewayVerdict(t *testing.T) {
+	server := openCodeStubGateway(t, `{}`, `{"action":"block"}`)
+	data := openCodePluginTestData(t, server)
+	data.Managed = true
+	data.FailMode = "open"
+	lines := runOpenCodePluginHarness(t, data, 2)
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "block:") || !strings.HasPrefix(lines[1], "block:") {
+		t.Fatalf("managed OpenCode invalid verdicts: %q", lines)
+	}
+}
+
 func TestOpenCodeOwnedHooksPresentRejectsManagedPluginDrift(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(dir, "OpenCode Config", "plugins", "defenseclaw.js")
