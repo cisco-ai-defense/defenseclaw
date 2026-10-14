@@ -36,7 +36,6 @@ type DeviceKeyLookup interface {
 // DeviceKeyChecker is an optional interface that a DeviceKeyProvider can
 // implement to report whether a per-device key has been provisioned. The
 // bridge uses this to reject unsigned heartbeats from keyed devices.
-//
 type DeviceKeyChecker interface {
 	HasDeviceKey(deviceID uint64) (bool, error)
 }
@@ -88,7 +87,6 @@ func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint64) []byte {
 // HasDeviceKey reports whether a per-device key has been provisioned for
 // this device. Returns true only when the backing store has a specific key;
 // returns false when the device would fall back to the fleet-wide key.
-//
 func (p *storeBackedKeyProvider) HasDeviceKey(deviceID uint64) (bool, error) {
 	if p.store == nil {
 		return false, nil

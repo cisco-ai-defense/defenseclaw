@@ -46,11 +46,11 @@ const (
 // internal/config) to avoid circular imports. The sidecar populates
 // this from config.FleetConfig and passes it via WithFleetSettings.
 type FleetSettings struct {
-	APIToken         string // resolved bearer token (empty = reject all)
-	TenantTokens     string // "token:tid,token:tid,..." format
-	AllowKeyOverHTTP bool
+	APIToken          string // resolved bearer token (empty = reject all)
+	TenantTokens      string // "token:tid,token:tid,..." format
+	AllowKeyOverHTTP  bool
 	TrustProxyHeaders bool
-	RequireClientID  bool
+	RequireClientID   bool
 }
 
 // AuditEmitter is the narrow interface the fleet API uses to emit events

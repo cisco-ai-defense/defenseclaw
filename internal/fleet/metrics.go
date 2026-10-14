@@ -26,8 +26,8 @@ type Metrics struct {
 	PolicyRollbacks    atomic.Int64
 	SpeculativeBlocks  atomic.Int64
 	EmergencySeqGaps   atomic.Int64
-	AlertsTotal atomic.Int64
-	OTARollbacks atomic.Int64
+	AlertsTotal        atomic.Int64
+	OTARollbacks       atomic.Int64
 }
 
 // GlobalMetrics is the singleton metrics instance.

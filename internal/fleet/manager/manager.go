@@ -118,8 +118,8 @@ type FleetManager struct {
 	devices     map[uint64]*Device
 
 	// hookMu protects all callback/hook fields from concurrent read/write.
-	hookMu           sync.Mutex
-	alertHandler     AlertHandler
+	hookMu             sync.Mutex
+	alertHandler       AlertHandler
 	onDeviceRegistered func()
 	onDeviceOffline    func()
 	onHeartbeat        func()

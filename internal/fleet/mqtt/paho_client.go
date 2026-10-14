@@ -133,8 +133,8 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 
 	cfg := autopaho.ClientConfig{
 		ServerUrls:                    []*url.URL{brokerURL},
-		TlsCfg:                       tlsCfg,
-		KeepAlive:                    60,
+		TlsCfg:                        tlsCfg,
+		KeepAlive:                     60,
 		CleanStartOnInitialConnection: true,
 		SessionExpiryInterval:         0,
 		ConnectRetryDelay:             time.Second,
