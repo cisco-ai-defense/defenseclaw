@@ -32,12 +32,14 @@ import (
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath  string
-	writes      []string
-	adopted     bool
-	digestCalls int
-	adoptAfter  int
-	refreshes   int
+	configPath    string
+	writes        []string
+	adopted       bool
+	digestCalls   int
+	adoptAfter    int
+	refreshes     int
+	bundleID      string
+	bundleVersion uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
@@ -56,7 +58,9 @@ func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
 		`","config_generation":` + strconv.Itoa(generation) +
 		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
-		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) + `}`), nil
+		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) +
+		`,"gateway_reported_bundle_id":"` + host.bundleID +
+		`","gateway_reported_bundle_version":` + strconv.FormatUint(host.bundleVersion, 10) + `}`), nil
 }
 
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
@@ -554,7 +558,10 @@ func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	host, opts := newHotConfigHost(t, previous, next)
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+	stub.install(t)
 	savedDigest := windowsEnterprisePolicyDigest
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
 	windowsEnterprisePolicyDigest = host.digest
@@ -564,13 +571,11 @@ func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
 		host.adopted = true
 		return nil
 	}
-	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
-	stub.install(t)
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
-	if !applied || reloads != 1 || opts.bundle.gatewayRestarted || len(host.writes) != 1 {
-		t.Fatalf("applied=%t reloads=%d restarted=%t writes=%q", applied, reloads, opts.bundle.gatewayRestarted, host.writes)
+	if !applied || reloads != 1 || host.digestCalls == 0 || opts.bundle.gatewayRestarted || len(host.writes) != 1 {
+		t.Fatalf("applied=%t reloads=%d digestCalls=%d restarted=%t writes=%q errors=%v", applied, reloads, host.digestCalls, opts.bundle.gatewayRestarted, host.writes, result.Errors)
 	}
 }
 
@@ -578,7 +583,14 @@ func TestWindowsHotBundleReloadCannotConfirmWrongDigest(t *testing.T) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	host, opts := newHotConfigHost(t, previous, next)
-	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	// A managed config has a matching prior generation. Rollback records a
+	// new generation for the restored bytes through the writer seam.
+	recorded := `{"generation":10,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	savedDigest := windowsEnterprisePolicyDigest
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
 	windowsEnterprisePolicyDigest = host.digest
