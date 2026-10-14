@@ -4694,13 +4694,6 @@ groups:
       forbidden_value_classes:
       - filesystem_path
       - credential_material
-    compatibility_aliases:
-    - alias: deployment.environment
-      canonical: deployment.environment.name
-    - alias: deployment.mode
-      canonical: defenseclaw.deployment.mode
-    - alias: defenseclaw.device.id
-      canonical: defenseclaw.device.public_key_fingerprint
     legacy_bindings:
     - source: schemas/otel/resource.schema.json
       disposition: preserved

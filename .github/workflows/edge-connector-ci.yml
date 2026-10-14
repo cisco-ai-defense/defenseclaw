@@ -31,8 +31,8 @@ jobs:
           persist-credentials: false
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
-      - name: Configure (STANDARD profile)
-        run: cmake -B build -DDCLAW_PROFILE=STANDARD
+      - name: Configure (STANDARD profile, dev mode for tests)
+        run: cmake -B build -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=ON
         working-directory: edge-connector
       - name: Build
         run: cmake --build build
