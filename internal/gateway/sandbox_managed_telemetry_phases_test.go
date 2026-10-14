@@ -139,11 +139,19 @@ func TestManagedSandboxTelemetryAfterAGatewayRevocation(t *testing.T) {
 	}
 	recorder := f.api.managedSandboxRecorder()
 	id := boundRegistration(t, f, sbxAlice, 1)
+	// Use distinct event timestamps. ListEvents sorts by wall-clock time;
+	// consecutive time.Now calls do not give this test a guaranteed order.
+	nextPhaseTime := time.Now()
+	claim := func(phase string) sandboxrelay.Event {
+		nextPhaseTime = nextPhaseTime.Add(time.Millisecond)
+		return telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, nextPhaseTime,
+			map[string]any{"sandbox": "dc-claude-1", "phase": phase})
+	}
 	post := func(events ...sandboxrelay.Event) *httptest.ResponseRecorder {
 		t.Helper()
 		return postEvents(f, sbxAlice, id, events...)
 	}
-	if rec := post(phaseClaim(t, "dc-claude-1", "creating"), phaseClaim(t, "dc-claude-1", "ready")); rec.Code != http.StatusAccepted {
+	if rec := post(claim("creating"), claim("ready")); rec.Code != http.StatusAccepted {
 		t.Fatalf("live: %d %s", rec.Code, rec.Body.String())
 	}
 	if recorder.TrackedSandboxes() != 1 {
@@ -157,11 +165,11 @@ func TestManagedSandboxTelemetryAfterAGatewayRevocation(t *testing.T) {
 	}
 	end := telemetryEvent(t, sandboxrelay.EventSandboxEgress, time.Now(), map[string]any{"sandbox": "dc-claude-1",
 		"source": "dc-egress-proxy", "host": "github.com", "port": 443, "end": "completed", "duration_ms": 1200})
-	if rec := post(phaseClaim(t, "dc-claude-1", "ready"), phaseClaim(t, "dc-claude-1", "stopping"),
-		phaseClaim(t, "dc-claude-1", "stopped"), end); rec.Code != http.StatusAccepted {
+	if rec := post(claim("ready"), claim("stopping"),
+		claim("stopped"), end); rec.Code != http.StatusAccepted {
 		t.Fatalf("stopping and stopped after a policy_changed revocation: %d %s, want 202", rec.Code, rec.Body.String())
 	}
-	if rec := post(phaseClaim(t, "dc-claude-1", "deleting"), phaseClaim(t, "dc-claude-1", "deleted")); rec.Code != http.StatusAccepted {
+	if rec := post(claim("deleting"), claim("deleted")); rec.Code != http.StatusAccepted {
 		t.Fatalf("deleting and deleted: %d %s, want 202", rec.Code, rec.Body.String())
 	}
 	if got, want := strings.Join(lifecyclePhases(t, store), ","), "creating,ready,stopping,stopped,deleting,deleted"; got != want {
