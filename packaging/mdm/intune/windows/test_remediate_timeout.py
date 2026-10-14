@@ -36,9 +36,15 @@ def test_remediation_bounds_ensure_and_restores_start_modes_on_failure():
     script = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text()
     assert "Get-DefenseClawRemediationStartModes" in script
     assert "Restore-DefenseClawRemediationStartModes -PriorModes $priorModes" in script
-    assert "if ($ensureFailure -or ($null -ne $run -and $run.ExitCode -ne 0))" in script
+    assert "$modes[$name] = if ($mode -in @(2, 3)) { $mode } else { -1 }" in script
+    assert "if ([int]$PriorModes[$name] -notin @(2, 3)) { continue }" in script
+    assert "if ($current -ne 4) { continue }" in script
+    assert "$committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending" in script
+    assert "$run.ExitCode -notin @(0, 3010, 1618)" in script
+    assert "4 { 'disabled' }" not in script
     assert "-TimeoutSeconds 840 -ArgumentList @(" in script
     assert "startup-mode restore failed" in script
+    assert "_.code -eq 'startup_mode_restore_failed'" in script
 
 
 def test_standalone_installer_binds_native_output_to_the_process_deadline():
@@ -49,3 +55,5 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline():
     assert "if (Test-DefenseClawStandaloneProfile)" in native
     assert "[Threading.Tasks.Task]::WaitAll(" in native
     assert "native process output timed out" in native
+    assert "DC_LIFECYCLE_PHASE:" in module
+    assert "transaction quiesce stop services" in module

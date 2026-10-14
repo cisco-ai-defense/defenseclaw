@@ -990,7 +990,7 @@ func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.
 			report.ServiceStartModes["DefenseClawHookEnumerator"] != "auto" {
 			t.Fatalf("lost service startup preimage: %+v", report.ServiceStartModes)
 		}
-		return nil
+		return errors.New("SCM refused startup-mode restore")
 	}
 	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
 		if windowsEnterpriseInstallerAction(args) == "Status" {
@@ -1032,6 +1032,10 @@ func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.
 	}
 	if len(result.Errors) == 0 || result.Errors[0].Code != "lifecycle_timeout" {
 		t.Fatalf("ensure result lacks timeout diagnostic: %+v", result.Errors)
+	}
+	if len(result.Errors) < 2 || result.Errors[1].Code != "startup_mode_restore_failed" ||
+		!strings.Contains(result.Errors[1].Message, "SCM refused startup-mode restore") {
+		t.Fatalf("ensure JSON lacks failed restore: %+v", result.Errors)
 	}
 }
 
@@ -2534,6 +2538,12 @@ func TestWindowsEnterpriseDirectUpgradeRefusesAnAPIPortChange(t *testing.T) {
 // planner found identical to the recorded one, so the missing file comes
 // back; a pending-transaction repair still takes no sources.
 func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testing.T) {
+	originalRestore := windowsEnterpriseRestoreStartModes
+	t.Cleanup(func() { windowsEnterpriseRestoreStartModes = originalRestore })
+	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error {
+		t.Fatal("committed repair must not restore pre-transaction service modes")
+		return nil
+	}
 	failed := installedStatus("verify")
 	failed["ok"] = false
 	failed["errors"] = []string{`managed path is missing: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}

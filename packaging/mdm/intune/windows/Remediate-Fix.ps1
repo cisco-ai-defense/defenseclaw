@@ -295,12 +295,13 @@ function Get-DefenseClawRemediationStartModes {
     foreach ($name in @('DefenseClawHookGuardian', 'DefenseClawGateway',
             'DefenseClawHookEnumerator', 'DefenseClawSensorHelper')) {
         $key = Get-DefenseClawRegistryKey64 -SubKey "SYSTEM\CurrentControlSet\Services\$name"
-        if ($null -eq $key) { continue }
+        if ($null -eq $key) { $modes[$name] = -1; continue }
         try {
             $mode = [int]$key.GetValue('Start', -1)
+        } catch {
+            $mode = -1
         } finally { $key.Dispose() }
-        if ($mode -notin @(2, 3, 4)) { throw "unexpected startup mode for $name`: $mode" }
-        $modes[$name] = $mode
+        $modes[$name] = if ($mode -in @(2, 3)) { $mode } else { -1 }
     }
     return $modes
 }
@@ -310,17 +311,21 @@ function Restore-DefenseClawRemediationStartModes {
     $sc = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'sc.exe')
     $failures = New-Object System.Collections.Generic.List[string]
     foreach ($name in $PriorModes.Keys) {
+        if ([int]$PriorModes[$name] -notin @(2, 3)) { continue }
         $key = Get-DefenseClawRegistryKey64 -SubKey "SYSTEM\CurrentControlSet\Services\$name"
         if ($null -eq $key) {
             $failures.Add("$name disappeared")
             continue
         }
-        try { $current = [int]$key.GetValue('Start', -1) } finally { $key.Dispose() }
-        if ($current -eq [int]$PriorModes[$name]) { continue }
+        try { $current = [int]$key.GetValue('Start', -1) }
+        catch { $failures.Add("$name`: cannot read current startup mode: $($_.Exception.Message)"); continue }
+        finally { $key.Dispose() }
+        # Only undo a quiesce. A later successful installer must own any
+        # deliberate service-mode change, including Disabled.
+        if ($current -ne 4) { continue }
         $mode = switch ([int]$PriorModes[$name]) {
             2 { 'auto' }
             3 { 'demand' }
-            4 { 'disabled' }
         }
         try {
             $change = Invoke-DefenseClawNative -FilePath $sc -TimeoutSeconds 30 -ArgumentList @(
@@ -380,7 +385,15 @@ try {
 }
 if ($null -eq $run -and -not $ensureFailure) { $ensureFailure = 'native ensure returned no result' }
 $restoreFailure = ''
-if ($ensureFailure -or ($null -ne $run -and $run.ExitCode -ne 0)) {
+$committed = $false
+if ($null -ne $run -and $run.ExitCode -notin @(3010, 1618)) {
+    try {
+        $ensureDocument = $run.StdOut | ConvertFrom-Json
+        $committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending
+    } catch { $null = $_ }
+}
+if (-not $committed -and ($ensureFailure -or
+        ($null -ne $run -and $run.ExitCode -notin @(0, 3010, 1618)))) {
     try { $restoreFailure = [string](Restore-DefenseClawRemediationStartModes -PriorModes $priorModes) }
     catch { $restoreFailure = $_.Exception.Message }
 }
@@ -417,6 +430,10 @@ try {
         $summary = "still failing ($codes)"
         $first = @($document.errors) | Select-Object -First 1
         if ($null -ne $first -and $first.message) { $summary += ": $($first.message)" }
+        $cliRestore = @($document.errors) | Where-Object { $null -ne $_ -and $_.code -eq 'startup_mode_restore_failed' } | Select-Object -First 1
+        if ($null -ne $cliRestore -and $cliRestore.message) {
+            $summary += "; startup-mode restore failed: $($cliRestore.message)"
+        }
         # A DefenseClaw binary went missing (an antivirus quarantine): the
         # installed CLI has no payload to restore it from, so say what does
         # (GAP-0935).

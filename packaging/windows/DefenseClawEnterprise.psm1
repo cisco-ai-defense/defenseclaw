@@ -3139,6 +3139,7 @@ function Invoke-DefenseClawProcess {
         # ambient automatic-variable state in a fresh module scope.
         $standardOutput = $process.StandardOutput.ReadToEndAsync()
         $standardError = $process.StandardError.ReadToEndAsync()
+        Write-DefenseClawLifecyclePhase -Stage "native process wait $([IO.Path]::GetFileName($resolved))"
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try { $process.Kill() } catch {}
             try {
@@ -3152,6 +3153,7 @@ function Invoke-DefenseClawProcess {
             throw "native process timed out after $TimeoutSeconds seconds: $resolved"
         }
         if (Test-DefenseClawStandaloneProfile) {
+            Write-DefenseClawLifecyclePhase -Stage "native output wait $([IO.Path]::GetFileName($resolved))"
             # WaitForExit() can wait indefinitely for inherited pipe handles
             # after the native process itself exited. Keep stream drain in
             # the same deadline as the process wait so transaction rollback
@@ -3168,6 +3170,7 @@ function Invoke-DefenseClawProcess {
         }
         $stdout = [string]$standardOutput.Result
         $stderr = [string]$standardError.Result
+        Write-DefenseClawLifecyclePhase -Stage "native process complete $([IO.Path]::GetFileName($resolved))"
         return [pscustomobject]@{
             exit_code = [int]$process.ExitCode
             stdout = $stdout
@@ -4509,6 +4512,7 @@ function Enter-DefenseClawLifecycleLock {
         -RejectUntrustedRead
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Write-DefenseClawLifecyclePhase -Stage 'lifecycle lock wait'
     do {
         try {
             $lock = [IO.File]::Open(
@@ -4521,6 +4525,7 @@ function Enter-DefenseClawLifecycleLock {
                 $lock.Dispose()
                 throw "protected lifecycle lock changed while opening: $path"
             }
+            Write-DefenseClawLifecyclePhase -Stage 'lifecycle lock acquired'
             return $lock
         }
         catch [IO.IOException] {
@@ -5249,6 +5254,13 @@ function Get-DefenseClawServiceChecked {
     }
 }
 
+function Write-DefenseClawLifecyclePhase {
+    param([Parameter(Mandatory)][string]$Stage)
+    if (Test-DefenseClawStandaloneProfile) {
+        [Console]::Error.WriteLine("DC_LIFECYCLE_PHASE: $([DateTime]::UtcNow.ToString('o')) $Stage")
+    }
+}
+
 function Stop-DefenseClawService {
     param([Parameter(Mandatory)][string]$Name)
     $service = Get-DefenseClawServiceChecked -Name $Name
@@ -5275,10 +5287,13 @@ function Stop-DefenseClawService {
     # is named too. Every caller has disabled the service first, so its
     # failure actions cannot restart it.
     $budget = [TimeSpan]::FromSeconds($script:ServiceStopTimeoutSeconds)
+    Write-DefenseClawLifecyclePhase -Stage "stop $Name request"
     $processId = Get-DefenseClawServiceProcessId -Name $Name
     $request = Start-DefenseClawServiceStopRequest -Name $Name
     try {
+        Write-DefenseClawLifecyclePhase -Stage "stop $Name wait"
         if (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget) {
+            Write-DefenseClawLifecyclePhase -Stage "stop $Name complete"
             # A service that answered has already returned the request; one
             # whose request is still open after it stopped was ended by
             # Windows.
@@ -5293,10 +5308,12 @@ function Stop-DefenseClawService {
         if ($running.Count -gt 0) {
             throw "service $Name failed during stop: $($running[0].ServiceName) still depends on it after $($script:ServiceStopTimeoutSeconds) seconds; stop the dependent service, then run Setup /ensure again"
         }
+        Write-DefenseClawLifecyclePhase -Stage "stop $Name ending unresponsive process"
         Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
         if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
             throw "service $Name failed during stop: it stayed running for $($script:ServiceStopTimeoutSeconds) seconds after its process was ended; inspect the Windows service events, then run Setup /ensure again"
         }
+        Write-DefenseClawLifecyclePhase -Stage "stop $Name complete after termination"
     }
     finally {
         if (-not $request.HasExited) {
@@ -6734,6 +6751,7 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     )
     $quiescedAt = ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
         -Value $ServicesQuiescedAt
+    Write-DefenseClawLifecyclePhase -Stage 'service failure restart quiescence wait'
     $deadline = $quiescedAt.AddSeconds(
         $script:ServiceFailureRestartQuiescenceSeconds
     )
@@ -6770,6 +6788,7 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     foreach ($name in @($GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         Stop-DefenseClawService -Name $name
     }
+    Write-DefenseClawLifecyclePhase -Stage 'service failure restart quiescence complete'
 }
 
 function Set-DefenseClawServiceActivationPhase {
@@ -9784,6 +9803,7 @@ function New-DefenseClawTransaction {
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
         $quiescingIntentPublished = $true
+        Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'
 
         # Disabled start neutralizes boot activation and any failure restart
         # already queued by SCM. Gateway is disabled first so a crash cannot
@@ -9807,6 +9827,7 @@ function New-DefenseClawTransaction {
                 Set-DefenseClawServiceStartMode -Name $name -StartMode 4
             }
         }
+        Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce stop services'
 
         # Quiesce every LocalSystem writer before reading any shared or
         # managed file preimage. Stop-Service waits for process exit, so an
@@ -9817,6 +9838,7 @@ function New-DefenseClawTransaction {
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
         Stop-DefenseClawService -Name $brokerServiceName
+        Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
         $quiescingIntent['services_disabled_and_stopped_at'] =
             $servicesQuiescedAt
@@ -11873,6 +11895,7 @@ function Restore-DefenseClawTransaction {
     # validated activation step. Disable every live owned service before the
     # first stop or file restore. Besides preventing boot activation, disabled
     # start makes any already queued SCM failure restart fail closed.
+    Write-DefenseClawLifecyclePhase -Stage 'rollback quiesce disable services'
     foreach ($name in @(
         [string]$snapshot.gateway_service,
         [string]$Layout.BrokerServiceName,
@@ -11897,6 +11920,7 @@ function Restore-DefenseClawTransaction {
             Stop-DefenseClawService -Name $name
         }
     }
+    Write-DefenseClawLifecyclePhase -Stage 'rollback managed services stopped'
     # The gateway depends on the sensor helper, so the helper can only stop
     # after the gateway has.
     if (-not [string]::IsNullOrWhiteSpace($standaloneSensorHelper) -and
@@ -19306,6 +19330,7 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
     $brokerReady = $false
     $gatewayReady = $false
     $guardianReady = $false
@@ -19342,6 +19367,7 @@ function Wait-DefenseClawEnterpriseReadiness {
         if ((-not $RequireBroker -or $brokerReady) -and
             $gatewayReady -and $guardianReady -and
             (-not $RequireEnumerator -or $enumeratorReady)) {
+            Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness complete'
             return
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
