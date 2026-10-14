@@ -182,6 +182,11 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 		case sid.Equals(userSID) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid):
 			if !inheritOnly {
 				ownerMask |= ace.Mask
+				// When the owner is LocalSystem, this same ACE also grants
+				// SYSTEM access. An inherit-only ACE grants neither on this object.
+				if sid.Equals(system) {
+					systemMask |= ace.Mask
+				}
 			}
 		case sid.Equals(system):
 			if !inheritOnly {
