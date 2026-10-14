@@ -26,7 +26,7 @@ import (
 // Windows SYSTEM can open an enrolled user's profile even when that user has
 // no logon token. An elevated owner can clean its own profile too. The profile
 // root is checked against the recorded SID; the connector transaction then
-// pins the settings identity and preserves its DACL.
+// pins the settings identity and preserves its owner and DACL.
 func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, error) {
 	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -50,7 +50,7 @@ func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return connector.TransformWindowsClaudeSettingsForUninstall(path, transactionDir, func(raw []byte) ([]byte, int, error) {
+	return connector.TransformWindowsClaudeSettingsForUninstall(path, transactionDir, sid, func(raw []byte) ([]byte, int, error) {
 		return removeWindowsManagedClaudeCommands(raw, launcher)
 	})
 }

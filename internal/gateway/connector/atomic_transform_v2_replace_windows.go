@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -419,6 +420,16 @@ func repairAtomicTransformV2ReplacementDACL(
 func openAtomicTransformV2DACLRepairGuard(
 	dir *atomicTransformBoundDirectory, name string, writeDACL bool,
 ) (*os.File, error) {
+	access := uint32(windows.GENERIC_READ | windows.READ_CONTROL | windows.SYNCHRONIZE)
+	if writeDACL {
+		access |= windows.WRITE_DAC
+	}
+	return openAtomicTransformV2MetadataRepairGuard(dir, name, access)
+}
+
+func openAtomicTransformV2MetadataRepairGuard(
+	dir *atomicTransformBoundDirectory, name string, access uint32,
+) (*os.File, error) {
 	if err := validateAtomicTransformBoundLeaf(name); err != nil {
 		return nil, err
 	}
@@ -428,10 +439,6 @@ func openAtomicTransformV2DACLRepairGuard(
 	attributes, err := atomicTransformBoundObjectAttributes(dir.file, name, nil)
 	if err != nil {
 		return nil, err
-	}
-	access := uint32(windows.GENERIC_READ | windows.READ_CONTROL | windows.SYNCHRONIZE)
-	if writeDACL {
-		access |= windows.WRITE_DAC
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
@@ -456,6 +463,115 @@ func openAtomicTransformV2DACLRepairGuard(
 		return nil, fmt.Errorf("wrap exact ReplaceFileW DACL repair guard for %s", name)
 	}
 	return file, nil
+}
+
+// ReplaceFileW keeps the prior DACL but can publish Stage's owner. For the
+// Claude uninstall receipt, restore only the authenticated Old owner on the
+// exact published Stage inode. Recovery calls this again after a crash between
+// ReplaceFileW and the owner repair.
+func repairAtomicTransformV2ReplacementOwner(
+	dir *atomicTransformBoundDirectory, receipt atomicTransformV2Receipt,
+	observed atomicTransformV2ReplaceObservation,
+) (bool, error) {
+	if !receipt.PreserveOldOwner || observed.Stage.exists ||
+		!atomicTransformV2BackupOldMatches(receipt.Old, observed.Backup) ||
+		!atomicTransformV2StageContentMatches(receipt.Stage, observed.Target) ||
+		observed.Target.preservedMetadataDigest != receipt.Old.PreservedMetadataSHA256 ||
+		observed.Target.ownerGroupDigest != receipt.Stage.OwnerGroupSHA256 ||
+		observed.Target.linkCount != 1 || observed.Target.creationTime != receipt.Old.CreationTime {
+		return false, nil
+	}
+	targetName := filepath.Base(receipt.TargetPath)
+	target, err := openAtomicTransformV2MetadataRepairGuard(dir, targetName,
+		windows.GENERIC_READ|windows.READ_CONTROL|windows.WRITE_OWNER|windows.SYNCHRONIZE)
+	if err != nil {
+		return false, err
+	}
+	defer target.Close()
+	backup, err := openAtomicTransformV2DACLRepairGuard(dir, receipt.TombstoneName, false)
+	if err != nil {
+		return false, err
+	}
+	defer backup.Close()
+	targetState, err := atomicTransformBoundStateFromOpen(target, targetName, atomicTransformMaxConfigBytes)
+	if err != nil || !atomicTransformArtifactStatesEqualExact(targetState, observed.Target) {
+		return false, errAtomicTransformConflict
+	}
+	backupState, err := atomicTransformBoundStateFromOpen(backup, receipt.TombstoneName, atomicTransformMaxConfigBytes)
+	if err != nil || !atomicTransformArtifactStatesEqualExact(backupState, observed.Backup) ||
+		!atomicTransformV2BackupOldMatches(receipt.Old, backupState) {
+		return false, errAtomicTransformConflict
+	}
+	descriptor, err := windows.GetSecurityInfo(windows.Handle(backup.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return false, fmt.Errorf("read authenticated prior config owner: %w", err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil {
+		return false, fmt.Errorf("read authenticated prior config group: %w", err)
+	}
+	if err := setAtomicTransformV2PriorOwnerGroup(windows.Handle(target.Fd()), owner, group); err != nil {
+		return false, fmt.Errorf("restore authenticated prior config owner and group after ReplaceFileW: %w", err)
+	}
+	repaired, err := atomicTransformBoundStateFromOpen(target, targetName, atomicTransformMaxConfigBytes)
+	if err != nil {
+		return false, err
+	}
+	if !atomicTransformV2PublishedTargetMatches(receipt, repaired) {
+		return false, fmt.Errorf("restored prior config owner does not match receipt")
+	}
+	return true, nil
+}
+
+func setAtomicTransformV2PriorOwnerGroup(handle windows.Handle, owner, group *windows.SID) error {
+	result := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+			runtime.UnlockOSThread()
+			result <- err
+			return
+		}
+		var token windows.Token
+		if err := windows.OpenThreadToken(windows.CurrentThread(),
+			windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, false, &token); err != nil {
+			if revertErr := windows.RevertToSelf(); revertErr == nil {
+				runtime.UnlockOSThread()
+			}
+			result <- err
+			return
+		}
+		var luid windows.LUID
+		name, err := windows.UTF16PtrFromString("SeRestorePrivilege")
+		if err == nil {
+			err = windows.LookupPrivilegeValue(nil, name, &luid)
+		}
+		if err == nil {
+			privileges := windows.Tokenprivileges{PrivilegeCount: 1,
+				Privileges: [1]windows.LUIDAndAttributes{{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}}}
+			err = windows.AdjustTokenPrivileges(token, false, &privileges, 0, nil, nil)
+			if err == nil && errors.Is(windows.GetLastError(), windows.ERROR_NOT_ALL_ASSIGNED) {
+				err = fmt.Errorf("token lacks SeRestorePrivilege")
+			}
+		}
+		if err == nil {
+			err = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION, owner, group, nil, nil)
+		}
+		token.Close()
+		if revertErr := windows.RevertToSelf(); revertErr != nil {
+			err = errors.Join(err, fmt.Errorf("revert owner restore privilege: %w", revertErr))
+		} else {
+			runtime.UnlockOSThread()
+		}
+		result <- err
+	}()
+	return <-result
 }
 
 type atomicTransformV2ReplaceInvoker func(targetPath, stagePath, backupPath string) error
@@ -741,6 +857,14 @@ func invokeAtomicTransformV2Replacement(
 	if repaired, repairErr := repairAtomicTransformV2ReplacementDACL(
 		dir, receipt, attempt.Observed,
 	); repairErr != nil {
+		return attempt, repairErr
+	} else if repaired {
+		attempt.Observed, err = observeAtomicTransformV2Replacement(dir, receipt)
+		if err != nil {
+			return attempt, err
+		}
+	}
+	if repaired, repairErr := repairAtomicTransformV2ReplacementOwner(dir, receipt, attempt.Observed); repairErr != nil {
 		return attempt, repairErr
 	} else if repaired {
 		attempt.Observed, err = observeAtomicTransformV2Replacement(dir, receipt)

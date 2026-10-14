@@ -5,15 +5,25 @@
 
 package connector
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/sys/windows"
+)
 
 // TransformWindowsClaudeSettingsForUninstall uses the connector's durable,
-// identity-bound settings transaction. It preserves the existing NTFS DACL
+// identity-bound settings transaction. It preserves the existing NTFS owner and DACL
 // while SYSTEM edits a signed-out user's settings and retries concurrent
 // Claude writes. The caller supplies an exact-command-only transform.
-func TransformWindowsClaudeSettingsForUninstall(path, stateDir string, transform func([]byte) ([]byte, int, error)) (int, error) {
+func TransformWindowsClaudeSettingsForUninstall(path, stateDir, ownerSID string, transform func([]byte) ([]byte, int, error)) (int, error) {
+	owner, err := windows.StringToSid(ownerSID)
+	if err != nil {
+		return 0, err
+	}
 	removed := 0
-	err := atomicTransformFileWithStateDir(path, stateDir, 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
+	err = atomicTransformFileV2(path, stateDir, 0o600, atomicTransformV2Options{
+		preserveExistingProtection: true, expectedOwner: owner,
+	}, func(current []byte, exists bool) (atomicTransformResult, error) {
 		if !exists {
 			return atomicTransformResult{Remove: true}, nil
 		}

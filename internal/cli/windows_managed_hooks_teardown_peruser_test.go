@@ -38,7 +38,11 @@ func TestWindowsClaudeCleanupTransactionUsesCurrentAccountCache(t *testing.T) {
 	if err := os.WriteFile(settings, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := connector.TransformWindowsClaudeSettingsForUninstall(settings, filepath.Join(t.TempDir(), "private-state"), func(raw []byte) ([]byte, int, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token owner: %v", err)
+	}
+	removed, err := connector.TransformWindowsClaudeSettingsForUninstall(settings, filepath.Join(t.TempDir(), "private-state"), user.User.Sid.String(), func(raw []byte) ([]byte, int, error) {
 		return removeWindowsManagedClaudeCommands(raw, launcher)
 	})
 	if err != nil || removed != 1 {

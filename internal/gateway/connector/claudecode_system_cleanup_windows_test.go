@@ -43,7 +43,7 @@ func TestWindowsClaudeSettingsUninstallPrivateCASTransaction(t *testing.T) {
 		windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
 		t.Fatalf("set copied settings owner: %v", err)
 	}
-	removed, err := TransformWindowsClaudeSettingsForUninstall(settings, stateDir, func(raw []byte) ([]byte, int, error) {
+	removed, err := TransformWindowsClaudeSettingsForUninstall(settings, stateDir, user.User.Sid.String(), func(raw []byte) ([]byte, int, error) {
 		var document map[string]any
 		if err := json.Unmarshal(raw, &document); err != nil {
 			return nil, 0, err
@@ -72,6 +72,63 @@ func TestWindowsClaudeSettingsUninstallPrivateCASTransaction(t *testing.T) {
 	}
 	if removed != 1 || strings.Contains(string(after), managed) || !strings.Contains(string(after), unrelated) {
 		t.Fatalf("removed=%d settings=%s", removed, after)
+	}
+	t.Logf("removed=%d settings=%s", removed, after)
+}
+
+// The ci31 live probe supplies a settings file owned by a standard account.
+// Its state directory is private to the token running this test.
+func TestWindowsClaudeSettingsUninstallEnrolledOwner(t *testing.T) {
+	root := os.Getenv("DEFENSECLAW_CI31_PROBE_ROOT")
+	if root == "" {
+		t.Skip("requires isolated Windows ci31 fixture")
+	}
+	settings := filepath.Join(root, "home", "dcwtest", ".claude", "settings.json")
+	stateDir := filepath.Join(root, os.Getenv("DEFENSECLAW_CI31_STATE"), "claude-settings-teardown")
+	ownerSID := os.Getenv("DEFENSECLAW_CI31_OWNER_SID")
+	before, err := windows.GetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TransformWindowsClaudeSettingsForUninstall(settings, stateDir,
+		"S-1-5-32-544", func(raw []byte) ([]byte, int, error) { return raw, 0, nil }); err == nil || !strings.Contains(err.Error(), "not owned by enrolled user") {
+		t.Fatalf("foreign enrolled SID must be refused: %v", err)
+	}
+	removed, err := TransformWindowsClaudeSettingsForUninstall(settings, stateDir, ownerSID, func(raw []byte) ([]byte, int, error) {
+		var document map[string]any
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return nil, 0, err
+		}
+		groups := document["hooks"].(map[string]any)["PreToolUse"].([]any)
+		hooks := groups[0].(map[string]any)["hooks"].([]any)
+		kept := make([]any, 0, len(hooks))
+		count := 0
+		for _, hook := range hooks {
+			if strings.Contains(hook.(map[string]any)["command"].(string), "defenseclaw-hook.exe") {
+				count++
+			} else {
+				kept = append(kept, hook)
+			}
+		}
+		groups[0].(map[string]any)["hooks"] = kept
+		out, err := json.Marshal(document)
+		return out, count, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 || strings.Contains(string(after), "defenseclaw-hook.exe") || !strings.Contains(string(after), "other-hook") {
+		t.Fatalf("removed=%d settings=%s", removed, after)
+	}
+	afterProtection, err := windows.GetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || before.String() != afterProtection.String() {
+		t.Fatalf("owner or DACL changed: before=%s after=%v err=%v", before.String(), afterProtection, err)
 	}
 	t.Logf("removed=%d settings=%s", removed, after)
 }

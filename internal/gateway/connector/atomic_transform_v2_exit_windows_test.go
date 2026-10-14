@@ -1887,7 +1887,7 @@ func prepareAtomicTransformV21177FixtureForTest(
 	}
 	txn, err := beginAtomicTransformV2(
 		path, path, preparedStateDir, snapshot,
-		atomicTransformResult{Data: []byte("new-1177")}, 0o600,
+		atomicTransformResult{Data: []byte("new-1177")}, 0o600, atomicTransformV2Options{},
 	)
 	if err != nil {
 		t.Fatal(err)
