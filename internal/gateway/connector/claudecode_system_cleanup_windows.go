@@ -12,9 +12,11 @@ import (
 )
 
 // TransformWindowsClaudeSettingsForUninstall uses the connector's durable,
-// identity-bound settings transaction. It preserves the existing NTFS owner and DACL
-// while SYSTEM edits a signed-out user's settings and retries concurrent
-// Claude writes. The caller supplies an exact-command-only transform.
+// identity-bound settings transaction. It verifies the enrolled owner, gives
+// that user, SYSTEM, and Administrators access when a privileged caller must
+// converge an unsafe DACL, and preserves the resulting owner and DACL through
+// replacement while retrying concurrent Claude writes. The caller supplies
+// an exact-command-only transform.
 func TransformWindowsClaudeSettingsForUninstall(path, stateDir, ownerSID string, transform func([]byte) ([]byte, int, error)) (int, error) {
 	owner, err := windows.StringToSid(ownerSID)
 	if err != nil {

@@ -1004,10 +1004,13 @@ func restoreAtomicTransformV2Replace1177(
 // The caller restarts the attempt after changed=true so all receipt witnesses
 // describe the converged object.
 func convergeAtomicTransformV2ExistingProtection(
-	path string, requested os.FileMode, snapshot atomicFileSnapshot,
+	path string, requested os.FileMode, snapshot atomicFileSnapshot, expectedOwner *windows.SID,
 ) (bool, error) {
 	if requested.Perm()&0o077 != 0 {
 		return false, nil
+	}
+	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+		return false, err
 	}
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -1053,8 +1056,8 @@ func convergeAtomicTransformV2ExistingProtection(
 	if !atomicTransformSnapshotMatchesState(snapshot, before) {
 		return false, errAtomicTransformConflict
 	}
-	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err == nil {
-		return false, nil
+	if before.linkCount != 1 {
+		return false, fmt.Errorf("refusing to rewrite protection on a hardlinked config")
 	}
 	current, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
@@ -1071,10 +1074,39 @@ func convergeAtomicTransformV2ExistingProtection(
 	if err != nil || userSID == nil {
 		return false, fmt.Errorf("resolve current user while converging config protection: %w", err)
 	}
-	if owner == nil || !owner.Equals(userSID) {
-		return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user")
+	if owner == nil || (!owner.Equals(userSID) && (expectedOwner == nil || !owner.Equals(expectedOwner))) {
+		return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user or enrolled target")
 	}
-	private, err := atomicTransformPrivateSecurityDescriptor()
+	foreignOwner := !owner.Equals(userSID)
+	if foreignOwner {
+		// The enrolled owner comes from the validated profile, but only a
+		// privileged machine uninstall may rewrite that user's DACL.
+		token := windows.GetCurrentProcessToken()
+		var threadToken windows.Token
+		if tokenErr := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &threadToken); tokenErr == nil {
+			defer threadToken.Close()
+			token = threadToken
+		} else if !errors.Is(tokenErr, windows.ERROR_NO_TOKEN) {
+			return false, fmt.Errorf("inspect effective token for foreign-owner convergence: %w", tokenErr)
+		}
+		effectiveUser, tokenErr := token.GetTokenUser()
+		if tokenErr != nil || effectiveUser == nil || effectiveUser.User.Sid == nil {
+			return false, fmt.Errorf("resolve effective token for foreign-owner convergence: %w", tokenErr)
+		}
+		if !token.IsElevated() && !effectiveUser.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+			return false, fmt.Errorf("refusing to rewrite another user's config without an elevated or LocalSystem token")
+		}
+	}
+	validatePrivate := func() error {
+		if foreignOwner {
+			return validateAtomicTransformBoundFilePrivateForOwner(file, owner)
+		}
+		return validateAtomicTransformBoundFilePrivatePlatform(file)
+	}
+	if err := validatePrivate(); err == nil {
+		return false, nil
+	}
+	private, err := atomicTransformPrivateSecurityDescriptorForOwner(owner, foreignOwner)
 	if err != nil {
 		return false, err
 	}
@@ -1099,7 +1131,7 @@ func convergeAtomicTransformV2ExistingProtection(
 	if before.identity != after.identity || before.digest != after.digest || before.size != after.size {
 		return false, fmt.Errorf("config changed identity or contents while converging protection")
 	}
-	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err != nil {
+	if err := validatePrivate(); err != nil {
 		return false, fmt.Errorf("validate converged private config protection: %w", err)
 	}
 	named, err := atomicTransformBoundInspect(dir, name, atomicTransformMaxConfigBytes)

@@ -115,8 +115,9 @@ type atomicTransformV2Transaction struct {
 }
 
 type atomicTransformV2Options struct {
-	// Only the Claude uninstall path preserves an enrolled user's existing
-	// protection. The bound owner check is repeated on every CAS attempt.
+	// Only the Claude uninstall path names an enrolled owner. A foreign
+	// owner's DACL is converged before the receipt, then preserved through
+	// replacement. The bound owner check repeats on every CAS attempt.
 	preserveExistingProtection bool
 	expectedOwner              *windows.SID
 }
@@ -220,8 +221,19 @@ func atomicTransformFileV2Locked(
 		if !matches {
 			continue
 		}
-		if snapshot.exists && !result.Remove && !options.preserveExistingProtection {
-			changed, convergeErr := convergeAtomicTransformV2ExistingProtection(path, writePerm, snapshot)
+		convergeProtection := !options.preserveExistingProtection
+		if options.expectedOwner != nil && !convergeProtection {
+			currentSID, sidErr := windowsEffectiveUserSID()
+			if sidErr != nil {
+				return fmt.Errorf("resolve current user before enrolled config convergence: %w", sidErr)
+			}
+			if currentSID == nil {
+				return fmt.Errorf("resolve current user before enrolled config convergence: missing SID")
+			}
+			convergeProtection = !options.expectedOwner.Equals(currentSID)
+		}
+		if snapshot.exists && !result.Remove && convergeProtection {
+			changed, convergeErr := convergeAtomicTransformV2ExistingProtection(path, writePerm, snapshot, options.expectedOwner)
 			if convergeErr != nil {
 				return fmt.Errorf("converge existing config protection before transaction receipt: %w", convergeErr)
 			}
@@ -473,8 +485,11 @@ func beginAtomicTransformV2(
 		StateDir: stateBound.path, StateDirIdentity: stateBound.identity,
 		TargetPath: target, TargetParentIdentity: targetDir.identity,
 		OldExists: snapshot.exists, Remove: result.Remove,
-		RequestedPrivate: perm.Perm()&0o077 == 0 && !options.preserveExistingProtection,
-		PreserveOldOwner: options.preserveExistingProtection && snapshot.exists && !result.Remove,
+		// Enrolled-owner replacements inherit the already-converged Old DACL
+		// and restore Old's owner after ReplaceFileW. They cannot use the
+		// stage-owner private-publication rule.
+		RequestedPrivate: perm.Perm()&0o077 == 0 && !options.preserveExistingProtection && options.expectedOwner == nil,
+		PreserveOldOwner: (options.preserveExistingProtection || options.expectedOwner != nil) && snapshot.exists && !result.Remove,
 	}
 	if snapshot.exists {
 		oldState, inspectErr := atomicTransformBoundInspect(targetDir, filepath.Base(target), atomicTransformMaxConfigBytes)
