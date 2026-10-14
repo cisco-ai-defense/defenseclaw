@@ -64,3 +64,32 @@ upgrade path.
   local runtime state.
 
 The repository-specific testing map is in [`docs/TESTING.md`](docs/TESTING.md).
+
+
+## Design rules and the contributor checklist
+
+The repository ships a skill, `.claude/skills/defenseclaw-develop/`, that
+records DefenseClaw's design rules as a tiered checklist: MUST (blocks merge),
+SHOULD (expected, skipping needs a one-line reason) and MAY. It covers
+configuration, policy, identity, deployment modes, external requirements,
+sandboxes, testing, performance, observability, docs, security, packaging and
+pull-request hygiene. Humans can read `SKILL.md` as a short design guide. Claude Code loads
+skills from `.claude/skills`; agents that read `AGENTS.md` or `.agents/skills`
+find the same files through a symlink (see [`AGENTS.md`](AGENTS.md)).
+
+Before you write code:
+
+1. Read `.claude/skills/defenseclaw-develop/SKILL.md` and classify your change
+   with its routing table.
+2. Read only the checklist sections for the areas you touch
+   (`reference/checklist.md`, the one place requirement IDs are defined).
+3. Paste `reference/pr-block.md` into your pull request and tick it as you go
+   (the PR template already contains it).
+4. Ask a maintainer first if your change hits a trigger on the stop-and-ask
+   list in `SKILL.md`.
+
+Adding or changing an agent connector has its own skill,
+`.claude/skills/defenseclaw-add-connector/`. TUI work uses
+`.claude/skills/defenseclaw-tui/`. Run `make skill-check` to confirm the skill
+still matches the code; if your change alters an architecture rule, update the
+skill in the same pull request (`reference/maintenance.md`).

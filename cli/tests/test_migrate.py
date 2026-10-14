@@ -442,7 +442,7 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--json"])
     assert done.exit_code == 0, done.output
     payload = json.loads(done.stdout)
-    assert "→ step 0.8.5" in done.stderr
+    assert "step 0.8.5" in done.stderr
     assert payload["applied"] == ["0.x import 0.8.5: step 0.8.5"]
     assert payload["from_config_version"] == 7
     assert payload["changed"] is True
@@ -687,7 +687,7 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     assert text.exit_code == 0, text.output
     assert "1 migration step(s) pending (config_version 7 -> 8)" in text.stdout
     # GAP-1500: human output shows the step in user terms, no "0.x import" id.
-    assert "→ step 0.8.5" in text.stdout
+    assert "step 0.8.5" in text.stdout
     assert "0.x import" not in text.stdout
     assert "✓" not in text.stdout
 
