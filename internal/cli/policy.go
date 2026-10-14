@@ -378,7 +378,7 @@ var policyEvaluateCmd = &cobra.Command{
 
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Tell the running gateway to reload OPA policies",
+	Short: "Tell the running gateway to reload its config and policies",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if err := managedStandardUserGatewayRefusal(); err != nil {
 			return err

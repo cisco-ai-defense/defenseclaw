@@ -577,6 +577,11 @@ func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
 	if !applied || reloads != 1 || host.digestCalls == 0 || opts.bundle.gatewayRestarted || len(host.writes) != 1 {
 		t.Fatalf("applied=%t reloads=%d digestCalls=%d restarted=%t writes=%q errors=%v", applied, reloads, host.digestCalls, opts.bundle.gatewayRestarted, host.writes, result.Errors)
 	}
+	for _, warning := range result.Warnings {
+		if warning.Code == "bundle_reload_request_failed" {
+			t.Fatalf("successful hot bundle reload reported a failure: %+v", result.Warnings)
+		}
+	}
 }
 
 func TestWindowsHotBundleReloadCannotConfirmWrongDigest(t *testing.T) {

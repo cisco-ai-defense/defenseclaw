@@ -93,7 +93,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	})
 	<-written
 	reloaded := make(chan error, 1)
-	go func() { reloaded <- mgr.Reload(context.Background(), "bundle hot apply") }()
+	go func() { reloaded <- mgr.ReloadAssets(context.Background(), "api:policy_reload") }()
 	<-applied
 	close(release)
 	if err := <-writer; err != nil {
@@ -101,6 +101,9 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	}
 	if err := <-reloaded; err != nil {
 		t.Fatal(err)
+	}
+	if current := mgr.Current(); current.Guardrail.BlockAt != "MEDIUM" || mgr.gen.Load() != 1 {
+		t.Fatalf("synchronous policy reload = generation %d, block_at %q", mgr.gen.Load(), current.Guardrail.BlockAt)
 	}
 	check := func(want int, id string, restart bool, changedPath string) {
 		t.Helper()
@@ -120,6 +123,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, field := range []string{
+			`"defenseclaw.admin.operation":"bundle-apply"`,
 			`"defenseclaw.admin.actor_ref":"os:uid:0:root"`,
 			`"defenseclaw.admin.principal_ref":"operator:manual-r3"`,
 			`"defenseclaw.policy.bundle.id":"` + id + `"`,
@@ -289,6 +293,7 @@ func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{
+		`"defenseclaw.admin.operation":"bundle-apply"`,
 		`"defenseclaw.admin.principal_ref":"operator:manual-r4"`,
 		`"defenseclaw.policy.bundle.id":"` + hotID + `"`,
 		`"defenseclaw.policy.bundle.version":2`,

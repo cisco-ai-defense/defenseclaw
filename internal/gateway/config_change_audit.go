@@ -115,6 +115,9 @@ func configChangeActivity(path string, previous, raw []byte, sections, effective
 		Severity: "INFO",
 	}
 	if bundleID != "" {
+		if bundlePrincipal && state.TransactionBundleID == "" {
+			in.Operation = "bundle-apply"
+		}
 		in.Bundle = &audit.PolicyBundle{ID: bundleID, Version: bundleVersion,
 			SignerKeyID: signerKeyID, ChangeSummary: summary}
 		in.After["bundle_id"], in.After["bundle_version"] = bundleID, bundleVersion

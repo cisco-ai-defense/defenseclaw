@@ -124,6 +124,7 @@ type controlPlaneV8Family uint8
 // the route-selected projection independently for each destination.
 type controlPlaneV8Evidence struct {
 	actorRef        observability.Optional[string]
+	operation       observability.Optional[string]
 	principalRef    observability.Optional[string]
 	origin          observability.Optional[string]
 	targetRef       observability.Optional[string]
@@ -345,9 +346,13 @@ func buildControlPlaneV8Record(
 	var record observability.Record
 	switch family {
 	case controlPlaneV8FamilyConfigApplied:
+		operation := event.Action
+		if named, ok := evidence.operation.Get(); ok {
+			operation = named
+		}
 		record, err = builder.BuildLogConfigChangeApplied(observability.LogConfigChangeAppliedInput{
 			Envelope: envelope, Severity: severity, LogLevel: logLevel,
-			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: event.Action,
+			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: operation,
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
 			DefenseClawAdminTargetRef:            targetRef,
@@ -657,6 +662,7 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 		receipt = &fields
 	}
 	return controlPlaneV8Evidence{
+		operation:       optionalControlPlaneV8Identifier(input.Operation),
 		bundle:          policyBundleV8FieldsFor(input.Bundle),
 		receipt:         receipt,
 		actorRef:        optionalControlPlaneV8Actor(input.Actor),

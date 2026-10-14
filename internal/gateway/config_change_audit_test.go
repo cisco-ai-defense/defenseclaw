@@ -37,7 +37,7 @@ func TestConfigChangeActivityNamesTheWriter(t *testing.T) {
 	if !ok {
 		t.Fatal("recorded bytes produced no writer event")
 	}
-	if in.Actor != "cli:alice" || in.Reason != "defenseclaw config set" || in.TargetID != "config.yaml" {
+	if in.Actor != "cli:alice" || in.Reason != "defenseclaw config set" || in.TargetID != "config.yaml" || in.Operation != "" {
 		t.Fatalf("event = actor %q reason %q target %q", in.Actor, in.Reason, in.TargetID)
 	}
 	if len(in.Diff) != 2 || in.Diff[0].Path != "guardrail.host" || in.Diff[1].Path != "guardrail.mode" {
@@ -101,7 +101,8 @@ func TestConfigChangeActivityUsesEffectiveRestartClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, _, ok := configChangeActivity(path, before, after, []string{"guardrail"}, []string{}, 0, true)
-	if !ok || len(in.Diff) != 1 || in.Diff[0].Path != "guardrail" || in.After["restart"] != false {
+	if !ok || len(in.Diff) != 1 || in.Diff[0].Path != "guardrail" || in.After["restart"] != false ||
+		in.Operation != "bundle-apply" {
 		t.Fatalf("policy apply audit = %+v, ok=%t", in, ok)
 	}
 }
@@ -156,7 +157,7 @@ func TestConfigChangeActivityAttributesRollbackToAttemptedBundle(t *testing.T) {
 	}
 	in, _, ok := configChangeActivity(path, staged, restored, []string{"guardrail"}, []string{}, 0, true)
 	if !ok || in.Actor != "os:uid:0:root" || in.Principal != "operator:tip" || in.Bundle == nil ||
-		in.Bundle.ID != "b-01JA0000000000000000000002" || in.Bundle.ChangeSummary != "failed apply" {
+		in.Bundle.ID != "b-01JA0000000000000000000002" || in.Bundle.ChangeSummary != "failed apply" || in.Operation != "" {
 		t.Fatalf("rollback audit attribution = %+v, %t", in, ok)
 	}
 }

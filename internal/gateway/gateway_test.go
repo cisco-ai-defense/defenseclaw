@@ -3918,6 +3918,38 @@ func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
 	}
 }
 
+func TestAPIPolicyReloadWithoutPolicyDirAppliesManagedConfig(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	managedCfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	managedCfg.Enterprise.Profile = "standalone"
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: managedCfg}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	called := 0
+	api.SetPolicyReloader(func() error { called++; return nil })
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusOK || called != 1 {
+		t.Fatalf("reload = %d %s, calls = %d; want successful synchronous reload", w.Code, w.Body.String(), called)
+	}
+	api.SetPolicyReloader(func() error { return errors.New("guardrail generation rejected") })
+	w = httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "guardrail generation rejected") {
+		t.Fatalf("rejected reload = %d %s; want failure", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIPolicyReloadSecureClientStillRequiresPolicyDir(t *testing.T) {
+	api := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise"}}
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "Secure Client policy_dir not configured") {
+		t.Fatalf("Secure Client reload without policy_dir = %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	logger := audit.NewLogger(capture.store)

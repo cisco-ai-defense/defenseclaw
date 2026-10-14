@@ -1129,8 +1129,11 @@ func (l *Logger) logEventWithV8(ctx context.Context, event Event, emit auditV8Ev
 type ActivityInput struct {
 	Actor string
 	// Principal is the signed bundle creator when Actor is the local OS account.
-	Principal   string
-	Action      Action
+	Principal string
+	Action    Action
+	// Operation refines the config.change.applied operation without changing
+	// the registered audit action or canonical event name.
+	Operation   string
 	TargetType  string
 	TargetID    string
 	Reason      string
