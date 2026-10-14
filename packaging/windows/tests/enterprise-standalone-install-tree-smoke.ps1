@@ -289,13 +289,21 @@ try {
                 Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
             } '^uninstall_in_use: defenseclaw-acp\.exe \(pid 4242, account HOST\\dcw-w3a1, started by zed\) runs from .*nothing was changed'
 
-            # Secure Client keeps its original allow-list: neither ipc nor share
-            # is accepted, and removal is a no-op.
+            # Secure Client: the AVC IPC directory lives under InstallRoot
+            # (spec 004 REQ-02) and a graceful gateway stop leaves it empty,
+            # so the uninstall inventory accepts that exact directory (release
+            # 26.8.4, #839) but nothing inside it beyond the layout's socket.
+            # share is not accepted, and the standalone removal helpers are
+            # no-ops.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
             Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
             $secureClient = New-TestLayout 'secure-client-ipc'
             [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
-            Test-Refused 'Secure Client allow-list (ipc)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            Test-Accepted 'Secure Client empty ipc directory' $secureClient
+            $secureClientStray = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'stray.txt')
+            [IO.File]::WriteAllText($secureClientStray, 'x')
+            Test-Refused 'Secure Client allow-list (ipc content)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected file'
+            [IO.File]::Delete($secureClientStray)
             Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $secureClient
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
                 $failures.Add('Secure Client ipc directory was removed by the standalone helper')

@@ -2545,6 +2545,12 @@ targets:
                 $script:HarnessState.service_start_modes[$BrokerServiceName] =
                     $mode
             }
+            # The sensor helper is registered with the managed service set
+            # independent of the legacy Broker/Enumerator restore lanes.
+            $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName `
+                -GatewayServiceName $GatewayServiceName
+            $script:HarnessState.service_start_modes[$sensorHelperServiceName] =
+                $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
                 $mode
             $enumeratorServiceName =
@@ -2564,6 +2570,7 @@ targets:
                         $BrokerServiceName
                     ] = $true
                 }
+                $script:HarnessState.service_exists[$sensorHelperServiceName] = $true
                 $script:HarnessState.service_exists[$GuardianServiceName] = $true
                 if (-not $RestoreTransactionWithoutEnumerator) {
                     $script:HarnessState.service_exists[

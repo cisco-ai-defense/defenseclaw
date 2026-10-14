@@ -306,6 +306,24 @@ function Get-DefenseClawOptionalLayoutValue {
     return [string]$property.Value
 }
 
+function Test-DefenseClawTransactionBrokerTopology {
+    <#
+        True only when the legacy no-Broker transaction lanes can apply: the
+        Secure Client profile, a layout that does not mark itself
+        broker-less, and a layout that names its Broker service. The
+        standalone profile never has a Broker, so its synthesized absent
+        Broker row must never route recovery through those lanes.
+    #>
+    param([Parameter(Mandatory)][object]$Layout)
+    if (-not (Test-DefenseClawBrokerEnabled) -or
+        -not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        return $false
+    }
+    return -not [string]::IsNullOrWhiteSpace(
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name BrokerServiceName)
+    )
+}
+
 function Test-DefenseClawLayoutBrokerEnabled {
     param([Parameter(Mandatory)][object]$Layout)
     if ($Layout -is [Collections.IDictionary]) {
@@ -2302,7 +2320,14 @@ function Write-DefenseClawAclSelfHealAdvisory {
 }
 
 function Assert-DefenseClawTrustedAncestor {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        # Keeps every verdict fatal regardless of the AIFW-34262 advisory
+        # scope. Used where the verdict decides whether content counts as
+        # administrator-written evidence rather than whether an install may
+        # proceed under AVC-owned ACLs.
+        [switch]$Strict
+    )
     # 'C:' is drive-relative and resolves to the current directory on that drive.
     # Callers trim the trailing separator, so restore it before touching disk.
     if ($Path -match '^[A-Za-z]:$') {
@@ -2317,7 +2342,8 @@ function Assert-DefenseClawTrustedAncestor {
     # Test-DefenseClawPlatformInstallerOwnedPath and $script:TrustStrictAncestorsEnv.
     # This mirrors the Go walks, which scope the same downgrade with
     # managed.PlatformInstallerOwnedPath.
-    $strict = (Test-DefenseClawTrustStrictAncestors) -or
+    $strict = [bool]$Strict -or
+        (Test-DefenseClawTrustStrictAncestors) -or
         -not (Test-DefenseClawPlatformInstallerOwnedPath -Path $Path)
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
@@ -2360,7 +2386,8 @@ function Assert-DefenseClawTrustedAncestor {
 function Assert-DefenseClawTrustedAncestors {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$RequiredBase
+        [Parameter(Mandatory)][string]$RequiredBase,
+        [switch]$Strict
     )
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $base = [IO.Path]::GetFullPath($RequiredBase).TrimEnd('\')
@@ -2369,7 +2396,7 @@ function Assert-DefenseClawTrustedAncestors {
     }
 
     $current = $base
-    Assert-DefenseClawTrustedAncestor -Path $current
+    Assert-DefenseClawTrustedAncestor -Path $current -Strict:$Strict
     $relative = $full.Substring($base.Length).TrimStart('\')
     if (-not [string]::IsNullOrWhiteSpace($relative)) {
         foreach ($component in $relative.Split('\')) {
@@ -2380,7 +2407,7 @@ function Assert-DefenseClawTrustedAncestors {
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $current -PathType Container)) {
                 throw "managed root ancestor is not a directory: $current"
             }
-            Assert-DefenseClawTrustedAncestor -Path $current
+            Assert-DefenseClawTrustedAncestor -Path $current -Strict:$Strict
         }
     }
 }
@@ -9543,11 +9570,15 @@ function New-DefenseClawTransaction {
     $servicesQuiescedAt = ''
     $precheckRedactionKeyClass = ''
     try {
-        if (Test-DefenseClawStandaloneProfile) {
+        if ((Test-DefenseClawStandaloneProfile) -and
+            -not $SkipRedactionKeySnapshot) {
             # Read-only, before any service changes: a redaction key another
             # account can open is refused with the services as they were. The
             # same refusal after the stop below left every service stopped
-            # and the transaction pending (GAP-0920).
+            # and the transaction pending (GAP-0920). Teardown skips it: the
+            # key is deleted regardless of its descriptor, so a third-party
+            # DACL rewrite must not refuse Uninstall (the class stays empty,
+            # which the ACL drift repair below treats as no key drift).
             $precheckRedactionKeyClass = [string](
                 Get-DefenseClawRedactionKeySecuritySnapshot `
                     -Layout $Layout `
@@ -11593,24 +11624,46 @@ function Restore-DefenseClawTransaction {
     # through the rollback-time mutation window.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName `
         -GuardianServiceName ([string]$snapshot.guardian_service)
-    $snapshotServiceStates = Get-DefenseClawTransactionServiceStates `
-        -Services $snapshot.services `
-        -GatewayServiceName ([string]$snapshot.gateway_service) `
-        -GuardianServiceName ([string]$snapshot.guardian_service)
-    $snapshotEnumeratorState = $snapshotServiceStates[
-        $enumeratorServiceName
-    ]
-    # Only a Secure Client layout has a Broker. A standalone layout has no
-    # Broker service name, so its preimage can never enter the legacy
-    # no-Broker restore lane below.
-    $layoutBrokerEnabled = Test-DefenseClawLayoutBrokerEnabled -Layout $Layout
+    # The snapshot's service rows are the authenticated preimage: a row that
+    # is missing or not marked existed records an absent service. This reads
+    # only that bit, as the restore below always has; the strict running and
+    # start-mode schema is enforced where services are reactivated.
+    $snapshotServiceExisted = {
+        param([string]$Name)
+        return @(
+            $snapshot.services |
+                Microsoft.PowerShell.Core\Where-Object {
+                    [string]::Equals(
+                        [string]$_.name,
+                        $Name,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -and [bool]$_.existed
+                }
+        ).Count -gt 0
+    }
+    $snapshotEnumeratorState = [pscustomobject]@{
+        existed = [bool](& $snapshotServiceExisted $enumeratorServiceName)
+    }
+    $snapshotGatewayExisted = [bool](
+        & $snapshotServiceExisted ([string]$snapshot.gateway_service)
+    )
+    # Only a Secure Client layout has a Broker. The standalone profile never
+    # registers one, so its preimage can never enter the legacy no-Broker
+    # restore lane below.
+    $layoutBrokerEnabled = Test-DefenseClawTransactionBrokerTopology -Layout $Layout
     $snapshotBrokerState = $null
     $snapshotBrokerAbsent = $false
     if ($layoutBrokerEnabled) {
-        $snapshotBrokerState = $snapshotServiceStates[
-            [string]$Layout.BrokerServiceName
-        ]
-        $snapshotBrokerAbsent = -not [bool]$snapshotBrokerState.existed
+        $snapshotBrokerAbsent = -not [bool](
+            & $snapshotServiceExisted ([string]$Layout.BrokerServiceName)
+        )
+        # The exact absent row Get-DefenseClawTransactionServiceStates yields
+        # for a Broker the preimage does not record.
+        $snapshotBrokerState = [pscustomobject]@{
+            existed = -not $snapshotBrokerAbsent
+            running = $false
+            start_mode = 0
+        }
     }
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $enumeratorServiceName `
@@ -11921,10 +11974,7 @@ function Restore-DefenseClawTransaction {
         # each exact SCM object and remove it before configuring the restored
         # service set. Never call the ordinary four-service create path first:
         # doing so would silently convert rollback into an upgrade.
-        if ($snapshotBrokerAbsent -and
-            [bool]$snapshotServiceStates[
-                [string]$snapshot.gateway_service
-            ].existed) {
+        if ($snapshotBrokerAbsent -and $snapshotGatewayExisted) {
             Restore-DefenseClawTransactionGatewayWithoutBroker `
                 -BrokerState $snapshotBrokerState `
                 -Layout $Layout `
@@ -12169,7 +12219,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     # The standalone profile has no Broker at all; only a Secure Client
     # preimage can authorize a Broker-absent restore.
     $brokerAbsentPreimage = (
-        (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) -and
+        (Test-DefenseClawTransactionBrokerTopology -Layout $Layout) -and
         -not [bool]$brokerState.existed
     )
     if ($brokerAbsentPreimage -and
@@ -12233,7 +12283,7 @@ function Start-DefenseClawTransactionServices {
     # Only a Secure Client layout has a Broker. The standalone profile never
     # registers one, so its synthesized absent Broker row must not route the
     # Gateway through the legacy no-Broker restore below.
-    $layoutBrokerEnabled = Test-DefenseClawLayoutBrokerEnabled -Layout $Layout
+    $layoutBrokerEnabled = Test-DefenseClawTransactionBrokerTopology -Layout $Layout
     $gateway = $states[$GatewayServiceName]
     $broker = $states[$brokerServiceName]
     $guardian = $states[$GuardianServiceName]
@@ -22636,9 +22686,27 @@ function Write-DefenseClawStatePurgeIntentAtomic {
             }
             finally {
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
-                    Microsoft.PowerShell.Management\Remove-Item `
-                        -LiteralPath $backup `
-                        -Force
+                    if ([IO.File]::Exists($destination)) {
+                        # Either phase is now continuously visible at the
+                        # canonical path; the backup is redundant.
+                        Microsoft.PowerShell.Management\Remove-Item `
+                            -LiteralPath $backup `
+                            -Force
+                    }
+                    else {
+                        # ReplaceFile can fail after moving the destination
+                        # aside (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2). The
+                        # backup then holds the prior purge intent, the only
+                        # recovery authority outside StateRoot: put it back
+                        # at the canonical path, and keep it if that fails.
+                        try {
+                            [IO.File]::Move($backup, $destination)
+                        }
+                        catch {
+                            Microsoft.PowerShell.Utility\Write-Warning `
+                                -Message "state purge intent preimage kept at $backup"
+                        }
+                    }
                 }
             }
         }
@@ -28262,9 +28330,13 @@ function Test-DefenseClawProfileDeploymentRecordTrusted {
     param([Parameter(Mandatory)][string]$Path)
     try {
         Assert-DefenseClawNoReparsePath -Path $Path
+        # Strict: the AIFW-34262 advisory downgrade lets an install proceed
+        # under AVC-owned ancestor ACLs, but it must not turn a record a
+        # standard user could plant into evidence of the other profile.
         Assert-DefenseClawTrustedAncestors `
             -Path ([IO.Path]::GetDirectoryName($Path)) `
-            -RequiredBase $script:ProgramData
+            -RequiredBase $script:ProgramData `
+            -Strict
         Assert-DefenseClawPathAcl `
             -Path $Path `
             -AllowedWriterSIDs @(

@@ -1172,7 +1172,10 @@ func TestWindowsManagedHooksTeardownJournalWritesEmptyCodexTargets(t *testing.T)
 		windowsManagedHooksTeardownExpectedEnrollment(journal.ActivationState, []string{"S-1-5-21-111-222-333-1001"}, nil, nil)
 	for _, c := range []struct{ profile, want string }{
 		{managed.ProfileStandalone, `"codex_targets":[]`},
-		{"", `"codex_targets":null`}, // Secure Client: unchanged
+		// Secure Client: windowsManagedHooksTeardownExpectedEnrollment now
+		// returns empty, non-nil slices, so it writes [] too; the reader
+		// still accepts null from journals of earlier releases.
+		{"", `"codex_targets":[]`},
 	} {
 		t.Setenv(managed.EnterpriseProfileEnv, c.profile)
 		body, err := json.Marshal(windowsManagedHooksTeardownJournalForWrite(journal))
