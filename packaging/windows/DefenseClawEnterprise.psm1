@@ -14479,22 +14479,21 @@ function Publish-DefenseClawInstallRollbackIntent {
     # rollback and own no absent-baseline roots. Query service absence only
     # after the transaction claims or an authenticated external receipt prove
     # that fresh-install cleanup authority actually exists.
-    if (Test-DefenseClawStandaloneProfile) {
-        # Transaction snapshots carry the gateway, guardian and enumerator
-        # preimages but not the sensor helper, which a fresh install registers
-        # first. A failed first install would otherwise leave that disabled
-        # service behind, this check would refuse root cleanup, and every
-        # later ensure or uninstall would fail the same way. Fresh-install
-        # cleanup authority is proven above, so an owned sensor helper can only
-        # be this transaction's.
-        $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
-            -GatewayServiceName ([string]$Snapshot.gateway_service)
-        if (Test-DefenseClawServiceExists -Name $sensorHelperName) {
-            Assert-DefenseClawStandaloneSensorHelperOwned `
-                -Name $sensorHelperName `
-                -Layout $Layout
-            Remove-DefenseClawService -Name $sensorHelperName
-        }
+    # Both profiles register the sensor helper when its binary is laid down.
+    # Transaction snapshots carry the gateway, guardian and enumerator
+    # preimages but not the sensor helper, which a fresh install registers
+    # first. A failed first install would otherwise leave that disabled
+    # service behind, this check would refuse root cleanup, and every later
+    # ensure or uninstall would fail the same way ("rollback also failed and
+    # pending recovery was retained"). Fresh-install cleanup authority is
+    # proven above, so an owned sensor helper can only be this transaction's.
+    $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName ([string]$Snapshot.gateway_service)
+    if (Test-DefenseClawServiceExists -Name $sensorHelperName) {
+        Assert-DefenseClawStandaloneSensorHelperOwned `
+            -Name $sensorHelperName `
+            -Layout $Layout
+        Remove-DefenseClawService -Name $sensorHelperName
     }
     foreach ($name in @(Get-DefenseClawManagedServiceNames `
             -GatewayServiceName ([string]$Snapshot.gateway_service) `
