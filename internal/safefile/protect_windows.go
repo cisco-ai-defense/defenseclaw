@@ -482,9 +482,7 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 	if err != nil {
 		return false, fmt.Errorf("safefile: current token user: %w", err)
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		fmt.Sprintf("O:%sD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", identity.sid),
-	)
+	descriptor, err := privateDirectoryCreationDescriptor(identity.sid)
 	if err != nil {
 		return false, err
 	}
@@ -516,11 +514,32 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 		if err := rejectReparsePath(directory); err != nil {
 			return false, err
 		}
-		if err := protectDirectory(directory); err != nil {
+		if created {
+			// The creation descriptor keeps the path private from the
+			// first instant. Normalize its inherited ACE representation
+			// before a reader later validates the directory.
+			if err := setPrivateDACL(directory, true); err != nil {
+				return false, err
+			}
+		} else if err := protectDirectory(directory); err != nil {
 			return false, err
 		}
 	}
 	return targetCreated, nil
+}
+
+func privateDirectoryCreationDescriptor(owner *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {
+	// OWNER RIGHTS is an inheritable placeholder, not the token user's SID.
+	// Windows can materialize it as another SYSTEM ACE for a SYSTEM-owned
+	// child. Give the actual owner an explicit grant instead, and avoid a
+	// duplicate SYSTEM grant when the owner is LocalSystem.
+	ownerGrant := fmt.Sprintf("(A;OICI;FA;;;%s)", owner)
+	if !owner.IsWellKnown(windows.WinLocalSystemSid) {
+		ownerGrant += "(A;OICI;FA;;;SY)"
+	}
+	return windows.SecurityDescriptorFromString(
+		fmt.Sprintf("O:%sD:P%s", owner, ownerGrant),
+	)
 }
 
 func setPrivateDACL(path string, inherit bool) error {
@@ -550,7 +569,11 @@ func setPrivateDACL(path string, inherit bool) error {
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{identity.sid, system} {
+	sids := []*windows.SID{identity.sid}
+	if !identity.sid.Equals(system) {
+		sids = append(sids, system)
+	}
+	for _, sid := range sids {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
@@ -615,7 +638,11 @@ func privateDACLForCurrentUser(inherit bool) (*windows.SID, *windows.ACL, error)
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{user, system} {
+	sids := []*windows.SID{user}
+	if !user.Equals(system) {
+		sids = append(sids, system)
+	}
+	for _, sid := range sids {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
