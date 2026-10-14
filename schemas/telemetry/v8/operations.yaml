@@ -19412,6 +19412,51 @@ producer_mappings:
     introduced_in: telemetry-registry-v3
     disposition: translate_to_v8
 - producer: audit_action
+  key: fleet.device.reregistered
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device_registered
+  default_identity:
+    event_name: fleet.device.registered
+    bucket: asset.lifecycle
+    family: log.fleet.device.registered
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.token.rotated
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device_command
+  default_identity:
+    event_name: fleet.device.command
+    bucket: enforcement.action
+    family: log.fleet.device.command
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.key_rotated
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device_command
+  default_identity:
+    event_name: fleet.device.command
+    bucket: enforcement.action
+    family: log.fleet.device.command
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
   key: upgrade
   source: internal/audit/actions.go
   event_name_policy: context_optional

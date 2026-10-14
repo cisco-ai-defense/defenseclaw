@@ -1750,6 +1750,7 @@ def _status_payload(app) -> dict:
     config_invalid = bool(getattr(app, "config_problems", None))
     skip_live_health = config_invalid and profile != "secure_client"
     health = None
+    client = None
     if not skip_live_health:
         from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
@@ -1781,6 +1782,8 @@ def _status_payload(app) -> dict:
 
 def _fetch_fleet_health(client) -> dict | None:
     """GET /api/v1/fleet/health from the gateway; None when unavailable."""
+    if client is None:
+        return None
     import os
 
     try:

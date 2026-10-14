@@ -254,6 +254,9 @@ classes:
       ActionFleetPolicyEmergency: "fleet.policy.emergency"
       ActionFleetThreatIntel: "fleet.threat_intel.push"
       ActionFleetAlert: "fleet.alert"
+      ActionFleetDeviceReregistered: "fleet.device.reregistered"
+      ActionFleetTokenRotated: "fleet.token.rotated"
+      ActionFleetDeviceKeyRotated: "fleet.device.key_rotated"
 
   emitted_metrics:
     items:

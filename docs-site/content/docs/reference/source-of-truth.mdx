@@ -99,6 +99,9 @@ the old value until you restart it:
 - `deployment_mode`, `enterprise.profile` and `enterprise.network`
 - the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,
   `discovery_source`)
+- `fleet.*` (the fleet management keys: `fleet.enabled`,
+  `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls` and the env-var
+  references for OTA, emergency, device and MQTT credentials)
 
 The storage paths and `deployment_mode` can not be kept that way: after a
 change to one, the gateway refuses that reload, and every later one, until you
