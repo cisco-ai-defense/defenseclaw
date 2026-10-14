@@ -401,7 +401,8 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "windows.CreateDirectory(name, attributes)" in go
     assert "createWindowsBundleDirectoryMode" not in go
     assert "windows.FILE_FLAG_OPEN_REPARSE_POINT" in go
-    assert "windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)" in go
+    assert "windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, securityInfo)" in go
+    assert "windows.OWNER_SECURITY_INFORMATION |" in go
     assert "windowsEnterpriseSIDEqual(actualOwner, owner)" in go
     assert "windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT," in go
     assert "windows.PROTECTED_DACL_SECURITY_INFORMATION" in go
