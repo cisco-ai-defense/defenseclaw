@@ -501,10 +501,26 @@ func TestWindowsBundleGatewayRestartReachesEveryReceiptSurface(t *testing.T) {
 	if err := os.WriteFile(layout.ConfigPath, run.prepared.Config, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// This host uses a temporary managed layout, so derive the gateway's
+	// enforcing digest from that layout and the promoted bundle assets.
+	versionDir := run.driver.Store.VersionDir(run.prepared.Receipt.Dir)
+	installedBundle, err := enterprisebundle.ReadDir(versionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, rendered, err := enterprisebundle.LoadConfigForDeviceLayout(installedBundle, versionDir,
+		enterprisebundle.PlatformWindows, enterprisebundle.DeviceLayoutFromManaged(layout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := bundleDigester(context.Background(), cfg, rendered, enterprisebundle.PlatformWindows, versionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	run.gatewayRestarted = true
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
-	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: windowsBundleTestDigest,
-		GatewayReportedDigest: windowsBundleTestDigest, ConfigGeneration: 3, Applied: true}
+	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: digest,
+		GatewayReportedDigest: digest, ConfigGeneration: 3, Applied: true}
 	finishWindowsEnterpriseBundle(cmd, opts, result)
 	if len(result.Errors) != 0 {
 		t.Fatalf("finish errors: %+v", result.Errors)
@@ -597,9 +613,20 @@ func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
 				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
 			if kind == "version_not_newer" {
-				if !done || err == nil || !strings.Contains(out.String(), kind) ||
-					!strings.Contains(out.String(), "set by trust anchor min_version") ||
-					!strings.Contains(out.String(), `"floor_source": "trust_anchor_min_version"`) {
+				var refusal struct {
+					FloorSource string `json:"floor_source"`
+					ExitCode    int    `json:"exit_code"`
+					LastRefusal struct {
+						ErrorCode string `json:"error_code"`
+					} `json:"last_refusal"`
+				}
+				if decodeErr := json.Unmarshal(out.Bytes(), &refusal); decodeErr != nil {
+					t.Fatalf("decode version floor refusal: %v: %s", decodeErr, out.String())
+				}
+				if !done || commandExitCode(err) != enterprisestatus.WindowsExitFailure ||
+					refusal.ExitCode != enterprisestatus.WindowsExitFailure || refusal.LastRefusal.ErrorCode != kind ||
+					refusal.FloorSource != "trust_anchor_min_version" ||
+					!strings.Contains(out.String(), "set by trust anchor min_version") {
 					t.Fatalf("version floor refusal: done=%v err=%v output=%s", done, err, out.String())
 				}
 				assertWindowsBundleLockRemoved(t, layout)
