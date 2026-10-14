@@ -306,6 +306,15 @@ func publishWindowsBundlePrivateFile(path string) error {
 }
 
 func publishWindowsBundleReceipt(path string) error {
+	if filepath.Base(filepath.Dir(path)) == enterprisestatus.PublicReceiptEventsDirName {
+		if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
+			return err
+		}
+		if err := applyWindowsBundleSDDL(filepath.Dir(path), windowsBundlePrivateSDDL()); err != nil {
+			return err
+		}
+		return applyWindowsBundleSDDL(path, windowsBundleAdminFileSDDL())
+	}
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
 	if err != nil {
 		return err
@@ -349,7 +358,42 @@ func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
 	}
 	sddl := windowsBundleDirectorySDDL(service.String())
 	path := filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
-	return createWindowsBundleDirectory(path, sddl)
+	if err := createWindowsBundleDirectory(path, sddl); err != nil {
+		return err
+	}
+	return ensureWindowsBundleReceiptEvents(path)
+}
+
+func ensureWindowsBundleReceiptEvents(path string) error {
+	// Terminal receipts may have created this directory after the previous
+	// apply's Verify. Protect it and its existing files before the next Verify.
+	events := filepath.Join(path, enterprisestatus.PublicReceiptEventsDirName)
+	if err := os.MkdirAll(events, 0o700); err != nil {
+		return err
+	}
+	if err := winpath.RejectReparseChain(events); err != nil {
+		return err
+	}
+	if err := applyWindowsBundleSDDL(events, windowsBundlePrivateSDDL()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(events)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("bundle receipt event is not a regular file: %s", entry.Name())
+		}
+		file := filepath.Join(events, entry.Name())
+		if err := winpath.RejectReparseChain(file); err != nil {
+			return err
+		}
+		if err := applyWindowsBundleSDDL(file, windowsBundleAdminFileSDDL()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureWindowsBundlePublicReceiptEventsDirectory(path string) error {

@@ -383,7 +383,7 @@ var policyReloadCmd = &cobra.Command{
 		if err := managedStandardUserGatewayRefusal(); err != nil {
 			return err
 		}
-		return rootPersistentPreRunE(cmd, args)
+		return policyConfigOnlyPreRunE(cmd, args)
 	},
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790

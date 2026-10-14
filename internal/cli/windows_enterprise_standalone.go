@@ -2637,7 +2637,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		if plan.Reason == "drift:bundle" {
-			result.AddError("bundle_apply_failed", "the gateway did not adopt the policy bundle config; check bundle status and gateway health")
+			result.AddError("bundle_apply_failed", "the policy bundle apply did not complete; check the preceding bundle error and gateway health")
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		startOnlyKeys = keys

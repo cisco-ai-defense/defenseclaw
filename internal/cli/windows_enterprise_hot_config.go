@@ -97,8 +97,14 @@ func reloadWindowsStandaloneBundlePolicy(ctx context.Context, layout managed.Sta
 	defer cancel()
 	command := exec.CommandContext(ctx, installedCLI, "policy", "reload")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
-	_, err = command.Output()
-	return err
+	out, err := command.CombinedOutput()
+	if err != nil {
+		if detail := strings.TrimSpace(string(out)); detail != "" {
+			return fmt.Errorf("policy reload: %w: %s", err, windowsEnterpriseBoundedDiagnostic(detail))
+		}
+		return fmt.Errorf("policy reload: %w", err)
+	}
+	return nil
 }
 
 // windowsEnterpriseServicePins are the environment pins the gateway service
@@ -274,7 +280,7 @@ func windowsEnterpriseHotConfigApply(
 		// best effort on Windows. A reload request makes a policy-only bundle
 		// deterministic; a failed request cannot bypass adoption confirmation.
 		if err := windowsEnterpriseHotBundleReload(ctx, layout); err != nil {
-			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy")
+			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		}
 	}
 	if len(startOnly) > 0 {
@@ -323,7 +329,13 @@ func windowsEnterpriseHotConfigApply(
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil || !windowsEnterpriseVerifyAcceptable(verifyReport) {
 		undo()
-		failBundle("bundle_post_verify_failed", "the standalone post-apply verification did not pass")
+		message := "the standalone post-apply verification did not pass"
+		if err != nil {
+			message += ": " + windowsEnterpriseBoundedDiagnostic(err.Error())
+		} else {
+			message += ": " + windowsEnterpriseVerifyFailureDetail(verifyReport, "")
+		}
+		failBundle("bundle_post_verify_failed", message)
 		if opts.bundle != nil && opts.bundle.gatewayRestarted {
 			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
 				_, _ = windowsEnterpriseHotConfigRecover()
