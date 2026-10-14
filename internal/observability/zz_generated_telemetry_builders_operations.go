@@ -6,8 +6,7 @@
 package observability
 
 type TelemetryCustomResourceAttributes struct {
-	entries              familyFieldValues
-	compatibilityAliases bool
+	entries familyFieldValues
 }
 
 func (attributes TelemetryCustomResourceAttributes) Values() map[string]string {
@@ -21,11 +20,7 @@ func (attributes TelemetryCustomResourceAttributes) Values() map[string]string {
 	return values
 }
 
-func (attributes TelemetryCustomResourceAttributes) CompatibilityAliasesEnabled() bool {
-	return attributes.compatibilityAliases
-}
-
-func NewTelemetryCustomResourceAttributes(values map[string]string, compatibilityAliases bool) (TelemetryCustomResourceAttributes, error) {
+func NewTelemetryCustomResourceAttributes(values map[string]string) (TelemetryCustomResourceAttributes, error) {
 	if len(values) > 64 {
 		return TelemetryCustomResourceAttributes{}, familyBuildFailure(FamilyBuildConstraint)
 	}
@@ -63,12 +58,11 @@ func NewTelemetryCustomResourceAttributes(values map[string]string, compatibilit
 	for _, key := range keys {
 		entries = append(entries, familyFieldValue{key: key, value: cloned[key], present: true})
 	}
-	return TelemetryCustomResourceAttributes{entries: entries, compatibilityAliases: compatibilityAliases}, nil
+	return TelemetryCustomResourceAttributes{entries: entries}, nil
 }
 
 func WithTelemetryCustomResourceAttributes(resource TraceResourceInput, attributes TelemetryCustomResourceAttributes) TraceResourceInput {
 	resource.customValues = append(familyFieldValues(nil), attributes.entries...)
-	resource.compatibilityAliases = attributes.compatibilityAliases
 	return resource
 }
 
@@ -8637,22 +8631,8 @@ func generatedTelemetryResourceContract() familyResourceDynamicContract {
 		maxValueUTF8Bytes:     1024,
 		maxAggregateUTF8Bytes: 16384,
 		fieldClass:            FieldClassMetadata,
-		aliases: []familyResourceCompatibilityAlias{
-			{
-				canonical:  "deployment.environment.name",
-				descriptor: familyFieldDescriptor{key: "deployment.environment", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassMetadata, constraints: familyFieldConstraints{maxUTF8Bytes: 4096}, source: familyValueInput},
-			},
-			{
-				canonical:  "defenseclaw.deployment.mode",
-				descriptor: familyFieldDescriptor{key: "deployment.mode", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassMetadata, constraints: familyFieldConstraints{maxUTF8Bytes: 4096}, source: familyValueInput},
-			},
-			{
-				canonical:  "defenseclaw.device.public_key_fingerprint",
-				descriptor: familyFieldDescriptor{key: "defenseclaw.device.id", typeOf: familyFieldString, requirement: familyRequirementRecommended, fieldClass: FieldClassIdentifier, constraints: familyFieldConstraints{maxUTF8Bytes: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9:+._/-]*$"}, source: familyValueInput},
-			},
-		},
-		validate:      generatedValidateTelemetryResourceAttribute,
-		prometheusKey: generatedTelemetryResourcePrometheusKey,
+		validate:              generatedValidateTelemetryResourceAttribute,
+		prometheusKey:         generatedTelemetryResourcePrometheusKey,
 	}
 }
 
