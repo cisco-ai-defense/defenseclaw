@@ -289,11 +289,14 @@ func planWindowsManagedRuntimeRoots(
 	// Only a standalone install plan re-protects a folder a standalone purge
 	// kept; a validation plan never changes a folder.
 	adoptPurgeKept := !validation && windowsEnterpriseStandaloneProcess()
+	// An install plan, in either profile, gives a folder whose only drift is
+	// another product's read-only grant the canonical DACL again.
+	restampReadOnly := !validation
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
-			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept)
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept, restampReadOnly)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -876,8 +879,11 @@ func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target wi
 // absent data directory, or one the account created itself before enrollment,
 // is planned pending instead of absent or refused. With adoptPurgeKept (a
 // standalone install plan), a data directory left by a standalone uninstall
-// with purge is given the canonical DACL again and planned canonical.
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept bool) (WindowsManagedRuntimeRootPlan, error) {
+// with purge is given the canonical DACL again and planned canonical. With
+// restampReadOnly (an install plan), a canonical data directory that also
+// carries read-only grants of another product (Codex's sandbox group) is
+// given the exact canonical DACL again, after the per-user install refusal.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept, restampReadOnly bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -926,6 +932,19 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 			}
 		}
+		if err == nil && restampReadOnly {
+			removed, restampErr := restampWindowsManagedRuntimeReadOnlyGrants(parent, final, target)
+			if restampErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, restampErr
+			}
+			if len(removed) > 0 {
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] warning: %s carried read-only grants of another product; "+
+						"the canonical managed DACL was restored and these grants were removed: %s\n",
+					target.data, strings.Join(removed, ", "))
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
+		}
 		if err != nil {
 			if !pendingAllowed || !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
 				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
@@ -951,6 +970,71 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 	}
 	root.MarkerSID = marker.String()
 	return root, nil
+}
+
+// windowsManagedRuntimeRootReadOnlyGrants returns the principals of the
+// read-only extra grants on the data directory behind handle, which must
+// otherwise carry the exact canonical DACL and be owned by the target.
+func windowsManagedRuntimeRootReadOnlyGrants(handle windows.Handle, target windowsManagedRuntimeTarget) ([]*windows.SID, error) {
+	if err := validateWindowsGuardianACLHandle(handle, target.sid, true, true, false); err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, fmt.Errorf("enterprise hooks: %s has a null or unreadable DACL", target.data)
+	}
+	return inspectWindowsUserPathProtectionACL(target.data, descriptor, dacl, target.sid, true, true)
+}
+
+// restampWindowsManagedRuntimeReadOnlyGrants gives the canonical protected
+// DACL back to a target-owned data directory whose DACL is canonical except
+// for read-only grants of other principals (windowsReadOnlyExtraACE). The
+// folder is first refused if a per-user install left it
+// (refuseWindowsPerUserInstallFolder). The DACL changes through a second
+// no-follow handle bound to the same inode, re-inspected before the write,
+// and only the DACL is written. It returns the removed principals, or none
+// when the folder had no such grant. With
+// DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 the validator already refused
+// such a folder, so nothing reaches here.
+func restampWindowsManagedRuntimeReadOnlyGrants(parent, final windows.Handle, target windowsManagedRuntimeTarget) ([]string, error) {
+	extras, err := windowsManagedRuntimeRootReadOnlyGrants(final, target)
+	if err != nil || len(extras) == 0 {
+		return nil, err
+	}
+	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+		return nil, err
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: reopen %s to remove read-only grants: %w", target.data, err)
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return nil, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	extras, err = windowsManagedRuntimeRootReadOnlyGrants(writer, target)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: %s changed while it was inspected: %w", target.data, err)
+	}
+	if len(extras) == 0 {
+		return nil, nil
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: restore the canonical DACL on %s: %w", target.data, err)
+	}
+	return windowsSIDDisplayNames(extras), nil
 }
 
 // adoptWindowsManagedRuntimePurgeKeptRoot restores the canonical DACL on a

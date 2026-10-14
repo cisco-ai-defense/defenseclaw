@@ -6164,3 +6164,190 @@ def test_existing_virtual_account_gateway_migrates_in_place() -> None:
     assert "[string]$RestoreGatewayAccount" in setter
     assert "a recorded gateway account can be restored only while transaction services remain disabled" in setter
     assert "refusing to restore unsupported gateway service account" in setter
+
+
+def test_secure_client_purge_removes_only_defenseclaw_user_runtime_entries() -> None:
+    """A Secure Client --purge (nuclear and validated) removes DefenseClaw's
+    own entries from every account's .defenseclaw, never through a link and
+    never a per-user install's folder; what stays is a warning."""
+    module = read(MODULE)
+
+    names = _module_function(module, "Get-DefenseClawManagedUserRuntimeEntryNames")
+    for name in (
+        "'hooks'",
+        "'hook_contract_lock.json'",
+        "'hook_contract_lock.json.lock'",
+        "'inventory.db'",
+        "'inventory.db-journal'",
+        "'inventory.db-shm'",
+        "'inventory.db-wal'",
+    ):
+        assert name in names
+    # Exactly the managed runtime cleanup contract's root leaves: never a
+    # per-user install's data.
+    for name in ("config.yaml", "audit.db", ".venv", "installer", "connector_backups", "acp"):
+        assert f"'{name}'" not in names
+    leftovers = _module_function(module, "Get-DefenseClawPerUserInstallLeftoverNames")
+    assert "return @('config.yaml', 'audit.db', '.venv', 'installer')" in leftovers
+    go_setup = read(ROOT / "internal" / "enterprisehooks" / "target_runtime_setup_windows.go")
+    assert 'var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}' in go_setup
+    for leaf in ("hook_contract_lock.json", "hook_contract_lock.json.lock", "inventory.db-wal"):
+        assert f'"{leaf}":' in go_setup
+
+    tree = _module_function(module, "Remove-DefenseClawNoFollowTree")
+    assert "[IO.FileAttributes]::ReparsePoint" in tree
+    assert "a link or junction; left as found" in tree
+    assert "$nativeSecurity::OpenDirectoryPinNoFollow($Path)" in tree
+    assert "$nativeSecurity::CloseDirectoryPin($pin)" in tree
+    assert "[IO.Directory]::Delete($Path, $false)" in tree
+    assert "Remove-Item" not in tree and "-Recurse" not in tree
+
+    folder = _module_function(module, "Remove-DefenseClawManagedUserRuntimeFolder")
+    assert "[IO.Path]::Combine($UserHome, '.defenseclaw')" in folder
+    assert "$homePin = $nativeSecurity::OpenDirectoryPinNoFollow($UserHome)" in folder
+    assert "$dataPin = $nativeSecurity::OpenDirectoryPinNoFollow($dataDir)" in folder
+    assert "Get-DefenseClawPerUserInstallLeftoverNames" in folder
+    assert "which a per-user DefenseClaw install leaves" in folder
+    # The per-user install refusal comes before any removal.
+    assert folder.index("Get-DefenseClawPerUserInstallLeftoverNames") < folder.index("Remove-DefenseClawNoFollowTree")
+    # The folder itself goes only when empty, and otherwise names what stays.
+    assert "if ($left.Count -eq 0) {" in folder
+    assert "[IO.Directory]::Delete($dataDir, $false)" in folder
+    assert "kept: it still holds" in folder
+    assert "Remove-Item" not in folder
+
+    native = _module_function(module, "Initialize-DefenseClawNativeSecurity")
+    assert "public static IntPtr OpenDirectoryPinNoFollow(string path)" in native
+    pin = native[native.index("public static IntPtr OpenDirectoryPinNoFollow") :]
+    pin = pin[: pin.index("public static void CloseDirectoryPin")]
+    assert "FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS" in pin
+    # Held without FILE_SHARE_DELETE so the folder cannot be swapped.
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE," in pin and "FILE_SHARE_DELETE" not in pin
+    assert "FILE_ATTRIBUTE_REPARSE_POINT" in pin
+
+    leftovers_all = _module_function(module, "Remove-DefenseClawManagedUserRuntimeLeftovers")
+    assert "Get-DefenseClawManagedUserRuntimeHomes" in leftovers_all
+    assert "Remove-DefenseClawManagedUserRuntimeFolder -UserHome" in leftovers_all
+    assert "throw" not in leftovers_all
+
+    nuclear = _module_function(module, "Invoke-DefenseClawNuclearUninstall")
+    assert "$userRuntime = Remove-DefenseClawManagedUserRuntimeLeftovers" in nuclear
+    assert '$warnings.Add("nuclear uninstall left per-user DefenseClaw runtime state: $entry")' in nuclear
+    assert "user_runtime_removed                     = [string[]]@($userRuntime.removed)" in nuclear
+    assert "user_runtime_remaining                   = [string[]]@($userRuntime.remaining)" in nuclear
+    # Still reported as a successful purge.
+    assert "ok                                       = $true" in nuclear
+
+    scope = _module_function(module, "Test-DefenseClawManagedUserRuntimeCleanupScope")
+    assert "Test-DefenseClawStandaloneProfile" in scope
+    assert "Get-DefenseClawNuclearSafeRootPattern" in scope
+    uninstall = _module_function(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert (
+        "if ($Purge -and (Test-DefenseClawManagedUserRuntimeCleanupScope -Layout $Layout)) {\n"
+        "        $result = Add-DefenseClawManagedUserRuntimeCleanupResult -Result $result"
+    ) in uninstall
+    added = _module_function(module, "Add-DefenseClawManagedUserRuntimeCleanupResult")
+    assert "-Name user_runtime_remaining" in added and "-Name warnings" in added
+    assert "-Name ok" not in added
+
+
+_USER_RUNTIME_BEHAVIOR_SCRIPT = r"""
+param([string]$Module, [string]$UserHome)
+$ErrorActionPreference = 'Stop'
+$text = [IO.File]::ReadAllText($Module)
+foreach ($name in @(
+    'Get-DefenseClawManagedUserRuntimeEntryNames',
+    'Get-DefenseClawPerUserInstallLeftoverNames',
+    'Test-DefenseClawPathPresentNoFollow',
+    'Remove-DefenseClawNoFollowTree',
+    'Remove-DefenseClawManagedUserRuntimeFolder'
+)) {
+    $start = $text.IndexOf("function $name {")
+    $end = $text.IndexOf("`nfunction ", $start + 1)
+    . ([scriptblock]::Create($text.Substring($start, $end - $start)))
+}
+# The no-follow pin is native Windows code; this stand-in refuses a link or
+# non-folder the same way so the walk can run on any engine.
+Add-Type -TypeDefinition @"
+public static class DefenseClawUserRuntimeTestPin {
+    public static System.IntPtr OpenDirectoryPinNoFollow(string path) {
+        var attributes = System.IO.File.GetAttributes(path);
+        if ((attributes & System.IO.FileAttributes.ReparsePoint) != 0 ||
+            (attributes & System.IO.FileAttributes.Directory) == 0)
+            throw new System.InvalidOperationException("refusing a link, junction or non-folder: " + path);
+        return new System.IntPtr(1);
+    }
+    public static void CloseDirectoryPin(System.IntPtr handle) {}
+}
+"@
+function Initialize-DefenseClawNativeSecurity { return [DefenseClawUserRuntimeTestPin] }
+$outcome = Remove-DefenseClawManagedUserRuntimeFolder -UserHome $UserHome
+if ($null -eq $outcome) { 'null'; return }
+$outcome | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7 is not installed")
+def test_secure_client_user_runtime_cleanup_behavior(tmp_path: Path) -> None:
+    script = tmp_path / "behavior.ps1"
+    script.write_text(_USER_RUNTIME_BEHAVIOR_SCRIPT, encoding="utf-8")
+
+    def run(user_home: Path) -> dict | None:
+        completed = subprocess.run(
+            ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script),
+             "-Module", str(MODULE), "-UserHome", str(user_home)],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        output = completed.stdout.strip().splitlines()[-1]
+        return None if output == "null" else json.loads(output)
+
+    # The field leftover: hooks, the contract lock and its lock file.
+    managed = tmp_path / "managed"
+    data = managed / ".defenseclaw"
+    (data / "hooks" / "generations").mkdir(parents=True)
+    for leaf in ("hook_contract_lock.json", "hook_contract_lock.json.lock"):
+        (data / leaf).write_text("{}", encoding="utf-8")
+    (data / "hooks" / ".hookcfg").write_text("x", encoding="utf-8")
+    (data / "hooks" / "generations" / "bundle").write_text("x", encoding="utf-8")
+    outcome = run(managed)
+    assert outcome is not None and outcome["folder_removed"] is True
+    assert outcome["remaining"] == []
+    assert not data.exists() and managed.exists()
+
+    # No folder: nothing to do.
+    assert run(managed) is None
+
+    # Anything else stays, with a warning naming it.
+    mixed = tmp_path / "mixed"
+    (mixed / ".defenseclaw" / "hooks").mkdir(parents=True)
+    (mixed / ".defenseclaw" / "notes.txt").write_text("mine", encoding="utf-8")
+    outcome = run(mixed)
+    assert outcome is not None and outcome["folder_removed"] is False
+    assert not (mixed / ".defenseclaw" / "hooks").exists()
+    assert (mixed / ".defenseclaw" / "notes.txt").exists()
+    assert any("kept: it still holds notes.txt" in entry for entry in outcome["remaining"])
+
+    # A per-user install's folder is left exactly as found.
+    peruser = tmp_path / "peruser"
+    (peruser / ".defenseclaw" / "hooks").mkdir(parents=True)
+    (peruser / ".defenseclaw" / "config.yaml").write_text("x", encoding="utf-8")
+    outcome = run(peruser)
+    assert outcome is not None and outcome["removed"] == []
+    assert (peruser / ".defenseclaw" / "hooks").is_dir()
+    assert any("per-user DefenseClaw install" in entry for entry in outcome["remaining"])
+
+    # A link below the folder is never followed.
+    linked = tmp_path / "linked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x", encoding="utf-8")
+    (linked / ".defenseclaw" / "hooks").mkdir(parents=True)
+    try:
+        (linked / ".defenseclaw" / "hooks" / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("this account cannot create symbolic links")
+    outcome = run(linked)
+    assert outcome is not None and outcome["folder_removed"] is False
+    assert (outside / "keep").exists()
+    assert any("a link or junction; left as found" in entry for entry in outcome["remaining"])

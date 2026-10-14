@@ -1316,6 +1316,59 @@ namespace $nativeNamespace
             }
         }
 
+        // Opens the folder itself (never what a link or junction there
+        // names) and holds it without sharing delete access, so it cannot be
+        // renamed or replaced while the handle is open. A link, junction or
+        // non-folder is refused.
+        public static IntPtr OpenDirectoryPinNoFollow(string path)
+        {
+            const uint FILE_LIST_DIRECTORY = 0x00000001;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint SYNCHRONIZE = 0x00100000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            IntPtr handle = CreateFileW(
+                path,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open folder without following failed: " + path);
+            BY_HANDLE_FILE_INFORMATION information;
+            if (!GetFileInformationByHandle(handle, out information))
+            {
+                int error = Marshal.GetLastWin32Error();
+                CloseHandle(handle);
+                throw new Win32Exception(
+                    error,
+                    "query folder attributes failed: " + path);
+            }
+            if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                CloseHandle(handle);
+                throw new InvalidOperationException(
+                    "refusing a link, junction or non-folder: " + path);
+            }
+            return handle;
+        }
+
+        public static void CloseDirectoryPin(IntPtr handle)
+        {
+            if (handle != IntPtr.Zero && handle != new IntPtr(-1))
+                CloseHandle(handle);
+        }
+
         public static byte[] GetFileSecurityDescriptor(string path)
         {
             const uint READ_CONTROL = 0x00020000;
@@ -30581,6 +30634,375 @@ function Invoke-DefenseClawNuclearSilentExec {
     catch {}
 }
 
+function Get-DefenseClawManagedUserRuntimeEntryNames {
+    <#
+        The entries DefenseClaw's managed runtime writes into an account's
+        %USERPROFILE%\.defenseclaw: the root leaves of the managed runtime
+        cleanup contract (windowsManagedRuntimeCleanupSpecs in
+        internal/enterprisehooks/target_runtime_setup_windows.go). hooks
+        holds the hook scripts, .hookcfg and .hookcfg.lock, the per-connector
+        .hookcfg.<connector> and hook tokens, and the runtime generations;
+        hook_contract_lock.json and its lock file are the hook contract
+        lock; inventory.db and its SQLite sidecars are the gateway's
+        inventory. Nothing else in the folder is removed.
+    #>
+    return @(
+        'hooks',
+        'hook_contract_lock.json',
+        'hook_contract_lock.json.lock',
+        'inventory.db',
+        'inventory.db-journal',
+        'inventory.db-shm',
+        'inventory.db-wal'
+    )
+}
+
+function Get-DefenseClawPerUserInstallLeftoverNames {
+    <#
+        The entries a per-user (non-managed) DefenseClaw install keeps in
+        %USERPROFILE%\.defenseclaw and the managed runtime never writes
+        there (windowsPerUserInstallLeftovers in
+        internal/enterprisehooks/target_runtime_setup_windows.go). A folder
+        that holds one belongs to a per-user install and is left as found.
+    #>
+    return @('config.yaml', 'audit.db', '.venv', 'installer')
+}
+
+function Test-DefenseClawPathPresentNoFollow {
+    # Whether something (a link included) is at Path, without following it.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        [void][IO.File]::GetAttributes($Path)
+        return $true
+    }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $false
+    }
+}
+
+function Remove-DefenseClawNoFollowTree {
+    <#
+        Removes Path, a file or a folder, never through a link: a link or
+        junction (at Path or anywhere below it) is left as found and named
+        in Remaining, and so is anything that could not be removed. Each
+        folder is held (OpenDirectoryPinNoFollow) while its entries go, so
+        it cannot be replaced by a junction meanwhile. Returns whether Path
+        is gone.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[string]]$Remaining,
+        [int]$Depth = 0
+    )
+    try {
+        $attributes = [IO.File]::GetAttributes($Path)
+    }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $true
+    }
+    catch {
+        $Remaining.Add("${Path}: $($_.Exception.Message)")
+        return $false
+    }
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $Remaining.Add("${Path}: a link or junction; left as found")
+        return $false
+    }
+    if (($attributes -band [IO.FileAttributes]::Directory) -eq 0) {
+        try {
+            if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                [IO.File]::SetAttributes(
+                    $Path,
+                    [IO.FileAttributes]([int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
+                )
+            }
+            [IO.File]::Delete($Path)
+            return $true
+        }
+        catch {
+            $Remaining.Add("${Path}: $($_.Exception.Message)")
+            return $false
+        }
+    }
+    if ($Depth -ge 32) {
+        $Remaining.Add("${Path}: nested too deep; left as found")
+        return $false
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $pin = [IntPtr]::Zero
+    $complete = $true
+    try {
+        $pin = $nativeSecurity::OpenDirectoryPinNoFollow($Path)
+        foreach ($child in @([IO.Directory]::GetFileSystemEntries($Path))) {
+            if (-not (Remove-DefenseClawNoFollowTree `
+                    -Path ([string]$child) `
+                    -Remaining $Remaining `
+                    -Depth ($Depth + 1))) {
+                $complete = $false
+            }
+        }
+    }
+    catch {
+        $Remaining.Add("${Path}: $($_.Exception.Message)")
+        $complete = $false
+    }
+    finally {
+        $nativeSecurity::CloseDirectoryPin($pin)
+    }
+    if (-not $complete) {
+        return $false
+    }
+    try {
+        # Non-recursive: a junction put here meanwhile goes as the link only.
+        [IO.Directory]::Delete($Path, $false)
+        return $true
+    }
+    catch {
+        $Remaining.Add("${Path}: $($_.Exception.Message)")
+        return $false
+    }
+}
+
+function Remove-DefenseClawManagedUserRuntimeFolder {
+    <#
+        Removes DefenseClaw's own managed runtime entries
+        (Get-DefenseClawManagedUserRuntimeEntryNames) from one profile's
+        .defenseclaw folder, without following a link: the profile and the
+        folder are held while their entries go, and a link or junction at
+        the folder or below it is left as found. A folder a per-user install
+        left (Get-DefenseClawPerUserInstallLeftoverNames) is not changed.
+        The folder itself goes only when nothing else stays in it. Returns
+        $null when the profile has no such folder, otherwise what was
+        removed and what stays (with the reason).
+    #>
+    param([Parameter(Mandatory)][string]$UserHome)
+    $dataDir = [IO.Path]::Combine($UserHome, '.defenseclaw')
+    $outcome = [pscustomobject][ordered]@{
+        data_dir = $dataDir
+        removed = [Collections.Generic.List[string]]::new()
+        remaining = [Collections.Generic.List[string]]::new()
+        folder_removed = $false
+    }
+    try {
+        $attributes = [IO.File]::GetAttributes($dataDir)
+    }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $null
+    }
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $outcome.remaining.Add("${dataDir}: a link or junction; left as found")
+        return $outcome
+    }
+    if (($attributes -band [IO.FileAttributes]::Directory) -eq 0) {
+        $outcome.remaining.Add("${dataDir}: not a folder; left as found")
+        return $outcome
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $homePin = [IntPtr]::Zero
+    $dataPin = [IntPtr]::Zero
+    try {
+        $homePin = $nativeSecurity::OpenDirectoryPinNoFollow($UserHome)
+        $dataPin = $nativeSecurity::OpenDirectoryPinNoFollow($dataDir)
+        foreach ($leftover in @(Get-DefenseClawPerUserInstallLeftoverNames)) {
+            if (Test-DefenseClawPathPresentNoFollow -Path ([IO.Path]::Combine($dataDir, $leftover))) {
+                $outcome.remaining.Add(
+                    "${dataDir}: kept: it holds $leftover, which a per-user DefenseClaw install leaves; that install's data was not removed"
+                )
+                return $outcome
+            }
+        }
+        foreach ($name in @(Get-DefenseClawManagedUserRuntimeEntryNames)) {
+            $entry = [IO.Path]::Combine($dataDir, $name)
+            if (-not (Test-DefenseClawPathPresentNoFollow -Path $entry)) {
+                continue
+            }
+            if (Remove-DefenseClawNoFollowTree -Path $entry -Remaining $outcome.remaining) {
+                $outcome.removed.Add($entry)
+            }
+        }
+        $nativeSecurity::CloseDirectoryPin($dataPin)
+        $dataPin = [IntPtr]::Zero
+        $left = @([IO.Directory]::GetFileSystemEntries($dataDir))
+        if ($left.Count -eq 0) {
+            # Non-recursive: only an empty folder (or a link put in its
+            # place meanwhile, as the link itself) goes.
+            [IO.Directory]::Delete($dataDir, $false)
+            $outcome.folder_removed = $true
+        }
+        else {
+            $names = @(
+                $left |
+                    Microsoft.PowerShell.Utility\Select-Object -First 16 |
+                    Microsoft.PowerShell.Core\ForEach-Object {
+                        [IO.Path]::GetFileName([string]$_)
+                    }
+            )
+            $more = ''
+            if ($left.Count -gt $names.Count) {
+                $more = " and $($left.Count - $names.Count) more"
+            }
+            $outcome.remaining.Add(
+                "${dataDir}: kept: it still holds $($names -join ', ')$more"
+            )
+        }
+    }
+    catch {
+        $outcome.remaining.Add("${dataDir}: $($_.Exception.Message)")
+    }
+    finally {
+        $nativeSecurity::CloseDirectoryPin($dataPin)
+        $nativeSecurity::CloseDirectoryPin($homePin)
+    }
+    return $outcome
+}
+
+function Get-DefenseClawManagedUserRuntimeHomes {
+    # Every local or Entra ID account profile on this computer (enrolled or
+    # not: the cleanup removes only DefenseClaw's own entries).
+    $profileList = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($key in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $profileList -ErrorAction SilentlyContinue)) {
+        $sid = [string]$key.PSChildName
+        if ($sid -cnotmatch '^S-1-(5-21|12-1)-[0-9-]+$') {
+            continue
+        }
+        $userHome = [Environment]::ExpandEnvironmentVariables(
+            [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue)
+        )
+        if ([string]::IsNullOrWhiteSpace($userHome) -or
+            -not [IO.Path]::IsPathRooted($userHome)) {
+            continue
+        }
+        $userHome = [IO.Path]::GetFullPath($userHome).TrimEnd('\')
+        $account = $sid
+        try {
+            $account = [Security.Principal.SecurityIdentifier]::new($sid).Translate([Security.Principal.NTAccount]).Value
+        }
+        catch {
+            $account = $sid
+        }
+        [pscustomobject][ordered]@{
+            sid = $sid
+            account = $account
+            home = $userHome
+        }
+    }
+}
+
+function Remove-DefenseClawManagedUserRuntimeLeftovers {
+    <#
+        Secure Client uninstall with purge: removes DefenseClaw's own managed
+        runtime entries from every account's .defenseclaw folder
+        (Remove-DefenseClawManagedUserRuntimeFolder), and the folder when
+        nothing else stays. A stale DACL there (for example another
+        product's grant) refused the next install of the account. It does
+        not fail: what stays is returned ("account (SID): path: reason") for
+        the result's warnings, never as a failed uninstall.
+    #>
+    $removed = [Collections.Generic.List[string]]::new()
+    $remaining = [Collections.Generic.List[string]]::new()
+    try {
+        $accountHomes = @(Get-DefenseClawManagedUserRuntimeHomes)
+    }
+    catch {
+        $remaining.Add("account profiles: $($_.Exception.Message)")
+        $accountHomes = @()
+    }
+    foreach ($accountHome in $accountHomes) {
+        $label = "$($accountHome.account) ($($accountHome.sid))"
+        try {
+            $outcome = Remove-DefenseClawManagedUserRuntimeFolder -UserHome ([string]$accountHome.home)
+        }
+        catch {
+            $remaining.Add("${label}: $($accountHome.home): $($_.Exception.Message)")
+            continue
+        }
+        if ($null -eq $outcome) {
+            continue
+        }
+        foreach ($path in @($outcome.removed)) {
+            $removed.Add("${label}: $path")
+        }
+        if ([bool]$outcome.folder_removed) {
+            $removed.Add("${label}: $($outcome.data_dir)")
+        }
+        foreach ($entry in @($outcome.remaining)) {
+            $remaining.Add("${label}: $entry")
+        }
+    }
+    return [pscustomobject][ordered]@{
+        removed = [string[]]@($removed.ToArray())
+        remaining = [string[]]@($remaining.ToArray())
+    }
+}
+
+function Test-DefenseClawManagedUserRuntimeCleanupScope {
+    # Only a deployment in the real Secure Client roots (production or
+    # -Cert) cleans the accounts' folders; a smoke run's temporary roots
+    # never touch the profiles of the computer it runs on.
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (Test-DefenseClawStandaloneProfile) {
+        return $false
+    }
+    $pattern = Get-DefenseClawNuclearSafeRootPattern
+    foreach ($name in @('InstallRoot', 'StateRoot')) {
+        $root = [string]$Layout[$name]
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            return $false
+        }
+        try {
+            $root = [IO.Path]::GetFullPath($root).TrimEnd('\')
+        }
+        catch {
+            return $false
+        }
+        if ($root -notmatch $pattern) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Add-DefenseClawManagedUserRuntimeCleanupResult {
+    # Records the per-user runtime cleanup of a Secure Client purge on a
+    # lifecycle result; what stays becomes warnings, never ok:false.
+    param([Parameter(Mandatory)]$Result)
+    $cleanup = Remove-DefenseClawManagedUserRuntimeLeftovers
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name user_runtime_removed `
+            -Value ([string[]]@($cleanup.removed)) `
+            -Force
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name user_runtime_remaining `
+            -Value ([string[]]@($cleanup.remaining)) `
+            -Force
+    if (@($cleanup.remaining).Count -gt 0) {
+        $warnings = [Collections.Generic.List[string]]::new()
+        $existing = $Result.PSObject.Properties['warnings']
+        if ($null -ne $existing -and $null -ne $existing.Value) {
+            foreach ($item in @($existing.Value)) {
+                $warnings.Add([string]$item)
+            }
+        }
+        foreach ($entry in @($cleanup.remaining)) {
+            $warning = "uninstall left per-user DefenseClaw runtime state: $entry"
+            $warnings.Add($warning)
+            Microsoft.PowerShell.Utility\Write-Warning -Message $warning
+        }
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name warnings `
+                -Value ([string[]]@($warnings.ToArray())) `
+                -Force
+    }
+    return $Result
+}
+
 function Invoke-DefenseClawNuclearUninstall {
     # Managed-mode bulldoze: uninstall --purge is a hammer. We don't care
     # what the previous state was; the point is a clean slate for the
@@ -30940,6 +31362,24 @@ function Invoke-DefenseClawNuclearUninstall {
         }
     }
 
+    # 4. DefenseClaw's own per-user runtime entries in every account's
+    #    .defenseclaw (hooks, the hook contract lock and its lock file, the
+    #    inventory database), never through a link and never a per-user
+    #    install's folder; the folder goes only when it ends up empty. The
+    #    hammer above never reached the profiles, so a stale folder (with,
+    #    for example, the read grant Codex's sandbox adds) refused the next
+    #    install. What stays is a warning, not a failed uninstall.
+    $userRuntime = [pscustomobject]@{ removed = [string[]]@(); remaining = [string[]]@() }
+    try {
+        $userRuntime = Remove-DefenseClawManagedUserRuntimeLeftovers
+    }
+    catch {
+        $userRuntime.remaining = [string[]]@("per-user runtime cleanup: $($_.Exception.Message)")
+    }
+    foreach ($entry in @($userRuntime.remaining)) {
+        $warnings.Add("nuclear uninstall left per-user DefenseClaw runtime state: $entry")
+    }
+
     # Probe actual SCM + process state so the return reflects reality
     # instead of the previously hard-coded "absent"/false. If sc.exe
     # delete silently failed (prior bug: ArgumentList-only helper on
@@ -31011,6 +31451,8 @@ function Invoke-DefenseClawNuclearUninstall {
         gateway_ready                            = $false
         guardian_ready                           = $false
         cached_enterprise_clients_require_reload = $true
+        user_runtime_removed                     = [string[]]@($userRuntime.removed)
+        user_runtime_remaining                   = [string[]]@($userRuntime.remaining)
         errors                                   = @()
         warnings                                 = @($warnings.ToArray())
     }
@@ -31545,6 +31987,12 @@ function Invoke-DefenseClawUninstallLifecycle {
         -Result $result `
         -Layout $Layout `
         -Finalization $finalization
+    # A Secure Client purge also removes DefenseClaw's own entries from the
+    # accounts' .defenseclaw folders (the standalone purge removes those
+    # folders in its finalize).
+    if ($Purge -and (Test-DefenseClawManagedUserRuntimeCleanupScope -Layout $Layout)) {
+        $result = Add-DefenseClawManagedUserRuntimeCleanupResult -Result $result
+    }
     if ($null -ne $selfUninstallReceipt) {
         return Add-DefenseClawSelfUninstallResult `
             -Result $result `

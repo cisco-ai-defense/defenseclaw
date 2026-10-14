@@ -2441,6 +2441,11 @@ func mapWindowsUserPathGenericMask(mask windows.ACCESS_MASK) windows.ACCESS_MASK
 	return mapped
 }
 
+// validateWindowsUserPathProtectionACL requires the canonical protected DACL
+// of a managed path. A profile's .defenseclaw folder and its hooks child may
+// also carry read-only grants of other products (windowsReadOnlyExtraACE, for
+// example Codex's sandbox group); DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1
+// refuses them too.
 func validateWindowsUserPathProtectionACL(
 	path string,
 	sd *windows.SECURITY_DESCRIPTOR,
@@ -2448,67 +2453,128 @@ func validateWindowsUserPathProtectionACL(
 	target *windows.SID,
 	directory bool,
 ) error {
+	_, err := inspectWindowsUserPathProtectionACL(
+		path, sd, dacl, target, directory,
+		windowsReadOnlyExtraACEsTolerated(path, directory),
+	)
+	return err
+}
+
+// inspectWindowsUserPathProtectionACL is validateWindowsUserPathProtectionACL
+// with an explicit read-only tolerance. It returns the principals of the
+// tolerated read-only extra grants.
+func inspectWindowsUserPathProtectionACL(
+	path string,
+	sd *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+	directory bool,
+	tolerateReadOnly bool,
+) ([]*windows.SID, error) {
 	control, _, err := sd.Control()
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect Windows DACL control for %s: %w", path, err)
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
+		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
 	}
-	expected, err := windowsUserPathAppliedCanonicalACEs(target, directory)
+	if dacl == nil || target == nil {
+		return nil, fmt.Errorf("enterprise hooks: null Windows DACL or target on %s", path)
+	}
+	applied, err := windowsUserPathAppliedCanonicalACEs(target, directory)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	required := len(expected)
+	required := len(applied)
 	if directory && windowsGatewayReadablePluginRoot(path) {
 		// The Amp and OpenCode plugin folder may also carry the read grant
 		// of the gateway service (GAP-0958): both of its entries or neither.
 		if optional := windowsGatewayPluginRootAppliedACEs(); len(optional) > 0 && int(dacl.AceCount) == required+len(optional) {
-			expected = append(expected, optional...)
+			applied = append(applied, optional...)
 		}
 	}
-	if int(dacl.AceCount) != len(expected) {
-		return fmt.Errorf(
+	expected := make([]windowsDACLExpectedEntry, 0, len(applied))
+	for _, want := range applied {
+		expected = append(expected, windowsDACLExpectedEntry{sid: want.sid.String(), mask: uint32(want.mask), flags: want.flags})
+	}
+	entries := make([]windowsDACLEntry, 0, dacl.AceCount)
+	sids := make([]*windows.SID, 0, dacl.AceCount)
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
+		}
+		if ace == nil {
+			return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
+		}
+		entry := windowsDACLEntry{aceType: ace.Header.AceType, flags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
+		var sid *windows.SID
+		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+			sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			entry.sid = sid.String()
+		}
+		entries = append(entries, entry)
+		sids = append(sids, sid)
+	}
+	result := matchWindowsCanonicalDACL(entries, expected, target.String(), tolerateReadOnly)
+	switch result.failure {
+	case windowsDACLMatched:
+	case windowsDACLCountMismatch:
+		return nil, fmt.Errorf(
 			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
 			path,
 			dacl.AceCount,
 			required,
 		)
+	case windowsDACLNonAllowedType:
+		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, result.index)
+	case windowsDACLUnexpectedEntry:
+		entry := entries[result.index]
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
+			path,
+			windowsSIDString(sids[result.index]),
+			entry.mask,
+			uint32(entry.flags),
+		)
+	default:
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d (a canonical ACE is missing; %d read-only extra grants)",
+			path,
+			dacl.AceCount,
+			required,
+			len(result.extras),
+		)
 	}
-	seen := make([]bool, len(expected))
-	for index := uint16(0); index < dacl.AceCount; index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
+	extras := make([]*windows.SID, 0, len(result.extras))
+	for _, index := range result.extras {
+		copied, err := sids[index].Copy()
+		if err != nil {
+			return nil, err
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
-		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		match := -1
-		for candidate, want := range expected {
-			if seen[candidate] {
-				continue
-			}
-			if sid.Equals(want.sid) &&
-				ace.Mask == want.mask &&
-				ace.Header.AceFlags == want.flags {
-				match = candidate
-				break
-			}
-		}
-		if match < 0 {
-			return fmt.Errorf(
-				"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
-				path,
-				windowsSIDString(sid),
-				uint32(ace.Mask),
-				uint32(ace.Header.AceFlags),
-			)
-		}
-		seen[match] = true
+		extras = append(extras, copied)
 	}
-	return nil
+	return extras, nil
+}
+
+// windowsSIDDisplayNames names each SID as "DOMAIN\name (SID)", or the SID
+// alone when it does not resolve.
+func windowsSIDDisplayNames(sids []*windows.SID) []string {
+	names := make([]string, 0, len(sids))
+	for _, sid := range sids {
+		if sid == nil {
+			continue
+		}
+		label := sid.String()
+		if account, domain, _, err := sid.LookupAccount(""); err == nil && account != "" {
+			if domain != "" {
+				account = domain + `\` + account
+			}
+			label = account + " (" + label + ")"
+		}
+		names = append(names, label)
+	}
+	return names
 }
 
 func rejectWindowsUserRuntimeWriteACEs(path string, dacl *windows.ACL, target *windows.SID, wantDir, protectChildren bool) error {
