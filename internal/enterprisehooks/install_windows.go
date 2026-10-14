@@ -73,14 +73,25 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // windowsEnterpriseHookFailMode is the authoritative managed-native hook
 // policy used by rendering, lock publication, and verification. Enrollment and
 // integrity checks are independent of delivery availability.
+//
+// Outside Secure Client the protected Windows deployment never permits Codex,
+// Claude Code or Cursor hooks to inherit a fail-open normal-mode setting, and
+// the standalone per-user connectors always fail closed. Under Secure Client
+// (#1163) Codex, Claude Code and Cursor honor the configured policy: unset and
+// "open" resolve to open, an explicit or invalid non-empty value to closed.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	// Codex, Claude Code and Cursor honor the configured policy (#1163):
-	// unset/empty and "open" resolve to open, an explicit or invalid non-empty
-	// value to closed. The standalone per-user connectors keep failing closed.
-	if _, perUser := windowsStandalonePerUserConnector(connectorName); perUser {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
 		return "closed"
 	}
-	return canonicalHookFailMode(configured)
+	if secureClientHookDelivery() {
+		return canonicalHookFailMode(configured)
+	}
+	switch name {
+	case "codex", "claudecode", "cursor":
+		return "closed"
+	}
+	return strings.TrimSpace(configured)
 }
 
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -148,15 +159,60 @@ func requireWindowsStandaloneAgentVersionUnchanged(opts InstallOptions, result I
 	)
 }
 
-// requireWindowsEnterpriseManagedAgentVersion no longer gates install or
-// verify on agent-version evidence (#1163): missing, malformed or
-// unsupported versions select the reviewed best-effort contract in open
-// delivery. Connector certification, enrollment and runtime authentication
-// stay mandatory and are enforced independently of version discovery. The
+// requireWindowsEnterpriseManagedAgentVersion gates install and verify on
+// agent-version evidence: an explicit, well-formed version at or above the
+// Windows enterprise minimum for Codex, Claude Code and Cursor. Under Secure
+// Client (#1163) it does not gate: missing, malformed or unsupported versions
+// select the reviewed best-effort contract in open delivery, while connector
+// certification, enrollment and runtime authentication stay mandatory. The
 // standalone profile's per-target floor is
 // requireWindowsEnterpriseStandaloneAgentFloor.
-func requireWindowsEnterpriseManagedAgentVersion(_, _ string) error {
+func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
+	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
+		return err
+	}
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	minimum := ""
+	switch name {
+	case "codex":
+		minimum = "0.131.0"
+	case "claudecode":
+		minimum = "2.1.152"
+	case "cursor":
+		minimum = "1.7.0"
+	default:
+		return nil
+	}
+	normalized := connector.NormalizeAgentVersion(name, raw)
+	if normalized == "" {
+		return fmt.Errorf(
+			"enterprise hooks: connector %s agent_version %q is malformed",
+			name,
+			raw,
+		)
+	}
+	if compareWindowsEnterpriseVersion(normalized, minimum) < 0 {
+		return fmt.Errorf(
+			"enterprise hooks: connector %s agent_version %s is below the Windows enterprise minimum %s",
+			name,
+			normalized,
+			minimum,
+		)
+	}
 	return nil
+}
+
+// requireWindowsEnterpriseAgentVersionOutsideSecureClient keeps the explicit
+// agent_version requirement for every profile but Secure Client, which
+// installs without version evidence (#1163).
+func requireWindowsEnterpriseAgentVersionOutsideSecureClient(raw string) error {
+	if secureClientHookDelivery() {
+		return nil
+	}
+	return requireWindowsEnterpriseAgentVersion(raw)
 }
 
 // compareWindowsEnterpriseVersion orders dotted numeric versions; the
@@ -189,6 +245,9 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 
 func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
@@ -237,22 +296,23 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		GuardrailMode:      strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             windowsEnterpriseHookFailMode(name, opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setupOpts); err != nil {
 		return InstallResult{}, err
@@ -263,7 +323,10 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if setupOpts.HookAPIToken == "" {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	setupOpts, err = prepareHookContract(conn, setupOpts)
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setupOpts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -443,21 +506,22 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		)
 	}
 	setup := connector.SetupOpts{
-		DataDir:            dataDir,
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             windowsEnterpriseHookFailMode(name, opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	// The standalone Amp and OpenCode plugins run the administrator-owned
 	// hook binary for the foreign-hook guard. Install and verify share this
@@ -484,7 +548,10 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if setup.HookAPIToken == "" {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	setup, err = prepareHookContract(conn, setup)
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setup.AgentVersion); err != nil {
+		return windowsGenericManagedTarget{}, err
+	}
+	setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
 	if err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
@@ -587,6 +654,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 		return InstallResult{}, err
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -744,6 +814,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 
 func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -1926,10 +1999,12 @@ func validateWindowsEnterpriseImpersonationSetup(setup connector.SetupOpts) erro
 	return nil
 }
 
-// requireWindowsEnterpriseAgentVersion is kept for the runtime-only
-// (Copilot and standalone runtime-only) install path, whose machine policy
-// is rendered per recorded agent version. Codex, Claude Code, Cursor and the
-// generic per-user runtime install without version evidence (#1163).
+// requireWindowsEnterpriseAgentVersion requires explicit version evidence.
+// The runtime-only (Copilot and standalone runtime-only) install path always
+// requires it, because its machine policy is rendered per recorded agent
+// version. Codex, Claude Code, Cursor and the generic per-user runtime require
+// it outside Secure Client only; Secure Client installs without version
+// evidence (#1163).
 func requireWindowsEnterpriseAgentVersion(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("enterprise hooks: native Windows managed target requires explicit agent_version")

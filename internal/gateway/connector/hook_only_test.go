@@ -3498,11 +3498,9 @@ func TestCursorHooks_ActionIsFailClosedAndObserveRefreshIsFailOpen(t *testing.T)
 		t.Fatalf("Cursor action hooks must all be fail-closed:\n%s", string(data))
 	}
 
-	// Refreshing the same connector with an open delivery policy must replace
-	// the managed entries rather than retaining stale host-side enforcement.
-	// Delivery policy, not guardrail mode, selects failClosed (release #1163).
+	// Refreshing the same connector in observe mode must replace the
+	// managed entries rather than retaining stale host-side enforcement.
 	opts.GuardrailMode = "observe"
-	opts.HookFailMode = "open"
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("observe refresh Setup: %v", err)
 	}
@@ -3860,7 +3858,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		wantFailMode  string
 	}{
 		{name: "cursor_action_forces_fail_closed", connector: NewCursorConnector(), guardrailMode: "action", wantFailMode: "closed"},
-		{name: "cursor_observe_honors_explicit_closed", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "closed"},
+		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
 		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},

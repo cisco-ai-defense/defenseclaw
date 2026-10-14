@@ -69,11 +69,9 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def normalize_fail_mode(value: object, *, default: str = "open") -> str:
+def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     raw = str(value or "").strip().lower()
-    if not raw:
-        return default
-    return raw if raw in _VALID_MODES else "closed"
+    return raw if raw in _VALID_MODES else default
 
 
 @dataclass(frozen=True)
@@ -120,11 +118,10 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        Since spec 007 only Cursor's desired value differs from the configured
-        one: its fail mode follows its guardrail mode, so in observe mode
-        ``closed`` in config.yaml next to ``open`` in the hooks is intended
-        (GuardrailConfig.effective_hook_fail_mode); reporting says so instead
-        of looking like drift (GAP-0129).
+        A connector in observe mode without a value of its own stays fail-open
+        whatever the global value says (GuardrailConfig.effective_hook_fail_mode),
+        so ``closed`` in config.yaml next to ``open`` in the hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129).
         """
 
         if self.configured == self.desired or self.effective != self.desired:

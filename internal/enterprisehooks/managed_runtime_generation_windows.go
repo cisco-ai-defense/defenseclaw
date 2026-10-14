@@ -1304,6 +1304,10 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		return desired, nil, errors.New("enterprise hooks: managed runtime fail mode is invalid")
 	}
 	desired.FailMode = canonicalHookFailMode(desired.FailMode)
+	if !secureClientHookDelivery() {
+		// Outside Secure Client the managed runtime is always fail-closed.
+		desired.FailMode = "closed"
+	}
 	target, err := validateWindowsManagedRuntimeGenerationIdentity(desired)
 	if err != nil {
 		return desired, nil, err
@@ -1800,7 +1804,7 @@ func windowsManagedRuntimeBundleFromDesired(
 		HookExecutable:             desired.HookExecutable,
 		GatewayAddr:                desired.GatewayAddr,
 		GatewayServiceName:         desired.GatewayServiceName,
-		FailMode:                   canonicalHookFailMode(desired.FailMode),
+		FailMode:                   windowsManagedGenerationFailMode([]string{desired.FailMode}),
 		ScopedToken:                desired.ScopedToken,
 		HookContractID:             desired.HookContractID,
 		HookContractLockUpdatedAt:  desired.HookContractLockUpdatedAt,
@@ -1884,7 +1888,7 @@ func windowsManagedRuntimeBundleMatchesSelectorIdentity(
 		sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) && bundle.HookExecutable == entry.HookExecutable &&
 		bundle.GatewayAddr == entry.GatewayAddr &&
 		bundle.GatewayServiceName == entry.GatewayServiceName &&
-		(bundle.FailMode == "closed" || bundle.FailMode == "open")
+		(bundle.FailMode == "closed" || (bundle.FailMode == "open" && secureClientHookDelivery()))
 }
 
 func windowsManagedRuntimeBundleMatchesDesired(
@@ -1896,7 +1900,7 @@ func windowsManagedRuntimeBundleMatchesDesired(
 		bundle.HookExecutable == desired.HookExecutable &&
 		bundle.GatewayAddr == desired.GatewayAddr &&
 		bundle.GatewayServiceName == desired.GatewayServiceName &&
-		bundle.FailMode == canonicalHookFailMode(desired.FailMode) &&
+		bundle.FailMode == windowsManagedGenerationFailMode([]string{desired.FailMode}) &&
 		subtle.ConstantTimeCompare([]byte(bundle.ScopedToken), []byte(desired.ScopedToken)) == 1 &&
 		bundle.HookContractID == desired.HookContractID &&
 		// The lock timestamp is audit metadata for the shared, multi-connector

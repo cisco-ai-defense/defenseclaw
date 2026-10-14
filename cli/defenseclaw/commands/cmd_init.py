@@ -140,9 +140,9 @@ def refuse_first_run_when_managed() -> None:
     default=None,
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'open' = allow + log (recommended); 'closed' = block where the hook supports "
-        "a blocking response. Omitted, the wizard asks (default open), and "
-        "--non-interactive keeps the current setting (open on a new install). "
+        "'closed' (the default on a new install) = block where the hook supports "
+        "a blocking response; 'open' = allow + log. Omitted, the wizard asks and "
+        "--non-interactive keeps the current setting (closed on a new install). "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
     ),
@@ -1464,18 +1464,18 @@ def _prompt_action_connectors(
 def _current_hook_fail_mode(data_dir: str | os.PathLike[str] | None = None) -> str:
     """The hook fail mode an Enter at the init prompt keeps.
 
-    A new install gets the config default, open (spec 007), which
-    --non-interactive, quickstart and the fail-mode help all name; a re-run
-    keeps the saved value, so an explicit closed is preserved (GAP-0047)."""
+    A new install gets the config default, closed, which --non-interactive,
+    quickstart and the fail-mode help all name; a re-run keeps the saved
+    value (GAP-0047)."""
     try:
         from defenseclaw import config as cfg_mod
 
         if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
-            return "open"
+            return "closed"
         saved = (cfg_mod.load(data_dir=data_dir).guardrail.hook_fail_mode or "").strip().lower()
-        return saved if saved in {"open", "closed"} else "open"
+        return saved if saved in {"open", "closed"} else "closed"
     except Exception:  # noqa: BLE001 - an unreadable config offers the default
-        return "open"
+        return "closed"
 
 
 def _prompt_action_policy(
@@ -2695,8 +2695,8 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     else:
         renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
     if not proxy and _closed_fail_mode_connectors(report, connectors):
-        # An operator chose closed (GAP-1424; the default is open since spec
-        # 007): say what it means and how to change it.
+        # --non-interactive keeps the closed default the wizard asks about
+        # (GAP-1424): say what it means and how to change it.
         renderer.echo(
             "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
             " to allow and log instead: defenseclaw guardrail fail-mode open"

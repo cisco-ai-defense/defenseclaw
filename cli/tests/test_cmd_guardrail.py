@@ -319,11 +319,10 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("BLOCK", result.output)
 
     def test_single_connector_observe_mode_names_the_mode_switch(self):
-        # GAP-1341: --connector is refused on a single-connector install.
-        # Spec 007: only Cursor's observe mode keeps its hooks fail-open, so
-        # only Cursor is pointed at the mode switch.
+        # GAP-1341: --connector is refused on a single-connector install, and
+        # observe mode is what keeps the hooks fail-open.
         runner = CliRunner()
-        app = make_ctx(enabled=True, connector="cursor", hook_fail_mode="closed")
+        app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
         app.cfg.guardrail.connectors = {}
         app.cfg.guardrail.effective_mode = lambda _name: "observe"
         app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
@@ -334,17 +333,6 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("observe mode keeps hooks fail-open", result.output)
         self.assertIn("defenseclaw guardrail mode action", result.output)
         self.assertNotIn("--connector <name>", result.output)
-
-        # Any other connector still open is closed by the fail-mode command.
-        app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
-        app.cfg.guardrail.connectors = {}
-        app.cfg.guardrail.effective_mode = lambda _name: "observe"
-        app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
-        with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state):
-            result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertNotIn("observe mode keeps hooks fail-open", result.output)
-        self.assertIn("Close it with: defenseclaw guardrail fail-mode closed", result.output)
 
     def test_show_hermes_closed_provenance_reports_effective_open(self):
         runner = CliRunner()
@@ -1211,7 +1199,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(restart_mock.call_count, 2)
         self.assertIn("restored", result.output)
 
-    def test_connector_open_clears_explicit_closed_override_in_observe_mode(self):
+    def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"

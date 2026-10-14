@@ -115,10 +115,19 @@ type templateData struct {
 // authorization failures, and transport failures consistently. Strict
 // availability remains an unconditional force-closed override.
 //
-// Availability defaults to open and logs delivery failures. Explicit closed
-// settings and strict availability remain supported; valid policy denials
-// still block independently of this default.
-const defaultHookFailMode = "open"
+// "closed" is the safer default: an absent or untrustworthy verdict BLOCKS
+// rather than forwarding an uninspected action. Operators who would rather
+// accept an observability gap than a hard block during a DefenseClaw
+// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
+// runtime, or through the per-connector setup flow (which also
+// persists to guardrail.hook_fail_mode in config.yaml). Secure Client is the
+// one profile whose unset mode renders open (secureClientHookFailMode, #1163).
+const defaultHookFailMode = "closed"
+
+// secureClientHookFailMode is the unset delivery mode under the Secure Client
+// profile (#1163): availability failures are logged and the event allowed;
+// valid policy denials still block.
+const secureClientHookFailMode = "open"
 
 // windowsHookAdapterTimeoutMS matches the existing 10-second connector request
 // budget for adapters that do not have a larger documented host contract.
@@ -145,13 +154,27 @@ const (
 const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
-// the two values the hook scripts understand. Empty defaults open; malformed
-// non-empty values collapse to closed.
+// the two values the hook scripts understand. Anything other than
+// "open" (matched case-insensitively after trimming, like the config
+// resolver) collapses to "closed", so an empty value or a typo never
+// accidentally puts the agent into fail-OPEN mode at the hook failure
+// boundary (CodeGuard rule codeguard-0-authorization-access-control: deny
+// by default).
 func normalizeHookFailMode(mode string) string {
-	if trimmed := strings.TrimSpace(mode); trimmed == "" || strings.EqualFold(trimmed, "open") {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"
+}
+
+// setupHookFailMode is the delivery mode a render takes from opts without a
+// connector-specific rule: an explicit value normalized, and an unset value
+// open under Secure Client (#1163) and closed everywhere else.
+func setupHookFailMode(opts SetupOpts) string {
+	if strings.TrimSpace(opts.HookFailMode) == "" && opts.SecureClientHookDelivery {
+		return secureClientHookFailMode
+	}
+	return normalizeHookFailMode(opts.HookFailMode)
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -1469,16 +1492,21 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  1. An EXPLICIT operator value in opts.HookFailMode — either
+//  1. Outside Secure Client, Cursor observe mode always resolves to "open"
+//     and action mode to "closed"; host failClosed and adapter transport
+//     failures must not enforce outside action mode.
+//  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
 //     "open" or "closed" — wins. The operator answered
 //     `defenseclaw setup guardrail`'s fail-mode prompt (or used
 //     `defenseclaw guardrail fail-mode <value>`); silently
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open") for
-//     every connector, including Cursor in observe or action mode.
-//  3. Hook-only connectors may use explicit "closed" only when their
+//  3. EMPTY/unset opts.HookFailMode uses the connector default:
+//     defaultHookFailMode ("closed"), upgraded from the codex/claudecode
+//     enforcement flags. Under Secure Client (opts.SecureClientHookDelivery,
+//     #1163) an unset mode is "open" for every connector, Cursor included.
+//  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
@@ -1548,13 +1576,45 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
 // given the operator's setup opts and the connector identity.
-// The explicit string in opts.HookFailMode always wins; an empty value falls
-// back to defaultHookFailMode ("open"). Guardrail mode and enforcement flags
-// do not change availability policy: valid policy denials still block, and
-// explicit closed settings are preserved.
+//
+// Under Secure Client (opts.SecureClientHookDelivery, #1163) the explicit
+// string in opts.HookFailMode always wins and an empty value is open:
+// guardrail mode and enforcement flags do not change availability policy.
+//
+// Everywhere else the explicit string in opts.HookFailMode normally wins;
+// Cursor first applies its observe/action boundary because observe is never
+// allowed to block. An empty value falls back to the connector-default and is
+// upgraded to "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if opts.SecureClientHookDelivery {
+		return setupHookFailMode(opts)
+	}
+	if c != nil && c.Name() == "cursor" {
+		// Cursor mode owns its availability posture: action registrations are
+		// fail-closed and observe registrations are fail-open. This prevents a
+		// global setting inherited from another connector from making observe
+		// blocking or action silently nonblocking.
+		if strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") ||
+			strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "enforce") {
+			return "closed"
+		}
+		return "open"
+	}
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	if c != nil {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				return "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				return "closed"
+			}
+		}
 	}
 	return defaultHookFailMode
 }

@@ -65,7 +65,8 @@ per-user and machine application roots provide version metadata. When a native
 installation uses another binary location, a real, non-reparse
 `%USERPROFILE%\.cursor\extensions` directory supplies best-effort presence
 evidence. A newly discovered target is emitted enabled with an empty version,
-then uses the existing unverified-contract fail-open path from spec 007.
+then uses the existing unverified-contract fail-open path from spec 007
+(which applies under Secure Client only; elsewhere delivery stays closed).
 Discovery does not execute the binary, read extension contents, or treat
 `.cursor` / `hooks.json` alone as presence; DefenseClaw can create those itself.
 It does not treat `cursor-agent` in WSL or an npm package as native installation

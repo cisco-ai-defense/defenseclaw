@@ -121,7 +121,10 @@ targets:
 	}
 }
 
+// TestLoadManifestWindowsAcceptsMissingAgentVersion is the Secure Client
+// version fallback (#1163).
 func TestLoadManifestWindowsAcceptsMissingAgentVersion(t *testing.T) {
+	setStandaloneProfileForTest(t, false)
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
 version: 1
@@ -135,6 +138,25 @@ targets:
 	_, err := LoadManifest(path)
 	if err != nil {
 		t.Fatalf("LoadManifest error = %v, want version fallback", err)
+	}
+}
+
+// Outside Secure Client a target still needs explicit version evidence.
+func TestLoadManifestWindowsRejectsMissingAgentVersionOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+targets:
+  - user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: codex
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
+		t.Fatalf("LoadManifest error = %v, want explicit agent_version rejection", err)
 	}
 }
 

@@ -620,7 +620,7 @@ func TestAMPHookEndpointRequiresBearerOnLoopbackAndRemote(t *testing.T) {
 	}
 }
 
-func TestAMPFailModeDefaultsOpen(t *testing.T) {
+func TestAMPFailModeDefaultsClosed(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	previous := AMPPluginPathOverride
 	AMPPluginPathOverride = filepath.Join(root, "defenseclaw.ts")
@@ -637,8 +637,8 @@ func TestAMPFailModeDefaultsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `const DC_FAIL_MODE: string = "open"`) {
-		t.Fatal("unset hook fail mode did not render open")
+	if !strings.Contains(string(data), `const DC_FAIL_MODE: string = "closed"`) {
+		t.Fatal("unset hook fail mode did not render closed")
 	}
 }
 

@@ -98,11 +98,12 @@ Any other agent stays in observe. The mode is saved to `config.yaml`, and the
 running gateway applies it on its own without a restart. The hook fail mode
 is a separate setting; changing it may require hooks to be refreshed.
 
-Action mode does not change what happens while the gateway is down. The
-report showed `fail mode=open`: the hook fail mode is `open` on a new install
-in observe and action mode alike, so Claude Code's tools are allowed and the
-failure is logged while the gateway is down. To block them instead, run
-`defenseclaw guardrail fail-mode closed`.
+Action mode also changes what happens while the gateway is down. The report
+showed `fail mode=open` because an agent in observe mode always fails open. In
+action mode Claude Code uses the global hook fail mode, which is `closed` on a
+new install, so its tools are blocked while the gateway is down. The command
+tells you so when it switches. To allow and log the calls instead, run
+`defenseclaw guardrail fail-mode open`.
 
 Running `defenseclaw quickstart` again without `--mode` keeps the mode, and
 the fail mode, each connector already has; pass `--mode observe` to switch

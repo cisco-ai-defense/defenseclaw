@@ -171,12 +171,14 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			return rollback(err)
 		}
 		setup := connector.SetupOpts{
-			APIAddr:           apiAddr,
-			HookFailMode:      canonicalHookFailMode(""),
-			ManagedEnterprise: true,
-			HookExecutable:    hookExecutable,
-			DataDir:           target.dataDir,
-			AgentVersion:      strings.TrimSpace(target.manifest.AgentVersion),
+			APIAddr: apiAddr,
+			// Closed outside Secure Client; open under Secure Client (#1163).
+			HookFailMode:             canonicalHookFailMode(""),
+			SecureClientHookDelivery: secureClientHookDelivery(),
+			ManagedEnterprise:        true,
+			HookExecutable:           hookExecutable,
+			DataDir:                  target.dataDir,
+			AgentVersion:             strings.TrimSpace(target.manifest.AgentVersion),
 		}
 		switch name {
 		case "claudecode":
@@ -261,7 +263,14 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	return nil
 }
 
+// deferredWindowsCursorFailMode is a pending Cursor row's delivery mode.
+// Outside Secure Client it is always closed (origin/main). Under Secure
+// Client (#1163) an unverified version selects open delivery, otherwise the
+// configured policy applies (unset is open).
 func deferredWindowsCursorFailMode(version string, configured ...string) string {
+	if !secureClientHookDelivery() {
+		return "closed"
+	}
 	mode := ""
 	if len(configured) > 0 {
 		mode = configured[0]

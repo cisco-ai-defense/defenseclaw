@@ -6869,7 +6869,7 @@ function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
 }
 
 function Assert-DoctorWindowsHookRegistration {
-    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'open')
+    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'closed')
     if ($Connector -eq 'opencode') {
         Assert-OpenCodePluginContract
         return
@@ -9476,29 +9476,30 @@ function Invoke-ContractRun {
     Invoke-Setup observe
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
-        # Fresh installs default open; an explicit closed policy must still
-        # render and verify independently. Restore open before the corpus.
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
-        # A failed restore must not mask the closed-mode failure that caused
+        # Fresh installs outside Secure Client default closed; an explicit open
+        # policy must still render and verify independently. Restore closed
+        # before the corpus.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        # A failed restore must not mask the open-mode failure that caused
         # it: keep the primary error, warn about the restore, rethrow primary.
         $ampFailModeError = $null
         try {
-            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
             Invoke-Setup observe
-            Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+            Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
         } catch {
             $ampFailModeError = $_
         }
         try {
-            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
             Invoke-Setup observe
         } catch {
             if ($null -eq $ampFailModeError) { throw }
-            Write-Warning "Amp fail-mode restore to open failed after the closed-mode check failed: $($_.Exception.Message)"
+            Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
         }
         if ($null -ne $ampFailModeError) { throw $ampFailModeError }
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
-        Write-Result 'amp:delivery-mode-contract' pass 'default open and explicit closed plugins both rendered and verified'
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        Write-Result 'amp:delivery-mode-contract' pass 'default closed and explicit open plugins both rendered and verified'
     }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }

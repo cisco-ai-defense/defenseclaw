@@ -29,10 +29,11 @@ scanners, and observability exporters. It is an enforcement and evidence layer;
 it does not prove that an agent, model interaction, or third-party capability is
 risk-free.
 
-Hook delivery defaults to fail-open when no policy is specified; explicit
-fail-closed settings and valid policy denials remain effective. See the
+Hooks fail closed by default. Only Cisco Secure Client deployments default
+hook delivery to fail-open when no policy is specified; there an explicit
+fail-closed setting and valid policy denials remain effective. See the
 [hook delivery contract](docs/specs/007-hook-delivery-default/README.md) for
-managed-platform scope and verification.
+its Secure Client scope and verification.
 
 ## Get started
 

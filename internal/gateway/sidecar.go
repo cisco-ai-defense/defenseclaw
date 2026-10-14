@@ -6463,12 +6463,14 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		GuardrailMode:        s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
-		HILTEnabled:          s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
-		InstallCodeGuard:     false,
-		AgentVersion:         agentVersion,
-		AgentExecutable:      agentExecutable,
-		HookContractID:       contractResolution.Contract.ContractID,
+		// Secure Client renders the resolved mode as is (#1163).
+		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
+		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
+		InstallCodeGuard:         false,
+		AgentVersion:             agentVersion,
+		AgentExecutable:          agentExecutable,
+		HookContractID:           contractResolution.Contract.ContractID,
 	}, nil
 }
 

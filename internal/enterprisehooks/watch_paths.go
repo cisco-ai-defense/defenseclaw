@@ -65,18 +65,19 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:           dataDir,
-		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:           strings.TrimSpace(opts.APIAddr),
-		APIToken:          strings.TrimSpace(opts.APIToken),
-		Interactive:       false,
-		ManagedEnterprise: true,
-		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
-		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:       opts.HILTEnabled,
-		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
-		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             strings.TrimSpace(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
@@ -241,18 +242,19 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:           dataDir,
-		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:           strings.TrimSpace(opts.APIAddr),
-		APIToken:          strings.TrimSpace(opts.APIToken),
-		Interactive:       false,
-		ManagedEnterprise: true,
-		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
-		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:       opts.HILTEnabled,
-		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
-		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		DataDir:                  dataDir,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             strings.TrimSpace(opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		GuardrailMode:            strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
 	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())

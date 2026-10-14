@@ -153,7 +153,8 @@ t_unversioned_but_present_emits_row_with_empty_version() {
   # Now: when the version probe returns empty AND a CLI-only artifact
   # exists on this user, emit the row with an empty agent_version and let
   # the Go guardian's ResolveHookContract fall back to the reviewed
-  # DefaultForUnversioned event matrix in fail-open delivery mode.
+  # DefaultForUnversioned event matrix (fail-open delivery under Secure
+  # Client; outside it the action-mode contract gate still refuses).
   discover_agent_version() { printf ''; }
 
   local test_home

@@ -29,7 +29,10 @@ func TestManagedHookDeliveryUsesAuthenticatedGenerationPolicy(t *testing.T) {
 					t.Fatal("active authenticated generation no-opped")
 				}
 				opts := buildHookOptionsForRuntime(agent, "PreToolUse", "", "open", true)
-				if opts.FailMode != mode || opts.StrictAvailability || opts.ManagedRuntimeFailure != "" {
+				// Only an authenticated open (Secure Client) generation relaxes
+				// managed delivery; a closed one keeps origin/main's
+				// fail-closed, strict-availability contract.
+				if opts.FailMode != mode || opts.StrictAvailability != (mode != "open") || opts.ManagedRuntimeFailure != "" {
 					t.Fatalf("hook policy did not match authenticated %s mode: %+v", mode, opts)
 				}
 				t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "1")

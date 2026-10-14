@@ -1,5 +1,17 @@
 # Spec 007 — Fail-open hook delivery default
 
+> **Scope: Secure Client only.** Per the owner decision on
+> [#1291](https://github.com/cisco-ai-defense/defenseclaw/pull/1291), this
+> spec's open default applies only when the Secure Client integration is
+> present (`Config.SecureClientIntegration()`). OSS, the standalone
+> enterprise profile and every other managed install keep failing closed:
+> an unset `hook_fail_mode` resolves to `closed` (observe-mode connectors
+> without their own value stay open, as before), managed Codex and Claude
+> Code hooks and standalone Devin always fail closed, and Cursor follows its
+> guardrail mode (action is closed). An explicit `closed` is always kept,
+> including under Secure Client. Read every "unset defaults to open"
+> requirement below as "under Secure Client".
+
 ## Requirements
 
 - Unset hook delivery policy defaults to `open` in the Go and Python loaders,

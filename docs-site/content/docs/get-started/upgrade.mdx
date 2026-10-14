@@ -524,7 +524,7 @@ Do this once, before you set up Antigravity:
 Until the gateway restarts after `geminicli` has left `config.yaml`, the old
 hook script is still in place and calls a gateway endpoint that no longer
 exists (or a gateway that is stopped). If the script was installed with
-`guardrail.hook_fail_mode: closed` (set explicitly, or the earlier releases' new-install default; the default is now `open`), that blocks
+`guardrail.hook_fail_mode: closed`, the default for new installs, that blocks
 every Gemini CLI action. After the gateway removes the script, Gemini CLI only
 prints hook errors until you finish step 2.
 </Callout>

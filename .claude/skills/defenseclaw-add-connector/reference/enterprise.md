@@ -158,7 +158,7 @@ Without these, the plugin fails closed with "hook credential is unavailable".
 | Vendor-enforced floor drop-in | `internal/enterprisepolicy/claude_floor.go` (`00-defenseclaw-version-floor.json`, `ClaudeVersionFloor()`); `EnterpriseConnectorPolicy.VersionFloor` accepted only for claudecode | Only when the vendor has a managed "refuse to start below X" key. Use a separate drop-in so the hook drop-in bytes don't change. Write it only while no admin source sets the key. Record ownership plus a postimage hash, and save the record before the file. |
 | Not-gated standalone floor | `agent_floor_standalone.go` | Connectors without versioned contracts (Kiro). Gates new enrollments only. |
 | Windows platform minimum | `agent_floor_standalone_windows.go` | Minimums above the contract. |
-| Secure Client floors | `install_windows.go` `requireWindowsEnterpriseManagedAgentVersion`; psm1 `Get-DefenseClawClaudeMinimumClientVersion` | **Don't touch.** Pinned by `TestWindowsEnterpriseManagedAgentVersionMinimums` (`internal/enterprisehooks/install_windows_test.go`) and `test_secure_client_claude_floor_is_unchanged` (`cli/tests/test_windows_enterprise_standalone_contract.py`). |
+| Managed Windows version floors | `install_windows.go` `requireWindowsEnterpriseManagedAgentVersion` (enforced outside Secure Client; under Secure Client an unverified version installs in open delivery, spec 007); psm1 `Get-DefenseClawClaudeMinimumClientVersion` | **Don't touch.** Pinned by `TestWindowsEnterpriseManagedAgentVersionMinimums` (`internal/enterprisehooks/install_windows_test.go`) and `test_secure_client_claude_floor_is_unchanged` (`cli/tests/test_windows_enterprise_standalone_contract.py`). |
 
 ## 7. How the existing connectors differ
 

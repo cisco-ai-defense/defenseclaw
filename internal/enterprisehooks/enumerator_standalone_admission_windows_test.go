@@ -95,8 +95,13 @@ func TestStandaloneRowAdmissionAppliesTheWindowsPlatformMinimum(t *testing.T) {
 		if connector.ResolveHookContract("codex", version).Status != connector.HookCompatibilityKnown {
 			t.Fatalf("fixture codex %s must resolve to a known contract", version)
 		}
-		// The Secure Client install no longer gates on agent version
-		// (#1163); the standalone floor below still refuses the row.
+		// Outside Secure Client the install gate refuses it (origin/main);
+		// under Secure Client it does not gate on agent version (#1163).
+		setStandaloneProfileForTest(t, true)
+		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err == nil {
+			t.Fatalf("fixture codex %s must be below the install minimum", version)
+		}
+		setStandaloneProfileForTest(t, false)
 		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err != nil {
 			t.Fatalf("fixture codex %s: Secure Client install gate = %v, want none", version, err)
 		}

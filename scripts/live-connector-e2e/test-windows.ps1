@@ -4873,12 +4873,12 @@ threading.Event().wait()
             $wizardHookValidation.Contains($marker)) `
             "Windows contracts require the Amp fail-safe marker: $marker"
     }
-    Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''open''') -and
+    Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''closed''') -and
         $doctorContract.Contains('''const DC_FAIL_MODE: string = "'' + $ExpectedFailMode + ''"''') -and
         $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed') -and
         $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode open') -and
-        $wizardHookContract.Contains('const DC_FAIL_MODE: string = "open"')) `
-        'Windows Amp contracts verify the open default and independently exercise explicit closed policy'
+        $wizardHookContract.Contains('const DC_FAIL_MODE: string = "closed"')) `
+        'Windows Amp contracts verify the closed default and independently exercise explicit open policy'
     $ampNativeHookPattern = 'defenseclaw-hook(?:\.exe|\.cmd)'
     $ampCompatibilityPattern = '\bwsl\b|\bbash\b|\bchmod\b'
     $hasAmpShellRejectionContract = {

@@ -2518,24 +2518,32 @@ class GuardrailConfig:
     # transport, missing-token/authentication, and invalid-response failures.
     # Two values are supported:
     #
-    #   - ``"closed"`` (explicit opt-in): connection failures, timeouts,
+    #   - ``"closed"`` (default, safer): connection failures, timeouts,
     #     5xx/4xx responses, missing authentication, malformed JSON, or a
     #     missing action BLOCK the event where the connector has a block shape.
     #     CodeGuard rule codeguard-0-authorization-access-control:
     #     deny by default.
     #
-    #   - ``"open"`` (default): those failures ALLOW the event with a stderr warning and
+    #   - ``"open"``: those failures ALLOW the event with a stderr warning and
     #     a record in
     #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. Choose when
     #     a brief observability gap is preferable to bricking the
     #     agent on a gateway hiccup.
     #
-    # Existing explicit closed settings are preserved, not migrated.
+    # Backwards compat: existing v3 installs are pinned to ``"open"``
+    # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
+    # NEW-INSTALL-ONLY behavior change.
+    #
+    # Secure Client exception (spec 007, scoped to Secure Client by the owner
+    # decision on #1291): a config that resolves to the Secure Client profile
+    # and leaves ``hook_fail_mode`` unset loads as ``"open"``, and its
+    # delivery fail mode is independent of the guardrail mode; an explicit
+    # ``"closed"`` is always kept. See ``_apply_secure_client_hook_fail_default``.
     #
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "open"
+    hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2626,22 +2634,38 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Explicit connector posture > global > open default.
+        """Explicit connector posture > observe compatibility > global.
 
-        Delivery failures and policy enforcement are independent. Observe
-        mode must not replace an explicit closed setting during hook repair,
-        and unset policy defaults open. Cursor alone still follows its
-        guardrail mode (action is closed, observe is open), mirroring Go
-        ``Config.EffectiveHookFailModeForConnector``.
+        Cursor always follows its guardrail mode: action is closed and
+        observe is open. Other connector-scoped values remain explicit
+        runtime response-integrity choices in observe mode.
+
+        Secure Client exception (spec 007, Secure Client only): a config the
+        loader marked as Secure Client resolves explicit connector posture >
+        global, independent of the guardrail mode, with its unset global
+        loaded as open; an explicit closed is kept. Mirrors Go
+        ``Config.EffectiveHookFailModeForConnector`` under
+        ``SecureClientIntegration()``, which also skips Cursor's mode rule.
         """
+        if getattr(self, "_secure_client", False):
+            pc = self._connector_override(connector)
+            if pc is not None and pc.hook_fail_mode.strip():
+                return _normalize_hook_fail_mode(pc.hook_fail_mode)
+            return _normalize_hook_fail_mode(self.hook_fail_mode)
         # Cursor's native hook registration follows policy mode. A stored
         # fail mode from an older setup cannot override that contract.
         if str(connector).strip().lower() == "cursor":
             return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
-            return _normalize_hook_fail_mode(pc.hook_fail_mode)
-        return _normalize_hook_fail_mode(self.hook_fail_mode)
+            if pc.hook_fail_mode.strip().lower() == "closed":
+                return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
+            return "open"
+        if self.hook_fail_mode.strip().lower() == "closed":
+            return "closed"
+        return "open"
 
     def effective_block_message(self, connector: str = "") -> str:
         """Per-connector block message when set, else the global one."""
@@ -6018,12 +6042,50 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     sentinels the gateway understands.
 
     Mirrors ``normalizeHookFailMode`` in
-    ``internal/gateway/connector/subprocess.go``. Missing/empty policy defaults
-    open; malformed non-empty configuration remains closed.
+    ``internal/gateway/connector/subprocess.go``. Anything other than
+    the explicit ``"open"`` sentinel collapses to ``"closed"`` so a
+    typo in config.yaml never accidentally puts the agent into
+    fail-OPEN mode at the hook failure boundary (CodeGuard rule
+    codeguard-0-authorization-access-control: deny by default).
+    A Secure Client config's unset value is resolved by
+    :func:`_apply_secure_client_hook_fail_default`, not here.
     """
-    if value is None or (isinstance(value, str) and value.strip().lower() in {"", "open"}):
+    if isinstance(value, str) and value.strip().lower() == "open":
         return "open"
     return "closed"
+
+
+def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
+    """Secure Client exception to the fail-closed hook default (spec 007).
+
+    Per the owner decision on #1291, hooks fail open by default only under
+    Secure Client: a document that resolves to the Secure Client profile
+    (``deployment_mode: managed_enterprise`` and not the standalone profile,
+    as Go ``SecureClientIntegration()``) loads an unset
+    ``guardrail.hook_fail_mode`` as ``"open"`` and marks the guardrail so
+    :meth:`GuardrailConfig.effective_hook_fail_mode` resolves independent of
+    the guardrail mode. An explicit value, ``"closed"`` included, is kept.
+    Every other install keeps the fail-closed default. The Secure Client
+    config is administrator-owned (local writers refuse it), so the gateway
+    remains the authority; this only keeps CLI reporting in step with it.
+    """
+    from defenseclaw import config_writer
+
+    if not (
+        _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+        or _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
+    ):
+        return
+    if not config_writer.secure_client_document(raw):
+        return
+    try:
+        object.__setattr__(cfg.guardrail, "_secure_client", True)
+    except (AttributeError, TypeError):  # a test double without attributes
+        return
+    guardrail_raw = raw.get("guardrail")
+    configured = guardrail_raw.get("hook_fail_mode") if isinstance(guardrail_raw, dict) else None
+    if not str(configured or "").strip():
+        cfg.guardrail.hook_fail_mode = "open"
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
@@ -7052,6 +7114,7 @@ def load(
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
+    _apply_secure_client_hook_fail_default(cfg, raw)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go

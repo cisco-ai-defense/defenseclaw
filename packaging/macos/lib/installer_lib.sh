@@ -1491,11 +1491,14 @@ enumerate_local_users() {
 # config surface exists on this user, emit the row with an empty
 # agent_version and let the Go guardian handle it — the sidecar's
 # ResolveHookContract has an Unversioned branch that returns the
-# connector's reviewed best-effort DefaultForUnversioned contract. The Go
-# guardian wires that target with fail-open delivery until discovery resolves
-# a known compatible contract; policy denials still enforce when the hook
-# reaches DefenseClaw. If the presence signal is also absent, the row is still
-# skipped as before.
+# connector's reviewed best-effort DefaultForUnversioned contract. Under
+# Secure Client the Go guardian wires that target with fail-open delivery
+# until discovery resolves a known compatible contract (#1163); policy denials
+# still enforce when the hook reaches DefenseClaw. Every other profile keeps
+# the fail-closed gate: in `action` mode validateHookContract refuses the
+# target (unless DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1), which surfaces the
+# failure in protected_targets.json instead of a silent drop. If the presence
+# signal is also absent, the row is still skipped as before.
 
 # connector_present_for_user CONNECTOR HOME -> exit 0 iff there is a
 # per-user artifact on disk indicating the user has actually used this

@@ -225,9 +225,40 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	}
 }
 
+// Outside Secure Client the managed native Codex and Claude Code hooks are
+// always fail-closed (origin/main).
+func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "observe", HookFailMode: "open"},
+		"codex":      {Mode: "observe", HookFailMode: "open"},
+	}
+
+	state, err := rotationConnectorStateFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Connectors) != 2 {
+		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
+	}
+	for _, row := range state.Connectors {
+		if row.HookFailMode != "closed" {
+			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		}
+	}
+}
+
+// Secure Client honors an explicit open delivery policy for the native
+// hooks (#1163).
 func TestRotationConnectorStatePreservesManagedNativeHooksOpen(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "secure_client"
 	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.HookFailMode = "open"

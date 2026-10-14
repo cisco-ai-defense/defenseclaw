@@ -109,29 +109,31 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
 
 
 def test_global_switch_rerenders_hooks_without_a_restart(app, restarts, rerenders, monkeypatch) -> None:
-    # Spec 007: the hook fail mode is independent of the guardrail mode, so
-    # codex's inherited hook_fail_mode=closed applies in observe and action
-    # alike. The gateway reloads the mode hot (GAP-0002) and, with no fail-mode
-    # flip, no hook script is re-rendered and nothing restarts.
+    # codex inherits hook_fail_mode=closed, which only applies in action mode:
+    # observe -> action flips its hooks from fail-open to fail-closed. The
+    # gateway reloads the mode hot and the script is re-rendered in place
+    # (GAP-0002); no restart.
     result, payload = _run(app, "action", "--json")
-    assert result.exit_code == 0, result.output
-    assert payload["gateway"] == "live" and rerenders == [] and restarts == []
+    assert payload["gateway"] == "live" and rerenders == ["codex"] and restarts == []
     text, _ = _run(app, "observe")
-    assert "now fail" not in text.output
-    assert rerenders == [] and restarts == []
+    assert "fail open" in text.output
+    assert rerenders == ["codex", "codex"] and restarts == []
 
-    # Cursor alone still pins its fail mode to the guardrail mode (action is
-    # closed). It has no in-place runtime registration, so the flip restarts
-    # the gateway, which re-bakes its hooks.
-    app.cfg.claw.mode = "cursor"
-    app.cfg.guardrail.connector = "cursor"
-    app.cfg.guardrail.hook_fail_mode = "open"
-    monkeypatch.setattr(cmd_guardrail, "_unguarded_hook_connectors", lambda _app, _names: [])
-    text, _ = _run(app, "action")
-    assert text.exit_code == 0, text.output
-    assert "Hook failures for Cursor now fail closed" in text.output
-    assert rerenders == [] and restarts == [app.cfg.data_dir]
-    assert app.cfg.guardrail.hook_fail_mode == "closed"
+    # Without a hook fail-mode flip nothing is re-rendered.
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
+    _, payload = _run(app, "action", "--json")
+    assert payload["gateway"] == "live" and len(rerenders) == 2
+
+    # A failed re-render falls back to a restart, which re-bakes the script.
+    app.cfg.guardrail.connectors = {}
+    app.cfg.guardrail.mode = "observe"
+
+    def broken(_cfg, _name):
+        raise OSError("native defenseclaw-gateway executable not found")
+
+    monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", broken)
+    _, payload = _run(app, "action", "--json")
+    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
@@ -215,18 +217,8 @@ def test_copilot_action_message_names_upstream_fail_open(app) -> None:
     app.cfg.guardrail.connector = "copilot"
     result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
     assert result.exit_code == 0, result.output
-    # Spec 007: entering action flips no fail mode, but the configured closed
-    # value still can't apply upstream, so the note names that.
     assert "upstream limitation" in result.output
     assert "now fail closed" not in result.output
-
-    # With the open default there is nothing misleading to correct.
-    app.cfg.guardrail.mode = "observe"
-    app.cfg.guardrail.connectors = {}
-    app.cfg.guardrail.hook_fail_mode = "open"
-    result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
-    assert result.exit_code == 0, result.output
-    assert "upstream limitation" not in result.output
 
 
 def test_action_mode_without_registered_hooks_is_not_reported_as_success(app, restarts, rerenders, tmp_path) -> None:

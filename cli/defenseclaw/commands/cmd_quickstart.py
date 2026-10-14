@@ -64,9 +64,8 @@ from defenseclaw import ux
     default=None,
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'open' (the default on a new install) allows the event and logs the failure; "
-        "'closed' blocks where the hook supports it, so the agent's tools are blocked "
-        "while the gateway is down. "
+        "'closed' (the default on a new install) blocks where the hook supports it, "
+        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
         "Omit it to keep the current setting. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed. "

@@ -631,8 +631,13 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	key := previousManifestKey(row.SID, row.Connector)
 	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
 	if prev, ok := previous[key]; ok {
-		// Preserve authorization, not stale compatibility evidence.
-		row.AgentVersion = version
+		// Secure Client preserves authorization, not stale compatibility
+		// evidence (#1163). Every other profile keeps the recorded version,
+		// so a version change goes through the install's contract gate.
+		row.AgentVersion = prev.AgentVersion
+		if secureClientHookDelivery() {
+			row.AgentVersion = version
+		}
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
@@ -640,7 +645,10 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.GID = prev.GID
 		return true
 	}
-	if version == "" && !windowsAgentPresence(row.UserHome, row.Connector) {
+	// Secure Client admits an unversioned row on static presence evidence and
+	// installs best-effort hooks for it (#1163); every other profile skips a
+	// user × connector without version evidence.
+	if version == "" && !(secureClientHookDelivery() && windowsAgentPresence(row.UserHome, row.Connector)) {
 		logfSafely(
 			logf,
 			row.SID,

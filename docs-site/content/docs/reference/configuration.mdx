@@ -1298,7 +1298,7 @@ A handful of high-traffic env vars are inlined below. The full inventory — eve
     },
     "DEFENSECLAW_STRICT_AVAILABILITY": {
       type: "0|1",
-      description: "When 1, transport-layer and missing-token hook failures are forced closed. Without this override, both transport and response failures follow guardrail.hook_fail_mode (open when unset; an explicit closed is preserved).",
+      description: "When 1, transport-layer and missing-token hook failures are forced closed. Without this override, both transport and response failures follow guardrail.hook_fail_mode (closed on fresh installs; migrated configs can retain open; Secure Client deployments default to open when it is unset).",
     },
     "DEFENSECLAW_FAIL_MODE": {
       type: "open|closed",

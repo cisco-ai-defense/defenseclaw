@@ -17,7 +17,7 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | System boundaries | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `cli/`, `cmd/`, `internal/`, `extensions/defenseclaw/` |
 | Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md) | `internal/gateway/`, `internal/guardrail/`, `policies/` |
 | Hook compatibility fallback | [`development/unverified-hook-contract-fallback.md`](development/unverified-hook-contract-fallback.md) | `internal/gateway/connector/`, `internal/enterprisehooks/` |
-| Hook delivery default | [`specs/007-hook-delivery-default/README.md`](specs/007-hook-delivery-default/README.md) | `internal/config/`, `cli/defenseclaw/`, connector runtimes |
+| Hook delivery default (Secure Client) | [`specs/007-hook-delivery-default/README.md`](specs/007-hook-delivery-default/README.md) | `internal/config/`, `cli/defenseclaw/`, connector runtimes |
 | Observability v8 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | `schemas/telemetry/v8/`, `schemas/config/v8/`, `internal/observability/` |
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
 | OpenShell sandbox | [`SANDBOX.md`](SANDBOX.md) (architecture, and what the retired standalone install left), [`OPENSHELL_SANDBOX_EVENTS.md`](OPENSHELL_SANDBOX_EVENTS.md) (telemetry) | `internal/openshell/`, `internal/sandboxauth/`, `policies/sandbox/` |

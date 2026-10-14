@@ -119,7 +119,13 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 	)
 }
 
+// windowsManagedGenerationFailMode is the delivery mode an authenticated
+// runtime generation records. Only Secure Client may record open (#1163);
+// every other profile's generation stays closed, as on origin/main.
 func windowsManagedGenerationFailMode(modes []string) string {
+	if !secureClientHookDelivery() {
+		return "closed"
+	}
 	if len(modes) == 0 {
 		return "open"
 	}

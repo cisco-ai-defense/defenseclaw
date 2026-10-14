@@ -175,6 +175,14 @@ type SetupOpts struct {
 	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
 
+	// SecureClientHookDelivery selects the Secure Client delivery contract
+	// (#1163): an unset HookFailMode renders open and an explicit value wins
+	// for every connector, Cursor included. Callers set it from
+	// cfg.SecureClientIntegration() (the enterprise guardian from its
+	// profile). Every other install leaves it false and keeps the
+	// fail-closed default and Cursor's action/observe rule.
+	SecureClientHookDelivery bool
+
 	// GuardrailMode is the effective connector policy mode. Cursor uses it to
 	// render a blocking, fail-closed user hook for action and a nonblocking,
 	// fail-open user hook for observe. An empty value is treated as observe.

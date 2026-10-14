@@ -409,7 +409,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_repeat_quickstart_without_mode_keeps_action(self, _gate):
-        # GAP-0979: a re-run without --mode switched action back to observe.
+        # GAP-0979: a re-run without --mode switched action/closed back to observe/open.
         atomic_write_private_bytes(
             os.path.join(self.tmp_dir, "config.yaml"),
             b"config_version: 8\n"
@@ -477,11 +477,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         result = self.runner.invoke(quickstart_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--fail-mode", result.output)
-        # Spec 007: a new install resolves to open, so the help must name
-        # open as the default and must not call closed the default.
+        # GAP-1251: a new install resolves to closed, so the help must not
+        # call open the default.
         text = " ".join(result.output.split())
-        self.assertIn("'open' (the default on a new install)", text)
-        self.assertNotIn("'closed' (the default", text)
+        self.assertNotIn("'open' (default)", text)
+        self.assertNotIn("'open' (the default", text)
+        self.assertIn("'closed' (the default on a new install)", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([
@@ -504,13 +505,14 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             "closed",
         )
 
-    def test_omitting_fail_mode_resolves_to_open(self):
-        # When the operator omits ``--fail-mode`` at quickstart, the
-        # resulting config resolves to the "open" default (spec 007): a
-        # delivery or response failure (gateway down, 4xx, malformed JSON,
-        # missing action) allows the event and records it in
-        # hook-failures.jsonl. An explicit "closed" is preserved, never
-        # migrated (see test_fail_mode_closed_persists_to_config).
+    def test_omitting_fail_mode_resolves_to_closed(self):
+        # Closes when the operator omits ``--fail-mode``
+        # at quickstart, the resulting config must default to the safer
+        # "closed" sentinel so response-layer failures (4xx, malformed
+        # JSON, missing action) BLOCK the tool/prompt rather than
+        # silently allowing it. Existing v3 installs are protected by
+        # _migrate_0_4_0_seed_hook_fail_mode (migrations.py), so this
+        # behavior change is new-install-only.
         result = self._invoke([
             "--connector",
             "codex",
@@ -524,7 +526,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
         raw = cfg["guardrail"].get("hook_fail_mode", "")
-        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
     def test_requested_gateway_start_failure_is_nonzero_in_human_and_json(self):
         def invoke(args: list[str]) -> Result:

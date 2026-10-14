@@ -554,11 +554,12 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if cfg != nil {
 		opts.CodexOtelEnvironment = cfg.Environment
 		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
 		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
-	if name == "cursor" && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
+	if name == "cursor" && !opts.SecureClientHookDelivery && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
 		// Keep maintenance output and persisted lock evidence truthful: Cursor
 		// observe mode is always fail-open even when a global closed setting is
 		// inherited for connectors that enforce failures independently.

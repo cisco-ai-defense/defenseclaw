@@ -1219,9 +1219,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     Pre-v3 installs had no concept of a hook fail mode — every hook
     was hardcoded to fail-OPEN on any gateway error, which made the
     response-layer boundary silently leakable. The v3 wave introduced
-    a dedicated config field, and v4 flipped the BUILT-IN default to
-    ``"closed"``; spec 007 restored the built-in default to ``"open"``, so
-    the seeded value now matches it and only makes it visible.
+    a dedicated config field, and v4 () flipped the
+    BUILT-IN default to ``"closed"`` so new installs deny by default.
 
     To avoid a noisy behavior change under existing operators, this
     migration writes ``hook_fail_mode: open`` into ANY pre-existing
@@ -1285,7 +1284,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if _atomic_write_text(cfg_path, new_text):
         ctx.changes.append(
             "seeded guardrail.hook_fail_mode='open' in config.yaml "
-            "(fail-open behavior preserved; it is also the built-in default)"
+            "(legacy fail-open behavior preserved for upgraders; v4 "
+            "fresh installs default to 'closed' per )"
         )
 
 

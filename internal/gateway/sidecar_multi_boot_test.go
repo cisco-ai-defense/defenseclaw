@@ -2813,3 +2813,30 @@ func assertPathMissing(t *testing.T, path string) {
 		t.Fatalf("stat %s: %v", path, err)
 	}
 }
+
+// TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient: the gateway
+// renders an unset hook fail mode open only under Secure Client (#1163), and
+// tells the renderer so; every other install renders it closed.
+func TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient(t *testing.T) {
+	for _, tc := range []struct {
+		name, deploymentMode, profile, want string
+		secureClient                        bool
+	}{
+		{"oss", "", "", "closed", false},
+		{"standalone", "managed_enterprise", "standalone", "closed", false},
+		{"secure_client", "managed_enterprise", "secure_client", "open", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := multiBootSidecar(t)
+			s.cfg.DeploymentMode = tc.deploymentMode
+			s.cfg.Enterprise.Profile = tc.profile
+			s.cfg.Guardrail.Mode = "action"
+			s.cfg.Guardrail.HookFailMode = ""
+			conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+			opts := mustConnectorSetupOpts(t, s, conn, "", "127.0.0.1:4000", "127.0.0.1:18970")
+			if opts.HookFailMode != tc.want || opts.SecureClientHookDelivery != tc.secureClient {
+				t.Fatalf("setup opts fail mode=%q secure_client=%t, want %q/%t", opts.HookFailMode, opts.SecureClientHookDelivery, tc.want, tc.secureClient)
+			}
+		})
+	}
+}

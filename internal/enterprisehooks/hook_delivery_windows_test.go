@@ -15,6 +15,8 @@ import (
 )
 
 func TestWindowsManagedRuntimeBundleAuthenticatesDeliveryMode(t *testing.T) {
+	// Secure Client records the selected delivery mode (#1163).
+	setStandaloneProfileForTest(t, false)
 	for _, mode := range []string{"", "open", "closed"} {
 		t.Run(mode, func(t *testing.T) {
 			desired := WindowsManagedRuntimeGenerationDesired{FailMode: mode}
@@ -34,7 +36,26 @@ func TestWindowsManagedRuntimeBundleAuthenticatesDeliveryMode(t *testing.T) {
 	}
 }
 
+// Outside Secure Client the authenticated runtime generation is always
+// fail-closed (origin/main), whatever mode the caller supplies.
+func TestWindowsManagedRuntimeBundleIsClosedOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	for _, mode := range []string{"", "open", "closed"} {
+		desired := WindowsManagedRuntimeGenerationDesired{FailMode: mode}
+		bundle := windowsManagedRuntimeBundleFromDesired(desired, strings.Repeat("a", 32))
+		if bundle.FailMode != "closed" || !windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
+			t.Fatalf("mode %q: bundle fail mode = %q, want closed", mode, bundle.FailMode)
+		}
+		bundle.FailMode = "open"
+		if windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
+			t.Fatalf("mode %q: an open bundle matched outside Secure Client", mode)
+		}
+	}
+}
+
 func TestWindowsManagedInstallDefaultsOpenAndClaudeVersionCanBeMissing(t *testing.T) {
+	// Secure Client (#1163).
+	setStandaloneProfileForTest(t, false)
 	t.Run("codex default", func(t *testing.T) {
 		fixture := newWindowsGenericCodexFixture(t)
 		opts := fixture.opts

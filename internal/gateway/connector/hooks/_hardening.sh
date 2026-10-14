@@ -60,7 +60,9 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        defenseclaw_log_hook_failure) and the delivery failure wrapper
 #        (defenseclaw_log_hook_delivery_failure /
 #        defenseclaw_hook_delivery_outcome) used by Codex, Claude Code and
-#        Cursor. Managed status alone no longer forces closed delivery.
+#        Cursor. Under Secure Client managed status alone no longer forces
+#        closed delivery; every other managed hook still fails closed on an
+#        unreachable gateway or a missing token.
 #        (Release 26.8.4 shipped these helpers as its v7; this line carries
 #        them above main's v8 so an older writer cannot remove a helper used
 #        by newer hook scripts.)
@@ -1001,13 +1003,18 @@ defenseclaw_response_failure_reason() {
 }
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
-# connector's effective fail mode is closed or strict availability is enabled.
-# Managed status alone does not select availability policy. Fail mode has one
-# consistent meaning across malformed responses, auth failures, and transport
-# failures instead of silently opening only the latter class.
+# connector's effective fail mode is closed, for guardian-installed managed
+# hooks outside Secure Client, or when strict availability is enabled. Under
+# Secure Client managed status alone does not select availability policy: the
+# baked FAIL_MODE does (#1163). Fail mode therefore has one consistent meaning
+# across malformed responses, auth failures, and transport failures instead of
+# silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
   case "${FAIL_MODE:-open}" in
     closed) return 0 ;;
+  esac
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
