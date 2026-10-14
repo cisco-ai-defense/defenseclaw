@@ -3310,15 +3310,15 @@ class FleetConfig:
     """
 
     enabled: bool = False
-    api_token_env: str = ""
+    api_token_env: str = "DCLAW_FLEET_API_TOKEN"
     tenant_tokens_env: str = ""
     mqtt_broker_url: str = ""
-    mqtt_user_env: str = ""
-    mqtt_pass_env: str = ""
+    mqtt_user_env: str = "DCLAW_MQTT_USER"
+    mqtt_pass_env: str = "DCLAW_MQTT_PASS"
     mqtt_require_tls: bool = False
-    ota_key_env: str = ""
-    emergency_key_env: str = ""
-    device_key_env: str = ""
+    ota_key_env: str = "DCLAW_OTA_KEY"
+    emergency_key_env: str = "DCLAW_EMERGENCY_KEY"
+    device_key_env: str = "DCLAW_DEVICE_KEY"
     auto_register: bool = False
     allow_key_over_http: bool = False
     trust_proxy_headers: bool = False
@@ -7386,17 +7386,18 @@ def _merge_fleet(raw: dict[str, Any] | None) -> FleetConfig:
     """Build a :class:`FleetConfig` from the YAML ``fleet:`` block."""
     if not isinstance(raw, dict):
         return FleetConfig()
+    defaults = FleetConfig()
     return FleetConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
-        api_token_env=str(raw.get("api_token_env", "") or ""),
+        api_token_env=str(raw.get("api_token_env", defaults.api_token_env) or defaults.api_token_env),
         tenant_tokens_env=str(raw.get("tenant_tokens_env", "") or ""),
         mqtt_broker_url=str(raw.get("mqtt_broker_url", "") or ""),
-        mqtt_user_env=str(raw.get("mqtt_user_env", "") or ""),
-        mqtt_pass_env=str(raw.get("mqtt_pass_env", "") or ""),
+        mqtt_user_env=str(raw.get("mqtt_user_env", defaults.mqtt_user_env) or defaults.mqtt_user_env),
+        mqtt_pass_env=str(raw.get("mqtt_pass_env", defaults.mqtt_pass_env) or defaults.mqtt_pass_env),
         mqtt_require_tls=_coerce_bool(raw.get("mqtt_require_tls", False)),
-        ota_key_env=str(raw.get("ota_key_env", "") or ""),
-        emergency_key_env=str(raw.get("emergency_key_env", "") or ""),
-        device_key_env=str(raw.get("device_key_env", "") or ""),
+        ota_key_env=str(raw.get("ota_key_env", defaults.ota_key_env) or defaults.ota_key_env),
+        emergency_key_env=str(raw.get("emergency_key_env", defaults.emergency_key_env) or defaults.emergency_key_env),
+        device_key_env=str(raw.get("device_key_env", defaults.device_key_env) or defaults.device_key_env),
         auto_register=_coerce_bool(raw.get("auto_register", False)),
         allow_key_over_http=_coerce_bool(raw.get("allow_key_over_http", False)),
         trust_proxy_headers=_coerce_bool(raw.get("trust_proxy_headers", False)),
