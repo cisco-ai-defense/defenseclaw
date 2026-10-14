@@ -484,7 +484,7 @@ bool dclaw_verdict_is_key_provisioned(void) {
 
 /* Compute HMAC for outbound use (e.g., for testing/verification).
  * Full 32-byte HMAC-SHA256 output (extended from 16 bytes).
- * MF-3: Added request_nonce parameter for per-request HMAC freshness. */
+ * Includes request_nonce for per-request HMAC freshness. */
 void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
                                          uint8_t severity, uint16_t ttl,
                                          uint8_t reason, uint8_t flags,

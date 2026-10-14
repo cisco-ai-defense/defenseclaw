@@ -207,7 +207,7 @@ typedef struct {
     uint16_t request_id;
     bool     resolved;
     uint64_t resolved_at;
-    uint8_t  request_nonce[4]; /* MF-3: per-request nonce included in HMAC */
+    uint8_t  request_nonce[4]; /* per-request nonce included in HMAC */
 } dclaw_pending_verdict_t;
 
 /* === Speculative Execution === */

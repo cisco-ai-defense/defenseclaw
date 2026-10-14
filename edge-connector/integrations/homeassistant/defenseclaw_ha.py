@@ -101,7 +101,7 @@ class HomeAssistantAdapter:
                  session_id: int = 1, timeout: float = 10.0):
         self.host, self.port, self.timeout = host, port, timeout
         self.read_only = read_only
-        # HIGH-10 fix: Default to HTTPS for non-loopback; explicit opt-in for plaintext
+        # Default to HTTPS for non-loopback; explicit opt-in for plaintext
         _is_loopback = host in ("127.0.0.1", "localhost", "::1", "[::1]")
         scheme = "http" if _is_loopback else os.environ.get("DCLAW_EDGE_SCHEME", "https")
         self.ha_url = f"{scheme}://{host}:{port}"

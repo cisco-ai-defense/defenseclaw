@@ -92,11 +92,10 @@ func ParseHeader(data []byte) (*PolicyHeader, error) {
 // Service manages policy compilation, signing, and distribution to edge devices.
 //
 // Design note -- a single OTA signing key (DCLAW_OTA_KEY) is used for both
-// policy blob signatures and emergency broadcast signatures. This is
-// intentional for Phase 1 simplicity: the fleet manager is the sole issuer
-// of both message types, so a single symmetric HMAC key is sufficient.
-// Phase 2 may introduce separate Ed25519 key pairs for non-repudiation and
-// per-message-type key isolation.
+// policy blob signatures and emergency broadcast signatures. The fleet
+// manager is the sole issuer of both message types, so a single symmetric
+// HMAC key is sufficient. The 64-byte signature field reserves space for
+// Ed25519 when non-repudiation is needed.
 type Service struct {
 	store  PolicyStore
 	signer Signer
@@ -498,9 +497,7 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	}
 	copy(msg[44:44+n], sig[:n])
 
-	// Zero-pad the reserved Ed25519 area (bytes 76-108).
-	// When Ed25519 is available in Phase 2, the full 64-byte signature
-	// will be written into bytes 44-108 instead.
+	// Bytes 76-108 are zero-padded (reserved for Ed25519 signature).
 
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
 

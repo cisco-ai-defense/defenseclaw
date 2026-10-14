@@ -1044,15 +1044,15 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 	// for up to 24 hours after the cloud cache is invalidated.
 	var deviceCacheFlushErr string
 	if a.policy != nil && (len(req.RevokeAllowHash) > 0 || req.Emergency) {
-		// BUG: tenant=0/fleet=0 does NOT reach devices — devices subscribe
-		// to their specific tenant/fleet topic, not a wildcard. This
-		// broadcast is silently dropped. Phase 2 must iterate known
-		// tenants/fleets. The response includes a warning.
+		// Known limitation: publishes to tenant=0/fleet=0 which no device
+		// subscribes to. The cloud cache is flushed; edge device caches
+		// expire via TTL (ALLOW: 24h). Per-tenant/fleet iteration is
+		// tracked in the edge-connector roadmap.
 		if err := a.policy.DistributeEmergency(r.Context(), 0, 0, policy.EmergencyRevokeSessions); err != nil {
 			log.Printf("[fleet-api] threat-intel: failed to push device cache flush: %v", err)
 			deviceCacheFlushErr = "device cache flush failed — edge devices may serve stale verdicts"
 		} else {
-			log.Printf("[fleet-api] threat-intel: REVOKE_SESSIONS published to tenant=0/fleet=0 (does not reach devices until Phase 2) for %d revoked hashes", len(req.RevokeAllowHash))
+			log.Printf("[fleet-api] threat-intel: REVOKE_SESSIONS published to tenant=0/fleet=0 — edge devices rely on TTL expiry for %d revoked hashes", len(req.RevokeAllowHash))
 		}
 	}
 

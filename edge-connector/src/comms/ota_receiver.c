@@ -194,11 +194,10 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
  * When DCLAW_HAS_MBEDTLS=1 this is the Ed25519 public key.
  * When DCLAW_HAS_MBEDTLS=0 this is the HMAC-SHA256 pre-shared key.
  *
- * NOTE: Currently a single fleet-wide OTA key is used for all devices.
- * Phase 2 will introduce per-device or per-fleet key rotation via the fleet
- * manager's key distribution protocol. Until then, key compromise affects
- * the entire fleet. Operators should rotate DCLAW_OTA_KEY periodically and
- * redeploy via `defenseclaw setup edge-connector install`.
+ * NOTE: A single fleet-wide OTA key is used for all devices.
+ * Key compromise affects the entire fleet. Operators should rotate
+ * DCLAW_OTA_KEY periodically and redeploy via
+ * `defenseclaw setup edge-connector install`.
  */
 static uint8_t ota_ca_key[ED25519_PUBKEY_LEN];
 static bool    ota_ca_key_loaded = false;

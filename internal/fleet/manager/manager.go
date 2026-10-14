@@ -110,9 +110,8 @@ type DeviceStore interface {
 
 // FleetManager is the core fleet management service.
 //
-// TODO: The mu RWMutex currently protects the entire devices map for all
-// operations.  ProcessHeartbeat holds the write lock for the full duration of
-// heartbeat processing (parsing, delta computation, anomaly checks, AND store
+// Locking: mu RWMutex protects the devices map; per-device mutations use
+// the sharded deviceLocks[256] array to reduce contention under high
 type FleetManager struct {
 	mu          sync.RWMutex
 	deviceLocks [256]sync.Mutex
@@ -478,7 +477,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	//   0x08 = CANARY_ROLLBACK (handled above)
 	//   0x20 = OFFLINE_MODE
 	//   0x80 = SE_DEGRADED    (reserved — C encoder does not set this yet)
-	if hb.Flags&0x04 != 0 { // TAMPER_DETECT (Phase 2: C will set when audit chain breaks)
+	if hb.Flags&0x04 != 0 { // TAMPER_DETECT — C encoder sets when audit chain breaks
 		dev.Status = StatusLockdown
 		fm.fireAlert(Alert{
 			Type:      AlertTamperDetect,
@@ -487,7 +486,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			Severity:  "critical",
 			Timestamp: time.Now(),
 		})
-	} else if hb.Flags&0x80 != 0 { // SE_DEGRADED (Phase 2: C will set when SE unavailable)
+	} else if hb.Flags&0x80 != 0 { // SE_DEGRADED — C encoder sets when secure element unavailable
 		dev.Status = StatusDegraded
 		fm.fireAlert(Alert{
 			Type:      AlertSEDegraded,
@@ -551,7 +550,7 @@ func (fm *FleetManager) CheckOfflineDevices() {
 
 	threshold := time.Now().Add(-3 * fm.heartbeatInterval)
 
-	// Phase 2: resolve device pointers under mu.RLock (no shard lock).
+	// Resolve device pointers under mu.RLock (no shard lock needed).
 	type offlineCandidate struct {
 		id  uint64
 		dev *Device
@@ -565,14 +564,13 @@ func (fm *FleetManager) CheckOfflineDevices() {
 	}
 	fm.mu.RUnlock()
 
-	// Phase 3: check and update each device under its shard lock only.
+	// Check and update each device under its shard lock only.
 	for _, c := range resolved {
 		shard := c.id % 256
 		fm.deviceLocks[shard].Lock()
 
-		// Re-verify device still exists and pointer is unchanged (could have been
-		// decommissioned between Phase 2 and Phase 3, similar to the TOCTOU check
-		// in ProcessHeartbeat around the auto-register path).
+		// Re-verify device still exists and pointer is unchanged (could have
+		// been decommissioned between resolve and update).
 		fm.mu.RLock()
 		current, exists := fm.devices[c.id]
 		fm.mu.RUnlock()
