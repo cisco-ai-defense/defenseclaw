@@ -76,16 +76,28 @@ func TestWindowsClaudeSettingsUninstallPrivateCASTransaction(t *testing.T) {
 	t.Logf("removed=%d settings=%s", removed, after)
 }
 
-// The ci31 live probe supplies a settings file owned by a standard account.
-// Its state directory is private to the token running this test.
+// A settings file owned by the enrolled SID is edited without changing its
+// owner or DACL, and a different enrolled SID is refused.
 func TestWindowsClaudeSettingsUninstallEnrolledOwner(t *testing.T) {
-	root := os.Getenv("DEFENSECLAW_CI31_PROBE_ROOT")
-	if root == "" {
-		t.Skip("requires isolated Windows ci31 fixture")
+	root := t.TempDir()
+	settings := filepath.Join(root, "home", ".claude", "settings.json")
+	stateDir := filepath.Join(root, "state", "DefenseClaw", "claude-settings-teardown")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	settings := filepath.Join(root, "home", "dcwtest", ".claude", "settings.json")
-	stateDir := filepath.Join(root, os.Getenv("DEFENSECLAW_CI31_STATE"), "claude-settings-teardown")
-	ownerSID := os.Getenv("DEFENSECLAW_CI31_OWNER_SID")
+	fixture := []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"command":"C:\\probe\\defenseclaw-hook.exe"},{"command":"other-hook"}]}]}}`)
+	if err := os.WriteFile(settings, fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("resolve fixture owner: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+		t.Fatalf("set settings owner: %v", err)
+	}
+	ownerSID := user.User.Sid.String()
 	before, err := windows.GetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
