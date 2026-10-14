@@ -16,10 +16,7 @@ import (
 )
 
 func TestWindowsClaudeSettingsUninstallPrivateCASTransaction(t *testing.T) {
-	root := os.Getenv("DEFENSECLAW_CI26_PROBE_ROOT")
-	if root == "" {
-		root = t.TempDir()
-	}
+	root := t.TempDir()
 	settings := filepath.Join(root, "home", ".claude", "settings.json")
 	stateDir := filepath.Join(root, "state", "DefenseClaw", "claude-settings-teardown")
 	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
