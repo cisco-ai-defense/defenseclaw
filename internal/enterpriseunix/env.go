@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -233,6 +234,18 @@ type Env struct {
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
+	// BundleDigester computes the effective policy digest of the config of
+	// a signed policy bundle (the gateway ComputeEffectivePolicyFor); nil
+	// refuses every bundle (config_invalid).
+	BundleDigester enterprisebundle.PolicyDigester
+	// RefuseCapabilityLoss makes a bundle apply refuse capability loss
+	// before it changes the installed config.
+	RefuseCapabilityLoss bool
+	// bundleFault is a test seam: it runs at each named phase of a bundle
+	// apply (received, verified, staged, transaction, applied, committed)
+	// and an error fails the apply there; at committed the run stops before
+	// the swap, as a crash after the commit would. Production leaves it nil.
+	bundleFault func(phase string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops

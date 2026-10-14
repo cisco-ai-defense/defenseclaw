@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
 SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-exact-acl-smoke.ps1"
+WINDOWS_BUNDLE = ROOT / "internal" / "cli" / "windows_enterprise_bundle.go"
+WINDOWS_BUNDLE_ACL = ROOT / "internal" / "cli" / "windows_enterprise_bundle_acl.go"
+GO_STORE = ROOT / "internal" / "enterprisebundle" / "store.go"
 
 
 def _powershell_engines() -> list[str]:
@@ -94,6 +98,8 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "$security.SetOwner($administrators)" in setter
     assert "$security.SetGroup($administrators)" in setter
     assert "Microsoft.PowerShell.Security\\Set-Acl" in setter
+    assert "SetDirectoryDaclNoFollow" in setter
+    assert "PROTECTED_DACL_SECURITY_INFORMATION" in source
     assert "Assert-DefenseClawCanonicalPathAcl" in setter
     assert "does not have the exact canonical DACL" in setter
     assert "DiscretionaryAclAutoInherited" in setter
@@ -231,6 +237,255 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
     assert "$script:AuthenticatedUsersSID" in verifier
 
 
+def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    builder = _extract_function_body(
+        source,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    cases = {
+        kind: builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        for kind in (
+            "StateDirectory",
+            "ConfigDirectory",
+            "BundleDirectory",
+            "BundleReceipt",
+            "BundleVersionDirectory",
+            "BundleVersionFile",
+            "ConfigFile",
+        )
+    }
+    for kind in (
+        "StateDirectory",
+        "ConfigDirectory",
+        "BundleVersionDirectory",
+        "BundleVersionFile",
+        "ConfigFile",
+    ):
+        assert "$script:UsersSID" not in cases[kind], kind
+    assert "        'AdminDirectory' {" not in builder
+    assert "        'AdminFile' {" not in builder
+    assert (
+        "sid = $script:UsersSID\n"
+        "                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute"
+    ) in cases["BundleDirectory"]
+    assert (
+        "sid = $script:UsersSID\n"
+        "                rights = [Security.AccessControl.FileSystemRights]::Read"
+    ) in cases["BundleReceipt"]
+    assert "$Kind -eq 'BundleDirectory'" in builder
+    assert "-not $usersTraverseOnly" in builder
+
+    contract = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawBundleAclContract",
+        "function Set-DefenseClawManagedAcls",
+    )
+    assert (
+        "$bundleDirectory = Microsoft.PowerShell.Management\\Join-Path "
+        "$Layout.ConfigDirectory 'bundles'"
+    ) in contract
+    classifier = _extract_function_body(
+        source,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    assert "$RelativePath -ceq 'receipt.json' -and -not $IsDirectory" in classifier
+    assert "$top -ceq 'receipt-events'" in classifier
+    assert "return 'BundleDirectory'" in classifier
+    assert "^receipt-events\\\\[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
+    assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
+    assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
+    assert "'BundleVersionDirectory'" in contract
+    assert "'BundleVersionFile'" in classifier
+    assert "'bundle-state.json'" in contract
+    assert "'receipts'" in contract
+    assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    assert "return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(service.String()))" in go
+    assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
+    assert "ensureErr = os.MkdirAll(eventsDir, 0o755)" in store
+    assert "Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind" in contract
+
+    provisioner = _extract_function_body(
+        source,
+        "function Set-DefenseClawManagedAcls",
+        "function Get-DefenseClawLayout",
+    )
+    assert (
+        "Invoke-DefenseClawBundleAclContract -Layout $Layout "
+        "-GatewayServiceSID $gatewaySID -Repair"
+    ) in provisioner
+    verifier = _extract_function_body(
+        source,
+        "function Assert-DefenseClawEnterpriseDeployment",
+        "function Get-DefenseClawLifecycleStatus",
+    )
+    assert (
+        "Invoke-DefenseClawBundleAclContract -Layout $Layout "
+        "-GatewayServiceSID $gatewaySID"
+    ) in verifier
+
+
+def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
+    """Cross-check Go naming and SDDL with the PowerShell verifier contract."""
+    module = MODULE.read_text(encoding="utf-8")
+    smoke = SMOKE.read_text(encoding="utf-8")
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    classifier = _extract_function_body(
+        module,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    ps_pattern = re.search(r"\$top -cmatch '([^']+)'", classifier)
+    go_pattern = re.search(r"versionDirPattern\s*= regexp.MustCompile\(`([^`]+)`\)", store)
+    assert ps_pattern and go_pattern
+    assert ps_pattern.group(1) == go_pattern.group(1)
+    pattern = re.compile(ps_pattern.group(1))
+    name = "v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8"
+    assert pattern.fullmatch(name)
+    assert not pattern.fullmatch("v1-AKADPAK8-b-not-a-receipt")
+    assert "($RelativePath -cne $top -or $IsDirectory)" in classifier
+    assert "if ($IsDirectory) { return 'BundleVersionDirectory' }" in classifier
+    assert "return 'BundleVersionFile'" in classifier
+    builder = _extract_function_body(
+        module,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    assert "$versionServiceReadOnly = $Kind -eq 'BundleVersionDirectory' -and" in builder
+    assert "-not $versionServiceReadOnly" in builder
+    for kind in ("BundleVersionDirectory", "BundleVersionFile"):
+        entry = builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        assert "rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute" in entry
+        assert "$script:UsersSID" not in entry
+
+    sid = "S-1-5-80-1-2-3-4-5"
+
+    def creator_sddl(function: str, inherit: str = "") -> str:
+        body = go_acl.split(f"func {function}(", 1)[1].split("\n}", 1)[0]
+        expression = re.search(r"^\s*return (.+)$", body, re.MULTILINE)
+        assert expression
+        parts = re.findall(r'"[^"]*"|\b(?:inherit|serviceSID)\b', expression.group(1))
+        assert re.sub(r'"[^"]*"|\b(?:inherit|serviceSID)\b|[+\s]', "", expression.group(1)) == ""
+        return "".join(
+            {"inherit": inherit, "serviceSID": sid}[part]
+            if part in {"inherit", "serviceSID"} else json.loads(part)
+            for part in parts
+        )
+
+    creators = {
+        "BundleDirectory": creator_sddl("windowsBundleDirectorySDDL"),
+        "BundleReceipt": creator_sddl("windowsBundleReceiptSDDL"),
+        "BundleVersionDirectory": creator_sddl("windowsBundleVersionSDDL", "OICI"),
+        "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
+        "AdminDirectory": creator_sddl("windowsBundlePrivateSDDL"),
+        "AdminFile": creator_sddl("windowsBundleAdminFileSDDL"),
+    }
+    assert 'inherit = "OICI"' in go_acl.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
+    for kind, actual in creators.items():
+        expected = re.search(rf"^\s*{kind} = ([\"'])(.*?)\1", smoke, re.MULTILINE)
+        assert expected, kind
+        assert actual == expected.group(2).replace("$serviceSID", sid), kind
+        assert "D:P" in actual, kind
+        assert all("ID" not in ace.split(";", 2)[1] for ace in re.findall(r"\([^)]*\)", actual)), kind
+        if kind.startswith("BundleVersion"):
+            assert ";;;BU)" not in actual
+            assert f";;;{sid})" in actual
+            assert "0x1200a9" in actual
+    assert "$versionName = 'v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8'" in smoke
+    assert "Get-DefenseClawBundlePathKind -RelativePath $Relative" in smoke
+    assert "Kind = 'AdminDirectory'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
+    assert "store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory" in go
+    assert "store.PublishPrivateFile = windowsBundlePublishPrivateFile" in go
+    assert "return createWindowsBundleDirectory(path, windowsBundlePrivateSDDL())" in go
+    assert "return applyWindowsBundleSDDL(path, windowsBundleAdminFileSDDL())" in go
+    assert "store.EnsureStageDirectory = windowsBundleEnsureStageDirectory" in go
+    assert "store.PublishStageFile = windowsBundlePublishStageFile" in go
+    assert "windowsBundleEnsurePrivateDirectory(filepath.Dir(dst))" in go
+    assert "writeWindowsBundleAdminFile(dst, raw)" in go
+    assert "'trust'" in module.split("function Invoke-DefenseClawBundleAclContract {", 1)[1].split("function Set-DefenseClawManagedAcls {", 1)[0]
+    assert "s.EnsureStageDirectory(dir, parent)" in store
+    assert "if !dirs[parent]" in store
+    assert "s.PublishStageFile(full)" in store
+    assert "windows.CreateDirectory(name, attributes)" in go
+    assert "createWindowsBundleDirectoryMode" not in go
+    assert "windows.FILE_FLAG_OPEN_REPARSE_POINT" in go
+    assert "windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, securityInfo)" in go
+    assert "windows.OWNER_SECURITY_INFORMATION |" in go
+    assert "windowsEnterpriseSIDEqual(actualOwner, owner)" in go
+    assert "windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT," in go
+    assert "windows.PROTECTED_DACL_SECURITY_INFORMATION" in go
+
+
+def test_public_receipt_event_paths_select_public_exact_acl() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    classifier = _extract_function_body(
+        source,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    event_branch = classifier.split("if ($top -ceq 'receipt-events') {", 1)[1].split(
+        "# The immutable name", 1,
+    )[0]
+    assert "if ($RelativePath -ceq $top -and $IsDirectory)" in event_branch
+    assert "return 'BundleDirectory'" in event_branch
+    assert "-not $IsDirectory" in event_branch
+    assert "return 'BundleReceipt'" in event_branch
+    pattern = re.search(r"\$RelativePath -cmatch '([^']+)'", event_branch)
+    assert pattern
+    cases = {
+        r"receipt-events\b-01JA0000000000000000000033.json": True,
+        r"receipt-events\r-01JA0000000000000000000033.json": True,
+        r"receipt-events\invalid.json": False,
+        r"receipt-events\nested\b-01JA0000000000000000000033.json": False,
+    }
+    for path, public_receipt in cases.items():
+        assert (re.fullmatch(pattern.group(1), path) is not None) is public_receipt, path
+
+    builder = _extract_function_body(
+        source,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    for kind, right in (("BundleDirectory", "ReadAndExecute"), ("BundleReceipt", "Read")):
+        entry = builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        assert "$script:UsersSID" in entry
+        assert f"[Security.AccessControl.FileSystemRights]::{right}" in entry
+
+    smoke = SMOKE.read_text(encoding="utf-8")
+    for path, kind in (
+        ("receipt-events", "BundleDirectory"),
+        (r"receipt-events\b-01JA0000000000000000000033.json", "BundleReceipt"),
+        (r"receipt-events\invalid.json", "AdminFile"),
+    ):
+        assert f"relative = '{path}'; directory = $" in smoke
+        assert f"kind = '{kind}'" in smoke.split(f"relative = '{path}'", 1)[1].split("}", 1)[0]
+
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
+    public_dir = go_acl.split("func windowsBundleDirectorySDDL(", 1)[1].split("\n}", 1)[0]
+    public_file = go_acl.split("func windowsBundleReceiptSDDL(", 1)[1].split("\n}", 1)[0]
+    assert ";;;BU)" in public_dir and ";;;BU)" in public_file
+    setup_ensure = go.split("func ensureWindowsBundleReceiptEvents(", 1)[1].split("\n}", 1)[0]
+    publisher = go.split("func publishWindowsBundleReceipt(", 1)[1].split("\n}", 1)[0]
+    assert "windowsBundleDirectorySDDL(" in setup_ensure
+    assert "windowsBundleReceiptSDDL(" in setup_ensure
+    assert "windowsBundleDirectorySDDL(" in publisher
+    assert "windowsBundleReceiptSDDL(" in publisher
+    assert "windowsBundlePrivateSDDL()" not in setup_ensure + publisher
+    assert "windowsBundleAdminFileSDDL()" not in publisher
+
+
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:
     source = MODULE.read_text(encoding="utf-8")
     matcher = _extract_function_body(
@@ -246,7 +501,7 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
     cleanup = _extract_function_body(
         source,
         "function Revoke-DefenseClawManagedIPCServiceAccess",
-        "function Set-DefenseClawManagedAcls",
+        "function Invoke-DefenseClawBundleAclContract",
     )
     descriptor_guard = _extract_function_body(
         source,
@@ -465,17 +720,21 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
     payload = json.loads(completed.stdout)
+    descriptor_count = payload.pop("descriptors_checked")
+    pairing_count = payload.pop("installer_verifier_pairings_checked")
+    # The smoke script checks its descriptor kinds against both module
+    # ValidateSet declarations and its installer/verifier pairing table.
+    assert isinstance(descriptor_count, int) and descriptor_count > 0
+    assert pairing_count == descriptor_count
     assert payload == {
         "ok": True,
         "schema_version": 1,
-        "descriptors_checked": 18,
         "stale_explicit_aces_retained": False,
         "object_type_mismatches_rejected": True,
         "auto_inherited_control_flag_accepted": True,
         "ace_mismatches_rejected": True,
         "native_raw_acl_query_checked": True,
         "split_explicit_aces_rejected": True,
-        "installer_verifier_pairings_checked": 18,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
         "managed_ipc_scope_cleanup_exact": True,

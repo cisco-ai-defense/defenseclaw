@@ -62,3 +62,7 @@ policies/kernel/** text eol=lf
 internal/config/testdata/*.golden text eol=lf
 internal/openshell/packs/testdata/*.golden text eol=lf
 internal/openshell/sandboxapi/testdata/*.golden text eol=lf
+
+# enterprise bundle CLI goldens are compared byte-for-byte with the command
+# output (LF); keep them LF on Windows checkouts too.
+internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf

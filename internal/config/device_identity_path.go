@@ -5,9 +5,25 @@ package config
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
+
+func resolveRelativeGatewayDeviceKeyFileForPlatform(keyFile, dataDir, goos string) (string, bool) {
+	if goos != "linux" && goos != "darwin" {
+		return ResolveRelativeGatewayDeviceKeyFile(keyFile, dataDir)
+	}
+	if keyFile == "" || !path.IsAbs(dataDir) || strings.ContainsAny(keyFile, `:\`) || strings.HasPrefix(keyFile, "/") {
+		return "", false
+	}
+	root := path.Clean(dataDir)
+	target := path.Join(root, keyFile)
+	if target == root || !strings.HasPrefix(target, root+"/") {
+		return "", false
+	}
+	return target, true
+}
 
 // ResolveRelativeGatewayDeviceKeyFile resolves a portable relative device-key
 // spelling beneath an explicit absolute data directory. The boolean is false

@@ -13,6 +13,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -386,9 +387,9 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 // vendor default pack the lifecycle installs. An explicit rule_pack_dir is
 // kept for the lifecycle to check.
 func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
-	// Outside the layout the implicit pack follows policy_dir. The resolver
-	// joins with the host separator, so the expected paths do too.
-	dataDirPack := filepath.Join("/var/lib/defenseclaw", "policies", "guardrail", "default")
+	// Outside the layout the implicit pack follows policy_dir using the
+	// target platform's separators.
+	dataDirPack := "/var/lib/defenseclaw/policies/guardrail/default"
 	cases := []struct {
 		name    string
 		goos    string
@@ -400,17 +401,28 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		// uses its built-in policy.
 		policyCleared bool
 	}{
-		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
+		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: "/opt/defenseclaw/share/policies/guardrail/default"},
 		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
 		{name: "standalone with data_dir policies is unchanged", goos: "linux", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, want: dataDirPack},
 		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileSecureClient, want: dataDirPack},
 		// Nothing stages a pack under a Windows data_dir, so the
 		// implicit default selects the embedded packs.
 		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: "", policyCleared: true},
-		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
+		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.goos == "windows" {
+				if tc.pack == dataDirPack {
+					tc.pack = joinPathForPlatform(tc.goos, "/var/lib/defenseclaw", "policies", "guardrail", "default")
+				}
+				if tc.profile == managed.ProfileSecureClient {
+					tc.want = tc.pack
+				}
+				if tc.name == "windows standalone implicit follows an administrator policy_dir" {
+					tc.want = joinPathForPlatform(tc.goos, tc.policy, "guardrail", "default")
+				}
+			}
 			cfg := Config{DeploymentMode: "managed_enterprise", DataDir: "/var/lib/defenseclaw", PolicyDir: tc.policy}
 			cfg.Guardrail.RulePackDir = tc.pack
 			cfg.Enterprise.Profile = tc.profile
@@ -426,14 +438,14 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		})
 	}
 
-	if runtime.GOOS == "windows" {
-		t.Skip("the Linux and macOS layout paths are not paths on Windows")
-	}
-	emptyPolicy := t.TempDir()
-	seededPolicy := t.TempDir()
-	seededPack := filepath.Join(seededPolicy, "guardrail", "default")
-	if err := os.MkdirAll(seededPack, 0o755); err != nil {
-		t.Fatal(err)
+	emptyPolicy := "/policy/empty"
+	seededPolicy := "/policy/seeded"
+	seededPack := seededPolicy + "/guardrail/default"
+	exists := func(name string) (bool, error) {
+		if name == seededPack {
+			return true, nil
+		}
+		return false, fs.ErrNotExist
 	}
 	for _, goos := range []string{"linux", "darwin"} {
 		layout, err := managed.StandaloneLayoutFor(goos)
@@ -441,18 +453,18 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 			t.Fatal(err)
 		}
 		vendor := layout.VendorPolicyDir + "/guardrail/default"
-		implicit := filepath.Join(layout.DataDir, "policies", "guardrail", "default")
+		implicit := layout.DataDir + "/policies/guardrail/default"
 		for _, tc := range []struct {
 			name, policy, pack, want string
 			declared                 bool
 		}{
 			{name: "absent admin pack falls back to the vendor pack", policy: emptyPolicy, pack: implicit, want: vendor},
-			{name: "a missing policy_dir folder", policy: filepath.Join(emptyPolicy, "policies"), pack: implicit, want: vendor},
+			{name: "a missing policy_dir folder", policy: emptyPolicy + "/policies", pack: implicit, want: vendor},
 			{name: "an existing admin pack wins", policy: seededPolicy, pack: implicit, want: seededPack},
-			{name: "policy_dir inside data_dir never supplies the pack", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: vendor},
+			{name: "policy_dir inside data_dir never supplies the pack", policy: layout.DataDir + "/policies", pack: implicit, want: vendor},
 			{name: "vendor policy_dir", policy: layout.VendorPolicyDir, pack: implicit, want: vendor},
-			{name: "explicit pack is kept", policy: emptyPolicy, pack: filepath.Join(emptyPolicy, "guardrail", "custom"), want: filepath.Join(emptyPolicy, "guardrail", "custom")},
-			{name: "an explicit pack inside data_dir is kept for the lifecycle to refuse", policy: filepath.Join(layout.DataDir, "policies"), pack: implicit, want: implicit, declared: true},
+			{name: "explicit pack is kept", policy: emptyPolicy, pack: emptyPolicy + "/guardrail/custom", want: emptyPolicy + "/guardrail/custom"},
+			{name: "an explicit pack inside data_dir is kept for the lifecycle to refuse", policy: layout.DataDir + "/policies", pack: implicit, want: implicit, declared: true},
 		} {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
 				cfg := Config{
@@ -464,9 +476,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 				}
 				cfg.Guardrail.RulePackDir = tc.pack
 				cfg.rulePackDirDeclared = tc.declared
-				if err := resolveEnterpriseConfig(&cfg, goos, ""); err != nil {
-					t.Fatal(err)
-				}
+				standaloneRulePackDefaultWithExists(&cfg, layout.DataDir, goos, exists)
 				if cfg.Guardrail.RulePackDir != tc.want {
 					t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
 				}
@@ -475,7 +485,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	}
 	// Secure Client never gets a standalone rule pack default.
 	secureClient := Config{DeploymentMode: "managed_enterprise", ConfigFilePath: "/opt/cisco/defenseclaw/etc/config.yaml", DataDir: "/opt/cisco/defenseclaw/runtime", PolicyDir: emptyPolicy}
-	implicit := filepath.Join("/opt/cisco/defenseclaw/runtime", "policies", "guardrail", "default")
+	implicit := "/opt/cisco/defenseclaw/runtime/policies/guardrail/default"
 	secureClient.Guardrail.RulePackDir = implicit
 	if err := resolveEnterpriseConfig(&secureClient, "darwin", ""); err != nil {
 		t.Fatal(err)

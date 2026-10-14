@@ -6,8 +6,9 @@
     on Windows.
 
 .DESCRIPTION
-    Read-only. Works in Windows PowerShell 5.1 (32- or 64-bit, as Intune runs
-    custom detection and Remediations scripts) and in PowerShell 7.
+    Works in Windows PowerShell 5.1 (32- or 64-bit, as Intune runs
+    custom detection and Remediations scripts) and in PowerShell 7. Bundle
+    status may confirm an applied receipt left by an interrupted apply.
 
     Detected when the protected HKLM marker (64-bit view) names the standalone
     profile at or above -MinimumVersion, the installed CLI sits in the
@@ -24,11 +25,24 @@
 
 .PARAMETER RequireHealthy
     Also run `defenseclaw.exe enterprise windows verify` and require it to pass.
+
+.PARAMETER RequireBundle
+    Detect only when a signed policy bundle is confirmed: a bundle id
+    (b-<ULID>) must be the current bundle, a version number must be at most
+    the current version. The marker must name the bundle (BundleState
+    confirmed) and `defenseclaw.exe enterprise bundle status` must report
+    that the running gateway enforces its digest.
+
+.PARAMETER RequireSessionsProtected
+    Require no running agent session to predate its managed hooks. Run in
+    the MDM System context so every user process can be inspected.
 #>
 [CmdletBinding()]
 param(
     [string]$MinimumVersion = '',
-    [switch]$RequireHealthy
+    [switch]$RequireHealthy,
+    [string]$RequireBundle = '',
+    [switch]$RequireSessionsProtected
 )
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
@@ -324,5 +338,64 @@ if ($RequireHealthy) {
         Exit-NotDetected -Reason "verify exited $($run.ExitCode); run: `"$($deployment.Cli)`" enterprise windows verify --profile standalone"
     }
 }
-[Console]::Out.WriteLine("DefenseClaw Enterprise $($deployment.Version)")
+$bundleText = ''
+if ($RequireBundle) {
+    $wanted = $RequireBundle.Trim()
+    $wantedVersion = [UInt64]0
+    $byVersion = [UInt64]::TryParse($wanted, [ref]$wantedVersion) -and $wantedVersion -gt 0
+    if (-not $byVersion -and $wanted -cnotmatch '^b-[0-9A-HJKMNP-TV-Z]{26}$') {
+        Exit-NotDetected -Reason "-RequireBundle '$wanted' is neither a bundle id (b-<ULID>) nor a version number"
+    }
+    # Status settles an applied receipt left by a killed CLI before the
+    # marker is read. Both checks then describe the same confirmed bundle.
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
+        $status = ([string]$run.StdOut) | ConvertFrom-Json
+    } catch {
+        Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
+    }
+    if ($run.ExitCode -ne 0) { Exit-NotDetected -Reason 'bundle status could not be read' }
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    if ($null -eq $key) { Exit-NotDetected -Reason 'the enterprise marker is missing' }
+    try {
+        $bundleId = [string]$key.GetValue('BundleId')
+        $bundleVersionText = [string]$key.GetValue('BundleVersion')
+        $bundleState = [string]$key.GetValue('BundleState')
+    } finally { $key.Dispose() }
+    $bundleVersion = [UInt64]0
+    if ($bundleState -ne 'confirmed' -or -not $bundleId -or -not [UInt64]::TryParse($bundleVersionText, [ref]$bundleVersion)) {
+        Exit-NotDetected -Reason 'no signed policy bundle is confirmed on this computer'
+    }
+    if ($byVersion -and $bundleVersion -lt $wantedVersion) {
+        Exit-NotDetected -Reason "the confirmed policy bundle is version $bundleVersion, older than $wantedVersion"
+    }
+    if (-not $byVersion -and $bundleId -ne $wanted) {
+        Exit-NotDetected -Reason "the confirmed policy bundle is $bundleId, not $wanted"
+    }
+    if ($null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
+        Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"
+    }
+    $bundleText = ", policy bundle $bundleId version $bundleVersion"
+}
+if ($RequireSessionsProtected) {
+    if (-not $RequireBundle) {
+        try {
+            $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+                'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
+            $status = ([string]$run.StdOut) | ConvertFrom-Json
+        } catch {
+            Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
+        }
+        if ($run.ExitCode -ne 0) { Exit-NotDetected -Reason 'bundle status could not be read' }
+    }
+    $sessions = $status.PSObject.Properties['sessions_restart_required']
+    if ($null -eq $sessions -or $null -eq $sessions.Value -or $sessions.Value.state -ne 'known') {
+        Exit-NotDetected -Reason 'running agent sessions could not be checked; run detection in the MDM System context'
+    }
+    if ([int]$sessions.Value.count -gt 0) {
+        Exit-NotDetected -Reason "$($sessions.Value.count) sessions-need-restart: running agent sessions must restart to load managed hooks"
+    }
+}
+[Console]::Out.WriteLine("DefenseClaw Enterprise $($deployment.Version)$bundleText")
 exit 0

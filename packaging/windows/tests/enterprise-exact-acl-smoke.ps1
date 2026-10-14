@@ -31,6 +31,10 @@ $expected = [ordered]@{
     AdminFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
     ConfigDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     ConfigFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
+    BundleDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;$serviceSID)"
+    BundleReceipt = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;$serviceSID)"
+    BundleVersionDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$serviceSID)"
+    BundleVersionFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;$serviceSID)"
     MachinePolicyFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)'
     RuntimeDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
     RuntimeFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;$serviceSID)"
@@ -51,6 +55,8 @@ $directoryKinds = @(
     'StateDirectory',
     'AdminDirectory',
     'ConfigDirectory',
+    'BundleDirectory',
+    'BundleVersionDirectory',
     'RuntimeDirectory',
     'AuthorizationDirectory',
     'LogDirectory',
@@ -86,6 +92,88 @@ foreach ($row in $observed) {
 }
 if ($observed.Count -ne $expected.Count) {
     throw 'canonical ACL smoke did not exercise every managed path kind'
+}
+
+# Classify the exact name emitted by the bundle store before comparing the
+# descriptor. This catches a drift where the builder is right but verify and
+# repair select the administrator-only descriptor for an immutable version.
+$versionName = 'v1-AKADPAK8-b-01M4VBXHT0DS0QNK83AKADPAK8'
+$bundlePaths = @(
+    [pscustomobject]@{ relative = $versionName; directory = $true; kind = 'BundleVersionDirectory' },
+    [pscustomobject]@{ relative = "$versionName\manifest.json"; directory = $false; kind = 'BundleVersionFile' },
+    [pscustomobject]@{ relative = "$versionName\policies"; directory = $true; kind = 'BundleVersionDirectory' },
+    [pscustomobject]@{ relative = "$versionName\policies\rule.yaml"; directory = $false; kind = 'BundleVersionFile' },
+    [pscustomobject]@{ relative = 'receipt.json'; directory = $false; kind = 'BundleReceipt' },
+    [pscustomobject]@{ relative = 'receipt-events'; directory = $true; kind = 'BundleDirectory' },
+    [pscustomobject]@{ relative = 'receipt-events\b-01JA0000000000000000000033.json'; directory = $false; kind = 'BundleReceipt' },
+    [pscustomobject]@{ relative = 'receipt-events\invalid.json'; directory = $false; kind = 'AdminFile' },
+    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8'; directory = $true; kind = 'AdminDirectory' },
+    [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8\policies'; directory = $true; kind = 'AdminDirectory' }
+)
+foreach ($row in $bundlePaths) {
+    $actualKind = & $module {
+        param($Relative, $IsDirectory)
+        Get-DefenseClawBundlePathKind -RelativePath $Relative -IsDirectory $IsDirectory
+    } ([string]$row.relative) ([bool]$row.directory)
+    if ([string]$actualKind -cne [string]$row.kind) {
+        throw "bundle ACL kind mismatch for $($row.relative): $actualKind"
+    }
+    $descriptor = @($observed | Microsoft.PowerShell.Core\Where-Object {
+        [string]$_.kind -ceq [string]$actualKind
+    })[0]
+    if ($null -eq $descriptor -or [string]$descriptor.sddl -cne [string]$expected[[string]$row.kind]) {
+        throw "bundle ACL descriptor mismatch for $($row.relative)"
+    }
+}
+
+# Model a receipt folder created after Setup's first ACL pass, then require
+# repair and verification to agree on the protected AdminDirectory contract.
+$receiptsRepair = & $module {
+    param($GatewaySID)
+    $root = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        'DefenseClaw-ReceiptsAcl-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        $install = [IO.Directory]::CreateDirectory($root).FullName
+        Set-DefenseClawPathAcl -Path $install -Kind AdminDirectory -GatewayServiceSID $GatewaySID
+        $receipts = [IO.Directory]::CreateDirectory(
+            [IO.Path]::Combine($install, 'receipts')
+        ).FullName
+        [IO.File]::WriteAllText([IO.Path]::Combine($receipts, 'r-test.json'), '{}')
+        $native = Initialize-DefenseClawNativeSecurity
+        $created = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $native::GetFileSecurityDescriptor($receipts), 0
+        )
+        if (([int]$created.ControlFlags -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) {
+            throw 'the receipts fixture did not model an inherited DACL'
+        }
+        $config = [IO.Path]::Combine($root, 'etc')
+        $trust = [IO.Directory]::CreateDirectory(
+            [IO.Path]::Combine($config, 'trust')
+        ).FullName
+        [IO.File]::WriteAllText([IO.Path]::Combine($trust, 'bundle-anchors.json'), '{}')
+        $layout = @{
+            InstallStateDirectory = $install
+            ConfigDirectory = $config
+        }
+        foreach ($attempt in 1..2) {
+            Invoke-DefenseClawBundleAclContract `
+                -Layout $layout `
+                -GatewayServiceSID $GatewaySID `
+                -Repair
+            Invoke-DefenseClawBundleAclContract `
+                -Layout $layout `
+                -GatewayServiceSID $GatewaySID
+        }
+        return $true
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+} $serviceSID
+if (-not $receiptsRepair) {
+    throw 'private receipts ACL repair did not complete'
 }
 
 foreach ($mismatch in @(
@@ -138,6 +226,10 @@ $pairings = [ordered]@{
     AdminFile = 'Admin'
     ConfigDirectory = 'ConfigDirectory'
     ConfigFile = 'Config'
+    BundleDirectory = 'ServiceInstall'
+    BundleReceipt = 'Config'
+    BundleVersionDirectory = 'ServiceInstall'
+    BundleVersionFile = 'ServiceInstall'
     MachinePolicyFile = 'MachinePolicy'
     RuntimeDirectory = 'Runtime'
     RuntimeFile = 'Runtime'

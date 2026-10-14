@@ -95,6 +95,9 @@ in the config, including which agents to protect, is in
 
    Script-only MDMs that cannot pass arguments set the same values in the
    settings block at the top of `defenseclaw-enterprise.sh`.
+   On Linux and macOS, `--format jamf` wraps the lifecycle JSON document in
+   one XML-escaped `<result>...</result>` line while preserving its exit code;
+   the default format is `json`.
 4. **Deliver the optional Cisco AI Defense key** (or an observability
    credential) on standard input or from an administrator-only file, never as
    an argument or in a script body. On Linux and macOS the wrapper stores it

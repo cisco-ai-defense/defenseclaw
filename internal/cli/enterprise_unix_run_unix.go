@@ -37,7 +37,13 @@ import (
 
 // newUnixLifecycleEnv is a seam for CLI tests.
 var newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-	return enterpriseunix.NewEnv(goos, appVersion)
+	env, err := enterpriseunix.NewEnv(goos, appVersion)
+	if env != nil {
+		// Every changing run verifies signed bundles (the apply trigger
+		// processes the bundle inbox).
+		env.BundleDigester = bundleDigester
+	}
+	return env, err
 }
 
 func platformGOOS(platform string) string {
@@ -244,6 +250,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	// an administrator reading the text must see the generation and digest.
 	if result.Policy != nil {
 		fmt.Fprintf(w, "  %s\n", result.PolicyLine())
+	}
+	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		enterprisestatus.WriteSessionEntries(w, *result.Bundle.SessionsRestartRequired)
 	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).

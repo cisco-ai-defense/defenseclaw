@@ -44,8 +44,8 @@ func TestAuditActionClassificationsMatchSourceConstantsAndRegistry(t *testing.T)
 	}
 	sort.Strings(registry)
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerAuditAction))
-	if len(sourceConstants) != 219 {
-		t.Fatalf("audit Action source constants = %d, want 219", len(sourceConstants))
+	if len(sourceConstants) != 220 {
+		t.Fatalf("audit Action source constants = %d, want 220", len(sourceConstants))
 	}
 	if !reflect.DeepEqual(registry, sourceConstants) {
 		t.Fatalf("audit.AllActions registry differs from typed source constants\nregistry: %v\nsource: %v", registry, sourceConstants)

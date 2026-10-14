@@ -1,0 +1,425 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
+
+// bundleDevice makes the test a standalone managed device with its bundle
+// store in a temp dir and anchors trusted without the root-owner check.
+func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
+	t.Helper()
+	savedStore, savedPolicy, savedAnchors, savedTrust, savedSessions, savedSettle := bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust, bundleSessionStatus, bundleSettleStatus
+	t.Cleanup(func() {
+		bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust = savedStore, savedPolicy, savedAnchors, savedTrust
+		bundleSessionStatus = savedSessions
+		bundleSettleStatus = savedSettle
+	})
+	store := enterprisebundle.NewStore(filepath.Join(e.dir, "etc", "bundles"), filepath.Join(e.dir, "lifecycle"))
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(store.BundlesDir, func(path string, entry fs.DirEntry, err error) error {
+			if err == nil && entry.IsDir() {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
+	bundleManagedDevice = func() bool { return true }
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	bundleDefaultAnchors = func() (string, error) { return e.anchors, nil }
+	bundleAnchorTrust = nil
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState { return nil }
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "known", Entries: []enterprisestatus.SessionEntry{}}
+	}
+	bundleSettleStatus = func(context.Context) error { return nil }
+	return store
+}
+
+func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
+	newBundleCLIEnv(t)
+	bundlePrivilege = func() error {
+		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Detail: "administrator required"}
+	}
+	bundleManagedDevice = func() bool { t.Fatal("read deployment state before privilege check"); return false }
+	out, code := runBundle(t, "status", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_admin"`) ||
+		strings.Contains(out, `"bundle_mode"`) || strings.Contains(out, `"current"`) {
+		t.Fatalf("privilege refusal exit=%d: %s", code, out)
+	}
+}
+
+func TestBundleStatusSettlesBeforeReadingCurrent(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	store := bundleDevice(t, e)
+	saved := bundleSettleStatus
+	t.Cleanup(func() { bundleSettleStatus = saved })
+	const id = "b-01JA0000000000000000000037"
+	digest := "sha256:" + strings.Repeat("7", 64)
+	called := false
+	bundleSettleStatus = func(context.Context) error {
+		called = true
+		confirmBundle(t, store, id, 7, digest)
+		return nil
+	}
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 || !called {
+		t.Fatalf("status exit=%d, settlement called=%v: %s", code, called, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Current == nil || result.Current.BundleID != id || !result.Applied || result.LastReceipt == nil || result.LastReceipt.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("status did not report settled policy: %s", out)
+	}
+}
+
+// confirmBundle walks a receipt for id/version to confirmed with digest.
+func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest string) {
+	confirmBundleWithExpected(t, store, id, version, digest, digest, true)
+}
+
+func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
+	t.Helper()
+	r, err := store.Receive(id, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stage(r, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.ManifestSHA256 = strings.Repeat("f", 64)
+		r.ExpectedDigest = expected
+		r.SetDigestComparison(comparable, !comparable, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Promote(r); err != nil {
+		t.Fatal(err)
+	}
+	if len(disabled) > 0 {
+		r.DisabledByBundle = disabled
+		r.WarningCodes = []string{"capability_disabled"}
+	}
+	if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = digest }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Confirm(r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnterpriseBundleStatusDigestMarkerJSONAndText(t *testing.T) {
+	for _, crossVersion := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cross_version=%t", crossVersion), func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			store := bundleDevice(t, e)
+			digest := "sha256:" + strings.Repeat("8", 64)
+			confirmBundleWithExpected(t, store, "b-01JA0000000000000000000036", 1, digest, digest, !crossVersion)
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+			}
+			jsonOut, code := runBundle(t, "status", "--json")
+			if code != 0 {
+				t.Fatalf("JSON status exit %d: %s", code, jsonOut)
+			}
+			var result bundleStatusResult
+			if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+				t.Fatal(err)
+			}
+			textOut, code := runBundle(t, "status")
+			if code != 0 {
+				t.Fatalf("text status exit %d: %s", code, textOut)
+			}
+			jsonWarning := hasBundleWarning(result.Warnings, enterprisebundle.WarnDigestUnverifiable)
+			textWarning := strings.Contains(textOut, "warning: digest_unverifiable:")
+			if jsonWarning != crossVersion || textWarning != crossVersion || result.LastReceipt == nil || result.Bundle == nil ||
+				slices.Contains(result.LastReceipt.WarningCodes, enterprisebundle.WarnDigestUnverifiable) != crossVersion ||
+				slices.Contains(result.Bundle.WarningCodes, enterprisebundle.WarnDigestUnverifiable) != crossVersion {
+				t.Fatalf("cross_version=%t JSON=%s text=%s", crossVersion, jsonOut, textOut)
+			}
+		})
+	}
+}
+
+func TestEnterpriseBundleStatusCapabilityLossGolden(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000035"
+	digest := "sha256:" + strings.Repeat("8", 64)
+	confirmBundleWithExpected(t, store, id, 1, digest, digest, true, "asset_policy", "sandbox")
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Bundle == nil || !hasBundleWarning(result.Warnings, "capability_disabled") {
+		t.Fatalf("status lost capability warning: %s", out)
+	}
+	projection, err := json.Marshal(map[string]any{
+		"disabled_by_bundle": result.Bundle.DisabledByBundle,
+		"warning_code":       result.Warnings[0].Code,
+		"warning_message":    result.Warnings[0].Message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBundleGolden(t, "status-capability-loss", string(projection), e.dir)
+}
+
+func TestEnterpriseBundleStatusWarnsWhenSignedDigestDiffers(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000034"
+	digest, expected := "sha256:"+strings.Repeat("8", 64), "sha256:"+strings.Repeat("2", 64)
+	confirmBundleWithExpected(t, store, id, 1, digest, expected, true)
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var status bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Applied || status.LastReceipt == nil || status.LastReceipt.ExpectedDigest != expected ||
+		!hasBundleWarning(status.Warnings, enterprisebundle.WarnDigestDiffers) ||
+		len(status.LastReceipt.WarningCodes) != 1 || status.LastReceipt.WarningCodes[0] != enterprisebundle.WarnDigestDiffers {
+		t.Fatalf("status omitted signed digest warning: %s", out)
+	}
+	publicReceipt, err := os.ReadFile(store.PublicReceiptPath())
+	if err != nil || !strings.Contains(string(publicReceipt), `"warning_codes": [`) ||
+		!strings.Contains(string(publicReceipt), enterprisebundle.WarnDigestDiffers) {
+		t.Fatalf("public receipt omitted signed digest warning: %s (%v)", publicReceipt, err)
+	}
+	if code := enterprisebundle.DigestWarningCode(expected, digest, false); code != "" {
+		t.Fatalf("non-comparable digest difference inferred a cross-version warning: %q", code)
+	}
+}
+
+func TestEnterpriseBundleStatusRejectsConfigHealthError(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	digest := "sha256:" + strings.Repeat("8", 64)
+	confirmBundle(t, store, "b-01JA0000000000000000000046", 1, digest)
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{
+			EffectiveDigest: digest, GatewayReportedDigest: digest,
+			LastReloadError: "permission denied", Applied: false,
+		}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || !hasBundleWarning(result.Warnings, "policy_reload_rejected") {
+		t.Fatalf("confirmed digest hid config health error: %s", out)
+	}
+}
+
+func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000006"
+	digest := "sha256:" + strings.Repeat("1", 64)
+	confirmBundle(t, store, goodID, 7, digest)
+	bad, err := store.Receive(badID, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fail(bad, enterprisebundle.CodeVersionNotNewer, "older than the confirmed floor"); err != nil {
+		t.Fatal(err)
+	}
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d:\n%s", code, out)
+	}
+	var res bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !res.BundleMode || res.Current.BundleID != goodID || res.Floor != 7 || !res.GatewayChecked || !res.Applied ||
+		res.LastReceipt.State != enterprisebundle.StateConfirmed || res.LastReceipt.BundleID != goodID ||
+		res.Bundle.BundleID != goodID || res.Bundle.State != enterprisebundle.StateConfirmed ||
+		res.LastRefusal == nil || res.LastRefusal.BundleID != badID || res.LastRefusal.ErrorCode != string(enterprisebundle.CodeVersionNotNewer) {
+		t.Fatalf("status = %s", out)
+	}
+	projection, err := json.Marshal(map[string]any{
+		"current": res.Current.BundleID, "last_receipt": res.LastReceipt.BundleID,
+		"bundle": map[string]any{"bundle_id": res.Bundle.BundleID, "version": res.Bundle.Version, "state": res.Bundle.State},
+		"last_refusal": map[string]any{
+			"bundle_id": res.LastRefusal.BundleID, "version": res.LastRefusal.Version,
+			"error_code": res.LastRefusal.ErrorCode, "time": "<time>",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBundleGolden(t, "status-refused-replay", string(projection), e.dir)
+
+	// The gateway enforcing something else is not applied.
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{GatewayReportedDigest: "sha256:" + strings.Repeat("2", 64)}
+	}
+	if out, _ = runBundle(t, "status", "--json"); !strings.Contains(out, `"applied": false`) {
+		t.Fatalf("status with another gateway digest:\n%s", out)
+	}
+
+	// A state that cannot be read refuses; it never reads as "no bundle".
+	if err := os.WriteFile(store.StatePath(), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code = runBundle(t, "status", "--json"); code != bundleFailureExitCode() || !strings.Contains(out, `"state_invalid"`) {
+		t.Fatalf("corrupt state: exit %d:\n%s", code, out)
+	}
+	bundleManagedDevice = func() bool { return false }
+	if out, code = runBundle(t, "status", "--json"); code != bundleFailureExitCode() || !strings.Contains(out, `"not_managed"`) {
+		t.Fatalf("not managed: exit %d:\n%s", code, out)
+	}
+	bundleSecureClient = func() bool { return true }
+	if out, code = runBundle(t, "status", "--json"); code != bundleFailureExitCode() || !strings.Contains(out, `"not_supported_secure_client"`) {
+		t.Fatalf("Secure Client: exit %d:\n%s", code, out)
+	}
+}
+
+func TestEnterpriseBundleStatusSessionGolden(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	confirmBundle(t, store, "b-01JA0000000000000000000032", 1, "sha256:"+strings.Repeat("1", 64))
+	saved := bundleSessionStatus
+	scans := 0
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		scans++
+		return enterprisestatus.SessionRestartStatus{State: "known", Count: 1, Entries: []enterprisestatus.SessionEntry{{PID: 41, User: "alice", Agent: "claudecode", StartedAt: "2026-10-13T07:07:31Z"}}}
+	}
+	t.Cleanup(func() { bundleSessionStatus = saved })
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d: %s", code, out)
+	}
+	if scans != 1 {
+		t.Fatalf("status used %d process scans, want one", scans)
+	}
+	var res bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.MarshalIndent(struct {
+		Sessions       enterprisestatus.SessionRestartStatus  `json:"sessions_restart_required"`
+		BundleSessions *enterprisestatus.SessionRestartStatus `json:"bundle_sessions_restart_required"`
+		Warning        bool                                   `json:"sessions_need_restart_warning"`
+	}{res.SessionsRestartRequired, res.Bundle.SessionsRestartRequired, hasBundleWarning(res.Warnings, "sessions_need_restart")}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/enterprise_bundle/status-sessions.golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got)+"\n" != string(want) {
+		t.Fatalf("status session golden:\n%s\nwant:\n%s", got, want)
+	}
+	var printed bytes.Buffer
+	printStatusText(&printed, &res)
+	for _, want := range []string{"sessions_need_restart", "pid 41", "user alice", "2026-10-13T07:07:31Z", "restart the agent"} {
+		if !strings.Contains(printed.String(), want) {
+			t.Fatalf("status text omits %q: %s", want, printed.String())
+		}
+	}
+}
+
+func TestEnterpriseBundleStatusExplainsUnknownSessionScan(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	confirmBundle(t, store, "b-01JA0000000000000000000032", 1, "sha256:"+strings.Repeat("1", 64))
+	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
+		return enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{}, Reason: "process snapshot failed"}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 || !strings.Contains(out, `"reason": "process snapshot failed"`) || !strings.Contains(out, `"code": "sessions_scan_unknown"`) {
+		t.Fatalf("unknown scan exit=%d: %s", code, out)
+	}
+}
+
+// On a device, verify takes the floor from bundle-state.json: a bundle at
+// or below the confirmed version is refused.
+func TestEnterpriseBundleVerifyUsesTheDeviceFloor(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d:\n%s", code, out)
+	}
+	store := bundleDevice(t, e)
+	if out, code := runBundle(t, "verify", "--bundle", signed, "--platform", "linux", "--json"); code != 0 {
+		t.Fatalf("verify with no confirmed bundle: exit %d:\n%s", code, out)
+	}
+	confirmBundle(t, store, "b-01JA0000000000000000000006", 6, "sha256:"+strings.Repeat("3", 64))
+	out, code := runBundle(t, "verify", "--bundle", signed, "--platform", "linux", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"version_not_newer"`) ||
+		!strings.Contains(out, `"floor": 6`) ||
+		!strings.Contains(out, `"floor_source": "last_confirmed_bundle"`) ||
+		!strings.Contains(out, "set by the last confirmed bundle") {
+		t.Fatalf("verify below the floor: exit %d:\n%s", code, out)
+	}
+	if err := os.WriteFile(store.StatePath(), []byte(`{"schema_version":1,"floor":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code = runBundle(t, "verify", "--bundle", signed, "--platform", "linux", "--json"); code != bundleFailureExitCode() || !strings.Contains(out, `"state_invalid"`) {
+		t.Fatalf("verify with a corrupt state: exit %d:\n%s", code, out)
+	}
+}
+
+func hasBundleWarning(warnings []enterprisebundle.Warning, code string) bool {
+	for _, w := range warnings {
+		if w.Code == code {
+			return true
+		}
+	}
+	return false
+}

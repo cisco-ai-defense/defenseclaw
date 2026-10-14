@@ -21,7 +21,9 @@
          of the signer certificate; Cisco or your own re-signing certificate);
       3. takes the administrator config and the optional credential from an
          administrator-only file or standard input, never from the command
-         line, and stages them in the same folder;
+         line, and stages them in the same folder; or, instead of a config,
+         a signed policy bundle (-BundlePath) and its trust anchors
+         (-TrustAnchorPath, administrator-only);
       4. runs Setup /ensure (install, upgrade, repair or a true no-op) or,
          without -SetupPath, the installed CLI, and prints the lifecycle
          result (packaging/mdm/contract/lifecycle-result.schema.json);
@@ -39,6 +41,16 @@
         -Sha256 3f0c...e1 -ConfigPath D:\stage\config.yaml
 
 .EXAMPLE
+    pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 -SetupPath D:\stage\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+        -Sha256 3f0c...e1 -BundlePath D:\stage\policy-v7.dcbundle -TrustAnchorPath D:\stage\bundle-anchors.json
+
+    Applies a signed policy bundle on an installed computer (Setup /ensure
+    BUNDLE= TRUSTANCHORS=). The bundle carries the config, so -BundlePath is
+    not combined with -ConfigPath. The bundle may come from any folder: the
+    lifecycle verifies its own copy. The trust anchor file must be
+    administrator-only, like a config.
+
+.EXAMPLE
     Get-Content key.txt | pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 -SetupPath ... -Sha256 ... `
         -ConfigPath ... -SecretName ai-defense-api-key -SecretFromStdin
 #>
@@ -51,6 +63,9 @@ param(
     [string[]]$AllowedSigners = @(),
     [string]$ConfigPath = '',
     [switch]$ConfigFromStdin,
+    [string]$BundlePath = '',
+    [string]$TrustAnchorPath = '',
+	[switch]$RefuseCapabilityLoss,
     [string]$SecretName = '',
     [string]$SecretPath = '',
     [switch]$SecretFromStdin,
@@ -292,6 +307,8 @@ $script:ExitBusy = 1618
 $script:ExitInvalid = 1639
 $script:MaxConfigBytes = 1MB
 $script:MaxSecretBytes = 16KB
+$script:MaxBundleBytes = 4MB
+$script:MaxAnchorBytes = 256KB
 $script:Staging = $null
 $script:LogPath = $null
 $script:ResultAction = 'ensure'
@@ -633,7 +650,13 @@ if ($SecretName) {
 } elseif ($SecretPath -or $SecretFromStdin) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' 'a secret value needs -SecretName'
 }
-if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName)) {
+if ($BundlePath -and ($ConfigPath -or $ConfigFromStdin)) {
+    Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-BundlePath cannot be combined with -ConfigPath or -ConfigFromStdin: the signed bundle carries the config'
+}
+if ($RefuseCapabilityLoss -and -not $BundlePath) {
+	Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-RefuseCapabilityLoss requires -BundlePath'
+}
+if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName -or $BundlePath -or $TrustAnchorPath)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "-Action $Action is read-only and takes no config or secret"
 }
 if ($ProductVersion -and $ProductVersion -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$') {
@@ -656,6 +679,18 @@ if ($ConfigFromStdin) {
     Copy-WrapperInput -Source $ConfigPath -Destination $config -Limit $script:MaxConfigBytes -Label 'config' -RequireAdminOnly
 }
 $script:StagedConfig = $config
+$bundle = ''
+if ($BundlePath) {
+    # Signed and hash-checked by the lifecycle on its own copy, so it may
+    # come from any folder.
+    $bundle = Join-Path $staging 'policy.dcbundle'
+    Copy-WrapperInput -Source $BundlePath -Destination $bundle -Limit $script:MaxBundleBytes -Label 'bundle'
+}
+$anchors = ''
+if ($TrustAnchorPath) {
+    $anchors = Join-Path $staging 'bundle-anchors.json'
+    Copy-WrapperInput -Source $TrustAnchorPath -Destination $anchors -Limit $script:MaxAnchorBytes -Label 'trust anchors' -RequireAdminOnly
+}
 $secret = ''
 if ($SecretName) {
     $secret = Join-Path $staging 'secret'
@@ -677,6 +712,9 @@ try {
         # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
         $arguments = @(('/' + $normalizedAction), 'JSON=1')
         if ($config) { $arguments += "CONFIG=$config" }
+        if ($bundle) { $arguments += "BUNDLE=$bundle" }
+        if ($anchors) { $arguments += "TRUSTANCHORS=$anchors" }
+		if ($RefuseCapabilityLoss) { $arguments += 'REFUSECAPABILITYLOSS=1' }
         if ($script:Signers.Count -gt 0) { $arguments += ('ALLOWEDSIGNERS=' + ($script:Signers -join ',')) }
         $run = Invoke-DefenseClawNative -FilePath $stagedSetup -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'Setup'
@@ -687,6 +725,9 @@ try {
         }
         $arguments = @('enterprise', 'windows', $normalizedAction, '--profile', 'standalone', '--json')
         if ($config) { $arguments += @('--config', $config) }
+        if ($bundle) { $arguments += @('--bundle', $bundle) }
+        if ($anchors) { $arguments += @('--trust-anchors', $anchors) }
+		if ($RefuseCapabilityLoss) { $arguments += '--refuse-capability-loss' }
         if ($ProductVersion) { $arguments += @('--product-version', $ProductVersion.TrimStart('v')) }
         $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList $arguments
         $exitCode = Write-LifecycleResult -Run $run -Label 'defenseclaw.exe'

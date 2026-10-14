@@ -113,6 +113,16 @@ type windowsEnterpriseLifecycleOptions struct {
 	// hash_pinned run verifies its installer. The scanner runtime the
 	// lifecycle installs itself is admitted by them too.
 	payloadPins map[string]string
+	// bundlePath is the signed policy bundle ensure applies (--bundle,
+	// Setup BUNDLE=) and trustAnchors the anchor file it installs first
+	// (--trust-anchors, Setup TRUSTANCHORS=). Standalone ensure only.
+	bundlePath           string
+	trustAnchors         string
+	refuseCapabilityLoss bool
+	// bundle is the bundle state of the run; bundleRollback marks the
+	// internal ensure that puts the last good config back.
+	bundle         *windowsBundleRun
+	bundleRollback bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
@@ -288,6 +298,13 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
+	if action == "ensure" {
+		flags.StringVar(&opts.bundlePath, "bundle", "",
+			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
+		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
+		flags.StringVar(&opts.trustAnchors, "trust-anchors", "",
+			"standalone: install this administrator-only bundle trust anchor file (bundle-anchors.json) first")
+	}
 	if action == "uninstall" {
 		flags.BoolVar(&opts.force, "force", false,
 			"standalone, last resort: remove the deployment without recovering a pending transaction that no ensure, repair or uninstall can recover; run it from Setup (FORCE=1) as LocalSystem")
@@ -406,6 +423,9 @@ func runWindowsEnterpriseLifecycle(
 		}
 		return failPreflight(err)
 	}
+	if (opts.bundlePath != "" || opts.trustAnchors != "") && !windowsEnterpriseStandalone(opts) {
+		return failPreflight(errors.New("--bundle and --trust-anchors are valid only with --profile standalone"))
+	}
 	if windowsEnterpriseStandalone(opts) {
 		failPreflight = func(err error) error {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
@@ -422,6 +442,16 @@ func runWindowsEnterpriseLifecycle(
 				targets, targetsErr := windowsEnterpriseEnrolledTargets()
 				opts.previousTargets, opts.previousTargetsKnown = targets, targetsErr == nil
 			}
+		}
+	}
+	if windowsEnterpriseStandalone(opts) {
+		// Before --config is read: a bundle supplies it, and bundle mode
+		// refuses one that is not the current bundle config.
+		if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, action, opts); done {
+			return err
+		}
+		if opts.bundle != nil {
+			defer opts.bundle.release()
 		}
 	}
 	// The Secure Client profile keeps its historical preflight text exactly;

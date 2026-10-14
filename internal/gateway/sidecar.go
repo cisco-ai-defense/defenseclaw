@@ -1933,11 +1933,13 @@ func buildInitialSidecarJudge(
 }
 
 // generationUnchanged reports a rebuild that matches the live generation: the
-// same effective digest and the same reason (if any) the Rego policy did not
-// load, so a new failure to load it is published, not swallowed.
+// same effective digest, bundle identity, and policy-load errors. A newly
+// signed bundle still needs a published generation and an apply audit event
+// even when its effective policy bytes happen to match the live one.
 func generationUnchanged(live, next *Generation) bool {
 	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError &&
-		live.scannerPinError == next.scannerPinError
+		live.scannerPinError == next.scannerPinError && live.BundleID == next.BundleID &&
+		live.BundleVersion == next.BundleVersion
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -2480,7 +2482,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 			oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 			!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 			!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
-			oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+			!equalConfigPathForDiff(oldG.RulePackDir, newG.RulePackDir, runtime.GOOS) || oldG.HookSelfHeal != newG.HookSelfHeal ||
 			oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 			!reflect.DeepEqual(oldG.Judge, newG.Judge)
 	}

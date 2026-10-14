@@ -53,18 +53,61 @@ checks the installed config's SHA-256.
 | Last package result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
 | Wrapper log | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, 0600). |
 
+## Signed policy bundles
+
+`<etc>/bundles/receipt.json` is the public summary: any local user can read
+its confirmed bundle id, version and state. On Linux and macOS, `etc/bundles`
+is `0755` and the receipt is `0644`; `inbox` and staging remain `0700`,
+confirmed version directories and assets are `0750`/`0640` for the gateway
+group, and `bundle-state.json` and private receipts stay under the `0700`
+lifecycle directory. On Windows, Users can traverse the state root, `etc`
+and `bundles` through noninheriting read and execute ACEs, and only the public
+receipt has an explicit Users read ACE. The private state, receipts, staging,
+inbox and version assets retain protected ACLs without a Users grant.
+
+| OS | Is bundle N (or newer) enforcing? | Enforcing receipt and latest refusal |
+| --- | --- | --- |
+| Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed) | `enterprise bundle status --json` |
+| Linux, macOS | `detect.sh --require-bundle <version\|b-ULID>` (setting `DC_REQUIRE_BUNDLE`) | `detect.sh --bundle-status` (setting `DC_BUNDLE_STATUS=1`) for the enforcing receipt; `enterprise bundle status --json` for `last_refusal` |
+
+`-RequireBundle` and `--require-bundle` detect only when the current,
+confirmed bundle is that bundle id, or that version or newer, and
+`enterprise bundle status` reports that the running gateway enforces its
+digest. Not detected, `detect.sh` reports `bundle-missing`, `bundle-mismatch`,
+`bundle-outdated` or `bundle-not-enforced`.
+
+`detect.ps1 -RequireSessionsProtected` and
+`detect.sh --require-sessions-protected` additionally require that no
+running agent predates its managed hook settings. A nonzero count exits 1
+with `sessions-need-restart`; an unknown scan also exits 1. Run the Windows
+mode as LocalSystem and the Unix mode as root. `enterprise bundle status
+--json` reports `sessions_restart_required` with a count and up to 20
+process entries. A confirmed receipt records the count at confirmation;
+`coverage_complete` stays false while the live count is nonzero.
+
+`--bundle-status` prints `<bundle id> <version> <state>` for the receipt that
+reached the enforcing state and always exits 0 (inside `<result>` with `--format jamf`).
+Pre-staging refusals appear separately in `enterprise bundle status --json`
+as `last_refusal` (receipt id, bundle id, version, error code, time). `state`
+is `confirmed`, `not-enforced`, `failed:<code>`, an unfinished state
+(`staged`, `applied`), or `none` / `not-installed` /
+`unknown` after `none 0`. It takes no `--min-version` or `--require-*`
+option (exit 2).
+
 ## detect.sh output formats
 
 | Format | Exit | Output |
 | --- | --- | --- |
 | `exit` (default) | 0 detected, 1 not | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR |
-| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`) |
+| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`) or a `bundle-*` value (with `--require-bundle`) |
 | `jamf` | always 0 | The same values inside `<result>...</result>` |
 
 In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.
 
-Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY` and `DC_FORMAT`
+Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY`,
+`DC_REQUIRE_TETRAGON`, `DC_REQUIRE_BUNDLE`, `DC_BUNDLE_STATUS` and `DC_FORMAT`
+(`DC_REQUIRE_SESSIONS_PROTECTED` for the session check)
 in the settings block instead of flags.
 
 ## Versions

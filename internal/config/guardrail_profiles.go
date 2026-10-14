@@ -327,8 +327,9 @@ type DerivedGuardrailProfile struct {
 	// Sandbox is the profile's sandbox floor F: openshell.admin tightened
 	// by the profile's sandbox section. SandboxDigest is "sha256:..." of
 	// F's canonical JSON and the content of every pack it references.
-	Sandbox       OpenShellAdminConfig
-	SandboxDigest string
+	Sandbox             OpenShellAdminConfig
+	SandboxDigest       string
+	policySandboxDigest string
 }
 
 // DeriveGuardrailProfiles derives every profile in guardrail.profiles. The
@@ -360,11 +361,11 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 		if profile.Sandbox != nil {
 			sandboxDigest = floorDigest
 		}
-		digest, err := guardrailPolicyDigest(derived, sandboxDigest)
+		digest, err := guardrailPolicyDigest(derived, sandboxDigest, nil)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 		}
-		out[name] = DerivedGuardrailProfile{Name: name, Config: derived, Digest: digest, Sandbox: floor, SandboxDigest: floorDigest}
+		out[name] = DerivedGuardrailProfile{Name: name, Config: derived, Digest: digest, Sandbox: floor, SandboxDigest: floorDigest, policySandboxDigest: sandboxDigest}
 	}
 	return out, nil
 }
@@ -401,12 +402,25 @@ type guardrailPolicyDigestView struct {
 // marshal sorted and struct fields in declaration order, so equal policies
 // always yield the same digest.
 func GuardrailPolicyDigest(cfg *Config) (string, error) {
-	return guardrailPolicyDigest(cfg, "")
+	return guardrailPolicyDigest(cfg, "", nil)
+}
+
+// GuardrailPolicyDigestWithPathRewrite computes the bundle form of the
+// guardrail component. The caller rewrites paths only for hashing; the live
+// config still names the directory from which rule packs are loaded.
+func GuardrailPolicyDigestWithPathRewrite(cfg *Config, rewrite func(string) string) (string, error) {
+	return guardrailPolicyDigest(cfg, "", rewrite)
+}
+
+// DigestWithPathRewrite computes the bundle form of a derived profile digest,
+// retaining the sandbox component that was already derived from its source.
+func (p DerivedGuardrailProfile) DigestWithPathRewrite(rewrite func(string) string) (string, error) {
+	return guardrailPolicyDigest(p.Config, p.policySandboxDigest, rewrite)
 }
 
 // guardrailPolicyDigest is GuardrailPolicyDigest with a profile's sandbox
 // floor digest ("" for none).
-func guardrailPolicyDigest(cfg *Config, sandboxDigest string) (string, error) {
+func guardrailPolicyDigest(cfg *Config, sandboxDigest string, rewrite func(string) string) (string, error) {
 	if cfg == nil {
 		return "", errors.New("guardrail policy digest: configuration is unavailable")
 	}
@@ -429,6 +443,9 @@ func guardrailPolicyDigest(cfg *Config, sandboxDigest string) (string, error) {
 			"codex":       cfg.Codex.Mode,
 		},
 		Sandbox: sandboxDigest,
+	}
+	if rewrite != nil {
+		view.RulePackDir = rewrite(view.RulePackDir)
 	}
 	if !g.Rules.IsZero() {
 		rules := g.Rules

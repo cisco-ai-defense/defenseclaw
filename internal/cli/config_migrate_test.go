@@ -30,8 +30,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
+
+func TestMigrateManagedStandaloneConfigRecordsStagedBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	saved := managedStandaloneBundleGeneration
+	t.Cleanup(func() { managedStandaloneBundleGeneration = saved })
+	const id = "b-01JA0000000000000000000039"
+	managedStandaloneBundleGeneration = func(gotPath string, gotRaw []byte) (configwrite.Options, bool, error) {
+		if gotPath != path || string(gotRaw) != string(raw) {
+			t.Fatalf("bundle lookup got %s and %q", gotPath, gotRaw)
+		}
+		return configwrite.Options{Actor: "control-plane:acme/alice", Lifecycle: true,
+			Reason: configwrite.BundleReason(id, 3, "guardrail pack update"),
+			Bundle: configwrite.BundleRef{ID: id, Version: 3, SignerKeyID: "k1"}}, true, nil
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := observabilityruntime.ReadBundleAttribution(path)
+	if !ok || got.Principal != "control-plane:acme/alice" || got.ID != id || got.Version != 3 || got.SignerKeyID != "k1" {
+		t.Fatalf("restart config.change.applied bundle attribution = %+v, ok=%v", got, ok)
+	}
+}
 
 // The Windows standalone config step migrates a v8 config in place with the
 // lifecycle actor, then only records an unrecorded config.

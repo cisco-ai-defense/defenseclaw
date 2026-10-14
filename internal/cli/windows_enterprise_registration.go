@@ -244,6 +244,9 @@ func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *w
 	if err := reconcileWindowsEnterpriseSelfUpdatePolicy(marker, disableSelfUpdate == 1); err != nil {
 		return err
 	}
+	if err := writeWindowsBundleMarker(marker); err != nil {
+		return err
+	}
 
 	arp, _, err := registry.CreateKey(registry.LOCAL_MACHINE, windowsEnterpriseARPKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {

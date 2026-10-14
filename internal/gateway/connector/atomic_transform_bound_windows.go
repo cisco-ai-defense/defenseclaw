@@ -84,6 +84,12 @@ func validateAtomicTransformBoundFilePrivatePlatform(file *os.File) error {
 	return validateAtomicTransformWindowsPrivateHandle(windows.Handle(file.Fd()))
 }
 
+// Only an enrolled user's existing config may use a foreign owner. State,
+// receipt, stage, and marker validation continue to require the current user.
+func validateAtomicTransformBoundFilePrivateForOwner(file *os.File, owner *windows.SID) error {
+	return validateAtomicTransformWindowsPrivateHandleForOwner(windows.Handle(file.Fd()), owner)
+}
+
 func validateAtomicTransformBoundDirectoryDurabilityPlatform(file *os.File) error {
 	// FILE_REMOTE_PROTOCOL_INFO succeeds only for a remote filesystem handle.
 	// Reject it even when the server reports an NTFS backing filesystem: the
@@ -126,6 +132,10 @@ func validateAtomicTransformBoundDirectoryDurabilityPlatform(file *os.File) erro
 }
 
 func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
+	return validateAtomicTransformWindowsPrivateHandleForOwner(handle, nil)
+}
+
+func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, expectedOwner *windows.SID) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -156,10 +166,20 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 	if err != nil {
 		return err
 	}
+	if expectedOwner != nil {
+		userSID = expectedOwner
+	}
 	if owner == nil || !owner.Equals(userSID) {
+		if expectedOwner != nil {
+			return fmt.Errorf("bound private compare-and-swap file is not owned by enrolled target")
+		}
 		return fmt.Errorf("bound compare-and-swap state directory is not owned by current user")
 	}
-	var ownerMask, systemMask windows.ACCESS_MASK
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	var ownerMask, systemMask, administratorsMask windows.ACCESS_MASK
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
@@ -172,7 +192,9 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		inheritOnly := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0
 		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE && ace.Mask != 0 &&
-			(sid.Equals(userSID) || sid.Equals(system) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) {
+			(sid.Equals(userSID) || sid.Equals(system) ||
+				(expectedOwner != nil && sid.Equals(administrators)) ||
+				sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) {
 			return fmt.Errorf("bound compare-and-swap state directory denies a trusted principal")
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask == 0 {
@@ -182,10 +204,19 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 		case sid.Equals(userSID) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid):
 			if !inheritOnly {
 				ownerMask |= ace.Mask
+				// When the owner is LocalSystem, this same ACE also grants
+				// SYSTEM access. An inherit-only ACE grants neither on this object.
+				if sid.Equals(system) {
+					systemMask |= ace.Mask
+				}
 			}
 		case sid.Equals(system):
 			if !inheritOnly {
 				systemMask |= ace.Mask
+			}
+		case expectedOwner != nil && sid.Equals(administrators):
+			if !inheritOnly {
+				administratorsMask |= ace.Mask
 			}
 		default:
 			return fmt.Errorf("bound compare-and-swap state directory grants access to another principal")
@@ -199,8 +230,14 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 	if systemMask&windows.GENERIC_ALL != 0 {
 		systemMask |= full
 	}
+	if administratorsMask&windows.GENERIC_ALL != 0 {
+		administratorsMask |= full
+	}
 	if ownerMask&full != full || systemMask&full != full {
 		return fmt.Errorf("bound private compare-and-swap object does not grant owner and SYSTEM full effective access")
+	}
+	if expectedOwner != nil && administratorsMask&full != full {
+		return fmt.Errorf("bound private compare-and-swap object does not grant Administrators full effective access")
 	}
 	return nil
 }
@@ -229,9 +266,19 @@ func atomicTransformPrivateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, e
 	if err != nil || userSID == nil {
 		return nil, fmt.Errorf("resolve current Windows user for private CAS artifact: %w", err)
 	}
-	return windows.SecurityDescriptorFromString(fmt.Sprintf(
-		"O:%sD:P(A;;FA;;;SY)(A;;FA;;;%s)", userSID, userSID,
-	))
+	return atomicTransformPrivateSecurityDescriptorForOwner(userSID, false)
+}
+
+func atomicTransformPrivateSecurityDescriptorForOwner(owner *windows.SID, includeAdministrators bool) (*windows.SECURITY_DESCRIPTOR, error) {
+	if owner == nil {
+		return nil, fmt.Errorf("private CAS artifact has no expected owner")
+	}
+	if includeAdministrators {
+		return windows.SecurityDescriptorFromString(fmt.Sprintf(
+			"O:%sD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;%s)", owner, owner,
+		))
+	}
+	return windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;;FA;;;SY)(A;;FA;;;%s)", owner, owner))
 }
 
 func createAtomicTransformBoundFilePlatform(parent *os.File, name string, _ os.FileMode) (*os.File, error) {

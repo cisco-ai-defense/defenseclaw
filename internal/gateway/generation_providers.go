@@ -37,11 +37,16 @@ const llmBaseURLProviderName = "custom-gateway"
 // embedded providers.json, the legacy operator overlay for non-managed
 // profiles (configs.LoadProviders skips a derived one), then llm_providers
 // from config, then llm.base_url's host when nothing above knows it.
-// Managed v9 uses only config.yaml additions (GAP-0443).
+// Managed standalone uses only config.yaml additions (GAP-0443); loading a
+// per-user overlay would make an offline bundle depend on the signer's home.
 func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) {
+	return buildGenerationProvidersForScope(cfg, digestScope{}, false)
+}
+
+func buildGenerationProvidersForScope(cfg *config.Config, scope digestScope, offline bool) (*generationProviders, error) {
 	var reg *configs.ProvidersConfig
 	var err error
-	if cfg != nil && cfg.ConfigVersion == config.ConfigVersionV9 && cfg.StandaloneEnterprise() {
+	if cfg != nil && cfg.StandaloneEnterprise() {
 		reg, err = configs.LoadEmbeddedProviders()
 	} else {
 		reg, err = configs.LoadProviders()
@@ -52,6 +57,11 @@ func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) 
 	if cfg != nil {
 		overlay := configs.ProvidersConfig{OllamaPorts: append([]int(nil), cfg.LLMProviders.OllamaPorts...)}
 		for _, custom := range cfg.LLMProviders.Custom {
+			if offline && custom.TLS != nil && !scope.bundleFile(custom.TLS.CACertFile) {
+				copy := *custom.TLS
+				copy.CACertFile = ""
+				custom.TLS = &copy
+			}
 			provider, err := providerFromConfig(custom)
 			if err != nil {
 				return nil, err
@@ -157,6 +167,30 @@ func (p *generationProviders) digest() string {
 		OllamaPorts []int              `json:"ollama_ports"`
 	}{p.Providers, p.OllamaPorts})
 	return sha256Digest(raw)
+}
+
+// digestForBundle removes external CA bytes from the signed provider view.
+// The configured path remains in config; only bundle-shipped CA bytes are
+// content-addressed by a bundle.
+func (p *generationProviders) digestForBundle(cfg *config.Config, scope digestScope) string {
+	if p == nil || scope.bundleRoot == "" {
+		return p.digest()
+	}
+	copy := *p
+	copy.Providers = append([]configs.Provider(nil), p.Providers...)
+	for _, custom := range cfg.LLMProviders.Custom {
+		if custom.TLS == nil || scope.bundleFile(custom.TLS.CACertFile) {
+			continue
+		}
+		for i := range copy.Providers {
+			if copy.Providers[i].Name == custom.Name && copy.Providers[i].TLS != nil {
+				tls := *copy.Providers[i].TLS
+				tls.CACertPEM = ""
+				copy.Providers[i].TLS = &tls
+			}
+		}
+	}
+	return copy.digest()
 }
 
 // applyGenerationProviders makes p the proxy's provider registry.

@@ -16,7 +16,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -218,6 +220,70 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser)
 	if len(requests) != 3 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
+	}
+}
+
+func TestStandaloneForeignCleanupBlocksPersonalClaudeWithoutManifestRow(t *testing.T) {
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousMachinePolicy := enterpriseHookStandaloneMachinePolicySet
+	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
+	t.Cleanup(func() {
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHookStandaloneMachinePolicySet = previousMachinePolicy
+		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.leftoversClean = false
+	})
+	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	enterpriseHookForeignCleanupState.leftoversClean = false
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"claudecode": {}}
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"claudecode": {}} }
+	enterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
+	home := t.TempDir()
+	hooks := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hooks, "claude-code-hook.sh")
+	old := []byte("#!/bin/sh\n# defenseclaw-managed-hook v7\necho 'gateway unreachable, allowing' >&2\nexit 0\n")
+	if err := os.WriteFile(path, old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	account := enterprisehooks.UnixEligibleAccount{User: "alice", UID: 4242, GID: 4242, Home: home, HomeInode: 7}
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{account}, nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable, Inode: 7}
+	}
+	called := false
+	enterpriseHookWorkerRunner = func(ctx context.Context, _ enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		for _, target := range request.Targets {
+			if target.Mode == enterpriseHookWorkerModeBlockPersonalClaude {
+				called = true
+			}
+		}
+		return runEnterpriseHookWorkerApply(ctx, request), nil
+	}
+	now := time.Now()
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now, enterprisehooks.Manifest{}, nil)
+	if !called {
+		t.Fatal("eligible user with no Claude manifest row did not get a blocking repair")
+	}
+	output, err := exec.Command("/bin/sh", path).CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !bytes.Contains(output, []byte("this computer is managed")) {
+		t.Fatalf("personal hook exit=%v output=%q", err, output)
+	}
+	if err := os.WriteFile(path, old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now.Add(enterpriseHookForeignCleanupInterval), enterprisehooks.Manifest{}, nil)
+	output, err = exec.Command("/bin/sh", path).CombinedOutput()
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !bytes.Contains(output, []byte("this computer is managed")) {
+		t.Fatalf("reverted personal hook exit=%v output=%q", err, output)
 	}
 }
 

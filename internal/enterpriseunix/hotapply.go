@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 // hotApplyTimeout bounds how long a gateway that kept running through a
@@ -82,8 +83,8 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	// A file that differs only in bytes (a comment, CRLF, a BOM, quoting)
 	// changes no key: it is applied hot like any reloadable change, so the
 	// gateway is not restarted for a policy that stays the same (GAP-0545).
-	changed, err := configwrite.ChangedPaths(previous, p.config.Raw)
-	if err != nil || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+	restart, err := configwrite.ManagedConfigRestartRequired(previous, p.config.Raw)
+	if err != nil || len(restart) > 0 {
 		return false
 	}
 	// Loading the SELinux module replaces the hook socket, which a gateway
@@ -115,7 +116,11 @@ func gatewayUnitOf(units []Unit) (Unit, bool) {
 // which loads the config whole.
 func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 	env := l.env
-	if want, _, ok := l.computePolicy(ctx); ok {
+	var receipt *enterprisebundle.Receipt
+	if l.bundle != nil {
+		receipt = l.bundle.receipt
+	}
+	if want, ok := l.bundlePolicyWant(ctx, receipt); ok {
 		deadline := env.Now().Add(min(hotApplyTimeout, env.ReadyTimeout))
 		for {
 			if body, err := l.gatewayHealth(ctx, gateway, l.serviceUID); err == nil && gatewayPolicyDigest(body) == want {
@@ -137,4 +142,25 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 		return fmt.Errorf("restart %s: %w", gateway.Name, err)
 	}
 	return l.waitGatewayReady(ctx, gateway)
+}
+
+// bundlePolicyWant reuses the digest already computed while verifying a
+// same-build signed bundle. Starting another gateway CLI to rebuild the same
+// generation during a hot apply competes with the serving gateway for CPU and
+// disk precisely while hooks must keep their deadlines. Other config changes
+// and bundles whose digest could not be compared still compute it locally.
+func (l *lifecycle) bundlePolicyWant(ctx context.Context, receipt *enterprisebundle.Receipt) (string, bool) {
+	if receipt != nil && receipt.DigestComparable && receipt.ExpectedDigest != "" {
+		wantSHA := receipt.ConfigSHA256
+		if wantSHA == "" && l.bundle != nil && l.bundle.receipt == receipt {
+			wantSHA = l.bundle.configSHA
+		}
+		if wantSHA != "" && l.env != nil {
+			if installedSHA, err := sha256File(l.env.P(l.env.Layout.ConfigPath)); err == nil && installedSHA == wantSHA {
+				return receipt.ExpectedDigest, true
+			}
+		}
+	}
+	digest, _, ok := l.computePolicy(ctx)
+	return digest, ok
 }

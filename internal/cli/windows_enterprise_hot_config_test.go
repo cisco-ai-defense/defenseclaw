@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -31,12 +32,14 @@ import (
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath  string
-	writes      []string
-	adopted     bool
-	digestCalls int
-	adoptAfter  int
-	refreshes   int
+	configPath    string
+	writes        []string
+	adopted       bool
+	digestCalls   int
+	adoptAfter    int
+	refreshes     int
+	bundleID      string
+	bundleVersion uint64
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
@@ -55,7 +58,9 @@ func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
 		`","config_generation":` + strconv.Itoa(generation) +
 		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
-		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) + `}`), nil
+		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) +
+		`,"gateway_reported_bundle_id":"` + host.bundleID +
+		`","gateway_reported_bundle_version":` + strconv.FormatUint(host.bundleVersion, 10) + `}`), nil
 }
 
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
@@ -75,15 +80,18 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseIsElevated = func() bool { return true }
 	layoutSeam, lockSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
-	timeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll
+	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	reloadSeam := windowsEnterpriseHotBundleReload
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
+		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
@@ -95,21 +103,22 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		host.refreshes++
 		return nil
 	}
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
-	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, reason, expectedSHA string) error {
-		if current, err := os.ReadFile(path); err != nil || configwrite.SHA256Hex(current) != expectedSHA {
+	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, opt configwrite.Options) error {
+		if current, err := os.ReadFile(path); err != nil || configwrite.SHA256Hex(current) != opt.ExpectSHA256 {
 			return errors.New("installed config changed before write")
 		}
-		host.writes = append(host.writes, reason)
+		host.writes = append(host.writes, opt.Reason)
 		// The writer records a generation with every write.
 		if err := os.WriteFile(configwrite.GenerationPath(path), []byte(`{"generation":`+strconv.Itoa(len(host.writes)+10)+`}`), 0o600); err != nil {
 			return err
 		}
 		return os.WriteFile(path, raw, 0o600)
 	}
-	windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = 50*time.Millisecond, 5*time.Millisecond
+	windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll = 50*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond
 	opts := ensureTestOptions()
 	opts.configPath, opts.manifestPath, opts.noStart = supplied, "", false
 	return host, opts
@@ -511,5 +520,242 @@ func TestWindowsEnterpriseHotEnrollmentWarnsOpenSessions(t *testing.T) {
 		if len(warnings) != 1 || !strings.Contains(warnings[0], `user DCFC\alice runs claudecode (pid 41), started before the account was enrolled`) {
 			t.Fatalf("%s session warnings = %q", result.Action, warnings)
 		}
+	}
+}
+
+func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, next string
+		restarts   int
+	}{
+		{"policy only", "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n", 0},
+		{"start only", "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+			host, opts := newHotConfigHost(t, previous, tc.next)
+			host.adopted = true
+			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			command := &cobra.Command{}
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), command, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			if !applied || restarts != tc.restarts || opts.bundle.gatewayRestarted != (tc.restarts == 1) || len(stub.calls) != 1 {
+				t.Fatalf("applied=%t restarts=%d receiptRestart=%t installerCalls=%q", applied, restarts, opts.bundle.gatewayRestarted, stub.calls)
+			}
+		})
+	}
+}
+
+func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+	stub.install(t)
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	reloads := 0
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
+		reloads++
+		host.adopted = true
+		return nil
+	}
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if !applied || reloads != 1 || host.digestCalls == 0 || opts.bundle.gatewayRestarted || len(host.writes) != 1 {
+		t.Fatalf("applied=%t reloads=%d digestCalls=%d restarted=%t writes=%q errors=%v", applied, reloads, host.digestCalls, opts.bundle.gatewayRestarted, host.writes, result.Errors)
+	}
+	for _, warning := range result.Warnings {
+		if warning.Code == "bundle_reload_request_failed" {
+			t.Fatalf("successful hot bundle reload reported a failure: %+v", result.Warnings)
+		}
+	}
+}
+
+func TestWindowsHotBundleReloadCannotConfirmWrongDigest(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.bundleID, host.bundleVersion = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", 2
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: host.bundleID, Version: host.bundleVersion}}}
+	// A managed config has a matching prior generation. Rollback records a
+	// new generation for the restored bytes through the writer seam.
+	recorded := `{"generation":10,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	got, _ := os.ReadFile(host.configPath)
+	if applied || string(got) != previous || len(host.writes) != 2 || !windowsBundleHasCode(result.Errors, "bundle_policy_not_adopted") {
+		t.Fatalf("mismatched gateway confirmed=%t config=%q writes=%q errors=%v", applied, got, host.writes, result.Errors)
+	}
+}
+
+func TestWindowsHotBundleWaitsForGatewayBundleIdentity(t *testing.T) {
+	savedDigest, savedPoll := windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigPoll
+	t.Cleanup(func() { windowsEnterprisePolicyDigest, windowsEnterpriseHotConfigPoll = savedDigest, savedPoll })
+	windowsEnterpriseHotConfigPoll = time.Millisecond
+	const bundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	calls := 0
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
+		calls++
+		id := "previous-bundle"
+		if calls > 1 {
+			id = bundleID
+		}
+		return []byte(`{"effective_digest":"sha256:abc","gateway_reported_digest":"sha256:abc","config_generation":3,"config_generation_recorded":true,"gateway_reported_config_generation":3,"gateway_reported_bundle_id":"` + id + `","gateway_reported_bundle_version":2}`), nil
+	}
+	bundle := &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
+	if !windowsEnterpriseHotConfigAdopted(context.Background(), time.Second, bundle) || calls < 2 {
+		t.Fatalf("gateway bundle identity was not awaited; calls=%d", calls)
+	}
+}
+
+func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testing.T) {
+	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	host, opts := newHotConfigHost(t, current, current)
+	installedRoot := filepath.Join(t.TempDir(), "installed")
+	installedScript := filepath.Join(installedRoot, "libexec", "install-enterprise.ps1")
+	stagedScript := `C:\stage\install-enterprise.ps1`
+	unlocks := 0
+	opts.bundle = &windowsBundleRun{
+		layout:   managed.StandaloneLayout{InstallRoot: installedRoot, ConfigPath: host.configPath},
+		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
+		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
+		unlock:   func() { unlocks++ },
+	}
+	// Setup's staged hash pins belong to its embedded release. Verify must
+	// run the protected installed release with its recorded pins instead.
+	opts.trustMode = windowsEnterpriseTrustHashPinned
+	opts.payloadManifest = filepath.Join(t.TempDir(), "setup-payload-trust.json")
+	opts.allowedSigners = []string{strings.Repeat("a", 64)}
+	previousFinder := windowsEnterpriseScriptFinder
+	windowsEnterpriseScriptFinder = func(path string) (string, error) {
+		if path != installedScript {
+			t.Fatalf("installed installer lookup = %q, want %q", path, installedScript)
+		}
+		return installedScript, nil
+	}
+	t.Cleanup(func() { windowsEnterpriseScriptFinder = previousFinder })
+	previousDir := windowsEnterpriseHookRuntimeDir
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return filepath.Join(t.TempDir(), "missing"), nil }
+	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = previousDir })
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+		t.Fatal("already-applied bundle reached drift planning")
+		return "", nil
+	}
+	runner := windowsEnterpriseStandaloneRunner
+	var scripts []string
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, cmd *cobra.Command, script string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		scripts = append(scripts, script)
+		return runner(ctx, cmd, script, args)
+	}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, stagedScript); err != nil {
+		t.Fatalf("Setup ensure: %v\n%s", err, stdout.String())
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Noop || result.NoopReason != "already_applied" || len(stub.calls) != 2 || len(host.writes) != 0 || unlocks != 1 {
+		t.Fatalf("same bundle = %+v, installer calls=%q writes=%q unlocks=%d", result, stub.calls, host.writes, unlocks)
+	}
+	if len(scripts) != 2 || scripts[0] != stagedScript || scripts[1] != installedScript {
+		t.Fatalf("status/verify installers = %q", scripts)
+	}
+	verifyArgs := stub.calls[1]
+	if !containsString(verifyArgs, "-TrustMode") || !containsString(verifyArgs, "Authenticode") ||
+		containsString(verifyArgs, "-PayloadManifest") || containsString(verifyArgs, "-AllowedSigners") {
+		t.Fatalf("installed verify received Setup trust inputs: %q", verifyArgs)
+	}
+	if opts.trustMode != windowsEnterpriseTrustHashPinned || opts.payloadManifest == "" || len(opts.allowedSigners) != 1 {
+		t.Fatal("the read-only probe changed Setup's payload trust inputs")
+	}
+}
+
+func TestWindowsConfirmedBundleRepairsVerifiedInstallDamageWithReason(t *testing.T) {
+	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	host, opts := newHotConfigHost(t, current, current)
+	previousLayout := windowsEnterpriseStandaloneLayoutForPreflight
+	previousPending := windowsEnterpriseStandaloneTransactionPending
+	previousVersion := windowsEnterpriseInstalledProductVersion
+	previousRestoredVersion := windowsEnterprisePendingRestoredVersion
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}, nil
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseInstalledProductVersion = func(*windowsEnterpriseLifecycleOptions) (string, error) { return "1.4.0", nil }
+	windowsEnterprisePendingRestoredVersion = func(*windowsEnterpriseLifecycleOptions) (string, bool) { return "", false }
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = previousLayout
+		windowsEnterpriseStandaloneTransactionPending = previousPending
+		windowsEnterpriseInstalledProductVersion = previousVersion
+		windowsEnterprisePendingRestoredVersion = previousRestoredVersion
+	})
+	installedRoot := filepath.Join(t.TempDir(), "installed")
+	opts.bundle = &windowsBundleRun{
+		layout:   managed.StandaloneLayout{InstallRoot: installedRoot, ConfigPath: host.configPath},
+		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
+		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
+		unlock:   func() {},
+	}
+	previousFinder := windowsEnterpriseScriptFinder
+	windowsEnterpriseScriptFinder = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() { windowsEnterpriseScriptFinder = previousFinder })
+	failed := installedStatus("verify")
+	failed["ok"] = false
+	failed["errors"] = []string{"managed ACL is invalid"}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failed, installedStatus("repair")}}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+		t.Fatal("already-applied bundle reached drift planning")
+		return "", nil
+	}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("repair damaged install: %v\n%s", err, stdout.String())
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Noop || len(stub.calls) != 3 || stub.calls[2][1] != "Repair" {
+		t.Fatalf("unhealthy bundle result = %+v, installer calls = %q", result, stub.calls)
+	}
+	found := false
+	for _, warning := range result.Warnings {
+		found = found || warning.Code == "ensure_repair" && strings.Contains(warning.Message, "verify_failed: managed ACL is invalid")
+	}
+	if !found {
+		t.Fatalf("repair did not name the failed check: %+v", result.Warnings)
 	}
 }

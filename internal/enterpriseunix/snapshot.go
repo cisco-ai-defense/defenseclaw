@@ -395,11 +395,11 @@ func (e *Env) linkAtomic(src, path string, mode os.FileMode, owner fileOwner) er
 			_ = os.Remove(tmp)
 		}
 	}()
-	if err := os.Chmod(tmp, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
-	}
 	if err := e.Lchown(tmp, owner.UID, owner.GID); err != nil {
 		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)

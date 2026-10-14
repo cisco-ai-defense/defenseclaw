@@ -124,6 +124,8 @@ type controlPlaneV8Family uint8
 // the route-selected projection independently for each destination.
 type controlPlaneV8Evidence struct {
 	actorRef        observability.Optional[string]
+	operation       observability.Optional[string]
+	principalRef    observability.Optional[string]
 	origin          observability.Optional[string]
 	targetRef       observability.Optional[string]
 	beforeSummary   observability.Optional[string]
@@ -136,6 +138,10 @@ type controlPlaneV8Evidence struct {
 	revision        observability.Optional[string]
 	currentRevision observability.Optional[string]
 	changeCount     observability.Optional[int64]
+	// bundle and receipt are the policy bundle fields of a
+	// config.change.applied or config.bundle.receipt record.
+	bundle  policyBundleV8Fields
+	receipt *policyBundleReceiptV8Fields
 }
 
 var controlPlaneV8PrincipalPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
@@ -146,6 +152,7 @@ const (
 	controlPlaneV8FamilyPolicyUpdated
 	controlPlaneV8FamilyAuthenticationFailed
 	controlPlaneV8FamilyApprovalResolved
+	controlPlaneV8FamilyBundleReceipt
 )
 
 // emitControlPlaneV8 sends one selected v7 Event through the canonical runtime.
@@ -286,7 +293,7 @@ func buildControlPlaneV8Record(
 			Connector:             event.Connector,
 			Action:                event.Action,
 			Phase:                 controlPlaneV8Phase(family),
-			Outcome:               controlPlaneV8Outcome(family, event.Action),
+			Outcome:               controlPlaneV8EvidenceOutcome(family, event.Action, evidence),
 			Correlation:           correlation,
 			Provenance: observability.Provenance{
 				Producer:              provenance.Producer,
@@ -320,6 +327,9 @@ func buildControlPlaneV8Record(
 		Provenance:  provenance,
 	}
 	principal, principalKnown := controlPlaneV8Principal(event.Actor)
+	if evidence.principalRef.IsPresent() {
+		principal, principalKnown = evidence.principalRef, true
+	}
 	actorRef := evidence.actorRef
 	if !actorRef.IsPresent() {
 		actorRef = optionalControlPlaneV8Actor(event.Actor)
@@ -336,23 +346,59 @@ func buildControlPlaneV8Record(
 	var record observability.Record
 	switch family {
 	case controlPlaneV8FamilyConfigApplied:
+		operation := event.Action
+		if named, ok := evidence.operation.Get(); ok {
+			operation = named
+		}
 		record, err = builder.BuildLogConfigChangeApplied(observability.LogConfigChangeAppliedInput{
 			Envelope: envelope, Severity: severity, LogLevel: logLevel,
-			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: event.Action,
+			Outcome: observability.OutcomeApplied, DefenseClawAdminOperation: operation,
 			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
 			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
-			DefenseClawAdminTargetRef:       targetRef,
-			DefenseClawAdminBeforeSummary:   evidence.beforeSummary,
-			DefenseClawAdminAfterSummary:    evidence.afterSummary,
-			DefenseClawAdminBeforeState:     evidence.beforeState,
-			DefenseClawAdminAfterState:      evidence.afterState,
-			DefenseClawAdminDiff:            evidence.diff,
-			DefenseClawAdminReason:          evidence.reason,
-			DefenseClawAdminReasonDetail:    evidence.reasonDetail,
-			DefenseClawAdminRevision:        evidence.revision,
-			DefenseClawAdminCurrentRevision: evidence.currentRevision,
-			DefenseClawAdminChangeCount:     evidence.changeCount,
-			MandatoryControlPlaneMutation:   true,
+			DefenseClawAdminTargetRef:            targetRef,
+			DefenseClawAdminBeforeSummary:        evidence.beforeSummary,
+			DefenseClawAdminAfterSummary:         evidence.afterSummary,
+			DefenseClawAdminBeforeState:          evidence.beforeState,
+			DefenseClawAdminAfterState:           evidence.afterState,
+			DefenseClawAdminDiff:                 evidence.diff,
+			DefenseClawAdminReason:               evidence.reason,
+			DefenseClawAdminReasonDetail:         evidence.reasonDetail,
+			DefenseClawAdminRevision:             evidence.revision,
+			DefenseClawAdminCurrentRevision:      evidence.currentRevision,
+			DefenseClawAdminChangeCount:          evidence.changeCount,
+			DefenseClawPolicyBundleID:            evidence.bundle.id,
+			DefenseClawPolicyBundleVersion:       evidence.bundle.version,
+			DefenseClawPolicyBundleSignerKeyID:   evidence.bundle.signerKeyID,
+			DefenseClawPolicyBundleChangeSummary: evidence.bundle.changeSummary,
+			MandatoryControlPlaneMutation:        true,
+		})
+	case controlPlaneV8FamilyBundleReceipt:
+		receipt := evidence.receipt
+		if receipt == nil {
+			return observability.Record{}, fmt.Errorf("audit: bundle receipt record has no receipt")
+		}
+		record, err = builder.BuildLogConfigBundleReceipt(observability.LogConfigBundleReceiptInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome: receipt.outcome, DefenseClawAdminOperation: event.Action,
+			DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
+			DefenseClawAdminActorRef: actorRef, DefenseClawAdminOrigin: origin,
+			DefenseClawAdminTargetRef:              targetRef,
+			DefenseClawAdminAfterSummary:           evidence.afterSummary,
+			DefenseClawAdminAfterState:             evidence.afterState,
+			DefenseClawAdminReason:                 evidence.reason,
+			DefenseClawPolicyBundleReceiptID:       receipt.receiptID,
+			DefenseClawPolicyBundleState:           receipt.state,
+			DefenseClawPolicyBundleID:              evidence.bundle.id,
+			DefenseClawPolicyBundleVersion:         evidence.bundle.version,
+			DefenseClawPolicyBundleSignerKeyID:     evidence.bundle.signerKeyID,
+			DefenseClawPolicyBundleChangeSummary:   evidence.bundle.changeSummary,
+			DefenseClawPolicyBundleErrorCode:       receipt.errorCode,
+			DefenseClawPolicyBundleRolledBack:      receipt.rolledBack,
+			DefenseClawPolicyBundleRestart:         receipt.restart,
+			DefenseClawPolicyBundleEnforcingDigest: receipt.enforcingDigest,
+			DefenseClawPolicyEffectiveDigest:       receipt.effectiveDigest,
+			DefenseClawConfigGeneration:            receipt.generation,
+			MandatoryControlPlaneMutation:          true,
 		})
 	case controlPlaneV8FamilyPolicyUpdated:
 		record, err = builder.BuildLogPolicyUpdated(observability.LogPolicyUpdatedInput{
@@ -410,6 +456,8 @@ func controlPlaneV8FamilyForAction(action string) controlPlaneV8Family {
 	switch Action(action) {
 	case ActionConfigUpdate, ActionAPIConfigPatch, ActionGuardrailConfigReload:
 		return controlPlaneV8FamilyConfigApplied
+	case ActionConfigBundleReceipt:
+		return controlPlaneV8FamilyBundleReceipt
 	case ActionPolicyUpdate, ActionPolicyReload:
 		return controlPlaneV8FamilyPolicyUpdated
 	case ActionAPIAuthFailure:
@@ -427,6 +475,10 @@ func controlPlaneV8Classification(family controlPlaneV8Family, severity string) 
 	switch family {
 	case controlPlaneV8FamilyConfigApplied:
 		context.EventName = observability.EventName(observability.TelemetryEventConfigChangeApplied)
+		context.MandatoryFacts.ControlPlaneMutation = true
+	case controlPlaneV8FamilyBundleReceipt:
+		context.EventName = observability.EventName(observability.TelemetryEventConfigBundleReceipt)
+		context.Bucket = observability.BucketComplianceActivity
 		context.MandatoryFacts.ControlPlaneMutation = true
 	case controlPlaneV8FamilyPolicyUpdated:
 		context.EventName = observability.EventName(observability.TelemetryEventPolicyUpdated)
@@ -449,6 +501,15 @@ func controlPlaneV8Phase(family controlPlaneV8Family) string {
 		return "resolve"
 	}
 	return "apply"
+}
+
+// controlPlaneV8EvidenceOutcome is controlPlaneV8Outcome, with the outcome
+// of a bundle receipt (applied or failed) taken from its evidence.
+func controlPlaneV8EvidenceOutcome(family controlPlaneV8Family, action string, evidence controlPlaneV8Evidence) observability.Outcome {
+	if family == controlPlaneV8FamilyBundleReceipt && evidence.receipt != nil {
+		return evidence.receipt.outcome
+	}
+	return controlPlaneV8Outcome(family, action)
 }
 
 func controlPlaneV8Outcome(family controlPlaneV8Family, action string) observability.Outcome {
@@ -592,8 +653,20 @@ func controlPlaneV8ActivityEvidence(input ActivityInput) (controlPlaneV8Evidence
 	if err != nil {
 		return controlPlaneV8Evidence{}, fmt.Errorf("audit: encode administrative diff: %w", err)
 	}
+	var receipt *policyBundleReceiptV8Fields
+	if input.BundleReceipt != nil {
+		fields, err := policyBundleReceiptV8FieldsFor(input.BundleReceipt)
+		if err != nil {
+			return controlPlaneV8Evidence{}, err
+		}
+		receipt = &fields
+	}
 	return controlPlaneV8Evidence{
+		operation:       optionalControlPlaneV8Identifier(input.Operation),
+		bundle:          policyBundleV8FieldsFor(input.Bundle),
+		receipt:         receipt,
 		actorRef:        optionalControlPlaneV8Actor(input.Actor),
+		principalRef:    optionalControlPlaneV8Identifier(input.Principal),
 		targetRef:       optionalControlPlaneV8Target(activityTargetReference(input.TargetType, input.TargetID)),
 		beforeSummary:   controlPlaneV8StateSummary(input.Before),
 		afterSummary:    controlPlaneV8StateSummary(input.After),
@@ -671,8 +744,11 @@ func controlPlaneV8Correlation(event Event) observability.Correlation {
 
 func controlPlaneV8Principal(actor string) (observability.Optional[string], bool) {
 	actor = strings.TrimSpace(actor)
+	// control-plane:<tenant>/<admin> is the principal of a signed policy
+	// bundle; configwrite accepts it only from the enterprise lifecycle.
 	trustedPrincipal := strings.HasPrefix(actor, "principal:") ||
-		strings.HasPrefix(actor, "operator:") || strings.HasPrefix(actor, "cli:")
+		strings.HasPrefix(actor, "operator:") || strings.HasPrefix(actor, "cli:") ||
+		strings.HasPrefix(actor, "control-plane:")
 	if !trustedPrincipal || len(actor) > 256 || !utf8.ValidString(actor) ||
 		!controlPlaneV8PrincipalPattern.MatchString(actor) {
 		return observability.Absent[string](), false

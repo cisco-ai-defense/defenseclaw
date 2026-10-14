@@ -445,3 +445,28 @@ func TestHookTransportDriftedTreatsAnUnrecordedTransportAsTCP(t *testing.T) {
 		}
 	}
 }
+
+func TestPersonalClaudeHookChecksManagedHostBeforeGatewayFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		managed, sandbox, want bool
+	}{
+		{"personal", false, false, true},
+		{"managed", true, false, false},
+		{"sandbox", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := renderHookTemplate("claude-code-hook.sh", templateData{
+				APIAddr: "127.0.0.1:18970", FailMode: "open", Managed: tc.managed, Sandbox: tc.sandbox,
+				TokenFile: ".token-claudecode", ScopedToken: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Contains(string(body), "this computer is managed; the personal Claude Code hook cannot approve this call")
+			if got != tc.want {
+				t.Fatalf("managed-host check present=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}

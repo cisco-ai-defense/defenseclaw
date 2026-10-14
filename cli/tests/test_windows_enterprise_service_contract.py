@@ -105,6 +105,31 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_bundle_acl_repair_verify_and_uninstall_use_the_same_store_tree() -> None:
+    module = read(MODULE)
+    contract = module[
+        module.index("function Invoke-DefenseClawBundleAclContract"):
+        module.index("function Set-DefenseClawManagedAcls")
+    ]
+    setter = module[
+        module.index("function Set-DefenseClawManagedAcls"):
+        module.index("function Get-DefenseClawLayout")
+    ]
+    verifier = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment"):
+        module.index("function Get-DefenseClawLifecycleStatus")
+    ]
+    assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
+    assert "Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind" in contract
+    assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
+    assert "Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair" in setter
+    assert "Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID" in verifier
+    # Uninstall and purge remove StateRoot as a tree, so nested receipt-named
+    # directories do not need another fixed-name parser.
+    assert "Remove-DefenseClawManagedTree" in module
+    assert "-Path $Layout.StateRoot" in module
+
+
 def test_windows_shorthand_targets_require_metadata_versions() -> None:
     installer = read(INSTALLER)
     smoke = read(BOOTSTRAP_ENVIRONMENT_SMOKE)

@@ -70,3 +70,25 @@ func TestMachinePolicyAncestorACLsMustNotLetStandardUsersWrite(t *testing.T) {
 		t.Fatalf("repair accepted an ACL it could not read: %+v", repair)
 	}
 }
+
+func TestGatewayConfigReadDenyACLIsRemovedBeforeApply(t *testing.T) {
+	for _, target := range []struct {
+		path  func(*testHost) string
+		entry string
+	}{
+		{func(h *testHost) string { return h.env.P(h.env.Layout.ConfigPath) }, "user:_defenseclaw deny read"},
+		{func(h *testHost) string { return h.env.P(h.env.Layout.ConfigDir) }, "user:_defenseclaw deny search"},
+	} {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		path := target.path(h)
+		h.runner.acls = map[string][]string{path: {target.entry}}
+		if got := messagesOf(h.run(Options{Action: ActionStatus}).Errors, codeVerify); !strings.Contains(got, target.entry) {
+			t.Fatalf("status missed gateway read denial at %s: %s", path, got)
+		}
+		requireOK(t, h.run(Options{Action: ActionRepair}))
+		if len(h.runner.acls[path]) != 0 {
+			t.Fatalf("repair left gateway read denial at %s: %v", path, h.runner.acls[path])
+		}
+	}
+}

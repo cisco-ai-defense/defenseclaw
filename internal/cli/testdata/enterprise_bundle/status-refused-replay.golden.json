@@ -1,0 +1,15 @@
+{
+  "bundle": {
+    "bundle_id": "b-01JA0000000000000000000007",
+    "state": "confirmed",
+    "version": 7
+  },
+  "current": "b-01JA0000000000000000000007",
+  "last_receipt": "b-01JA0000000000000000000007",
+  "last_refusal": {
+    "bundle_id": "b-01JA0000000000000000000006",
+    "error_code": "version_not_newer",
+    "time": "<time>",
+    "version": 6
+  }
+}

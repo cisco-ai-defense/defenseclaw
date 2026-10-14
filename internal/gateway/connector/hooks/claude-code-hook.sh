@@ -46,6 +46,16 @@ export DEFENSECLAW_MANAGED_HOOK
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{if not .Sandbox}}
+# A personal hook left on a managed computer must not fall back to its
+# personal gateway port. The managed hook is published separately by machine
+# policy; this path is never allowed to approve a tool on that host.
+if [ -e /etc/defenseclaw/managed-runtime.json ] || [ -L /etc/defenseclaw/managed-runtime.json ] ||
+   [ -e /opt/cisco/defenseclaw/etc/managed-runtime.json ] || [ -L /opt/cisco/defenseclaw/etc/managed-runtime.json ]; then
+  echo "defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call" >&2
+  exit 2
+fi
+{{end}}
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi

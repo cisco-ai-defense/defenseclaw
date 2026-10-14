@@ -33,7 +33,7 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 	}
 	defer txn.Close()
 	first := []byte("config_version: 9\n")
-	if _, err := txn.Commit(nil, first, false, 0o600, "first", "init"); err != nil {
+	if _, err := txn.Commit(nil, first, false, 0o600, Writer{Actor: "first", Reason: "init"}); err != nil {
 		t.Fatal(err)
 	}
 	generationBefore, err := os.ReadFile(GenerationPath(path))
@@ -48,7 +48,7 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 		}
 		return failedSync
 	}
-	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, "rejected", "edit"); !errors.Is(err, failedSync) {
+	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, Writer{Actor: "rejected", Reason: "edit"}); !errors.Is(err, failedSync) {
 		t.Fatalf("Commit error = %v, want directory fsync failure", err)
 	}
 	configAfter, err := os.ReadFile(path)
@@ -94,7 +94,7 @@ func TestCommitDoesNotReplaceConfigWhenPreviousReadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, "test", "regression"); err == nil {
+	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, Writer{Actor: "test", Reason: "regression"}); err == nil {
 		t.Fatal("commit succeeded despite failed previous read")
 	}
 	info, err := os.Lstat(path)
@@ -125,7 +125,7 @@ func TestCommitRejectsHandEditAfterCandidateRead(t *testing.T) {
 	if err := os.WriteFile(path, handEdit, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := txn.Commit(read, []byte("config_version: 9\n# candidate\n"), exists, mode, "cli:test", "edit"); !errors.Is(err, ErrConflict) {
+	if _, err := txn.Commit(read, []byte("config_version: 9\n# candidate\n"), exists, mode, Writer{Actor: "cli:test", Reason: "edit"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("Commit error = %v, want conflict", err)
 	}
 	got, err := os.ReadFile(path)

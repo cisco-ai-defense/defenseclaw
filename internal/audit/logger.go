@@ -1127,8 +1127,13 @@ func (l *Logger) logEventWithV8(ctx context.Context, event Event, emit auditV8Ev
 // The generated v8 runtime owns its projection and persistence; activity_events
 // remains readable only for historical database compatibility.
 type ActivityInput struct {
-	Actor       string
-	Action      Action
+	Actor string
+	// Principal is the signed bundle creator when Actor is the local OS account.
+	Principal string
+	Action    Action
+	// Operation refines the config.change.applied operation without changing
+	// the registered audit action or canonical event name.
+	Operation   string
 	TargetType  string
 	TargetID    string
 	Reason      string
@@ -1141,6 +1146,11 @@ type ActivityInput struct {
 	RunID       string
 	RequestID   string
 	TraceID     string
+	// Bundle names the signed policy bundle of a config.change.applied
+	// record or a bundle receipt; BundleReceipt is set only on a
+	// config.bundle.receipt record (LogPolicyBundleReceipt).
+	Bundle        *PolicyBundle
+	BundleReceipt *PolicyBundleReceipt
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.

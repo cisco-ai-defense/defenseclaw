@@ -1,0 +1,145 @@
+{
+  "alg": "ed25519",
+  "bundle": {
+    "bundle_id": "b-01M4QNE6M00000000000000000",
+    "change_summary": "First bundle",
+    "created_at": "2026-10-12T09:00:00Z",
+    "created_by": "operator:alice",
+    "device_group": "eng",
+    "platforms": [
+      "linux",
+      "darwin",
+      "windows"
+    ],
+    "tenant_id": "acme",
+    "version": 5
+  },
+  "command": "sign",
+  "effective_policy": {
+    "components": {
+      "darwin": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ],
+      "linux": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ],
+      "windows": [
+        {
+          "digest": "sha256:<digest>",
+          "name": "builtin"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "confidence_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "config"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "guardrail_policy"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "observability"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "providers"
+        },
+        {
+          "digest": "sha256:<digest>",
+          "name": "signature_pack:${bundle_root}/discovery/signature-packs/team.json"
+        }
+      ]
+    },
+    "computed_on": "<host>",
+    "digests": {
+      "darwin": "sha256:<digest>",
+      "linux": "sha256:<digest>",
+      "windows": "sha256:<digest>"
+    },
+    "product_version": "1.0.2"
+  },
+  "errors": [],
+  "key_id": "k1",
+  "manifest_sha256": "<hash>",
+  "ok": true,
+  "out": "<tmp>/v5.dcbundle",
+  "result": "signed",
+  "schema_version": 1,
+  "secret_refs": [],
+  "warnings": [
+    {
+      "code": "sandbox_section_absent",
+      "message": "config.yaml has no sandbox or enterprise.openshell section; applying this full config can switch sandbox protection off"
+    },
+    {
+      "code": "observability_section_absent",
+      "message": "config.yaml has no observability section; applying this full config can switch that capability off"
+    },
+    {
+      "code": "asset_policy_section_absent",
+      "message": "config.yaml has no asset_policy section; applying this full config can switch that capability off"
+    },
+    {
+      "code": "machine_policy_section_absent",
+      "message": "config.yaml has no enterprise.machine_policy section; applying this full config can switch that capability off"
+    }
+  ]
+}

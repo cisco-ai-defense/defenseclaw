@@ -116,8 +116,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13902,
-      "sha256": "da15c1c8f767fe4ea880328cff3304f07b6e02808a804c4267b22ac38a7c7f30"
+      "size": 14461,
+      "sha256": "36c66f2e8f4c1b8b9c2680ae60f07ddec5a22057ff4db5a1b49eecf53bd1e606"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -163,8 +163,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13898,
-      "sha256": "1707563741c035d102404f26794d2dada945a43c10250b219464aae1e109af5c"
+      "size": 14457,
+      "sha256": "8db8e59d3208b5003e35632a6a67f054ece17afedbe95c350c2b47fcdb51f449"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -210,8 +210,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13998,
-      "sha256": "96cbee0408be693651a2435a21ee59604c44cceba7332062888d69a84d86d207"
+      "size": 14557,
+      "sha256": "cc3802241e5a6de3bb5232cd471833426e119f6709d2fd316a37b0e5102742f3"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -257,8 +257,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13994,
-      "sha256": "c4bc1b4a2f89d4ebe4ec14dde5723b20889f35255230521c9e901657916c0147"
+      "size": 14553,
+      "sha256": "aaa89d92dfc48e5888792f3c71546891833276481482d0b9fd083bede03cd7f7"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1399,8 +1399,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13788,
-      "sha256": "8cfdef642d07fb179014947212a7eca78edcb68f1e3117ddf9635a5e93fbbef2"
+      "size": 14347,
+      "sha256": "0e1b263017be3f40b3291a74a44c68b1b5878b4db9585b7a495487cf45c6b58d"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
@@ -1486,8 +1486,8 @@
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 13788,
-      "sha256": "33dd787d5a89b85e1f26357ab648a5c7a485526bd75c1d2e7da74610fadb56ca"
+      "size": 14347,
+      "sha256": "682d37d26c9cb260d2be0287d3cd3dbe16ecccd09ff2d208d772e55992e1ec57"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",

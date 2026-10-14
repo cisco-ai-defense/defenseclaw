@@ -4376,7 +4376,7 @@ func classifyScanError(err error) string {
 }
 
 // ---------------------------------------------------------------------------
-// POST /policy/reload — hot-reload OPA engine from disk
+// POST /policy/reload — rebuild the live config and policy generation from disk
 // ---------------------------------------------------------------------------
 
 func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
@@ -4386,8 +4386,12 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	policyCfg := a.policyConfigSnapshot(a.generation())
-	if policyCfg == nil || policyCfg.PolicyDir == "" {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
+	if policyCfg == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy configuration unavailable"})
+		return
+	}
+	if policyCfg.SecureClientIntegration() && strings.TrimSpace(policyCfg.PolicyDir) == "" {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Secure Client policy_dir not configured"})
 		return
 	}
 	if a.observabilityV8RuntimeEmitter() == nil || a.logger == nil {
@@ -4432,7 +4436,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	// the fresh rulepack. Safe no-op when the cache is unset.
 	InvalidateJudgeVerdictCache()
 
-	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
+	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "policy and config reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
 		return
 	}

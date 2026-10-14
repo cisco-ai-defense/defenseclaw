@@ -3126,6 +3126,176 @@ attributes:
       max: 9223372036854775807
     notes: nonnegative bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.policy.bundle.id
+  type: string
+  brief: Signed policy bundle a standalone managed device applied or refused
+  examples: [b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 28, pattern: '^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
+    notes: bundle_id of the manifest (b- and a ULID); never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.version
+  type: int64
+  brief: Version of the signed policy bundle
+  examples: [7]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 1
+      max: 9007199254740991
+    notes: manifest version, monotonic per tenant and device group
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.signer_key_id
+  type: string
+  brief: Trust anchor key that signed the policy bundle
+  examples: [fleet-2026-10]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'}
+    notes: key_id of manifest.sig, as the trust anchor file names it
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.change_summary
+  type: string
+  brief: Change summary the bundle author signed into the manifest
+  examples: [tighten egress for contractors]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 512
+    notes: manifest change_summary (at most 512 characters); administrator text, never a secret value and never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.receipt_id
+  type: string
+  brief: Apply receipt of one policy bundle delivery
+  examples: [b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 28, pattern: '^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$'}
+    notes: the bundle id, or r- and a ULID for a delivery whose manifest could not be read
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.state
+  type: string
+  brief: Terminal state of a policy bundle receipt
+  examples: [confirmed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [confirmed, failed]}
+    notes: confirmed when the gateway reported the bundle policy and the bundle became current; failed with an error code otherwise, while the last good policy keeps enforcing
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.error_code
+  type: string
+  brief: Closed error code of a failed policy bundle receipt
+  examples: [signature_invalid]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_]{0,63}$'}
+    notes: one of the bundle receipt codes (archive_invalid, signature_invalid, version_not_newer, not_confirmed, interrupted and the others of the policy bundle docs); absent when the receipt is confirmed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.rolled_back
+  type: boolean
+  brief: Whether a failed bundle apply put the last good config back
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: true when the ensure transaction had installed the bundle config and restored the last good one
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.restart
+  type: boolean
+  brief: Whether applying the bundle restarted the gateway
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: true when the bundle changed restart-required keys; managed hooks fail closed while the gateway restarts
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.bundle.enforcing_digest
+  type: string
+  brief: Effective policy digest the gateway enforced when the receipt ended
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: for a failed receipt the digest of the last good policy that kept enforcing
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.metric.policy.bundle.result
+  type: string
+  brief: Canonical bounded metric dimension projected as bundle.result for local observability
+  examples: [confirmed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [confirmed, failed]}
+    notes: terminal receipt state
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.metric.policy.bundle.error_code
+  type: string
+  brief: Canonical bounded metric dimension projected as bundle.error_code for local observability
+  examples: [not_confirmed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+    notes: closed bundle receipt error code; absent for a confirmed receipt
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.config.digest
   type: string
   brief: Secret-free effective config digest
@@ -8332,7 +8502,15 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.compliance.activity
-  attributes: []
+  attributes:
+  - ref: defenseclaw.policy.bundle.id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.version
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.signer_key_id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.change_summary
+    requirement_level: recommended
   body_fields: []
   log:
     event_name: config.change.applied
@@ -12547,6 +12725,107 @@ groups:
     route_selector: true
     compatibility_profiles:
     - local-observability-v1
+- id: log.config.bundle.receipt
+  type: log
+  brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  attributes:
+  - ref: defenseclaw.policy.bundle.receipt_id
+    requirement_level: required
+  - ref: defenseclaw.policy.bundle.state
+    requirement_level: required
+  - ref: defenseclaw.policy.bundle.id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.version
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.signer_key_id
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.change_summary
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.error_code
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.rolled_back
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.restart
+    requirement_level: recommended
+  - ref: defenseclaw.policy.bundle.enforcing_digest
+    requirement_level: recommended
+  - ref: defenseclaw.policy.effective_digest
+    requirement_level: recommended
+  - ref: defenseclaw.config.generation
+    requirement_level: recommended
+  body_fields: []
+  log:
+    event_name: config.bundle.receipt
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.policy.bundle.applies
+  type: metric
+  brief: Signed policy bundle receipts that ended on a standalone managed device, by result and error code.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.policy.bundle.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.policy.bundle.error_code
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.policy.bundle.applies
+    instrument_type: counter
+    value_type: int64
+    unit: '{apply}'
+    description: Signed policy bundle receipts that ended confirmed or failed, by result and error code.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.policy.bundle.result
+        label: bundle.result
+      - ref: defenseclaw.metric.policy.bundle.error_code
+        label: bundle.error_code
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.policy.bundle.version
+  type: metric
+  brief: Version of the signed policy bundle the standalone managed device enforces.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.policy.bundle.version
+    instrument_type: gauge
+    value_type: int64
+    unit: '{version}'
+    description: Version of the signed policy bundle the standalone managed device enforces.
+    temporality: unspecified
+    empty_labels_reason: One device enforces one bundle; the version is the value and the bundle id stays in the receipt log.
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 producer_identity_sets:
 - id: identity_set.agent_lifecycle
   identities:
@@ -14761,6 +15040,11 @@ producer_identity_sets:
   - event_name: finding.observed
     bucket: security.finding
     family: log.finding.observed
+- id: identity_set.config_bundle_receipt
+  identities:
+  - event_name: config.bundle.receipt
+    bucket: compliance.activity
+    family: log.config.bundle.receipt
 producer_mappings:
 - producer: gateway_event
   key: verdict
@@ -18905,3 +19189,15 @@ producer_mappings:
     event_name: legacy.audit.webhook.failed
     bucket: platform.health
     compatibility_only: true
+- producer: audit_action
+  key: config.bundle.receipt
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.config_bundle_receipt
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8

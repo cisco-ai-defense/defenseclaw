@@ -43,7 +43,7 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"` + reported + `","last_reload_error":"digest mismatch"}}`))
+		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"` + reported + `","last_reload_error":"digest mismatch","bundle_id":"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8","bundle_version":2}}`))
 	}))
 	defer server.Close()
 	host, port, _ := net.SplitHostPort(server.Listener.Addr().String())
@@ -53,7 +53,8 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	cfg.Gateway.Token = "gw-token"
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
-	if got := gatewayReportedPolicy(cfg); got.EffectiveDigest != reported || got.LastReloadError != "digest mismatch" {
+	if got := gatewayReportedPolicy(cfg); got.EffectiveDigest != reported || got.LastReloadError != "digest mismatch" ||
+		got.BundleID != "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8" || got.BundleVersion != 2 {
 		t.Fatalf("gateway reported policy = %+v", got)
 	}
 

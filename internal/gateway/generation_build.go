@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -54,6 +55,17 @@ type generationInputs struct {
 	raw       []byte
 	rulePacks *sidecarRulePackCandidate
 	profiles  *guardrailProfileSet
+	// goos is the platform whose policy is digested ("" is this one) and
+	// bundleRoot the policy bundle root whose prefix the digests replace
+	// with ${bundle_root} ("" for none).
+	goos, bundleRoot string
+	// vendorRoot is a temporary copy of the binary's shipped policies used
+	// by an offline signer; vendorTarget is its standard installed path.
+	vendorRoot, vendorTarget string
+	// offline marks a digest computed for a policy bundle, not loaded into
+	// a gateway: the managed policy_dir trust check, which keeps a loosened
+	// tree out of an enforcing generation, does not apply to a signing host.
+	offline bool
 	// strictOPA makes a Rego module that fails to load a build error. When
 	// false (boot) the generation has no OPA and the guardrail falls back.
 	strictOPA bool
@@ -87,6 +99,8 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		Profiles:   in.profiles,
 		Components: map[string]string{},
 		BuiltAt:    time.Now().UTC(),
+		goos:       in.goos,
+		bundleRoot: in.bundleRoot,
 		Scanners: scannerSettings{
 			Skill: cfg.Scanners.SkillScanner,
 			MCP:   cfg.Scanners.MCPScanner,
@@ -132,7 +146,7 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		// A module a standard user could change since the config was
 		// loaded is not loaded as managed policy: the build fails, so a
 		// reload keeps the previous generation (GAP-1499).
-		if err := managedPolicyTreeTrust(cfg, dir); err != nil {
+		if err := managedPolicyTreeTrust(cfg, dir); err != nil && !in.offline {
 			return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
 		}
 		prepared, err := policy.Prepare(ctx, dir)
@@ -164,32 +178,68 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	}
 
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
-	g.ConfigGen, g.ConfigGenRecorded = readConfigGeneration(cfg.ConfigFilePath, in.raw)
+	record := readConfigGenerationRecord(cfg.ConfigFilePath, in.raw)
+	g.ConfigGen, g.ConfigGenRecorded = record.Generation, record.Recorded
+	g.BundleID, g.BundleVersion = record.BundleID, record.BundleVersion
+	if in.bundleRoot == "" && record.Recorded && enterprisebundle.ValidBundleID(record.BundleID) && record.BundleVersion > 0 {
+		// The signer and staged verifier digest paths beneath their bundle
+		// root as ${bundle_root}. The installed config names the immutable
+		// directory for this receipt; retries of one version use fresh names.
+		bundlesDir := filepath.Join(filepath.Dir(cfg.ConfigFilePath), enterprisebundle.BundlesDirName)
+		raw := in.raw
+		if raw == nil {
+			raw, _ = os.ReadFile(cfg.ConfigFilePath)
+		}
+		names := enterprisebundle.VersionDirsNamed(raw, bundlesDir)
+		if len(names) > 1 {
+			return nil, fmt.Errorf("generation: config names more than one bundle version directory")
+		}
+		if len(names) == 1 {
+			root := filepath.Join(bundlesDir, names[0])
+			if info, err := os.Stat(root); err == nil && info.IsDir() {
+				in.bundleRoot = root
+			} else {
+				return nil, fmt.Errorf("generation: installed bundle version directory %s is unavailable", root)
+			}
+		}
+	}
+	g.bundleRoot = in.bundleRoot
 
-	configComponent, err := configDigest(cfg)
+	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
+	scope.vendorRoot, scope.vendorTarget = in.vendorRoot, in.vendorTarget
+	configComponent, err := configDigest(cfg, scope)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
 	}
 	g.Components["config"] = configComponent
-	if digest := observabilityDigest(cfg, in.raw); digest != "" {
+	if digest := observabilityDigest(cfg, in.raw, scope); digest != "" {
 		g.Components["observability"] = digest
 	}
-	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
+	guardrailDigest := config.GuardrailPolicyDigest
+	if scope.bundleRoot != "" {
+		guardrailDigest = func(cfg *config.Config) (string, error) {
+			return config.GuardrailPolicyDigestWithPathRewrite(cfg, scope.rewrite)
+		}
+	}
+	if digest, err := guardrailDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}
-	for key, digest := range assetDigestComponents(cfg) {
+	for key, digest := range assetDigestComponents(cfg, scope) {
 		g.Components[key] = digest
 	}
-	g.Providers, err = buildGenerationProviders(cfg)
+	g.Providers, err = buildGenerationProvidersForScope(cfg, scope, in.offline)
 	if err != nil {
 		return nil, fmt.Errorf("generation: providers: %w", err)
 	}
-	g.Components["providers"] = g.Providers.digest()
+	g.Components["providers"] = g.Providers.digestForBundle(cfg, scope)
 	// Every profile scope that resolves to a pack points at the same loaded
 	// pack, so each pack is digested once: digesting it per scope cost about
 	// 1.5 s of gateway start with 1,000 profiles (GAP-0276).
 	packDigests := make(map[*guardrail.RulePack]string, 4)
 	for key, pack := range g.RulePacks {
+		if scope.bundleRoot != "" && !scope.bundleFile(rulePackSourceDir(cfg, in.profiles, key)) {
+			continue
+		}
 		digest, done := packDigests[pack]
 		if !done {
 			digest = rulePackComponentDigest(pack)
@@ -197,20 +247,50 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 		g.Components["rule_pack:"+key] = digest
 	}
-	if g.OPA != nil {
+	if g.OPA != nil && scope.bundleFile(cfg.PolicyDir) {
 		g.Components["rego"] = g.OPA.RegoDigest
 	}
 	profileDigests := map[string]string{}
 	if in.profiles != nil {
 		for name, derived := range in.profiles.profiles {
-			profileDigests[name] = derived.Digest
-			g.Components["profile:"+name] = derived.Digest
+			digest := derived.Digest
+			if scope.bundleRoot != "" {
+				var err error
+				digest, err = derived.DigestWithPathRewrite(scope.rewrite)
+				if err != nil {
+					return nil, fmt.Errorf("generation: guardrail profile %s digest: %w", name, err)
+				}
+			}
+			profileDigests[name] = digest
+			g.Components["profile:"+name] = digest
 		}
 	}
 	g.Digest = effectivePolicyDigest(g.Components, profileDigests)
 	g.assetDirs = generationAssetDirs(cfg, g)
 	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// rulePackSourceDir identifies the files behind a loaded pack component.
+// Product-installed packs are pinned by product_version rather than bundle
+// content, so only packs inside the bundle root contribute to its digest.
+func rulePackSourceDir(cfg *config.Config, profiles *guardrailProfileSet, key string) string {
+	if key == "global" {
+		return globalRulePackScope(cfg).dir
+	}
+	if connector, ok := strings.CutPrefix(key, "conn:"); ok {
+		return connectorRulePackScope(cfg, connector).dir
+	}
+	if profile, ok := strings.CutPrefix(key, "prof:"); ok && profiles != nil {
+		name, connector, _ := strings.Cut(profile, "/")
+		if derived, exists := profiles.profiles[name]; exists {
+			if connector == "" {
+				return globalRulePackScope(derived.Config).dir
+			}
+			return connectorRulePackScope(derived.Config, connector).dir
+		}
+	}
+	return ""
 }
 
 // rulePackComponentDigest is a pack's effective-digest component; a seam
@@ -279,22 +359,43 @@ func effectivePolicyDigest(components, profiles map[string]string) string {
 // and whether it recorded the current config bytes (false for a hand edit or
 // a missing state file).
 func readConfigGeneration(configPath string, raw []byte) (uint64, bool) {
+	record := readConfigGenerationRecord(configPath, raw)
+	return record.Generation, record.Recorded
+}
+
+// configGenerationRecord is what config.generation.json says about the
+// config bytes a generation runs.
+type configGenerationRecord struct {
+	Generation uint64
+	// Recorded is true when the record names these bytes.
+	Recorded bool
+	// BundleID and BundleVersion name the policy bundle the lifecycle
+	// installed in this generation; set only when Recorded.
+	BundleID      string
+	BundleVersion uint64
+}
+
+func readConfigGenerationRecord(configPath string, raw []byte) configGenerationRecord {
 	if strings.TrimSpace(configPath) == "" {
-		return 0, false
+		return configGenerationRecord{}
 	}
 	state, err := configwrite.ReadGenerationState(configPath)
 	if err != nil {
-		return 0, false
+		return configGenerationRecord{}
 	}
 	if raw == nil {
 		raw, err = os.ReadFile(configPath)
 		if err != nil {
-			return state.Generation, false
+			return configGenerationRecord{Generation: state.Generation}
 		}
 	}
 	sum := sha256.Sum256(raw)
 	recorded := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(state.ConfigSHA256)), "sha256:")
-	return state.Generation, recorded == hex.EncodeToString(sum[:])
+	out := configGenerationRecord{Generation: state.Generation, Recorded: recorded == hex.EncodeToString(sum[:])}
+	if out.Recorded {
+		out.BundleID, out.BundleVersion = state.BundleID, state.BundleVersion
+	}
+	return out
 }
 
 // generationAssetDirs lists the directories the config watcher follows for
@@ -400,12 +501,14 @@ func refreshConfigGeneration(raw []byte) {
 	if current == nil || current.Config == nil {
 		return
 	}
-	gen, recorded := readConfigGeneration(current.Config.ConfigFilePath, raw)
-	if gen == current.ConfigGen && recorded == current.ConfigGenRecorded {
+	record := readConfigGenerationRecord(current.Config.ConfigFilePath, raw)
+	if record.Generation == current.ConfigGen && record.Recorded == current.ConfigGenRecorded &&
+		record.BundleID == current.BundleID && record.BundleVersion == current.BundleVersion {
 		return
 	}
 	next := *current
-	next.ConfigGen, next.ConfigGenRecorded = gen, recorded
+	next.ConfigGen, next.ConfigGenRecorded = record.Generation, record.Recorded
+	next.BundleID, next.BundleVersion = record.BundleID, record.BundleVersion
 	liveGeneration.Store(&next)
 }
 
@@ -446,6 +549,8 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		Generation:               g.N,
 		ConfigGeneration:         g.ConfigGen,
 		ConfigGenerationRecorded: g.ConfigGenRecorded,
+		BundleID:                 g.BundleID,
+		BundleVersion:            g.BundleVersion,
 		BuiltAt:                  g.BuiltAt.Format(time.RFC3339),
 		ComponentCount:           len(g.Components),
 	}

@@ -29,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -111,6 +113,38 @@ func (e *Env) stateTrees(account Account) []stateTree {
 	rootService := fileOwner{UID: 0, GID: account.GID}
 	manifest := filepath.Base(e.Layout.ManifestPath)
 	return []stateTree{
+		{dir: filepath.Join(e.Layout.LifecycleDir, enterprisebundle.ReceiptsDirName), rule: func(_ string, dir bool) stateMode {
+			if dir {
+				return stateMode{mode: 0o700, owner: rootOwner()}
+			}
+			return stateMode{mode: 0o600, owner: rootOwner()}
+		}},
+		{dir: filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName), rule: func(rel string, dir bool) stateMode {
+			name := strings.Split(rel, string(filepath.Separator))[0]
+			switch {
+			case rel == enterprisestatus.PublicReceiptName && !dir:
+				return stateMode{mode: 0o644, owner: rootOwner()}
+			case name == enterprisestatus.PublicReceiptEventsDirName:
+				if dir {
+					return stateMode{mode: 0o755, owner: rootOwner()}
+				}
+				return stateMode{mode: 0o644, owner: rootOwner()}
+			case name == bundleInboxDirName || strings.HasPrefix(name, ".staging-"):
+				if dir {
+					return stateMode{mode: 0o700, owner: rootOwner()}
+				}
+				return stateMode{mode: 0o600, owner: rootOwner()}
+			case enterprisebundle.IsVersionDirName(name) && (rel != name || dir):
+				if dir {
+					return stateMode{mode: 0o750, owner: rootService}
+				}
+				return stateMode{mode: 0o640, owner: rootService}
+			case dir:
+				return stateMode{mode: 0o700, owner: rootOwner()}
+			default:
+				return stateMode{mode: 0o600, owner: rootOwner()}
+			}
+		}},
 		{dir: e.Layout.DataDir, rule: func(rel string, dir bool) stateMode {
 			switch {
 			case dir:
@@ -195,6 +229,12 @@ func writerTemporary(name string) bool { return strings.HasPrefix(name, ".safefi
 // (a hard link, which could be any file) is refused rather than re-owned.
 func (l *lifecycle) settleStateModes(account Account) error {
 	env := l.env
+	receipts := filepath.Join(env.Layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+	if info, err := os.Lstat(env.P(receipts)); err == nil && info.IsDir() {
+		if err := env.ensureDir(env.P(receipts), 0o700, rootOwner()); err != nil {
+			return err
+		}
+	}
 	for _, tree := range env.stateTrees(account) {
 		var changed []string
 		if err := env.settleStateTree(tree, &changed); err != nil {
@@ -204,7 +244,7 @@ func (l *lifecycle) settleStateModes(account Account) error {
 			l.noteChange("restored the owner and mode of %d %s under %s (%s)", len(changed), plural(len(changed), "entry", "entries"), tree.dir, examples(changed))
 		}
 	}
-	for _, file := range env.configStateFiles(account) {
+	for _, file := range append(env.configStateFiles(account), env.bundleStateFile()) {
 		path := env.P(file.path)
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || !env.metadataDiffers(path, file.mode, file.owner) {
@@ -216,6 +256,11 @@ func (l *lifecycle) settleStateModes(account Account) error {
 		l.noteChange("restored the mode and owner of %s", file.path)
 	}
 	return nil
+}
+
+func (e *Env) bundleStateFile() stateFile {
+	return stateFile{path: filepath.Join(e.Layout.LifecycleDir, enterprisebundle.StateFileName),
+		stateMode: stateMode{mode: 0o600, owner: rootOwner()}}
 }
 
 func (e *Env) settleStateTree(tree stateTree, changed *[]string) error {
@@ -357,7 +402,9 @@ func (e *Env) stateModeProblems(account Account) []string {
 				return nil
 			}
 			want := tree.rule(rel, d.IsDir())
-			if mode, drifted := e.drift(info, uid, gid, want, false); drifted {
+			strict := tree.dir == filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName) ||
+				tree.dir == filepath.Join(e.Layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+			if mode, drifted := e.drift(info, uid, gid, want, strict); drifted {
 				wrong = append(wrong, fmt.Sprintf("%s is %04o %d:%d, want %04o %d:%d", rel, info.Mode().Perm(), uid, gid, mode, want.owner.UID, want.owner.GID))
 			}
 			if d.IsDir() && strings.Count(rel, string(filepath.Separator)) >= maxStateDepth-1 {
@@ -370,7 +417,7 @@ func (e *Env) stateModeProblems(account Account) []string {
 				len(wrong), plural(len(wrong), "entry", "entries"), tree.dir, plural(len(wrong), "has", "have"), examples(wrong), repair))
 		}
 	}
-	for _, file := range e.configStateFiles(account) {
+	for _, file := range append(e.configStateFiles(account), e.bundleStateFile()) {
 		path := e.P(file.path)
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
@@ -379,6 +426,10 @@ func (e *Env) stateModeProblems(account Account) []string {
 		if uid, gid, err := e.OwnerOf(path); err == nil && (info.Mode().Perm() != file.mode || uid != file.owner.UID || gid != file.owner.GID) {
 			problems = append(problems, fmt.Sprintf("%s is %04o %d:%d, want %04o %d:%d; run `%s` to restore it", file.path, info.Mode().Perm(), uid, gid, file.mode, file.owner.UID, file.owner.GID, repair))
 		}
+	}
+	receipts := filepath.Join(e.Layout.LifecycleDir, enterprisebundle.ReceiptsDirName)
+	if info, err := os.Lstat(e.P(receipts)); err == nil && info.IsDir() && info.Mode().Perm() != 0o700 {
+		problems = append(problems, fmt.Sprintf("%s is %04o, want 0700; run `%s` to restore it", receipts, info.Mode().Perm(), repair))
 	}
 	return problems
 }

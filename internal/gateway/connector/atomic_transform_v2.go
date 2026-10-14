@@ -66,6 +66,7 @@ type atomicTransformV2Receipt struct {
 	OldExists            bool                      `json:"old_exists"`
 	Remove               bool                      `json:"remove"`
 	RequestedPrivate     bool                      `json:"requested_private,omitempty"`
+	PreserveOldOwner     bool                      `json:"preserve_old_owner,omitempty"`
 	Old                  atomicTransformV2Artifact `json:"old,omitempty"`
 	Stage                atomicTransformV2Artifact `json:"stage,omitempty"`
 	StageFinalName       string                    `json:"stage_final_name,omitempty"`
@@ -113,6 +114,14 @@ type atomicTransformV2Transaction struct {
 	stateDir        *atomicTransformBoundDirectory
 }
 
+type atomicTransformV2Options struct {
+	// Only the Claude uninstall path names an enrolled owner. A foreign
+	// owner's DACL is converged before the receipt, then preserved through
+	// replacement. The bound owner check repeats on every CAS attempt.
+	preserveExistingProtection bool
+	expectedOwner              *windows.SID
+}
+
 func (txn *atomicTransformV2Transaction) close() error {
 	if txn == nil {
 		return nil
@@ -133,6 +142,7 @@ func atomicTransformFileV2(
 	path string,
 	transactionDir string,
 	perm os.FileMode,
+	options atomicTransformV2Options,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
 	if err := atomicTransformValidateNoReparsePathPlatform(transactionDir); err != nil {
@@ -153,13 +163,14 @@ func atomicTransformFileV2(
 		// after replacement gives the new inode a different short-name binding.
 		// Re-resolving the caller's alias between snapshot, commit, and recovery
 		// would then manufacture a conflict despite exclusive protocol ownership.
-		return atomicTransformFileV2Locked(path, target, stateDir, perm, transform)
+		return atomicTransformFileV2Locked(path, target, stateDir, perm, options, transform)
 	})
 }
 
 func atomicTransformFileV2Locked(
 	inputPath, path, stateDir string,
 	perm os.FileMode,
+	options atomicTransformV2Options,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
 	for attempt := 0; attempt < atomicTransformMaxAttempts; attempt++ {
@@ -172,6 +183,14 @@ func atomicTransformFileV2Locked(
 		snapshot, err := readAtomicFileSnapshot(path)
 		if err != nil {
 			return err
+		}
+		if snapshot.exists && options.expectedOwner != nil {
+			if err := validateAtomicTransformV2ExpectedOwner(path, snapshot, options.expectedOwner); err != nil {
+				if errors.Is(err, errAtomicTransformConflict) {
+					continue
+				}
+				return err
+			}
 		}
 		result, err := transform(append([]byte(nil), snapshot.data...), snapshot.exists)
 		if err != nil {
@@ -193,7 +212,7 @@ func atomicTransformFileV2Locked(
 		}
 		semanticNoop := (!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
-				atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm))
+				(options.preserveExistingProtection || atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
 		runAtomicTransformBeforeCompareHook(path, attempt)
 		matches, err := atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil {
@@ -202,8 +221,19 @@ func atomicTransformFileV2Locked(
 		if !matches {
 			continue
 		}
-		if snapshot.exists && !result.Remove {
-			changed, convergeErr := convergeAtomicTransformV2ExistingProtection(path, writePerm, snapshot)
+		convergeProtection := !options.preserveExistingProtection
+		if options.expectedOwner != nil && !convergeProtection {
+			currentSID, sidErr := windowsEffectiveUserSID()
+			if sidErr != nil {
+				return fmt.Errorf("resolve current user before enrolled config convergence: %w", sidErr)
+			}
+			if currentSID == nil {
+				return fmt.Errorf("resolve current user before enrolled config convergence: missing SID")
+			}
+			convergeProtection = !options.expectedOwner.Equals(currentSID)
+		}
+		if snapshot.exists && !result.Remove && convergeProtection {
+			changed, convergeErr := convergeAtomicTransformV2ExistingProtection(path, writePerm, snapshot, options.expectedOwner)
 			if convergeErr != nil {
 				return fmt.Errorf("converge existing config protection before transaction receipt: %w", convergeErr)
 			}
@@ -218,7 +248,7 @@ func atomicTransformFileV2Locked(
 			return nil
 		}
 
-		txn, err := beginAtomicTransformV2(inputPath, path, stateDir, snapshot, result, writePerm)
+		txn, err := beginAtomicTransformV2(inputPath, path, stateDir, snapshot, result, writePerm, options)
 		if err != nil {
 			_ = txn.close()
 			if recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir); recoverErr != nil {
@@ -270,6 +300,41 @@ func atomicTransformFileV2Locked(
 		inputPath,
 		atomicTransformMaxAttempts,
 	)
+}
+
+func validateAtomicTransformV2ExpectedOwner(path string, snapshot atomicFileSnapshot, expected *windows.SID) error {
+	dir, err := bindAtomicTransformDirectory(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	file, err := openAtomicTransformBoundFilePlatform(dir.file, filepath.Base(path), false)
+	if errors.Is(err, os.ErrNotExist) {
+		return errAtomicTransformConflict
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	state, err := atomicTransformBoundStateFromOpen(file, filepath.Base(path), atomicTransformMaxConfigBytes)
+	if err != nil {
+		return err
+	}
+	if !atomicTransformSnapshotMatchesState(snapshot, state) {
+		return errAtomicTransformConflict
+	}
+	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(expected) {
+		return fmt.Errorf("refusing to edit Claude settings not owned by enrolled user %s", expected)
+	}
+	return nil
 }
 
 func withAtomicTransformV2ProtocolLock(
@@ -361,6 +426,7 @@ func beginAtomicTransformV2(
 	snapshot atomicFileSnapshot,
 	result atomicTransformResult,
 	perm os.FileMode,
+	options atomicTransformV2Options,
 ) (*atomicTransformV2Transaction, error) {
 	target, err := canonicalAtomicTransformTargetPath(snapshot.writePath)
 	if err != nil {
@@ -419,7 +485,11 @@ func beginAtomicTransformV2(
 		StateDir: stateBound.path, StateDirIdentity: stateBound.identity,
 		TargetPath: target, TargetParentIdentity: targetDir.identity,
 		OldExists: snapshot.exists, Remove: result.Remove,
-		RequestedPrivate: perm.Perm()&0o077 == 0,
+		// Enrolled-owner replacements inherit the already-converged Old DACL
+		// and restore Old's owner after ReplaceFileW. They cannot use the
+		// stage-owner private-publication rule.
+		RequestedPrivate: perm.Perm()&0o077 == 0 && !options.preserveExistingProtection && options.expectedOwner == nil,
+		PreserveOldOwner: (options.preserveExistingProtection || options.expectedOwner != nil) && snapshot.exists && !result.Remove,
 	}
 	if snapshot.exists {
 		oldState, inspectErr := atomicTransformBoundInspect(targetDir, filepath.Base(target), atomicTransformMaxConfigBytes)
@@ -783,12 +853,15 @@ func atomicTransformV2PublishedTargetMatches(
 	if !receipt.OldExists {
 		return atomicTransformV2RenamedArtifactMatches(receipt.Stage, state)
 	}
+	ownerGroup := receipt.Stage.OwnerGroupSHA256
+	if receipt.PreserveOldOwner {
+		ownerGroup = receipt.Old.OwnerGroupSHA256
+	}
 	return atomicTransformV2StageContentMatches(receipt.Stage, state) &&
 		receipt.Stage.LinkCount == 1 && state.linkCount == 1 &&
 		receipt.Old.PreservedMetadataSHA256 != "" &&
 		state.preservedMetadataDigest == receipt.Old.PreservedMetadataSHA256 &&
-		receipt.Stage.OwnerGroupSHA256 != "" &&
-		state.ownerGroupDigest == receipt.Stage.OwnerGroupSHA256 &&
+		ownerGroup != "" && state.ownerGroupDigest == ownerGroup &&
 		receipt.Old.CreationTime != 0 && state.creationTime == receipt.Old.CreationTime
 }
 
@@ -1144,6 +1217,9 @@ func validateAtomicTransformV2Receipt(
 		receipt.StageMarker != (atomicTransformV2Artifact{}) ||
 		receipt.FinalMarker != (atomicTransformV2Artifact{})) {
 		return fmt.Errorf("remove receipt unexpectedly contains staged replacement metadata")
+	}
+	if receipt.PreserveOldOwner && (!receipt.OldExists || receipt.Remove || receipt.RequestedPrivate) {
+		return fmt.Errorf("preserve-owner receipt requires an existing replacement without protection convergence")
 	}
 	if !receipt.OldExists && receipt.TombstoneName != "" {
 		return fmt.Errorf("create receipt unexpectedly contains a prior-config tombstone")
@@ -2263,6 +2339,18 @@ func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 		if repaired, repairErr := repairAtomicTransformV2ReplacementDACL(
 			targetDir, receipt, observed,
 		); repairErr != nil {
+			return repairErr
+		} else if repaired {
+			observed, err = observeAtomicTransformV2Replacement(targetDir, receipt)
+			if err != nil {
+				return err
+			}
+			target, tomb, stage = observed.Target, observed.Backup, observed.Stage
+			tombOld = atomicTransformV2KnownOldState(receipt.Old, tomb)
+			targetNew = atomicTransformV2PublishedTargetMatches(receipt, target)
+			stageNew = atomicTransformV2KnownStageState(receipt, stage)
+		}
+		if repaired, repairErr := repairAtomicTransformV2ReplacementOwner(targetDir, receipt, observed); repairErr != nil {
 			return repairErr
 		} else if repaired {
 			observed, err = observeAtomicTransformV2Replacement(targetDir, receipt)
