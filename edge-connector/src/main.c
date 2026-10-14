@@ -149,9 +149,7 @@ int main(int argc, char *argv[]) {
                 "  DCLAW_FLASH_PATH       Flash backing file path\n"
                 "  DCLAW_AUDIT_KEY        Audit HMAC key (hex)\n"
                 "  DCLAW_DEVICE_KEY       Device HMAC key (hex)\n"
-                "  DCLAW_LOG_LEVEL        Log level: 0=error, 1=warn, 2=info, 3=debug\n"
-                "\nWARNING: DCLAW_FAIL_OPEN=1 disables enforcement when backend is unavailable.\n"
-                "         Use only for debugging. Never in production.\n");
+                "  DCLAW_LOG_LEVEL        Log level: 0=error, 1=warn, 2=info, 3=debug\n");
             return 0;
         }
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0) {

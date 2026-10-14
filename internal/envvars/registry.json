@@ -11,7 +11,8 @@
     "credential": "Auth materials (API keys, tokens, passwords). Should reference env vars, not contain raw values in code.",
     "discovery": "Probe / discovery tuning.",
     "splunk_bridge": "Splunk-bridge bundle (bundles/splunk_local_bridge). Not consumed by the Go gateway.",
-    "test_fixture": "Test-only fixtures. Should never be set in production."
+    "test_fixture": "Test-only fixtures. Should never be set in production.",
+    "fleet": "Fleet management (Edge Connector IoT device lifecycle, MQTT, OTA, emergency)"
   },
   "entries": [
     {
@@ -3279,7 +3280,7 @@
       "consumers": [
         {
           "location": "internal/managed/trust_advisory.go",
-          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it. The walks only ask for the downgrade for ancestors inside PlatformInstallerOwnedRoots — an ancestor outside the Cisco tree (a temp, home, or third-party prefix) keeps its verdicts fatal regardless of this variable"
+          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it. The walks only ask for the downgrade for ancestors inside PlatformInstallerOwnedRoots \u2014 an ancestor outside the Cisco tree (a temp, home, or third-party prefix) keeps its verdicts fatal regardless of this variable"
         },
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
@@ -3299,7 +3300,7 @@
         }
       ],
       "since": "0.8.6",
-      "security_note": "Inverted flag: setting it only hardens. The relaxation it disables is the AIFW-34262 default — an untrusted grant on a shared platform-owned parent no longer fails a managed install, which previously aborted after quiesce had disabled every service and left the endpoint unprotected. Set this on hosts where DefenseClaw owns the whole path chain and an untrusted ancestor must be treated as compromise."
+      "security_note": "Inverted flag: setting it only hardens. The relaxation it disables is the AIFW-34262 default \u2014 an untrusted grant on a shared platform-owned parent no longer fails a managed install, which previously aborted after quiesce had disabled every service and left the endpoint unprotected. Set this on hosts where DefenseClaw owns the whole path chain and an untrusted ancestor must be treated as compromise."
     },
     {
       "name": "DEFENSECLAW_MASTER_KEY",
@@ -7157,14 +7158,20 @@
     {
       "name": "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH",
       "category": "runtime_path",
-      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call — internal variable, not intended for user configuration; the entry appears in the generated env-vars catalog for completeness only.",
+      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call \u2014 internal variable, not intended for user configuration; the entry appears in the generated env-vars catalog for completeness only.",
       "default": "unset (set only by DefenseClawAssembler.exe)",
-      "accepted_values": ["<absolute path to Authenticode-signed payload file>", "unset"],
+      "accepted_values": [
+        "<absolute path to Authenticode-signed payload file>",
+        "unset"
+      ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
-        {"location": "cmd/windows-avc-assembler/signature.go", "description": "readSignerSubjectCN sets this in cmd.Env before invoking powershell.exe, and the script reads $env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH to feed Get-AuthenticodeSignature -FilePath"}
+        {
+          "location": "cmd/windows-avc-assembler/signature.go",
+          "description": "readSignerSubjectCN sets this in cmd.Env before invoking powershell.exe, and the script reads $env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH to feed Get-AuthenticodeSignature -FilePath"
+        }
       ],
       "since": "0.8.6"
     },
@@ -7215,92 +7222,253 @@
       ],
       "since": "1.0.1",
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
+    },
+    {
+      "name": "DCLAW_FLEET_API_TOKEN",
+      "category": "fleet",
+      "purpose": "Fleet management API bearer token (hex-encoded).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Fleet API bearer token"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_TENANT_TOKENS",
+      "category": "fleet",
+      "purpose": "Comma-separated tenant-scoped tokens (token:tid,... format).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Tenant-scoped bearer tokens"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_BROKER_URL",
+      "category": "fleet",
+      "purpose": "MQTT broker address for fleet bridge (host:port).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Fleet MQTT broker URL"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_USER",
+      "category": "fleet",
+      "purpose": "MQTT broker username.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "MQTT broker credentials"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_PASS",
+      "category": "fleet",
+      "purpose": "MQTT broker password.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "MQTT broker credentials"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_OTA_KEY",
+      "category": "fleet",
+      "purpose": "OTA policy signing key (hex-encoded, 32 bytes).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/policy/signer.go",
+          "description": "OTA policy signing key"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_EMERGENCY_KEY",
+      "category": "fleet",
+      "purpose": "Emergency command signing key (hex-encoded, 32 bytes). Falls back to DCLAW_OTA_KEY.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/policy/policy.go",
+          "description": "Emergency command signing key"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_KEY",
+      "category": "fleet",
+      "purpose": "Fleet-wide device HMAC key (hex-encoded, 32 bytes). Per-device keys override.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Device HMAC signing key"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_AUTO_REGISTER",
+      "category": "fleet",
+      "purpose": "Allow devices to self-register via MQTT heartbeat.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Auto-register unknown devices"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_PRODUCTION",
+      "category": "fleet",
+      "purpose": "Enable production mode (reject zero keys, require TLS).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/broker.go",
+          "description": "Production mode flag"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEV_MODE",
+      "category": "fleet",
+      "purpose": "Enable development mode (relaxed key requirements). Inverse of DCLAW_PRODUCTION.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/broker.go",
+          "description": "Development mode flag"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_ALLOW_KEY_OVER_HTTP",
+      "category": "fleet",
+      "purpose": "Allow device key delivery over plaintext HTTP (testing only).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/api.go",
+          "description": "Allow key rotation over HTTP"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TRUST_PROXY_HEADERS",
+      "category": "fleet",
+      "purpose": "Trust X-Forwarded-Proto from reverse proxies.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/api.go",
+          "description": "Trust X-Forwarded-* headers"
+        }
+      ],
+      "since": "1.1.0"
     }
-  ],
-  "DCLAW_FLEET_API_TOKEN": {
-    "description": "Fleet management API bearer token (hex-encoded).",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "authentication",
-    "config_key": "fleet.api_token_env"
-  },
-  "DCLAW_FLEET_TENANT_TOKENS": {
-    "description": "Comma-separated tenant-scoped tokens (token:tid,... format).",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "authentication",
-    "config_key": "fleet.tenant_tokens_env"
-  },
-  "DCLAW_MQTT_BROKER_URL": {
-    "description": "MQTT broker address for fleet bridge (host:port).",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "config_key": "fleet.mqtt_broker_url"
-  },
-  "DCLAW_MQTT_USER": {
-    "description": "MQTT broker username.",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "authentication",
-    "config_key": "fleet.mqtt_user_env"
-  },
-  "DCLAW_MQTT_PASS": {
-    "description": "MQTT broker password.",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "authentication",
-    "config_key": "fleet.mqtt_pass_env"
-  },
-  "DCLAW_OTA_KEY": {
-    "description": "OTA policy signing key (hex-encoded, 32 bytes).",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "signing",
-    "config_key": "fleet.ota_key_env"
-  },
-  "DCLAW_EMERGENCY_KEY": {
-    "description": "Emergency command signing key (hex-encoded, 32 bytes). Falls back to DCLAW_OTA_KEY.",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "signing",
-    "config_key": "fleet.emergency_key_env"
-  },
-  "DCLAW_DEVICE_KEY": {
-    "description": "Fleet-wide device HMAC key (hex-encoded, 32 bytes). Per-device keys override.",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "security_impact": "authentication",
-    "config_key": "fleet.device_key_env"
-  },
-  "DCLAW_FLEET_AUTO_REGISTER": {
-    "description": "Allow devices to self-register via MQTT heartbeat.",
-    "since": "1.1.0",
-    "managed_policy": "ignore",
-    "security_impact": "registration",
-    "config_key": "fleet.auto_register"
-  },
-  "DCLAW_PRODUCTION": {
-    "description": "Enable production mode (reject zero keys, require TLS).",
-    "since": "1.1.0",
-    "managed_policy": "tighten_only"
-  },
-  "DCLAW_DEV_MODE": {
-    "description": "Enable development mode (relaxed key requirements). Inverse of DCLAW_PRODUCTION.",
-    "since": "1.1.0",
-    "managed_policy": "ignore",
-    "security_impact": "weakens_security"
-  },
-  "DCLAW_ALLOW_KEY_OVER_HTTP": {
-    "description": "Allow device key delivery over plaintext HTTP (testing only).",
-    "since": "1.1.0",
-    "managed_policy": "ignore",
-    "security_impact": "weakens_security",
-    "config_key": "fleet.allow_key_over_http"
-  },
-  "DCLAW_TRUST_PROXY_HEADERS": {
-    "description": "Trust X-Forwarded-Proto from reverse proxies.",
-    "since": "1.1.0",
-    "managed_policy": "allow",
-    "config_key": "fleet.trust_proxy_headers"
-  }
+  ]
 }

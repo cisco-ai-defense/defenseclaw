@@ -182,10 +182,9 @@ func dialTLS(addr string) (net.Conn, error) {
 	return conn, nil
 }
 
-// NewTCPClient creates a new minimal MQTT client that connects to the given
-// broker address (host:port). The clientID identifies this client to the broker.
-// The address may include a URI scheme (tcp://, mqtt://) which is stripped
-// automatically since net.Dial expects bare host:port.
+// Deprecated: NewTCPClient is the legacy MQTT transport. Production code uses
+// NewPahoClient which wraps autopaho with auto-reconnect. This constructor is
+// retained for test fixtures that need a minimal synchronous client.
 func NewTCPClient(addr, clientID string, opts ...func(*TCPClient)) *TCPClient {
 	c := &TCPClient{
 		addr:     stripMQTTScheme(addr),
