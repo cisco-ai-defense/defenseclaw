@@ -63,9 +63,13 @@ For the kit's macOS wrapper, set an inline config or `DC_CONFIG_FILE`, or use
 carries its own config, so leave both config inputs empty when using one. Trust
 anchors can already be installed on the device, supplied by
 `DC_TRUST_ANCHOR_FILE`, or pasted into `dc_inline_trust_anchors` (JSON). The
-helper also accepts source-only installs, read-only actions, and re-apply runs
-with existing settings. It checks conflicting settings before Graph calls,
-including in preview mode. Do not put credentials in any inline block.
+helper also accepts source-only installs, read-only `status` and `verify` actions,
+secret rotation with both `DC_SECRET_NAME` and `DC_SECRET_FILE`, and an ensure
+run with only `DC_PRODUCT_VERSION` set. An ensure wrapper without config,
+bundle, trust anchors, source, a secret name and file, or product version is
+refused, even when a device already has settings. It checks invalid and
+conflicting settings before Graph calls, including in preview mode. Do not put
+credentials in any inline block.
 
 Rules: credentials only from the environment; every command that changes the tenant prints a
 plan until you pass `--apply` (and `--dry-run` is accepted); objects are found by exact display

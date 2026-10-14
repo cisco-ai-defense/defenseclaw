@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import http.client
 import json
@@ -899,15 +900,21 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
         has_config = bool(config and config.strip())
         has_bundle = bool(bundle and bundle.strip())
         has_anchors = bool(anchors and anchors.strip())
-        action = _wrapper_setting(content, b"DC_ACTION") or b"ensure"
+        action = _wrapper_setting(content, b"DC_ACTION")
+        output_format = _wrapper_setting(content, b"DC_FORMAT")
         source = _wrapper_setting(content, b"DC_SOURCE")
         source_url = _wrapper_setting(content, b"DC_SOURCE_URL")
         source_sha256 = _wrapper_setting(content, b"DC_SOURCE_SHA256")
-        trust_mode = _wrapper_setting(content, b"DC_TRUST_MODE") or b"hash_pinned"
+        trust_mode = _wrapper_setting(content, b"DC_TRUST_MODE")
         config_file = _wrapper_setting(content, b"DC_CONFIG_FILE")
         bundle_file = _wrapper_setting(content, b"DC_BUNDLE_FILE")
         anchor_file = _wrapper_setting(content, b"DC_TRUST_ANCHOR_FILE")
+        secret_name = _wrapper_setting(content, b"DC_SECRET_NAME")
+        secret_file = _wrapper_setting(content, b"DC_SECRET_FILE")
+        product_version = _wrapper_setting(content, b"DC_PRODUCT_VERSION")
         refuse_capability_loss = _wrapper_setting(content, b"DC_REFUSE_CAPABILITY_LOSS") == b"1"
+        if output_format not in (b"json", b"jamf"):
+            raise SystemExit("error: --format must be json or jamf")
         if action not in (b"ensure", b"status", b"verify"):
             raise SystemExit("error: --action must be ensure, status or verify (use uninstall.sh to remove)")
         if trust_mode not in (b"hash_pinned", b"signed"):
@@ -918,10 +925,16 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
             raise SystemExit("error: --sha256 must be 64 hexadecimal characters")
         if (source or source_url) and trust_mode == b"hash_pinned" and not source_sha256:
             raise SystemExit("error: hash_pinned trust requires --sha256 for the source")
+        if secret_name:
+            if not re.fullmatch(rb"[a-z0-9][a-z0-9-]*", secret_name):
+                raise SystemExit("error: --secret-name must be lowercase letters, digits and dashes")
+            if not secret_file:
+                raise SystemExit("error: --secret-name needs --secret-file or --secret-stdin")
+        elif secret_file:
+            raise SystemExit("error: a secret value needs --secret-name")
         if action != b"ensure":
             if any((source, source_url, config_file, bundle_file, anchor_file,
-                    _wrapper_setting(content, b"DC_SECRET_NAME"), _wrapper_setting(content, b"DC_SECRET_FILE"))) or \
-                    refuse_capability_loss:
+                    secret_name, secret_file)) or refuse_capability_loss:
                 raise SystemExit(
                     f"error: --action {action.decode('utf-8', 'replace')} is read-only and takes no source, "
                     "config, secret, bundle or trust anchor file"
@@ -932,10 +945,24 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
             raise SystemExit(
                 "error: --bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
             )
-        elif (bundle_file or has_bundle) and (config_file or has_config):
+        for path in (bundle_file, anchor_file):
+            if path and not path.startswith(b"/"):
+                raise SystemExit(
+                    "error: --bundle-file and --trust-anchor-file take absolute paths: "
+                    f"{path.decode('utf-8', 'replace')}"
+                )
+        if action == b"ensure" and has_bundle and not bundle_file:
+            try:
+                base64.b64decode(re.sub(rb"[ \t\r\n]", b"", bundle), validate=True)
+            except (ValueError, binascii.Error):
+                raise SystemExit("error: the inline bundle is not valid base64") from None
+        if action == b"ensure" and (bundle_file or has_bundle) and (config_file or has_config):
             raise SystemExit("error: a signed bundle carries its own config; empty the inline config block")
+        if secret_file and not secret_file.startswith(b"/"):
+            raise SystemExit("error: secret must be an absolute path")
         if action == b"ensure" and not any((has_config, has_bundle, has_anchors, source, source_url,
-                                            config_file, bundle_file, anchor_file)):
+                                            config_file, bundle_file, anchor_file, secret_name, secret_file,
+                                            product_version)):
             raise SystemExit("error: fill in the macOS wrapper settings block before upload")
     if args.frequency is not None and not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
         raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
