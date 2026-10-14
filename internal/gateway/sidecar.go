@@ -7911,10 +7911,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
-	// Wire the Edge Connector fleet management API only when enabled.
-	// Fleet is enabled when fleet.enabled=true in config.yaml, OR when a
-	// broker URL is configured (backward compat with env-var-only setups).
-	fleetEnabled := s.currentConfig().Fleet.Enabled || s.currentConfig().Fleet.EffectiveMQTTBrokerURL() != "" || s.currentConfig().Fleet.ResolvedAPIToken() != ""
+	// Wire the Edge Connector fleet management API only when explicitly enabled.
+	fleetEnabled := s.currentConfig().Fleet.Enabled
 	if fleetEnabled {
 		fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
 			// Stderr line for immediate local visibility (unchanged).
@@ -8014,7 +8012,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// and routes them to the fleet manager / verdict cache.
 		if brokerURL := s.currentConfig().Fleet.EffectiveMQTTBrokerURL(); brokerURL != "" {
 			clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
-			tcpClient := fleetmqtt.NewPahoClient(brokerURL, clientID)
+			tcpClient := fleetmqtt.NewPahoClient(brokerURL, clientID, s.currentConfig().Fleet.MQTTRequireTLS)
 			tcpClient.SetCredentials(
 				s.currentConfig().Fleet.ResolvedMQTTUser(),
 				s.currentConfig().Fleet.ResolvedMQTTPass(),

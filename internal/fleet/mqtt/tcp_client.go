@@ -39,8 +39,9 @@ const (
 // It supports CONNECT, PUBLISH, SUBSCRIBE, PING, and DISCONNECT — the subset
 // needed by the fleet bridge and policy service.
 type TCPClient struct {
-	addr     string
-	clientID string
+	addr       string
+	clientID   string
+	requireTLS bool
 
 	mu           sync.Mutex
 	conn         net.Conn
@@ -169,21 +170,30 @@ func dialTLS(addr string) (net.Conn, error) {
 // broker address (host:port). The clientID identifies this client to the broker.
 // The address may include a URI scheme (tcp://, mqtt://) which is stripped
 // automatically since net.Dial expects bare host:port.
-func NewTCPClient(addr, clientID string) *TCPClient {
-	return &TCPClient{
+func NewTCPClient(addr, clientID string, opts ...func(*TCPClient)) *TCPClient {
+	c := &TCPClient{
 		addr:     stripMQTTScheme(addr),
 		clientID: clientID,
 		subs:     make(map[string]subscription),
-		pubackCh: make(chan uint16, 64), // buffered to handle burst PUBACK delivery without overflow
+		pubackCh: make(chan uint16, 64),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+func WithRequireTLS(require bool) func(*TCPClient) {
+	return func(c *TCPClient) { c.requireTLS = require }
 }
 
 // checkRequireTLS returns an error if DCLAW_REQUIRE_TLS is set and the
 // address is plaintext. Used in both Connect() and doConnect() paths.
 func (c *TCPClient) checkRequireTLS() error {
-	if requireTLS := os.Getenv("DCLAW_REQUIRE_TLS"); requireTLS == "true" || requireTLS == "1" {
+	envTLS := os.Getenv("DCLAW_REQUIRE_TLS")
+	if c.requireTLS || envTLS == "true" || envTLS == "1" {
 		if !isTLSScheme(c.addr) {
-			return fmt.Errorf("DCLAW_REQUIRE_TLS is set but broker address %q does not use mqtts:// or ssl://", c.addr)
+			return fmt.Errorf("TLS required but broker address %q does not use mqtts:// or ssl://", c.addr)
 		}
 	}
 	return nil

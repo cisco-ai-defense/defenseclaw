@@ -35,11 +35,9 @@ type PahoClient struct {
 	mu   sync.RWMutex
 	subs map[string]func(Message)
 
-	// connected is set to true after the first successful CONNACK.
-	// autopaho reconnects internally, so this stays true once set.
-	connected bool
+	connected  bool
+	requireTLS bool
 
-	// Config-injected credentials (set via SetCredentials before Connect).
 	cfgUser string
 	cfgPass string
 }
@@ -54,12 +52,16 @@ func (c *PahoClient) SetCredentials(user, pass string) {
 // NewPahoClient creates a new Paho-backed MQTT client.
 // addr is the broker URL (mqtt://, mqtts://, tcp://, ssl://, or bare host:port).
 // clientID identifies this client to the broker.
-func NewPahoClient(addr, clientID string) *PahoClient {
-	return &PahoClient{
+func NewPahoClient(addr, clientID string, requireTLS ...bool) *PahoClient {
+	c := &PahoClient{
 		addr: addr,
 		id:   clientID,
 		subs: make(map[string]func(Message)),
 	}
+	if len(requireTLS) > 0 {
+		c.requireTLS = requireTLS[0]
+	}
+	return c
 }
 
 // normalizeBrokerURL converts the various supported URL formats into a
@@ -272,9 +274,10 @@ func (c *PahoClient) Disconnect() error {
 // --- TLS and production-mode checks (mirroring tcp_client.go policy) ---
 
 func (c *PahoClient) checkRequireTLS() error {
-	if requireTLS := os.Getenv("DCLAW_REQUIRE_TLS"); requireTLS == "true" || requireTLS == "1" {
+	envTLS := os.Getenv("DCLAW_REQUIRE_TLS")
+	if c.requireTLS || envTLS == "true" || envTLS == "1" {
 		if !c.isTLS() {
-			return fmt.Errorf("DCLAW_REQUIRE_TLS is set but broker address %q does not use mqtts:// or ssl://", c.addr)
+			return fmt.Errorf("TLS required but broker address %q does not use mqtts:// or ssl://", c.addr)
 		}
 	}
 	return nil

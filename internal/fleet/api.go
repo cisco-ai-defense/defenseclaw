@@ -27,8 +27,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Fleet audit action constants — mirror internal/audit/actions.go values.
-// Defined here to avoid circular imports (fleet cannot import audit).
+const tenantDenied uint16 = 65535
+
 const (
 	auditDeviceRegistered   = "fleet.device.registered"
 	auditDeviceReregistered = "fleet.device.reregistered"
@@ -224,11 +224,26 @@ func (a *API) emitAlert(severity, summary string, details map[string]any) {
 // tenantFromRequest extracts the tenant scope for the authenticated request.
 func (a *API) tenantFromRequest(r *http.Request) uint16 {
 	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return tenantDenied
+	}
 	got := strings.TrimPrefix(auth, "Bearer ")
+	if got == "" {
+		return tenantDenied
+	}
+
+	// Rotated admin token — global access (tenant 0 = admin).
+	tp := a.currentToken.Load()
+	if tp != nil && *tp != "" && subtle.ConstantTimeCompare([]byte(got), []byte(*tp)) == 1 {
+		return 0
+	}
 
 	// Check tenant-scoped tokens.
 	a.tenantScopesMu.RLock()
 	for tok, tid := range a.tenantScopes {
+		if tok == "" || tid == 0 {
+			continue
+		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) == 1 {
 			a.tenantScopesMu.RUnlock()
 			return tid
@@ -236,17 +251,15 @@ func (a *API) tenantFromRequest(r *http.Request) uint16 {
 	}
 	a.tenantScopesMu.RUnlock()
 
-	// Rotated admin token — global access.
-	tp := a.currentToken.Load()
-	if tp != nil && subtle.ConstantTimeCompare([]byte(got), []byte(*tp)) == 1 {
-		return 0
-	}
-	return 0
+	return tenantDenied
 }
 
 // authorizedForDevice checks if the request is authorized for this device's tenant.
 func (a *API) authorizedForDevice(r *http.Request, tenantID uint16) bool {
 	tid := a.tenantFromRequest(r)
+	if tid == tenantDenied {
+		return false
+	}
 	return tid == 0 || tid == tenantID
 }
 
@@ -271,10 +284,17 @@ func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		got := strings.TrimPrefix(auth, "Bearer ")
+		if got == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 
 		authenticated := false
 		a.tenantScopesMu.RLock()
 		for tok := range a.tenantScopes {
+			if tok == "" {
+				continue
+			}
 			if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) == 1 {
 				authenticated = true
 				break

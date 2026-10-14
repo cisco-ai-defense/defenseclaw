@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -22,6 +23,13 @@ type SQLiteStore struct {
 // NewSQLiteStore opens (or creates) a SQLite database at the given path
 // and initializes the devices table.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("create sqlite %s: %w", dbPath, err)
+		}
+		f.Close()
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
