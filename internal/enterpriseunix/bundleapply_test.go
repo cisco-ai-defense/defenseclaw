@@ -198,6 +198,7 @@ func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 			return 0, nil, errors.New("connection refused")
 		}
 		digest, generation := installedPolicy(b)
+		state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
 		if b.frozen != "" {
 			digest = b.frozen
 		}
@@ -205,8 +206,8 @@ func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 		if b.configError != "" {
 			configState = "error"
 		}
-		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"config":{"state":%q,"last_error":%q},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
-			configState, b.configError, digest, generation, b.reloadError)), nil
+		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"config":{"state":%q,"last_error":%q},"policy":{"effective_digest":%q,"config_generation":%d,"bundle_id":%q,"bundle_version":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+			configState, b.configError, digest, generation, state.BundleID, state.BundleVersion, b.reloadError)), nil
 	}
 	h.env.BundleDigester = func(_ context.Context, _ *config.Config, raw []byte, _, root string) (string, error) {
 		// As the gateway digest does, the bundle root is ${bundle_root}.
@@ -810,6 +811,123 @@ func TestBundleApplyCrashPointMatrix(t *testing.T) {
 				t.Fatalf("retry: state = %+v", st)
 			}
 		})
+	}
+}
+
+// The applied fault is the point where SIGKILL leaves an activated config
+// and generation on disk, but no confirmed receipt. Two bundles with the
+// same config and pack content still have different rendered version paths.
+func TestBundleApplyCrashAfterAppliedRestoresConfirmedPolicy(t *testing.T) {
+	b := newBundleHost(t)
+	const pack = "policies/guardrail/custom/rules/local-patterns.yaml"
+	b.extra = map[string]string{pack: "version: 1\ninjection: []\n"}
+	packRoot := t.TempDir()
+	writeRooted(t, filepath.Join(packRoot, "rules/local-patterns.yaml"), b.extra[pack])
+	pin, err := guardrail.RulePackDigest(packRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(string(DefaultConfig(b.env.Layout)), "policy_dir: "+b.env.Layout.VendorPolicyDir, "policy_dir: policies", 1)
+	cfg = strings.Replace(cfg, "  rule_pack: default\n",
+		"  rule_pack: custom\n  custom_packs:\n    custom:\n      path: policies/guardrail/custom\n      digest: sha256:"+pin+"\n", 1)
+	b.mapPromotedBundleOwners(11)
+	requireOK(t, b.apply(b.dir(11, cfg)))
+	confirmed := b.receipt(bundleID(11))
+	goodConfig := b.read(b.env.Layout.ConfigPath)
+	goodPack := b.env.P(filepath.Join(b.env.bundleVersionDir(b.state().Current.Dir), pack))
+	goodPackSHA, err := sha256File(goodPack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.mapPromotedBundleOwners(12)
+	path := b.dir(12, cfg)
+	b.env.bundleFault = func(phase string) error {
+		if phase == enterprisebundle.StateApplied {
+			panic("killed after applied receipt")
+		}
+		return nil
+	}
+	func() {
+		defer func() { _ = recover() }()
+		b.apply(path)
+	}()
+	b.env.bundleFault = nil
+	if rc := b.receipt(bundleID(12)); rc.State != enterprisebundle.StateApplied {
+		t.Fatalf("crash did not reach applied receipt: %+v", rc)
+	}
+	if got := b.read(b.env.Layout.ConfigPath); got == goodConfig {
+		t.Fatal("the unconfirmed bundle did not activate a distinct config path")
+	}
+	requireOK(t, b.run(Options{Action: ActionEnsure}))
+	if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(11) || st.Current.Version != 11 {
+		t.Fatalf("current after recovery = %+v", st.Current)
+	}
+	if failed := b.receipt(bundleID(12)); failed.State != enterprisebundle.StateFailed || failed.ErrorCode != enterprisebundle.CodeInterrupted {
+		t.Fatalf("unconfirmed receipt after recovery = %+v", failed)
+	}
+	if got := b.read(b.env.Layout.ConfigPath); got != goodConfig {
+		t.Fatal("recovery did not restore the confirmed config bytes")
+	}
+	if got, err := sha256File(goodPack); err != nil || got != goodPackSHA {
+		t.Fatalf("confirmed pack hash after recovery = %s, %v; want %s", got, err, goodPackSHA)
+	}
+	state, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath))
+	if err != nil || state.Generation <= before.Generation || state.ConfigSHA256 != sha256Bytes([]byte(goodConfig)) ||
+		state.BundleID != bundleID(11) || state.BundleVersion != 11 {
+		t.Fatalf("recovered generation = %+v, %v", state, err)
+	}
+	digest, generation := installedPolicy(b)
+	if digest != confirmed.ExpectedDigest || generation != state.Generation {
+		t.Fatalf("running policy = %s generation %d, want %s generation %d", digest, generation, confirmed.ExpectedDigest, state.Generation)
+	}
+	statusCode, healthRaw, err := b.env.HealthGet(context.Background())
+	health := parseBundleHealth(healthRaw)
+	if err != nil || statusCode != 200 || health.digest != confirmed.ExpectedDigest ||
+		health.bundleID != bundleID(11) || health.bundleVersion != 11 {
+		t.Fatalf("gateway health after recovery = %d %+v, %v", statusCode, health, err)
+	}
+	if status := b.run(Options{Action: ActionStatus}); !status.OK || status.Bundle == nil || status.Bundle.CurrentBundleID != bundleID(11) {
+		t.Fatalf("status after recovery = %+v", status)
+	}
+	writeFreshLedger(t, b.testHost)
+	if verify := b.run(Options{Action: ActionVerify}); !verify.OK {
+		t.Fatalf("verify after recovery = %+v", verify.Errors)
+	}
+}
+
+func TestBundleRecoveryKeepsPendingWhenGatewayRetainsUnconfirmedPolicy(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	requireOK(t, b.apply(b.dir(1, v1)))
+	path := b.dir(2, v2)
+	b.env.bundleFault = func(phase string) error {
+		if phase == enterprisebundle.StateApplied {
+			panic("killed after applied receipt")
+		}
+		return nil
+	}
+	func() {
+		defer func() { _ = recover() }()
+		b.apply(path)
+	}()
+	b.env.bundleFault = nil
+	b.frozen, _ = installedPolicy(b)
+	recovery := b.run(Options{Action: ActionEnsure})
+	requireError(t, recovery, codeRollbackFailed)
+	if pending, err := b.env.loadPending(); err != nil || pending == nil {
+		t.Fatalf("failed rollback lost its retryable transaction: %+v, %v", pending, err)
+	}
+	if verify := b.run(Options{Action: ActionVerify}); verify.OK {
+		t.Fatal("verify accepted a gateway enforcing the unconfirmed policy")
+	}
+	b.frozen = ""
+	requireOK(t, b.run(Options{Action: ActionEnsure}))
+	if pending, err := b.env.loadPending(); err != nil || pending != nil {
+		t.Fatalf("successful retry left the transaction pending: %+v, %v", pending, err)
 	}
 }
 

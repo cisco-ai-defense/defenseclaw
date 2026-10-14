@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -2409,8 +2411,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if restoreErr == nil {
 		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
-	if err := l.recordRestoredGeneration(ctx); err != nil {
-		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+err.Error())
+	generationErr := l.recordRestoredGeneration(ctx)
+	if generationErr != nil {
+		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+generationErr.Error())
 	}
 	reloadErr := env.Services.Reload(ctx)
 	var startErrs []error
@@ -2443,6 +2446,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	// that does not answer is reported not ready.
 	if gateway, ok := gatewayUnitOf(units); ok && contains(previouslyActive, gateway.Name) && env.Services.Active(ctx, gateway) {
 		_ = l.waitGatewayReady(ctx, gateway)
+	}
+	if restoreFirst {
+		restoreErr = errors.Join(restoreErr, generationErr)
 	}
 	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
 }
@@ -2499,6 +2505,34 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 		if raw, err := os.ReadFile(configPath); err == nil {
 			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
 		}
+	} else if env.bundleMode() {
+		// A killed process took generationBefore with it. Recover the actor
+		// and bundle identity from the confirmed receipt, after checking that
+		// the restored bytes really are that bundle's rendered config.
+		raw, ref, err := env.currentBundleConfig(env.bundleStore())
+		if err != nil {
+			return fmt.Errorf("read the confirmed bundle for rollback: %w", err)
+		}
+		if ref != nil {
+			restored, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(restored, raw) {
+				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
+			}
+			receipts, err := env.bundleStore().Receipts()
+			if err != nil {
+				return fmt.Errorf("read confirmed bundle receipt: %w", err)
+			}
+			found := false
+			for _, rc := range receipts {
+				if rc.State == enterprisebundle.StateConfirmed && rc.BundleID == ref.BundleID && rc.Version == ref.Version && rc.ManifestSHA256 == ref.ManifestSHA256 {
+					opt, found = enterprisebundle.GenerationOptions(rc)
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("no confirmed receipt can attribute bundle %s version %d", ref.BundleID, ref.Version)
+			}
+		}
 	}
 	if l.bundle != nil {
 		if attempted := l.configWriteOptions(); attempted.Bundle != (configwrite.BundleRef{}) {
@@ -2520,7 +2554,8 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 			return false, env.writeFileAtomic(statePath, before.raw, mode.Perm(), fileOwner{UID: uid, GID: gid})
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
-		return stateErr != nil || state.ConfigSHA256 != sha, nil
+		return stateErr != nil || state.ConfigSHA256 != sha ||
+			(opt.Bundle.ID != "" && (state.BundleID != opt.Bundle.ID || state.BundleVersion != opt.Bundle.Version)), nil
 	})
 	if err != nil {
 		return err
@@ -2536,6 +2571,10 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	env, r := l.env, l.result
 	pending, err := env.loadPending()
 	if err != nil {
+		if env.bundleMode() {
+			r.AddError(codeRollbackFailed, "cannot read the interrupted bundle transaction, so the confirmed running policy cannot be restored: "+err.Error())
+			return false
+		}
 		r.AddWarning(codeRecovered, "discarded an unreadable pending transaction: "+err.Error())
 		_ = env.clearPending()
 		return true
@@ -2548,6 +2587,11 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 		err = env.checkBlobs(snap)
 	}
 	if err != nil {
+		if env.bundleMode() {
+			r.AddError(codeRollbackFailed, fmt.Sprintf("cannot restore the interrupted bundle transaction from its snapshot: %v", err))
+			r.AddWarning(codeRollbackFailed, keptSnapshotAdvice)
+			return false
+		}
 		r.AddWarning(codeRecovered, fmt.Sprintf("an interrupted %s left no usable snapshot (%v); this run re-applies the desired state", pending.Action, err))
 		_ = env.clearPending()
 		if snap != nil {
@@ -2569,6 +2613,11 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s with errors: %v", pending.Action, err))
 	default:
 		r.AddWarning(codeRecovered, fmt.Sprintf("rolled back an interrupted %s started at %s", pending.Action, pending.StartedAt))
+	}
+	if err := l.confirmRecoveredBundle(ctx); err != nil {
+		r.AddError(codeRollbackFailed, "interrupted bundle rollback did not restore the confirmed running policy: "+err.Error())
+		r.AddWarning(codeRollbackFailed, keptSnapshotAdvice)
+		return false
 	}
 	_ = env.clearPending()
 	env.discardSnapshot(snap)

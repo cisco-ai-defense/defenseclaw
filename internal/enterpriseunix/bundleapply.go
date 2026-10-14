@@ -634,6 +634,8 @@ type bundleHealth struct {
 	digest, reloadError      string
 	configState, configError string
 	configGeneration         uint64
+	bundleID                 string
+	bundleVersion            uint64
 }
 
 func parseBundleHealth(body []byte) bundleHealth {
@@ -646,13 +648,16 @@ func parseBundleHealth(body []byte) bundleHealth {
 			EffectiveDigest  string `json:"effective_digest"`
 			ConfigGeneration uint64 `json:"config_generation"`
 			LastReloadError  string `json:"last_reload_error"`
+			BundleID         string `json:"bundle_id"`
+			BundleVersion    uint64 `json:"bundle_version"`
 		} `json:"policy"`
 	}
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
 		return bundleHealth{}
 	}
 	return bundleHealth{digest: health.Policy.EffectiveDigest, reloadError: health.Policy.LastReloadError,
-		configState: health.Config.State, configError: health.Config.LastError, configGeneration: health.Policy.ConfigGeneration}
+		configState: health.Config.State, configError: health.Config.LastError, configGeneration: health.Policy.ConfigGeneration,
+		bundleID: health.Policy.BundleID, bundleVersion: health.Policy.BundleVersion}
 }
 
 // gatewayPolicyNow is what the running gateway reports once ("" when it
@@ -668,6 +673,70 @@ func (l *lifecycle) gatewayPolicyNow(ctx context.Context, serviceUID int) (diges
 	}
 	h := parseBundleHealth(body)
 	return h.digest, h.reloadError
+}
+
+// confirmRecoveredBundle checks the activated state after an interrupted
+// transaction was rolled back. A successful file restore alone is not enough:
+// the running gateway may still hold the unconfirmed policy.
+func (l *lifecycle) confirmRecoveredBundle(ctx context.Context) error {
+	env := l.env
+	if !env.bundleMode() {
+		return nil
+	}
+	store := env.bundleStore()
+	raw, current, err := env.currentBundleConfig(store)
+	if err != nil || current == nil {
+		return err
+	}
+	configPath := env.P(env.Layout.ConfigPath)
+	installed, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read restored config: %w", err)
+	}
+	if !bytes.Equal(installed, raw) {
+		return fmt.Errorf("restored config does not match confirmed bundle %s version %d", current.BundleID, current.Version)
+	}
+	record, err := env.loadDeployment()
+	if err != nil || record == nil || record.ConfigSHA256 != sha256Bytes(installed) {
+		return fmt.Errorf("restored config does not match the committed deployment: %v", err)
+	}
+	state, err := configwrite.ReadGenerationState(configPath)
+	if err != nil || state.ConfigSHA256 != sha256Bytes(installed) || state.BundleID != current.BundleID || state.BundleVersion != current.Version {
+		return fmt.Errorf("restored config generation does not name confirmed bundle %s version %d: %v", current.BundleID, current.Version, err)
+	}
+	if current.EffectivePolicyDigest == "" {
+		return fmt.Errorf("confirmed bundle %s has no effective policy digest", current.BundleID)
+	}
+	gateway, ok := gatewayUnitOf(env.Services.Units())
+	if !ok {
+		return errors.New("no gateway unit to check after rollback")
+	}
+	check := func() error {
+		body, err := l.gatewayHealth(ctx, gateway, record.ServiceUID)
+		if err != nil {
+			return err
+		}
+		health := parseBundleHealth(body)
+		if health.digest != current.EffectivePolicyDigest || health.configGeneration != state.Generation ||
+			health.bundleID != current.BundleID || health.bundleVersion != current.Version || health.reloadError != "" || health.configState == "error" {
+			return fmt.Errorf("gateway policy %s at config generation %d for bundle %s version %d does not match confirmed bundle %s version %d policy %s at generation %d (reload error: %s)",
+				health.digest, health.configGeneration, health.bundleID, health.bundleVersion,
+				current.BundleID, current.Version, current.EffectivePolicyDigest, state.Generation, health.reloadError)
+		}
+		return nil
+	}
+	if err := check(); err == nil {
+		return nil
+	}
+	// A hot applied gateway can retain the new policy after the files were
+	// restored. Restart it once to load the confirmed generation.
+	if err := restartUnit(ctx, env.Services, gateway); err != nil {
+		return fmt.Errorf("restart gateway for confirmed bundle: %w", err)
+	}
+	if err := l.waitGatewayReady(ctx, gateway); err != nil {
+		return fmt.Errorf("wait for gateway after bundle rollback: %w", err)
+	}
+	return check()
 }
 
 // recordBundleGeneration records the installed config, which is already
