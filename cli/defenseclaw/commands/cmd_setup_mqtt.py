@@ -369,13 +369,13 @@ def _setup_docker_inner(
             "--user", "0",
             "-v", f"{final_dir}:/mosquitto/config",
             _MOSQUITTO_IMAGE,
-            "chown", "-R", "1883:1883", "/mosquitto/config",
+            "chown", "-R", "mosquitto:mosquitto", "/mosquitto/config",
         ],
         capture_output=True, text=True,
     )
     if chown_result.returncode != 0:
         ux.warn(
-            f"Could not chown config dir to mosquitto (1883): {chown_result.stderr.strip()}\n"
+            f"Could not chown config dir to mosquitto user: {chown_result.stderr.strip()}\n"
             "  The broker may fail to read its configuration files."
         )
 

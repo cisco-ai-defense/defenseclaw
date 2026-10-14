@@ -785,7 +785,11 @@ def test_fleet(
             results["policy"] = {"status": "error"}
             all_ok = False
 
-    # --- Output ----------------------------------------------------------
+    for section in ("gateway", "broker", "devices", "policy"):
+        status = results.get(section, {}).get("status", "unknown")
+        if status not in ("ok", "skipped", "not_configured"):
+            all_ok = False
+
     if as_json:
         results["all_ok"] = all_ok
         click.echo(json.dumps(results, indent=2))
