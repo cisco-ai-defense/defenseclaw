@@ -1,0 +1,589 @@
+package policy
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
+)
+
+// sha256Sum returns the SHA-256 hash of data.
+func sha256Sum(data []byte) [32]byte {
+	return sha256.Sum256(data)
+}
+
+// EmergencyCommand identifies an emergency action to push to a fleet.
+type EmergencyCommand uint8
+
+const (
+	// EmergencyBlockAll tells all devices to flush caches and block ALL requests
+	// until cleared or daemon restart.
+	// C-side ota_receiver.c: case 0x01 — BLOCK_ALL.
+	EmergencyBlockAll EmergencyCommand = 0x01
+
+	// EmergencyRevokeSessions tells all devices to revoke all active sessions
+	// (flushes caches and clears session table).
+	// C-side ota_receiver.c: case 0x02 — REVOKE_HASH / REVOKE_SESSIONS.
+	EmergencyRevokeSessions EmergencyCommand = 0x02
+
+	// EmergencyForceSync tells all devices to flush their audit logs immediately.
+	// C-side ota_receiver.c: case 0x03 — FORCE_SYNC.
+	EmergencyForceSync EmergencyCommand = 0x03
+
+	// EmergencyEnterLockdown tells all devices to enter lockdown mode
+	// (flushes caches and blocks ALL requests, same effect as BLOCK_ALL).
+	// C-side ota_receiver.c: case 0x04 — ENTER_LOCKDOWN.
+	EmergencyEnterLockdown EmergencyCommand = 0x04
+
+	// EmergencyReleaseLockdown clears the global block_all_active flag so
+	EmergencyReleaseLockdown EmergencyCommand = 0x05
+)
+
+// PolicyHeader matches the C-side dclaw_policy_header_t structure (8 bytes, big-endian).
+//
+//	[0:2]  version         uint16
+//	[2:4]  payload_len     uint16
+//	[4:6]  canary_baseline uint16
+//	[6:8]  _reserved       uint16
+type PolicyHeader struct {
+	Version        uint16
+	PayloadLen     uint16
+	CanaryBaseline uint16
+}
+
+// HeaderSize is the fixed size of the policy blob header.
+const HeaderSize = 8
+
+// EmergencyMsgSize is the size of the emergency wire format.
+// Matches dclaw_emergency_msg_t in ota_receiver.c:
+//
+//	[0:4]    sequence    uint32
+//	[4:8]    timestamp   uint32
+//	[8]      command     uint8
+//	[9]      scope       uint8
+//	[10:42]  payload     [32]byte
+//	[42:44]  _reserved   [2]byte
+//	[44:108] signature   [64]byte (HMAC-SHA256 in first 32, zero-padded)
+const EmergencyMsgSize = 108
+
+// ParseHeader decodes the 8-byte policy blob header (big-endian).
+func ParseHeader(data []byte) (*PolicyHeader, error) {
+	if len(data) < HeaderSize {
+		return nil, fmt.Errorf("policy blob too short for header: %d bytes", len(data))
+	}
+	return &PolicyHeader{
+		Version:        binary.BigEndian.Uint16(data[0:2]),
+		PayloadLen:     binary.BigEndian.Uint16(data[2:4]),
+		CanaryBaseline: binary.BigEndian.Uint16(data[4:6]),
+	}, nil
+}
+
+// Service manages policy compilation, signing, and distribution to edge devices.
+//
+// Design note -- a single OTA signing key (DCLAW_OTA_KEY) is used for both
+// policy blob signatures and emergency broadcast signatures. This is
+// intentional for Phase 1 simplicity: the fleet manager is the sole issuer
+// of both message types, so a single symmetric HMAC key is sufficient.
+// Phase 2 may introduce separate Ed25519 key pairs for non-repudiation and
+// per-message-type key isolation.
+type Service struct {
+	store  PolicyStore
+	signer Signer
+	client mqtt.Client
+	logger *log.Logger
+
+	emergencySigner Signer
+
+	// compilerPath is the path to the Python policy_compiler.py script.
+	// If empty, Compile() will return an error.
+	compilerPath string
+
+	// emergencySeq tracks the next emergency broadcast sequence number.
+	// Must be strictly increasing per the C-side anti-replay (REQ-31).
+	// Persisted in the PolicyStore to survive gateway restarts.
+	mu           sync.Mutex
+	emergencySeq uint32
+
+	emergencyMu sync.Mutex
+}
+
+// Config holds configuration for the policy Service.
+type Config struct {
+	// CompilerPath is the path to the Python policy_compiler.py.
+	// Defaults to "edge-connector/tools/policy_compiler.py".
+	CompilerPath string
+
+	// Logger for policy operations. Defaults to log.Default().
+	Logger *log.Logger
+}
+
+// NewService creates a new policy distribution service.
+// On startup, it loads the last persisted emergency sequence number from the
+// policy store to guarantee monotonically increasing values across restarts.
+func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Config) *Service {
+	s := &Service{
+		store:        store,
+		signer:       signer,
+		client:       client,
+		compilerPath: "edge-connector/tools/policy_compiler.py",
+		logger:       log.Default(),
+	}
+	if cfg != nil {
+		if cfg.CompilerPath != "" {
+			s.compilerPath = cfg.CompilerPath
+		}
+		if cfg.Logger != nil {
+			s.logger = cfg.Logger
+		}
+	}
+
+	// Validate compiler path at construction time to fail fast on misconfiguration.
+	if err := validateCompilerPath(s.compilerPath); err != nil {
+		s.logger.Printf("[policy] WARNING: compiler path validation failed: %v — Compile() will re-validate at call time", err)
+	}
+
+	if os.Getenv("DCLAW_EMERGENCY_KEY") != "" {
+		emergencySigner, err := NewEmergencySignerFromEnv()
+		if err != nil {
+			s.logger.Printf("[policy] WARNING: failed to load emergency signer: %v — using OTA signer for emergency commands", err)
+			s.emergencySigner = signer
+		} else {
+			s.emergencySigner = emergencySigner
+			s.logger.Printf("[policy] loaded separate emergency signer from DCLAW_EMERGENCY_KEY")
+		}
+	} else {
+		s.emergencySigner = signer
+	}
+
+	if store != nil {
+		if seq, err := store.GetEmergencySeq(); err != nil {
+			s.logger.Printf("[policy] WARNING: failed to load emergency sequence from store: %v (starting from 0)", err)
+		} else if seq > 0 {
+			s.emergencySeq = seq
+			s.logger.Printf("[policy] loaded emergency sequence %d from store", seq)
+		}
+	}
+
+	return s
+}
+
+// validateCompilerPath checks that the compiler path is safe to execute:
+// it must resolve to an absolute path without traversal, point to an existing
+// regular file (not a directory), and not contain embedded ".." sequences.
+func validateCompilerPath(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid compiler path: %w", err)
+	}
+	// Must not contain path traversal
+	if strings.Contains(abs, "..") {
+		return fmt.Errorf("compiler path must not contain '..'")
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("compiler not found: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("compiler path is a directory")
+	}
+
+	if !isUnderAllowedDir(abs) {
+		return fmt.Errorf("compiler path %q is not under an allowed directory (/usr/local/lib/defenseclaw/ or $HOME/.defenseclaw/)", abs)
+	}
+
+	// Must be owned by root or current user
+	return nil
+}
+
+// isUnderAllowedDir checks that the resolved absolute path is under one of
+// the trusted directories: /usr/local/lib/defenseclaw/ or $HOME/.defenseclaw/.
+func isUnderAllowedDir(abs string) bool {
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return false
+	}
+
+	allowed := []string{
+		"/usr/local/lib/defenseclaw/",
+	}
+
+	// Add $HOME/.defenseclaw/
+	if home, err := os.UserHomeDir(); err == nil {
+		allowed = append(allowed, filepath.Join(home, ".defenseclaw")+string(filepath.Separator))
+	}
+
+	for _, d := range allowed {
+		resolvedDir, err := filepath.EvalSymlinks(d)
+		if err != nil {
+			continue
+		}
+		absDir, err := filepath.Abs(resolvedDir)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(absPath, absDir+string(filepath.Separator)) || absPath == absDir {
+			return true
+		}
+	}
+	return false
+}
+
+// Compile invokes the Python policy compiler to transform YAML policy bytes
+// into the binary blob format expected by the C-side OTA receiver.
+//
+// The compiler is called as:
+//
+//	python3 policy_compiler.py --input <tmpfile> --profile <profile> --version <version> --output-binary <outfile>
+//
+// Returns the raw binary blob (header + payload, no signature).
+func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]byte, error) {
+	if s.compilerPath == "" {
+		return nil, errors.New("policy compiler path not configured")
+	}
+
+	if len(yamlBytes) > 65536 {
+		return nil, fmt.Errorf("policy YAML exceeds maximum size of 64KB")
+	}
+
+	// Validate profile
+	switch profile {
+	case "minimal", "standard", "edge":
+		// ok
+	default:
+		return nil, fmt.Errorf("unknown profile %q: must be minimal, standard, or edge", profile)
+	}
+
+	absPath, err := filepath.Abs(s.compilerPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid compiler path: %w", err)
+	}
+	if strings.Contains(absPath, "..") {
+		return nil, fmt.Errorf("compiler path must not contain '..'")
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("compiler not found: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("compiler path is not a regular file: %s", absPath)
+	}
+	if !isUnderAllowedDir(absPath) {
+		return nil, fmt.Errorf("compiler path %q is not under an allowed directory", absPath)
+	}
+
+	// Create temp directory for compiler I/O
+	tmpDir, err := makeTempDir()
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer removeAll(tmpDir)
+
+	inputPath := filepath.Join(tmpDir, "policy.yaml")
+	outputPath := filepath.Join(tmpDir, "policy.bin")
+
+	if err := writeFile(inputPath, yamlBytes); err != nil {
+		return nil, fmt.Errorf("write temp policy: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", s.compilerPath,
+		"--input", inputPath,
+		"--profile", profile,
+		"--version", fmt.Sprintf("%d", version),
+		"--output-binary", outputPath,
+		"--output-header", filepath.Join(tmpDir, "policy_tables.h"),
+	)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"LANG=C.UTF-8",
+		"TMPDIR=" + os.TempDir(),
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("policy compiler failed: %w\noutput: %s", err, output)
+	}
+
+	blob, err := readFile(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("read compiled policy: %w", err)
+	}
+
+	// Strip the dev-stub signature appended by policy_compiler.py when no
+	// signing key is available. Format: [0x00, 0xDE, 0xED, SHA-256(blob)..., zeros].
+	// Detection: blob[stubStart] == 0x00 && [1]==0xDE && [2]==0xED && SHA-256 match.
+	const devStubSize = 64
+	if len(blob) >= HeaderSize+devStubSize {
+		stubStart := len(blob) - devStubSize
+		if blob[stubStart] == 0x00 && blob[stubStart+1] == 0xDE && blob[stubStart+2] == 0xED {
+			unsigned := blob[:stubStart]
+			h := sha256Sum(unsigned)
+			if bytes.Equal(blob[stubStart+3:stubStart+35], h[:32]) {
+				s.logger.Printf("[policy] stripping 64-byte dev stub from compiler output")
+				blob = blob[:stubStart]
+			}
+		}
+	}
+
+	// Validate the header
+	if _, err := ParseHeader(blob); err != nil {
+		return nil, fmt.Errorf("compiled blob has invalid header: %w", err)
+	}
+
+	s.logger.Printf("[policy] compiled %d-byte blob (version=%d, profile=%s)", len(blob), version, profile)
+	return blob, nil
+}
+
+// Sign creates a signed policy blob by appending an HMAC-SHA256 signature
+// to the raw policy binary. The signed format matches what the C-side
+// mqtt_client.c OTA handler expects:
+//
+//	Total signed blob layout:
+//	  [0:8]         header  (dclaw_policy_header_t, big-endian)
+//	  [8:8+N]       payload (N = header.payload_len)
+//	  [8+N:8+N+64]  signature field (64 bytes)
+//
+//	Signature field breakdown:
+//	  [0:32]  HMAC-SHA256(key, header+payload)
+//	  [32:64] zero padding (reserved for Ed25519 slot)
+//
+//	C-side split (mqtt_client.c line ~547):
+//	  blob_len  = total - 64
+//	  signature = blob + blob_len
+//	  dclaw_apply_policy(blob, blob_len, signature)
+//
+//	C-side verify (ota_receiver.c):
+//	  HMAC-SHA256(ota_key, blob[0:blob_len]) compared to signature[0:32]
+func (s *Service) Sign(policyBin []byte) ([]byte, error) {
+	if len(policyBin) < HeaderSize {
+		return nil, errors.New("policy binary too short to sign")
+	}
+
+	// Validate that header.payload_len matches the actual payload size.
+	// Without this check, a malformed blob could pass signing but be
+	// rejected by the C-side apply_policy length validation.
+	hdr, err := ParseHeader(policyBin)
+	if err != nil {
+		return nil, fmt.Errorf("parse header before signing: %w", err)
+	}
+	expectedBlobLen := HeaderSize + int(hdr.PayloadLen)
+	if expectedBlobLen != len(policyBin) {
+		return nil, fmt.Errorf("header.payload_len (%d) does not match blob size (%d): expected blob_len=%d",
+			hdr.PayloadLen, len(policyBin), expectedBlobLen)
+	}
+
+	if s.signer == nil {
+		return nil, errors.New("policy signer not configured — set DCLAW_OTA_KEY")
+	}
+	sig, err := s.signer.Sign(policyBin)
+	if err != nil {
+		return nil, fmt.Errorf("sign policy: %w", err)
+	}
+
+	// Append exactly 64 bytes: 32-byte HMAC-SHA256 + 32 bytes zero
+	// padding, matching the C-side 64-byte signature field.
+	const sigFieldSize = 64
+	signed := make([]byte, len(policyBin)+sigFieldSize)
+	copy(signed, policyBin)
+	n := len(sig)
+	if n > 32 {
+		n = 32
+	}
+	copy(signed[len(policyBin):], sig[:n])
+	// signed[len(policyBin)+32 : len(policyBin)+64] stays zero — Ed25519 padding
+	return signed, nil
+}
+
+// Distribute publishes a signed policy blob to the fleet's OTA topic via MQTT.
+// Topic format: defenseclaw/{tenant}/{fleet}/ota/policy
+func (s *Service) Distribute(ctx context.Context, tenantID, fleetID uint64, signedPolicy []byte) error {
+	if s.client == nil {
+		return errors.New("MQTT not configured")
+	}
+	if len(signedPolicy) < HeaderSize+32 {
+		return errors.New("signed policy too short")
+	}
+
+	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/policy", tenantID, fleetID)
+
+	if err := s.client.Publish(ctx, topic, 1, signedPolicy); err != nil {
+		return fmt.Errorf("MQTT publish to %s: %w", topic, err)
+	}
+
+	// Parse version from the blob header for logging
+	hdr, _ := ParseHeader(signedPolicy)
+	if hdr != nil {
+		s.logger.Printf("[policy] distributed version=%d to %s (%d bytes)", hdr.Version, topic, len(signedPolicy))
+	}
+
+	return nil
+}
+
+// DistributeEmergency publishes an emergency command to the fleet.
+// Topic format: defenseclaw/{tenant}/{fleet}/ota/emergency
+//
+// The wire format matches dclaw_emergency_msg_t in ota_receiver.c:
+//
+//	[0:4]   sequence    uint32  (big-endian, strictly increasing)
+//	[4:8]   timestamp   uint32  (big-endian, Unix epoch)
+//	[8]     command     uint8
+//	[9]     scope       uint8   (0 = fleet-wide)
+//	[10:42] payload     [32]byte (zeros for now)
+//	[42:44] _reserved   [2]byte
+//	[44:108] signature  [64]byte (HMAC-SHA256 in first 32, zero-padded)
+func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uint64, cmd EmergencyCommand) error {
+	if s.client == nil {
+		return errors.New("MQTT not configured")
+	}
+	if s.emergencySigner == nil {
+		return errors.New("emergency signer not configured — set DCLAW_OTA_KEY or DCLAW_EMERGENCY_KEY")
+	}
+
+	s.emergencyMu.Lock()
+	defer s.emergencyMu.Unlock()
+
+	if s.emergencySeq == ^uint32(0) {
+		return errors.New("emergency sequence counter exhausted (uint32 overflow)")
+	}
+	seq := s.emergencySeq + 1
+
+	// Build the message: 44 bytes of data + 64-byte signature field = 108 bytes.
+	// The signature field holds 32 bytes of HMAC-SHA256 followed by 32 bytes of
+	// zero padding, matching the C-side dclaw_emergency_msg_t which reserves a
+	// 64-byte Ed25519 signature field.
+	msg := make([]byte, EmergencyMsgSize)
+
+	// Sequence (big-endian)
+	binary.BigEndian.PutUint32(msg[0:4], seq)
+
+	// Timestamp (big-endian)
+	binary.BigEndian.PutUint32(msg[4:8], uint32(time.Now().Unix()))
+
+	// Command
+	msg[8] = uint8(cmd)
+
+	// Scope: 0 = fleet-wide
+	msg[9] = 0
+
+	// Payload [10:42] and reserved [42:44] are zero-filled
+
+	// Sign the first 44 bytes of the emergency message (everything before
+	// the 64-byte signature field). The C verifier passes exactly msg[0:44]
+	// to verify_emergency_signature(), so the HMAC input MUST match.
+	sig, err := s.emergencySigner.Sign(msg[:44])
+	if err != nil {
+		return fmt.Errorf("sign emergency msg: %w", err)
+	}
+
+	// Copy HMAC-SHA256 (32 bytes) into the first half of the 64-byte signature
+	n := 32
+	if len(sig) < n {
+		n = len(sig)
+	}
+	copy(msg[44:44+n], sig[:n])
+
+	// Zero-pad the reserved Ed25519 area (bytes 76-108).
+	// When Ed25519 is available in Phase 2, the full 64-byte signature
+	// will be written into bytes 44-108 instead.
+
+	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
+
+	s.emergencySeq = seq
+	if s.store != nil {
+		if err := s.store.SetEmergencySeq(seq); err != nil {
+			s.logger.Printf("[policy] WARNING: failed to persist emergency sequence %d: %v", seq, err)
+		}
+	}
+
+	if err := s.client.Publish(ctx, topic, 1, msg); err != nil {
+		return fmt.Errorf("MQTT publish emergency to %s: %w", topic, err)
+	}
+
+	s.logger.Printf("[policy] emergency cmd=%d seq=%d distributed to %s", cmd, seq, topic)
+	return nil
+}
+
+// CompileSignAndStore is a convenience method that compiles a YAML policy,
+// signs it, stores the result, and returns the signed blob ready for distribution.
+func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID, fleetID uint64) ([]byte, uint32, error) {
+	if s.signer == nil {
+		return nil, 0, errors.New("policy signer not configured — set DCLAW_OTA_KEY")
+	}
+
+	// Determine version from latest stored policy
+	latest, err := s.store.GetLatestPolicy(tenantID, fleetID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get latest policy: %w", err)
+	}
+
+	var version uint32 = 1
+	if latest != nil {
+		version = latest.Version + 1
+	}
+
+	// Compile
+	blob, err := s.Compile(yamlBytes, profile, version)
+	if err != nil {
+		return nil, 0, fmt.Errorf("compile: %w", err)
+	}
+
+	// Sign
+	signed, err := s.Sign(blob)
+	if err != nil {
+		return nil, 0, fmt.Errorf("sign: %w", err)
+	}
+
+	// Store
+	sig := signed[len(blob):]
+	if err := s.store.SavePolicy(tenantID, fleetID, version, blob, sig, profile); err != nil {
+		return nil, 0, fmt.Errorf("store: %w", err)
+	}
+
+	return signed, version, nil
+}
+
+// Store returns the policy store for direct queries (e.g., listing versions).
+func (s *Service) Store() PolicyStore {
+	return s.store
+}
+
+// BuildPolicyBlob manually constructs a policy binary blob matching the
+// C-side format. Used only in tests.
+//
+// The blob format matches generate_binary_blob() in policy_compiler.py:
+//
+//	Header (8 bytes, big-endian):
+//	  [0:2] version
+//	  [2:4] payload_len
+//	  [4:6] canary_baseline
+//	  [6:8] reserved (0x0000)
+//	Payload:
+//	  Severity rules, sequence rules, etc.
+func BuildPolicyBlob(version uint16, canaryBaseline uint16, payload []byte) []byte {
+	if len(payload) > 65535 {
+		panic("BuildPolicyBlob: payload exceeds uint16 max (65535 bytes)")
+	}
+	header := make([]byte, HeaderSize)
+	binary.BigEndian.PutUint16(header[0:2], version)
+	binary.BigEndian.PutUint16(header[2:4], uint16(len(payload)))
+	binary.BigEndian.PutUint16(header[4:6], canaryBaseline)
+	// [6:8] reserved, zero
+
+	return append(header, payload...)
+}

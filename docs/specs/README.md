@@ -8,6 +8,7 @@ a spec records the intended contract and the open work.
 | Spec | Scope | Status |
 | --- | --- | --- |
 | [001](001-windows-deterministic-build/README.md) | Windows deterministic-build support for the AVC packaging flow | Implemented |
+| [001-edge](001-defenseclaw-lite-phase1/) | Edge Connector Phase 1 (STANDARD Profile) | Draft |
 | [002](002-windows-avc-packaging/README.md) | AVC-driven Windows enterprise packaging: the build kit, the closed eight-file payload, signing order and the outer Setup | Implemented |
 | [003](003-windows-deferred-config/README.md) | Late config and target manifest for the Secure Client lifecycle: bounded gateway and guardian waits, and the health `configuration` state | Partly implemented: the waits and health ship; the lifecycle refuses `-DeferredConfig` |
 | [004](004-windows-ui-ipc/README.md) | The Secure Client UI IPC socket on Windows: path, DACL, deferred peer authentication and the GA release gate | Implemented (beta posture) |

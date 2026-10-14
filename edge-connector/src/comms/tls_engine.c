@@ -1,0 +1,456 @@
+#include "platform.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <limits.h>
+
+/*
+ * TLS engine wrapper — mbedTLS implementation.
+ *
+ * When DCLAW_HAS_MBEDTLS is defined and non-zero, this file provides a
+ * real TLS transport using mbedTLS for mTLS handshake + session management.
+ *
+ * When mbedTLS is not available (DCLAW_HAS_MBEDTLS == 0 or undefined),
+ * the functions return -1 stubs so any TLS code path fails loudly.
+ *
+ * Environment variables:
+ *   DCLAW_CA_CERT_PATH     — PEM file for CA certificate (server verification)
+ *   DCLAW_DEVICE_CERT_PATH — PEM file for device certificate (mTLS client cert)
+ *   DCLAW_DEVICE_KEY_PATH  — PEM file for device private key (mTLS client key)
+ */
+
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+
+#include <mbedtls/ssl.h>
+#include <mbedtls/build_info.h>
+#if MBEDTLS_VERSION_MAJOR >= 4
+/* mbedTLS 4.x: entropy/ctr_drbg removed; PSA Crypto handles RNG */
+#include <psa/crypto.h>
+#else
+/* mbedTLS 3.x: traditional entropy + CTR_DRBG */
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#endif
+#include <mbedtls/x509_crt.h>
+#include <mbedtls/x509_crl.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/error.h>
+
+/* ---------- static TLS state ---------- */
+
+static mbedtls_ssl_context       tls_ssl;
+static mbedtls_ssl_config        tls_conf;
+#if MBEDTLS_VERSION_MAJOR < 4
+static mbedtls_ctr_drbg_context  tls_drbg;
+static mbedtls_entropy_context   tls_entropy;
+#endif
+static mbedtls_x509_crt          tls_ca_cert;
+static mbedtls_x509_crl          tls_crl;
+static mbedtls_x509_crt          tls_device_cert;
+static mbedtls_pk_context        tls_device_key;
+static mbedtls_net_context       tls_net;
+static bool                      tls_initialized = false;
+
+/* Helper: read an entire file into a malloc'd buffer (NUL-terminated for PEM).
+ * Returns the buffer on success (caller frees), NULL on failure.
+ * *out_len includes the trailing NUL byte (as mbedtls_x509_crt_parse expects). */
+static unsigned char *read_file_alloc(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    if (fsize <= 0) { fclose(f); return NULL; }
+    if (fsize > 65536) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+
+    /* +1 for NUL terminator (PEM parsing requires it) */
+    unsigned char *buf = malloc((size_t)fsize + 1);
+    if (!buf) { fclose(f); return NULL; }
+
+    size_t nread = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    if ((long)nread != fsize) { free(buf); return NULL; }
+
+    buf[nread] = '\0';
+    *out_len = nread + 1;
+    return buf;
+}
+
+/* ---------- public API ---------- */
+
+int dclaw_tls_init(void) {
+    int ret;
+
+    /* Prevent double-init */
+    if (tls_initialized) return 0;
+
+    /* 1. Init all contexts */
+    mbedtls_ssl_init(&tls_ssl);
+    mbedtls_ssl_config_init(&tls_conf);
+#if MBEDTLS_VERSION_MAJOR >= 4
+    /* mbedTLS 4.x: PSA Crypto provides RNG; no entropy/ctr_drbg needed */
+    psa_status_t psa_status = psa_crypto_init();
+    if (psa_status != PSA_SUCCESS) {
+        fprintf(stderr, "[DCLAW-TLS] psa_crypto_init failed: %d\n", (int)psa_status);
+        goto fail;
+    }
+#else
+    mbedtls_ctr_drbg_init(&tls_drbg);
+    mbedtls_entropy_init(&tls_entropy);
+#endif
+    mbedtls_x509_crt_init(&tls_ca_cert);
+    mbedtls_x509_crl_init(&tls_crl);
+    mbedtls_x509_crt_init(&tls_device_cert);
+    mbedtls_pk_init(&tls_device_key);
+    mbedtls_net_init(&tls_net);
+
+#if MBEDTLS_VERSION_MAJOR < 4
+    /* 2. Seed the DRBG from entropy (mbedTLS 3.x) */
+    const char *pers = "defenseclaw_tls";
+    ret = mbedtls_ctr_drbg_seed(&tls_drbg, mbedtls_entropy_func, &tls_entropy,
+                                (const unsigned char *)pers, strlen(pers));
+    if (ret != 0) {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] DRBG seed failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        goto fail;
+    }
+#endif
+
+    /* 3. Configure as TLS client */
+    ret = mbedtls_ssl_config_defaults(&tls_conf,
+                                      MBEDTLS_SSL_IS_CLIENT,
+                                      MBEDTLS_SSL_TRANSPORT_STREAM,
+                                      MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret != 0) {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] ssl_config_defaults failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        goto fail;
+    }
+
+#if MBEDTLS_VERSION_MAJOR < 4
+    /* mbedTLS 3.x: explicit RNG configuration required */
+    mbedtls_ssl_conf_rng(&tls_conf, mbedtls_ctr_drbg_random, &tls_drbg);
+#endif
+    /* mbedTLS 4.x: RNG is automatic via PSA Crypto (psa_crypto_init above) */
+
+#ifdef MBEDTLS_SSL_HAVE_GCM
+    static const int ciphersuites[] = {
+        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        0
+    };
+    mbedtls_ssl_conf_ciphersuites(&tls_conf, ciphersuites);
+#endif
+
+    mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+
+    mbedtls_ssl_conf_min_version(&tls_conf,
+                                  MBEDTLS_SSL_MAJOR_VERSION_3,
+                                  MBEDTLS_SSL_MINOR_VERSION_3); /* TLS 1.2 */
+
+    /* Handshake timeout bounds the event loop stall during connect.
+     * 5s min, 15s max — combined with TCP connect (5s) and Paho
+     * command timeout (5s×4), total connect path is bounded to ~40s. */
+    mbedtls_ssl_conf_handshake_timeout(&tls_conf, 5000, 15000);
+
+    /* 4. Load CA certificate if DCLAW_CA_CERT_PATH is set */
+    const char *ca_path = getenv("DCLAW_CA_CERT_PATH");
+    if (ca_path && ca_path[0]) {
+        size_t ca_len = 0;
+        unsigned char *ca_buf = read_file_alloc(ca_path, &ca_len);
+        if (!ca_buf) {
+            fprintf(stderr, "[DCLAW-TLS] Failed to read CA cert: %s\n", ca_path);
+            goto fail;
+        }
+        ret = mbedtls_x509_crt_parse(&tls_ca_cert, ca_buf, ca_len);
+        dclaw_secure_zero(ca_buf, ca_len);
+        free(ca_buf);
+        if (ret != 0) {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[DCLAW-TLS] CA cert parse failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+            goto fail;
+        }
+        {
+            mbedtls_x509_crl *crl_ptr = NULL;
+            const char *crl_path = getenv("DCLAW_CRL_PATH");
+            if (crl_path && crl_path[0]) {
+                size_t crl_len = 0;
+                unsigned char *crl_buf = read_file_alloc(crl_path, &crl_len);
+                if (!crl_buf) {
+                    fprintf(stderr, "[DCLAW-TLS] WARNING: Failed to read CRL file: %s\n", crl_path);
+                } else {
+                    ret = mbedtls_x509_crl_parse(&tls_crl, crl_buf, crl_len);
+                    dclaw_secure_zero(crl_buf, crl_len);
+                    free(crl_buf);
+                    if (ret != 0) {
+                        char errbuf[128];
+                        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+                        fprintf(stderr, "[DCLAW-TLS] WARNING: CRL parse failed: %s (0x%04x)\n",
+                                errbuf, (unsigned)-ret);
+                    } else {
+                        crl_ptr = &tls_crl;
+                        fprintf(stderr, "[DCLAW-TLS] CRL loaded from %s\n", crl_path);
+                    }
+                }
+            }
+            mbedtls_ssl_conf_ca_chain(&tls_conf, &tls_ca_cert, crl_ptr);
+        }
+        fprintf(stderr, "[DCLAW-TLS] CA certificate loaded from %s\n", ca_path);
+        if (!getenv("DCLAW_CRL_PATH") || !getenv("DCLAW_CRL_PATH")[0]) {
+            fprintf(stderr, "[DCLAW-TLS] NOTE: No CRL/OCSP revocation checking — use short-lived certificates\n");
+        }
+    } else {
+#if DCLAW_DEV_MODE
+        const char *insecure = getenv("DCLAW_TLS_INSECURE");
+        if (insecure && strcmp(insecure, "1") == 0) {
+            fprintf(stderr, "[DCLAW-TLS] WARNING: No CA cert and DCLAW_TLS_INSECURE=1 — "
+                    "downgrading to VERIFY_OPTIONAL. DO NOT USE IN PRODUCTION.\n");
+            mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+        } else {
+            fprintf(stderr, "[DCLAW-TLS] ERROR: No CA cert (DCLAW_CA_CERT_PATH unset) "
+                    "and DCLAW_TLS_INSECURE is not 1 — refusing to connect without "
+                    "server verification.\n");
+            goto fail;
+        }
+#else
+        fprintf(stderr, "[DCLAW-TLS] ERROR: No CA cert (DCLAW_CA_CERT_PATH unset) "
+                "— refusing to connect without server verification. "
+                "DCLAW_TLS_INSECURE is disabled in production builds.\n");
+        goto fail;
+#endif
+    }
+
+    /* 5. Load device certificate + key for mTLS (if both paths are set) */
+    const char *cert_path = getenv("DCLAW_DEVICE_CERT_PATH");
+    const char *key_path  = getenv("DCLAW_DEVICE_KEY_PATH");
+    if (cert_path && cert_path[0] && key_path && key_path[0]) {
+        /* Parse device certificate */
+        size_t cert_len = 0;
+        unsigned char *cert_buf = read_file_alloc(cert_path, &cert_len);
+        if (!cert_buf) {
+            fprintf(stderr, "[DCLAW-TLS] Failed to read device cert: %s\n", cert_path);
+            goto fail;
+        }
+        ret = mbedtls_x509_crt_parse(&tls_device_cert, cert_buf, cert_len);
+        dclaw_secure_zero(cert_buf, cert_len);
+        free(cert_buf);
+        if (ret != 0) {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[DCLAW-TLS] Device cert parse failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+            goto fail;
+        }
+
+        /* Parse device private key (no password) */
+        size_t key_len = 0;
+        unsigned char *key_buf = read_file_alloc(key_path, &key_len);
+        if (!key_buf) {
+            fprintf(stderr, "[DCLAW-TLS] Failed to read device key: %s\n", key_path);
+            goto fail;
+        }
+#if MBEDTLS_VERSION_MAJOR >= 4
+        /* mbedTLS 4.x: pk_parse_key uses PSA internally, no RNG parameter */
+        ret = mbedtls_pk_parse_key(&tls_device_key, key_buf, key_len, NULL, 0);
+#elif MBEDTLS_VERSION_MAJOR >= 3
+        ret = mbedtls_pk_parse_key(&tls_device_key, key_buf, key_len,
+                                   NULL, 0, mbedtls_ctr_drbg_random, &tls_drbg);
+#else
+        ret = mbedtls_pk_parse_key(&tls_device_key, key_buf, key_len, NULL, 0);
+#endif
+        dclaw_secure_zero(key_buf, key_len);
+        free(key_buf);
+        if (ret != 0) {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[DCLAW-TLS] Device key parse failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+            goto fail;
+        }
+
+        ret = mbedtls_ssl_conf_own_cert(&tls_conf, &tls_device_cert, &tls_device_key);
+        if (ret != 0) {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[DCLAW-TLS] ssl_conf_own_cert failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+            goto fail;
+        }
+        fprintf(stderr, "[DCLAW-TLS] Device cert+key loaded for mTLS (%s, %s)\n", cert_path, key_path);
+    }
+
+    /* 6. Apply config to SSL context */
+    ret = mbedtls_ssl_setup(&tls_ssl, &tls_conf);
+    if (ret != 0) {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] ssl_setup failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        goto fail;
+    }
+
+    tls_initialized = true;
+    fprintf(stderr, "[DCLAW-TLS] TLS engine initialized\n");
+    return 0;
+
+fail:
+    mbedtls_ssl_free(&tls_ssl);
+    mbedtls_ssl_config_free(&tls_conf);
+#if MBEDTLS_VERSION_MAJOR < 4
+    mbedtls_ctr_drbg_free(&tls_drbg);
+    mbedtls_entropy_free(&tls_entropy);
+#endif
+    mbedtls_x509_crt_free(&tls_ca_cert);
+    mbedtls_x509_crl_free(&tls_crl);
+    mbedtls_x509_crt_free(&tls_device_cert);
+    mbedtls_pk_free(&tls_device_key);
+    mbedtls_net_free(&tls_net);
+    return -1;
+}
+
+int dclaw_tls_connect(int tcp_fd, const char *hostname) {
+    if (!tls_initialized) {
+        fprintf(stderr, "[DCLAW-TLS] ERROR: tls_connect called before tls_init\n");
+        return -1;
+    }
+
+    /* Reset the SSL session state for a fresh handshake (allows reconnect) */
+    int ret = mbedtls_ssl_session_reset(&tls_ssl);
+    if (ret != 0) {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] ssl_session_reset failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        return -1;
+    }
+
+    if (hostname && hostname[0]) {
+        ret = mbedtls_ssl_set_hostname(&tls_ssl, hostname);
+        if (ret != 0) {
+            fprintf(stderr, "[DCLAW-TLS] set_hostname(%s) failed: 0x%04x\n",
+                    hostname, (unsigned)-ret);
+            return -1;
+        }
+    }
+
+    /* Wrap the existing TCP socket FD in an mbedtls_net_context */
+    tls_net.fd = tcp_fd;
+
+    mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
+                        mbedtls_net_send, mbedtls_net_recv, NULL);
+
+    /* Perform the TLS handshake, looping on WANT_READ / WANT_WRITE */
+    do {
+        ret = mbedtls_ssl_handshake(&tls_ssl);
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+             ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    if (ret != 0) {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] Handshake failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        return -1;
+    }
+
+    fprintf(stderr, "[DCLAW-TLS] Handshake complete (protocol: %s, cipher: %s)\n",
+            mbedtls_ssl_get_version(&tls_ssl),
+            mbedtls_ssl_get_ciphersuite(&tls_ssl));
+
+    mbedtls_ssl_conf_read_timeout(&tls_conf, 30000);
+    mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
+                        mbedtls_net_send, NULL, mbedtls_net_recv_timeout);
+
+    return 0;
+}
+
+int dclaw_tls_write(const uint8_t *data, size_t len) {
+    if (!tls_initialized) return -1;
+
+    size_t sent = 0;
+    while (sent < len) {
+        int ret = mbedtls_ssl_write(&tls_ssl, data + sent, len - sent);
+        if (ret > 0) {
+            sent += (size_t)ret;
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE ||
+                   ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            /* Non-blocking: retry */
+            continue;
+        } else {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[DCLAW-TLS] Write error: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+            return -1;
+        }
+    }
+    return (sent > INT_MAX) ? INT_MAX : (int)sent;
+}
+
+int dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms) {
+    if (!tls_initialized) return -1;
+
+    if (timeout_ms >= 0) {
+        mbedtls_ssl_conf_read_timeout(&tls_conf, (uint32_t)timeout_ms);
+    }
+
+    int ret = mbedtls_ssl_read(&tls_ssl, buf, len);
+
+    if (ret > 0) {
+        return ret;
+    } else if (ret == 0) {
+        /* EOF / peer closed */
+        return -1;
+    } else if (ret == MBEDTLS_ERR_SSL_TIMEOUT ||
+               ret == MBEDTLS_ERR_SSL_WANT_READ) {
+        return -2;
+    } else {
+        char errbuf[128];
+        mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[DCLAW-TLS] Read error: %s (0x%04x)\n", errbuf, (unsigned)-ret);
+        return -1;
+    }
+}
+
+void dclaw_tls_shutdown(void) {
+    if (!tls_initialized) return;
+
+    /* Send close_notify (best-effort, ignore errors) */
+    int ret;
+    do {
+        ret = mbedtls_ssl_close_notify(&tls_ssl);
+    } while (ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    /* Free all contexts */
+    mbedtls_ssl_free(&tls_ssl);
+    mbedtls_ssl_config_free(&tls_conf);
+#if MBEDTLS_VERSION_MAJOR < 4
+    mbedtls_ctr_drbg_free(&tls_drbg);
+    mbedtls_entropy_free(&tls_entropy);
+#endif
+    mbedtls_x509_crt_free(&tls_ca_cert);
+    mbedtls_x509_crl_free(&tls_crl);
+    mbedtls_x509_crt_free(&tls_device_cert);
+    mbedtls_pk_free(&tls_device_key);
+    mbedtls_net_free(&tls_net);
+    tls_net.fd = -1;
+
+    tls_initialized = false;
+    fprintf(stderr, "[DCLAW-TLS] TLS engine shut down\n");
+}
+
+#else /* DCLAW_HAS_MBEDTLS not available */
+
+/*
+ * Stub implementations — always return failure.
+ * Any code path that attempts TLS without mbedTLS will fail loudly.
+ */
+
+int  dclaw_tls_init(void)                                          { return -1; }
+int  dclaw_tls_connect(int tcp_fd, const char *hostname)            { (void)tcp_fd; (void)hostname; return -1; }
+int  dclaw_tls_write(const uint8_t *data, size_t len)              { (void)data; (void)len; return -1; }
+int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms)      { (void)buf; (void)len; (void)timeout_ms; return -1; }
+void dclaw_tls_shutdown(void)                                       {}
+
+#endif /* DCLAW_HAS_MBEDTLS */

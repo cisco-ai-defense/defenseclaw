@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import NoReturn
 
 import click
@@ -141,6 +142,14 @@ def _not_a_policy_error(name: str, data: object) -> None:
     raise SystemExit(1)
 
 
+def _redact_home(path: str) -> str:
+    """Replace the user's home directory prefix with '~' in error messages."""
+    home = str(Path.home())
+    if path.startswith(home):
+        return "~" + path[len(home):]
+    return path
+
+
 def _policy_not_found(app: AppContext, name: str) -> NoReturn:
     """Report an unknown policy name with the valid names, then exit 1 (GAP-1818)."""
     try:
@@ -238,7 +247,7 @@ def create(
         raise SystemExit(1)
 
     if os.path.exists(dest):
-        click.echo(f"error: policy '{name}' already exists at {dest}", err=True)
+        click.echo(f"error: policy '{name}' already exists at {_redact_home(dest)}", err=True)
         click.echo("  Delete it first or choose a different name.", err=True)
         raise SystemExit(1)
 
@@ -476,6 +485,130 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
 # ---------------------------------------------------------------------------
 # activate
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# load — load a policy from a YAML file (supports FleetPolicy kind)
+# ---------------------------------------------------------------------------
+
+@policy.command()
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@pass_ctx
+def load(app: AppContext, path: str) -> None:
+    """Load a policy from a YAML file.
+
+    For standard policies this is equivalent to ``policy activate`` on
+    the named policy.  When the YAML has ``kind: FleetPolicy`` the file
+    is pushed to the fleet API instead.
+
+    Examples:\n
+      defenseclaw policy load my-policy.yaml\n
+      defenseclaw policy load fleet-policy.yaml
+    """
+    data = _load_policy(path)
+
+    kind = str(data.get("kind", "")).strip()
+    if kind == "FleetPolicy":
+        _load_fleet_policy(app, path, data)
+        return
+
+    # Standard policy: treat as activate. The file must contain a
+    # ``name`` field so the catalog can register it.
+    name = data.get("name") or data.get("metadata", {}).get("name", "")
+    if not name:
+        click.echo("error: policy YAML has no 'name' field; cannot activate.", err=True)
+        raise SystemExit(1)
+
+    # Copy the file into the user policy directory so activate can find it.
+    dest = os.path.join(_ensure_policies_dir(app), f"{_sanitize_policy_name(name)}.yaml")
+    _save_policy(dest, data)
+    ux.ok(f"Policy '{name}' saved to {dest}")
+
+    _activate_policy(app, name)
+    ux.ok(f"Policy '{name}' activated.")
+    _reload_and_report(app, name)
+
+
+def _load_fleet_policy(app: AppContext, path: str, data: dict) -> None:
+    """Push a FleetPolicy YAML to the fleet API."""
+    import requests as req_lib
+
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    cfg = app.cfg
+    gateway = getattr(cfg, "gateway", None)
+    port = int(getattr(gateway, "api_port", 0) or 0) if gateway is not None else 0
+    if port <= 0:
+        click.echo(
+            "error: Fleet API not available. Use `defenseclaw setup edge-connector` first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Use the fleet API token (DCLAW_FLEET_API_TOKEN), not the gateway token.
+    fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
+    if not fleet_token:
+        click.echo(
+            "error: DCLAW_FLEET_API_TOKEN not set. The fleet API requires a bearer token.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    client = OrchestratorClient(
+        host=gateway_api_client_host(cfg),
+        port=port,
+        token=fleet_token,
+        timeout=10,
+    )
+
+    metadata = data.get("metadata", {}) or {}
+    tenant_id = int(metadata.get("tenant_id", 1))
+    fleet_id = int(metadata.get("fleet_id", 1))
+
+    # Read the raw YAML string — the fleet API expects the unparsed YAML text
+    # in ``policy_yaml``, not a parsed object in ``policy``.
+    with open(path) as fh:
+        raw_yaml = fh.read()
+
+    payload = {
+        "tenant_id": tenant_id,
+        "fleet_id": fleet_id,
+        "policy_yaml": raw_yaml,
+        "profile": str(metadata.get("profile", "standard")),
+    }
+
+    try:
+        resp = client._session.post(
+            f"{client.base_url}/api/v1/fleet/policy/push",
+            json=payload,
+            timeout=client.timeout,
+            allow_redirects=False,
+        )
+        if resp.status_code in (404, 503):
+            click.echo(
+                "error: Fleet API not available. Use `defenseclaw setup edge-connector` first.",
+                err=True,
+            )
+            raise SystemExit(1)
+        resp.raise_for_status()
+        result = resp.json() if resp.content else {}
+    except req_lib.ConnectionError:
+        click.echo(
+            "error: Fleet API not available. Use `defenseclaw setup edge-connector` first.",
+            err=True,
+        )
+        raise SystemExit(1)
+    except req_lib.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        click.echo(f"error: Fleet API returned HTTP {status}.", err=True)
+        raise SystemExit(1)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"error: failed to push fleet policy: {exc}", err=True)
+        raise SystemExit(1)
+
+    name = metadata.get("name", os.path.basename(path))
+    status = result.get("status", "distributed")
+    ux.ok(f"Fleet policy '{name}' {status} (tenant={tenant_id}, fleet={fleet_id}).")
+
 
 @policy.command()
 @click.argument("name")
@@ -1030,7 +1163,7 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         raise SystemExit(1)
 
     if not os.path.isfile(real_path):
-        click.echo(f"error: policy '{name}' not found in {user_dir}", err=True)
+        click.echo(f"error: policy '{name}' not found in {_redact_home(user_dir)}", err=True)
         raise SystemExit(1)
 
     secure_client = asset_lists.is_secure_client(app.cfg)
@@ -1149,7 +1282,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     rd = rego_dir or _default_rego_dir(app)
 
     if not os.path.isdir(rd):
-        ux.err(f"error: rego directory not found: {rd}")
+        ux.err(f"error: rego directory not found: {_redact_home(rd)}")
         raise SystemExit(1)
 
     if not _has_rego_tests(rd):
@@ -1159,7 +1292,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         if not _try_rego_compile(rd, app.cfg):
             raise SystemExit(1)
         click.echo(
-            f"No Rego unit tests (*_test.rego) in {rd}; nothing to run. "
+            f"No Rego unit tests (*_test.rego) in {_redact_home(rd)}; nothing to run. "
             "Add <module>_test.rego files next to your policies to test them."
         )
         return
@@ -1742,11 +1875,11 @@ def _prepare_opa_data(app: AppContext, policy_data: dict) -> tuple[str, dict]:
         # advertised activation. Surface the failure and let
         # activate exit non-zero.
         raise click.ClickException(
-            f"failed to read OPA data file at {data_json_path}: {exc}"
+            f"failed to read OPA data file at {_redact_home(data_json_path)}: {exc}"
         ) from exc
     except json.JSONDecodeError as exc:
         raise click.ClickException(
-            f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
+            f"OPA data file at {_redact_home(data_json_path)} is not valid JSON: {exc}; "
             f"run `defenseclaw policy validate` and repair before activating"
         ) from exc
 

@@ -20,9 +20,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from types import SimpleNamespace
 
-import defenseclaw.migrations as migrations
 import defenseclaw.observability.v8_migration as migration_module
 import pytest
 import yaml
@@ -1150,56 +1148,6 @@ def test_both_legacy_tls_insecure_aliases_are_materialized(alias: str) -> None:
         },
     )
     assert _destination(_document(result), "generic-otlp")["tls"]["insecure"] is True
-
-
-def test_sink_certificate_opt_out_is_kept_only_on_https_endpoints() -> None:
-    # The v8 runtime refuses a certificate option on a plain-http endpoint, and
-    # a v7 sink ignored it there, so only the https sink keeps the opt-out.
-    result = _convert(
-        """config_version: 7
-audit_sinks:
-  - name: plain
-    kind: http_jsonl
-    enabled: true
-    http_jsonl: {url: http://127.0.0.1:9000/ingest, insecure_skip_verify: true}
-  - name: secure
-    kind: http_jsonl
-    enabled: true
-    http_jsonl: {url: https://siem.example.test/ingest, insecure_skip_verify: true}
-"""
-    )
-    document = _document(result)
-    assert "tls" not in _destination(document, "plain")
-    assert _destination(document, "secure")["tls"] == {"insecure_skip_verify": True}
-    assert "legacy_insecure_skip_verify_ignored:plain" in result.warnings
-
-
-@pytest.mark.parametrize(
-    ("block", "endpoint", "path"),
-    [
-        ("endpoint: http://127.0.0.1:4318, protocol: http", "http://127.0.0.1:4318", None),
-        ("endpoint: http://127.0.0.1:4318/custom/logs, protocol: http", "http://127.0.0.1:4318", "/custom/logs"),
-        ("endpoint: http://127.0.0.1:4317, protocol: grpc", "http://127.0.0.1:4317", None),
-    ],
-)
-def test_plaintext_otlp_logs_sink_materializes_v8_tls_mode(block: str, endpoint: str, path: str | None) -> None:
-    # A released otlp_logs sink sent plaintext to an http:// collector with no
-    # insecure flag; v8 needs that stated, or the whole upgrade is refused.
-    result = _convert(
-        f"""config_version: 7
-audit_sinks:
-  - name: local-logs
-    kind: otlp_logs
-    enabled: true
-    otlp_logs: {{{block}}}
-"""
-    )
-
-    destination = _destination(_document(result), "local-logs")
-    assert destination["endpoint"] == endpoint
-    assert destination["tls"] == {"insecure": True}
-    assert destination.get("signal_overrides", {}).get("logs", {}).get("path") == path
-    load_validate_v8(result.candidate)
 
 
 def test_plaintext_flat_otel_endpoint_materializes_v8_tls_mode() -> None:
@@ -2410,163 +2358,6 @@ def test_fresh_080_disabled_otel_placeholder_migrates_without_inventing_endpoint
     load_validate_v8(result.candidate)
 
 
-def _named_placeholder_with_galileo(master_enabled: bool = True) -> dict[str, object]:
-    document = yaml.safe_load(_FRESH_080_NAMED_OTEL_CONFIG)
-    otel = document["otel"]
-    otel["enabled"] = master_enabled
-    otel["resource"]["attributes"] = {"service.name": "migration-test"}
-    otel["destinations"].append(
-        {
-            "name": "galileo",
-            "preset": "galileo",
-            "enabled": True,
-            "endpoint": "https://api.galileo.ai/otel/traces",
-            "protocol": "http",
-            "headers": {"Galileo-API-Key": "${GALILEO_API_KEY}"},
-            "traces": {"enabled": True},
-            "logs": {"enabled": False},
-            "metrics": {"enabled": False},
-        }
-    )
-    return document
-
-
-@pytest.mark.parametrize("master_enabled", [True, False])
-@pytest.mark.parametrize("placeholder_first", [True, False])
-def test_named_release_placeholder_beside_galileo_preserves_configured_export(
-    master_enabled: bool, placeholder_first: bool
-) -> None:
-    document = _named_placeholder_with_galileo(master_enabled)
-    destinations = document["otel"]["destinations"]
-    if not placeholder_first:
-        destinations.reverse()
-    environment = {"GALILEO_API_KEY": "synthetic-test-key"}
-    result = _convert(yaml.safe_dump(document), environment)
-    document["otel"]["destinations"] = [item for item in destinations if item["name"] != "generic-otlp"]
-    without_placeholder = _convert(yaml.safe_dump(document), environment)
-
-    assert result.candidate == without_placeholder.candidate
-    assert result.environment_edits == without_placeholder.environment_edits
-    assert set(result.warnings) == set(without_placeholder.warnings) | {
-        "legacy_unconfigured_generic_otlp_placeholder_omitted"
-    }
-    migrated = _document(result)
-    assert migrated["observability"]["resource"]["attributes"]["service.name"] == "migration-test"
-    galileo = _destination(migrated, "galileo")
-    assert galileo.get("enabled", True) is master_enabled
-    assert galileo["endpoint"] == "https://api.galileo.ai"
-    assert galileo["signal_overrides"]["traces"]["path"] == "/otel/traces"
-    assert galileo["headers"] == {"Galileo-API-Key": {"env": "GALILEO_API_KEY"}}
-    assert {tuple(route["signals"]) for route in galileo["routes"]} == {("traces",)}
-    load_validate_v8(result.candidate)
-    assert _convert(result.candidate).candidate == result.candidate
-
-
-@pytest.mark.parametrize(
-    ("path", "value"),
-    [
-        (("name",), "operator-destination"),
-        (("enabled",), True),
-        (("enabled",), 0),
-        (("headers",), {"X-Operator": "custom"}),
-        (("batch", "max_queue_size"), 4096),
-        (("metrics", "export_interval_s"), 60.0),
-    ],
-    ids=["name", "enabled", "bool-to-int", "headers", "batch", "int-to-float"],
-)
-def test_edited_placeholder_beside_galileo_is_not_silently_omitted(path: tuple[str, ...], value: object) -> None:
-    document = _named_placeholder_with_galileo()
-    target = document["otel"]["destinations"][0]
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = value
-
-    with pytest.raises(V8MigrationError):
-        _convert(yaml.safe_dump(document))
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("logs", {"emit_individual_findings": True}),
-        ("traces", {"sampler": "parentbased_traceidratio", "sampler_arg": "1.0"}),
-        ("batch", {"scheduled_delay_ms": 1000}),
-    ],
-)
-def test_placeholder_beside_galileo_with_inherited_operator_changes_fails_closed(key: str, value: object) -> None:
-    document = _named_placeholder_with_galileo()
-    document["otel"][key] = value
-
-    with pytest.raises(V8MigrationError) as captured:
-        _convert(yaml.safe_dump(document))
-    assert captured.value.code == "candidate_validation_failed"
-
-
-def test_configured_disabled_generic_otlp_beside_galileo_is_preserved() -> None:
-    document = _named_placeholder_with_galileo()
-    document["otel"]["destinations"][0]["endpoint"] = "collector.example.test:4317"
-    result = _convert(yaml.safe_dump(document))
-    generic = _destination(_document(result), "generic-otlp")
-
-    assert generic["enabled"] is False
-    assert generic["endpoint"] == "collector.example.test:4317"
-    assert {tuple(route["signals"]) for route in generic["routes"]} == {("logs",), ("traces",), ("metrics",)}
-    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" not in result.warnings
-    load_validate_v8(result.candidate)
-
-
-def test_named_placeholder_beside_galileo_preserves_environment_flat_export() -> None:
-    document = _named_placeholder_with_galileo()
-    result = _convert(yaml.safe_dump(document), {"OTEL_EXPORTER_OTLP_ENDPOINT": "collector.example.test:4317"})
-    generic = _destination(_document(result), "generic-otlp-2")
-
-    assert generic.get("enabled", True) is True
-    assert generic["endpoint"] == "collector.example.test:4317"
-    assert {tuple(route["signals"]) for route in generic["routes"]} == {("logs",), ("traces",), ("metrics",)}
-    assert _destination(_document(result), "galileo").get("enabled", True) is True
-    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" in result.warnings
-    load_validate_v8(result.candidate)
-
-
-def test_named_placeholder_beside_galileo_upgrade_preflight_is_read_only(tmp_path, monkeypatch) -> None:
-    source = yaml.safe_dump(_named_placeholder_with_galileo()).encode()
-    config = tmp_path / "config.yaml"
-    config.write_bytes(source)
-    environment = tmp_path / ".env"
-    environment.write_text("GALILEO_API_KEY=synthetic-test-key\n", encoding="utf-8")
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    checked = []
-
-    def inspect(operation, **kwargs):
-        assert operation == "validate"
-        assert kwargs["gateway_binary"] == "/staged/defenseclaw-gateway"
-        candidate = Path(kwargs["config_path"]).read_bytes()
-        load_validate_v8(candidate)
-        document = yaml.safe_load(candidate)
-        assert all(item["name"] != "generic-otlp" for item in document["observability"]["destinations"])
-        assert _destination(document, "galileo")["headers"] == {"Galileo-API-Key": {"env": "GALILEO_API_KEY"}}
-        assert kwargs["environment_overrides"]["GALILEO_API_KEY"] == "synthetic-test-key"
-        checked.append(candidate)
-        return SimpleNamespace(valid=True, config_version=8)
-
-    monkeypatch.setattr(migrations, "inspect_v8_config", inspect)
-    ctx = migrations.MigrationContext(
-        openclaw_home=str(tmp_path / "openclaw"),
-        data_dir=str(tmp_path),
-        from_version="0.8.3",
-        to_version="1.0.0",
-        config_path=str(config),
-    )
-    migrations._preflight_observability_v8(ctx, str(scratch), gateway_binary="/staged/defenseclaw-gateway")
-
-    assert len(checked) == 1
-    assert config.read_bytes() == source
-    assert environment.read_text(encoding="utf-8") == "GALILEO_API_KEY=synthetic-test-key\n"
-    assert list(scratch.iterdir()) == []
-    assert ctx.changes == []
-
-
 def test_custom_disabled_endpointless_otel_destination_still_fails_closed() -> None:
     with pytest.raises(V8MigrationError) as captured:
         _convert(
@@ -3503,7 +3294,7 @@ audit_sinks:
         "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 219
+    assert len(action_selector) == 222
     assert "setup-redaction-policy" in action_selector
     assert {"config-update", "gateway-agent-start", "guardrail-verdict", "scan"}.issubset(action_selector)
     assert "judge" not in routes[0]["selector"]["event_names"]

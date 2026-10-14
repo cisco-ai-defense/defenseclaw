@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -64,6 +65,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+var fleetAPITokenConfigured = os.Getenv("DCLAW_FLEET_API_TOKEN") != ""
 
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
@@ -307,6 +310,11 @@ type APIServer struct {
 	stepIdxBySession map[string]*sessionStepState
 
 	connectorRegistry *connector.Registry
+
+	// fleetAPI serves the Edge Connector fleet management surface.
+	// nil when fleet is not wired; the route registration simply skips
+	// mounting the handler in that case.
+	fleetAPI *fleet.API
 
 	// ciscoInspector calls the Cisco AI Defense /api/v1/inspect/chat
 	// route from the hook lane (inspectToolPolicy +
@@ -883,6 +891,15 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
 }
 
+// SetFleetAPI registers the Edge Connector fleet management API so its
+// routes are mounted when the HTTP server starts.
+func (a *APIServer) SetFleetAPI(api *fleet.API) {
+	if a == nil {
+		return
+	}
+	a.fleetAPI = api
+}
+
 // hookHandlers maps connector names to their gateway-side HTTP handlers.
 // connectorHookHandlerByName is the registry that lets api.go map a
 // connector name to the http.HandlerFunc that owns its hook endpoint.
@@ -1231,6 +1248,12 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// can roll up turn counts + completion reasons per session.
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
+	// Edge Connector fleet management API. Mounted when the fleet subsystem
+	// is wired by the sidecar; skipped otherwise so un-configured gateways
+	// don't expose the surface.
+	if a.fleetAPI != nil {
+		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
+	}
 	a.registerSandboxRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
@@ -3770,6 +3793,15 @@ func requestGatewayToken(r *http.Request) string {
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Fleet API routes carry their own DCLAW_FLEET_API_TOKEN auth
+		// (see fleet.API.authMiddleware). Only exempt them from the
+		// gateway's main token check when the fleet token is actually
+		// configured — otherwise leave the gateway auth in place so the
+		// fleet surface is never unauthenticated.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && fleetAPITokenConfigured {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -1,0 +1,521 @@
+---
+title: Install
+description: Build the Edge Connector from source, configure a policy, and integrate it with any AI agent framework on Linux.
+keywords:
+  - Edge Connector install
+  - build from source
+  - Raspberry Pi
+  - PicoClaw integration
+  - MCP proxy
+  - Model Context Protocol
+  - LangChain
+  - LangGraph
+  - FastAPI
+  - Flask
+  - CMake
+  - IoT setup
+---
+
+## Build from source
+
+Required: `gcc`, `cmake` (3.22+), `make`.
+
+```bash
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
+cd defenseclaw/edge-connector
+mkdir build && cd build
+cmake .. -DDCLAW_PROFILE=STANDARD
+make -j$(nproc)
+```
+
+### Run tests
+
+```bash
+ctest --output-on-failure
+```
+
+11 test suites covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-17).
+
+### Install system-wide
+
+```bash
+sudo make install
+```
+
+### Build profiles
+
+```bash
+cmake .. -DDCLAW_PROFILE=MINIMAL   # ~22KB — MCUs, ultra-constrained devices
+cmake .. -DDCLAW_PROFILE=STANDARD  # ~68KB — Raspberry Pi, Jetson, SBCs
+cmake .. -DDCLAW_PROFILE=EDGE      # ~131KB — Edge gateways with bloom filter
+```
+
+> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
+
+## Configure the policy
+
+### Step 1 — Copy and edit
+
+```bash
+# Return to the repository root (if you are still in edge-connector/build)
+cd ../..
+
+mkdir -p ~/.defenseclaw
+cp edge-connector/policies/strict.yaml ~/.defenseclaw/policy.yaml
+```
+
+Edit `~/.defenseclaw/policy.yaml`:
+
+```yaml title="~/.defenseclaw/policy.yaml"
+name: my-device-policy
+version: 1
+
+skill_actions:
+  critical:
+    runtime: disable    # BLOCK
+  high:
+    runtime: disable    # BLOCK
+  medium:
+    runtime: warn       # WARN (allow but log)
+
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [net_fetch, actuate]
+      action: block
+
+  destination_allowlist:
+    - "api.openai.com"
+    - "api.anthropic.com"
+    - "*.your-company.com"
+
+  rate_limits:
+    tool_calls_per_minute: 60
+    network_requests_per_minute: 30
+    actuations_per_minute: 10
+
+  escalation_mode:
+    sensor_read: speculative    # allow immediately
+    read_fs: speculative
+    net_fetch: speculative      # allow if dest in allowlist
+    actuate: sync_block         # BLOCK without cloud
+    exec_shell: sync_block      # BLOCK without cloud
+    write_fs: sync_block        # BLOCK without cloud
+```
+
+### Step 2 — Configure content inspection
+
+```yaml title="~/.defenseclaw/policy.yaml (continued)"
+  content_inspection:
+    enabled: true
+    categories:
+      secret:              # API keys, tokens, private keys
+        enabled: true
+        severity: high
+        action: block
+      pii:                 # SSN, credit cards, emails
+        enabled: true
+        severity: high
+        action: block
+      credential:          # AWS keys, GCP service accounts
+        enabled: true
+        severity: high
+        action: block
+      exfil:               # Base64 blobs, hex dumps
+        enabled: true
+        severity: high
+        action: block
+      injection:           # Prompt injection, jailbreaks
+        enabled: true
+        severity: critical
+        action: block
+      command:             # Shell commands, SQL, code exec
+        enabled: true
+        severity: critical
+        action: block
+
+  ssrf_protection:
+    enabled: true
+    block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
+    block_cloud_metadata: true     # 169.254.169.254
+```
+
+### Step 3 — Compile (optional)
+
+Only needed when you change the policy. Pre-built binaries include the default policy.
+
+```bash
+cd edge-connector
+python3 tools/policy_compiler.py \
+  --input ~/.defenseclaw/policy.yaml \
+  --profile standard --version 1 \
+  --output-header generated/policy_tables.h \
+  --output-binary dist/policy.bin
+```
+
+## Integrate with your AI agent
+
+The Edge Connector is framework-agnostic. Choose the integration that matches your stack.
+
+### Generic Python adapter (recommended)
+
+The simplest starting point for any Python agent. Three lines to add security enforcement:
+
+```python
+from generic_hook import EdgeConnector
+
+ec = EdgeConnector()  # auto-detects FFI or Unix socket
+
+verdict = ec.evaluate(
+    tool_name="exec_shell",
+    arguments={"command": "rm -rf /"},
+)
+if verdict.blocked:
+    print(f"Blocked: {verdict.reason}")
+```
+
+Auto-detects FFI (ctypes) first, falls back to Unix socket. Configure fail-open/fail-closed with `DCLAW_FAIL_OPEN=1`.
+
+### MCP proxy (Model Context Protocol)
+
+A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server. Intercepts every `tools/call` request and evaluates it through the 8-stage pipeline. All other MCP messages pass through unchanged.
+
+```
+LLM Client (Claude, Codex)
+    | MCP (stdio / HTTP)
+    v
+Edge Connector MCP Proxy
+    | evaluates via EdgeConnector.evaluate()
+    | MCP (stdio / HTTP)
+    v
+Real MCP Server (ESP-Claw, HA-MCP, etc.)
+```
+
+Quick start (stdio):
+
+```bash
+DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
+  python3 -m mcp_proxy
+```
+
+With a config file:
+
+```bash
+python3 -m mcp_proxy --config tools/mcp_proxy_config.yaml
+```
+
+HTTP transport (remote servers):
+
+```bash
+DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
+DCLAW_MCP_TRANSPORT=http \
+  python3 -m mcp_proxy
+```
+
+Use with Claude Desktop or Claude Code by adding the proxy to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "esp-claw-secured": {
+      "command": "python3",
+      "args": ["-m", "mcp_proxy"],
+      "env": {
+        "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
+        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+      }
+    }
+  }
+}
+```
+
+| MCP Method | Action | Description |
+| --- | --- | --- |
+| `tools/call` | Evaluate | Full 8-stage pipeline. Blocked calls return an MCP error with the reason. |
+| `tools/list`, `resources/*`, `prompts/*`, `initialize`, etc. | Passthrough | Forwarded unchanged to the real server. |
+
+Environment variables: `DCLAW_MCP_UPSTREAM` (target command or URL), `DCLAW_MCP_TRANSPORT` (`stdio` or `http`), `DCLAW_MCP_PORT` (default 8089). All standard Edge Connector env vars are passed through.
+
+### LangChain / LangGraph
+
+Wrap LangChain tools so every invocation passes through the Edge Connector:
+
+```python
+from langchain_hook import wrap_tools
+
+tools = wrap_tools(my_tools)
+agent = create_react_agent(llm, tools)
+```
+
+Or use as a LangGraph node:
+
+```python
+from langchain_hook import edge_connector_node
+
+graph.add_node("security_gate", edge_connector_node)
+graph.add_edge("agent", "security_gate")
+graph.add_edge("security_gate", "tools")
+```
+
+### HTTP middleware (FastAPI / Flask)
+
+For agents that expose tool execution via HTTP APIs:
+
+```python
+# FastAPI
+from http_middleware import EdgeConnectorMiddleware
+app.add_middleware(EdgeConnectorMiddleware)
+
+# Flask
+from http_middleware import flask_edge_connector
+flask_edge_connector(app)
+```
+
+Intercepts POST requests to tool-execution endpoints and returns `403` for blocked calls.
+
+### PicoClaw
+
+PicoClaw integrates via its process hook system:
+
+```bash
+cp /usr/local/lib/defenseclaw/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
+picoclaw config edit
+```
+
+Add to `hooks.processes`:
+
+```json
+{
+  "defenseclaw_gate": {
+    "enabled": true,
+    "priority": 5,
+    "transport": "stdio",
+    "command": ["python3", "~/.picoclaw/hooks/defenseclaw_gate.py"],
+    "env": {
+      "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
+      "DCLAW_LOG_PATH": "~/edge-connector.log"
+    },
+    "intercept": ["before_tool", "before_llm", "after_llm"]
+  }
+}
+```
+
+#### What gets intercepted
+
+| Hook | What happens | Actions |
+| --- | --- | --- |
+| `before_tool` | Full 8-stage pipeline (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence, cache, escalation) | `deny_tool` or `continue` |
+| `before_llm` | Prompt injection detection (20+ patterns) | `abort_turn` or `continue` |
+| `after_llm` | PII/credential leakage scanning | Detection + logging |
+
+#### Verify
+
+```bash
+# Test the hook standalone
+echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
+  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  python3 ~/.picoclaw/hooks/defenseclaw_gate.py
+
+# Should ALLOW — sensor read
+picoclaw agent -m "check battery status"
+
+# Should BLOCK — shell execution
+picoclaw agent -m "run whoami in the shell"
+
+# Watch decisions
+tail -f ~/edge-connector.log
+```
+
+### Low-level: shared library (FFI)
+
+Load `libdclaw_core.so` from any language that supports C FFI:
+
+```python
+import ctypes
+lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
+# Call dclaw_evaluate() — see defenseclaw.h for struct definitions
+```
+
+### Low-level: Unix socket (JSON-RPC)
+
+Query the daemon from any process:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
+  "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
+}}' | socat - UNIX-CONNECT:/tmp/defenseclaw.sock
+```
+
+## Tool-to-capability mapping
+
+Each tool must map to a capability that determines how the Edge Connector handles it.
+
+| Capability | Flag | Escalation | Behavior |
+| --- | --- | --- | --- |
+| `SENSOR_READ` | `0x40` | speculative | Allow immediately (read-only) |
+| `READ_FS` | `0x01` | speculative | Allow immediately |
+| `NET_FETCH` | `0x08` | speculative | Allow if destination in allowlist |
+| `SEND_MSG` | `0x10` | speculative | Allow if destination in allowlist |
+| `ACTUATE` | `0x20` | sync_block | Block without cloud (physical world) |
+| `EXEC_SHELL` | `0x04` | sync_block | Block without cloud (code execution) |
+| `WRITE_FS` | `0x02` | sync_block | Block without cloud (data modification) |
+
+## MQTT broker setup
+
+The Edge Connector uses MQTT 3.1.1 for cloud escalation (device to gateway) and command dispatch (gateway to device). Any standards-compliant broker works; Eclipse Mosquitto is recommended for simplicity.
+
+**Quick start with Docker:**
+
+Mosquitto 2.x defaults to local-only mode (no remote connections). You must mount a config file that binds to `0.0.0.0`:
+
+```bash
+# Create a minimal config that accepts remote connections
+cat > mosquitto.conf <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous true
+EOF
+
+docker run -d --name mosquitto -p 1883:1883 \
+  -v ./mosquitto.conf:/mosquitto/config/mosquitto.conf \
+  eclipse-mosquitto:2
+```
+
+<Callout type="warn">
+`allow_anonymous true` is acceptable for quick-start testing only. For production, configure a `password_file` or use an authentication plugin. See the Mosquitto documentation for details.
+</Callout>
+
+**Authenticated setup (recommended for production):**
+
+```bash
+# Create the mqtt directory first (prevents Docker from creating it as root)
+mkdir -p mqtt
+
+# Create a password file with a broker user (runs as current user to avoid
+# root-owned files that the non-root broker process cannot read — P2-16 fix)
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./mqtt:/mosquitto/config eclipse-mosquitto \
+  mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
+# 0640 lets owner (UID 1883 after chown) read/write; the Docker container
+# runs as UID 1883, so the file must be readable by that user.
+chmod 0640 mqtt/passwd
+
+# Create a config that requires authentication
+cat > mqtt/mosquitto.conf <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous false
+password_file /mosquitto/config/passwd
+EOF
+
+docker run -d --name mosquitto -p 1883:1883 \
+  -v ./mqtt:/mosquitto/config \
+  eclipse-mosquitto:2
+```
+
+Set the broker credentials on both sides using environment variables (the Go and C MQTT clients do not parse userinfo from the broker URL):
+
+```bash
+# Gateway (Go fleet server)
+export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+export DCLAW_MQTT_USER=dclaw
+export DCLAW_MQTT_PASS=yourpassword
+
+# Edge devices (C edge connector)
+export DCLAW_BROKER_URL=mqtt://broker-host:1883
+export DCLAW_MQTT_USER=dclaw
+export DCLAW_MQTT_PASS=yourpassword
+```
+
+<Callout type="warn">
+MQTT transport is currently plaintext only (`mqtt://`). TLS/mTLS support (`mqtts://`) is planned for Phase 2. Deploy the MQTT broker on a trusted network or use a VPN tunnel.
+</Callout>
+
+**Configure the gateway (Go fleet server):**
+
+```bash
+export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+```
+
+**Configure edge devices (C edge connector):**
+
+```bash
+export DCLAW_BROKER_URL=mqtt://broker-host:1883
+```
+
+Both sides must point to the same broker. The gateway publishes commands and policy updates; devices publish heartbeats and escalation requests.
+
+## Environment variables
+
+### Server-side (Go fleet gateway)
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DCLAW_FLEET_API_TOKEN` | yes | Bearer token for authenticating Fleet API requests. If unset, all API requests are rejected. |
+| `DCLAW_MQTT_BROKER_URL` | yes | MQTT broker connection URI (e.g., `tcp://broker-host:1883`). Used for command dispatch, policy distribution, and heartbeat ingestion. |
+| `DCLAW_OTA_KEY` | yes | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Used to sign OTA policy updates. Must match the key configured on devices. |
+
+### Device-side (C edge connector and Python hooks)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DCLAW_TENANT_ID` | (none) | Tenant identifier for this device. |
+| `DCLAW_FLEET_ID` | (none) | Fleet identifier for this device. |
+| `DCLAW_DEVICE_ID` | (none) | Unique device identifier within the fleet. |
+| `DCLAW_BROKER_URL` | (none) | MQTT broker URI (e.g., `mqtt://broker-host:1883`). Used for heartbeats and cloud escalation. |
+| `DCLAW_OTA_KEY` | (none) | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Must match the key configured on the server. |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
+| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
+| `DCLAW_AUDIT_KEY` | (none) | HMAC key for the tamper-evident audit chain. If unset, audit entries are not cryptographically chained. |
+
+### Compile-time constants
+
+Set in `CMakeLists.txt`; changing these requires rebuilding the C library:
+
+| Constant | Default | Description |
+| --- | --- | --- |
+| `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables compiled into binary via `policy_tables.h` |
+| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory (CMake variable) |
+| `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Max content snippet size for cloud escalation (set in `config.h.in`) |
+
+## Grafana dashboard
+
+A pre-built Grafana dashboard is included at `edge-connector/dashboards/fleet-dashboard.json`. It visualizes device status, verdict rates, cache performance, and alert history.
+
+**Import the dashboard:**
+
+1. Open Grafana and go to **Dashboards** > **Import**.
+2. Click **Upload JSON file** and select `edge-connector/dashboards/fleet-dashboard.json`, or paste the file contents directly.
+3. When prompted, select your Prometheus data source for the `DS_PROMETHEUS` variable.
+4. Click **Import**.
+
+<Callout type="warn">
+The dashboard expects the `DS_PROMETHEUS` datasource variable to be configured. It queries the Prometheus metrics exposed by the fleet gateway at `GET /api/v1/fleet/metrics` (see the [API reference](/docs/edge-connector/api-reference#prometheus-metrics)). Ensure your Prometheus instance is scraping the fleet gateway endpoint with the correct `Authorization` header.
+</Callout>
+
+The dashboard includes panels for:
+- Devices online/offline/degraded/lockdown (gauge)
+- Heartbeat rate (time series)
+- Block vs. allow verdict rates (time series)
+- Verdict cache hit ratio (stat)
+- Audit chain integrity (alert panel)
+- Policy rollback and emergency command counters
+
+## Benchmark
+
+```bash
+cd edge-connector/build
+./tests/bench_latency
+```
+
+Expected on ARM Cortex-A: &lt;5μs decisions, &gt;100K/sec throughput.
+
+## Troubleshooting
+
+| Problem | Solution |
+| --- | --- |
+| `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
+| All tools blocked | Check `TOOL_CAP_MAP` — unknown tools default to `SENSOR_READ` (safe); tools with dangerous keywords (`exec`, `shell`, `bash`, `run`, `write`, `delete`, `rm`) upgrade to `EXEC_SHELL` |
+| `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
+| `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` |
+| `CONTENT_BLOCK` false positives | Disable the offending category or add an exception pattern |
+| `SSRF_BLOCK` on internal services | Add trusted hosts to `ssrf_protection.private_ip_allowlist` |

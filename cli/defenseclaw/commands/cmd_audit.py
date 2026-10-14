@@ -34,6 +34,10 @@ def audit() -> None:
     'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
     same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
+
+    \b
+    Fleet device events are available via the Fleet API.
+    Use 'defenseclaw status' or 'defenseclaw edge-connector health' to see a summary.
     """
 
 
@@ -184,6 +188,12 @@ def audit_log_activity(app: AppContext, payload_file: Path) -> None:
             "add the constant to defenseclaw.audit_actions and internal/audit/actions.go first",
         )
 
+    VALID_SEVERITIES = {"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
+    severity = str(data.get("severity") or "INFO").upper()
+    if severity not in VALID_SEVERITIES:
+        click.echo(f"Invalid severity: {severity}. Must be one of {VALID_SEVERITIES}", err=True)
+        raise SystemExit(1)
+
     logger.log_activity(
         actor=str(data.get("actor") or "cli"),
         action=action,
@@ -194,6 +204,6 @@ def audit_log_activity(app: AppContext, payload_file: Path) -> None:
         diff=data.get("diff"),
         version_from=str(data.get("version_from") or ""),
         version_to=str(data.get("version_to") or ""),
-        severity=str(data.get("severity") or "INFO"),
+        severity=severity,
     )
     click.echo(ux._style("activity logged", fg="green"), file=sys.stderr)
