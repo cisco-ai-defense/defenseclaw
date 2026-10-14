@@ -120,7 +120,10 @@ class RegistryStructureTests(unittest.TestCase):
                 mock.patch.object(envvars_module, "__file__", str(module)),
                 mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}),
             ):
-                self.assertEqual(envvars_module._registry_path(), bundled)
+                self.assertEqual(
+                    envvars_module._registry_path().resolve(),
+                    bundled.resolve(),
+                )
 
     def test_new_windows_envvar_contract_is_pinned(self) -> None:
         expected_registry = {

@@ -7469,6 +7469,215 @@
         }
       ],
       "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_ALGORITHM",
+      "category": "debug",
+      "purpose": "GRPO training algorithm",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_BACKEND",
+      "category": "debug",
+      "purpose": "Training compute backend",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_CATEGORY",
+      "category": "debug",
+      "purpose": "Guardrail category for training",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_GROUP_SIZE",
+      "category": "debug",
+      "purpose": "GRPO group size",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_KL_COEF",
+      "category": "debug",
+      "purpose": "KL divergence coefficient",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_LORA_RANK",
+      "category": "debug",
+      "purpose": "LoRA adapter rank",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_MAX_GEN_LENGTH",
+      "category": "debug",
+      "purpose": "Maximum generation token length",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_MAX_STEPS",
+      "category": "debug",
+      "purpose": "Maximum training steps",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_MEMORY_MODE",
+      "category": "debug",
+      "purpose": "GPU memory optimization mode",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_POLICY_GGUF",
+      "category": "debug",
+      "purpose": "GGUF model path for policy training",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRAINING_REWARD_FUNCS",
+      "category": "debug",
+      "purpose": "Comma-separated reward functions",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_training.py",
+          "description": "Training subprocess env"
+        }
+      ],
+      "since": "1.1.0"
     }
   ]
 }

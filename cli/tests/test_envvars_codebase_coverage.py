@@ -196,6 +196,8 @@ _NON_ENVVAR_TOKENS = frozenset(
         # (internal/cli/windows_enterprise_service_test.go and
         # cli/tests/test_windows_enterprise_service_contract.py), so no
         # token-level exclusion is required.
+        # C header include guard in edge-connector/include/defenseclaw.h.
+        "DEFENSECLAW_H",
     }
 )
 
