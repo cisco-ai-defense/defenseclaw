@@ -315,19 +315,19 @@ dc_bundle_status() {
 dc_require_bundle() {
     doc=$("$1" enterprise bundle status --json 2>/dev/null </dev/null || true)
     current=$(dc_json_object "$doc" current)
-    id=$(dc_json_field "$current" bundle_id)
-    version=$(dc_json_field "$current" version)
-    case "$id:$version" in
+    bundle_id=$(dc_json_field "$current" bundle_id)
+    bundle_version=$(dc_json_field "$current" version)
+    case "$bundle_id:$bundle_version" in
         b-*:[0-9]*) ;;
         *) dc_report 0 bundle-missing "no signed policy bundle is confirmed on this computer; run: sudo $1 enterprise bundle status" ;;
     esac
     case "$2" in
-        b-*) [ "$id" = "$2" ] || dc_report 0 bundle-mismatch "the confirmed policy bundle is $id, not $2" ;;
-        *) [ "$version" -ge "$2" ] || dc_report 0 bundle-outdated "the confirmed policy bundle is version $version, older than $2" ;;
+        b-*) [ "$bundle_id" = "$2" ] || dc_report 0 bundle-mismatch "the confirmed policy bundle is $bundle_id, not $2" ;;
+        *) [ "$bundle_version" -ge "$2" ] || dc_report 0 bundle-outdated "the confirmed policy bundle is version $bundle_version, older than $2" ;;
     esac
     dc_json_true "$doc" applied ||
-        dc_report 0 bundle-not-enforced "the running gateway does not enforce policy bundle $id; run: sudo $1 enterprise bundle status"
-    DC_BUNDLE_TEXT=", policy bundle $id version $version"
+        dc_report 0 bundle-not-enforced "the running gateway does not enforce policy bundle $bundle_id; run: sudo $1 enterprise bundle status"
+    DC_BUNDLE_TEXT=", policy bundle $bundle_id version $bundle_version"
 }
 
 # dc_require_sessions_protected <gateway>: a bundle can be confirmed while

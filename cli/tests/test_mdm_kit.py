@@ -895,6 +895,34 @@ dc_report 1 1.2.3 ""
         assert _run([detect, "--bundle-status", "--format", "jamf"]).stdout == "<result>none 0 unknown</result>\n"
 
 
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_keeps_product_version_with_required_bundle(tmp_path: Path, platform: str) -> None:
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f'  "enterprise {platform} status --json") echo \'{{"installed":true,"installed_version":"9.9.9"}}\' ;;\n'
+        f'  "enterprise bundle status --json") echo \'{{"current":{{"bundle_id":"{_BUNDLE_ID}","version":1}},"applied":true}}\' ;;\n'
+        '  *) exit 9 ;;\nesac\n',
+        encoding="ascii",
+    )
+    gateway.chmod(0o755)
+    source = _text(MDM / platform / "detect.sh")
+    source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', '[ 1 = 1 ]', 1)
+    source = source.replace('[ "$(id -u)" = 0 ]', '[ 1 = 1 ]', 1)
+    original = ("gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux" if platform == "linux"
+                else "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos")
+    assert original in source
+    source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
+    source = source.replace('dc_trusted_path "$gateway" ||', '[ -f "$gateway" ] ||', 1)
+    detect = tmp_path / "detect.sh"
+    detect.write_text(source, encoding="ascii")
+    result = subprocess.run(["sh", str(detect), "--require-bundle", "1"], capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        0, f"DefenseClaw Enterprise 9.9.9, policy bundle {_BUNDLE_ID} version 1\n", ""
+    )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_can_require_running_sessions_protected(tmp_path: Path) -> None:
     source = _text(MDM / "linux" / "detect.sh")
