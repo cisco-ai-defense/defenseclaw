@@ -1222,6 +1222,15 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		// path (loadUnselectedWindowsManagedRuntimeBundle, called by
 		// GC) is separate from the selector-removal validator, so the
 		// strict-mode gate added there needs its mirror here.
+		if windowsEnterpriseStandaloneProcess() {
+			// The standalone profile keeps main's refusal: the bulldoze
+			// reclaim below (#1068) is a Secure Client recovery.
+			return entry, nil, fmt.Errorf(
+				"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
+					"it names another connector, account, data folder or hook binary than its file name and this deployment do",
+				path,
+			)
+		}
 		if managed.TrustStrictAncestors() {
 			return entry, nil, fmt.Errorf(
 				"enterprise hooks: refusing to collect managed runtime "+
@@ -2189,6 +2198,25 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		return errors.New(
 			"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
 		)
+	}
+	if windowsEnterpriseStandaloneProcess() {
+		// The standalone profile keeps main's refusal: the bulldoze reclaim
+		// below (#1068) is a Secure Client recovery. A selection another
+		// deployment left behind is reported as a mismatched selected
+		// runtime, not silently retired.
+		if entry.HookExecutable != opts.HookExecutable ||
+			!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+			return errors.New(
+				"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
+			)
+		}
+		if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
+			!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
+			return errors.New(
+				"enterprise hooks: refusing to remove a managed runtime selector entry with a different data directory",
+			)
+		}
+		return nil
 	}
 	strict := managed.TrustStrictAncestors()
 	if entry.HookExecutable != opts.HookExecutable ||

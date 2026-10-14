@@ -2083,9 +2083,9 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 }
 
 // claudeCodeSetupHookGroupCount is the number of events Setup wires for opts.
-// An unversioned Setup selects the best-effort contract (the union of every
-// registered contract's events, e.g. v2's DirectoryAdded), so the expected
-// managed-hook count is the setup-selected matrix, not the v1 hookGroups list.
+// An unversioned Setup selects the best-effort contract (the default plus the
+// events of every contract it may stand in for), so the expected managed-hook
+// count is the setup-selected matrix rather than a fixed list.
 func claudeCodeSetupHookGroupCount(t *testing.T, opts SetupOpts) int {
 	t.Helper()
 	groups, err := claudeCodeHookGroupsForSetup(opts)
@@ -2653,8 +2653,8 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 	ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
 
-	// An unversioned setup wires the best-effort contract (the union of every
-	// registered event), so verify against the same setup-selected matrix.
+	// An unversioned setup wires the best-effort contract, so verify against
+	// the same setup-selected matrix.
 	setupOpts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
 	if err := NewClaudeCodeConnector().Setup(context.Background(), setupOpts); err != nil {
 		t.Fatalf("Setup: %v", err)

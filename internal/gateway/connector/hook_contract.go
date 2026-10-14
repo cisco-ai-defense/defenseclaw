@@ -1409,10 +1409,30 @@ func bestEffortHookContract(contracts []HookContract) HookContract {
 		return HookContract{}
 	}
 	fallback := defaultHookContract(contracts)
-	fallback.Events = unionHookContractStrings(fallback.Events, contracts, func(contract HookContract) []string {
+	// Union only contracts the default may stand in for: those not gated
+	// entirely above the default's tested range. A newer contract's events
+	// (Claude Code v2's DirectoryAdded) are unknown to the agents the default
+	// describes, and the union keeps the default's ContractID, so including
+	// them would render a matrix that a pin of that ID rejects (the managed
+	// policy runtime verifier and the v1 guardian expect the v1 event set).
+	eligible := make([]HookContract, 0, len(contracts))
+	for _, contract := range contracts {
+		if !hookContractGatedAbove(contract, fallback) {
+			eligible = append(eligible, contract)
+		}
+	}
+	fallback.Events = unionHookContractStrings(fallback.Events, eligible, func(contract HookContract) []string {
 		return contract.Events
 	})
 	return fallback
+}
+
+// hookContractGatedAbove reports whether contract applies only to agent
+// versions at or above base's exclusive upper bound.
+func hookContractGatedAbove(contract, base HookContract) bool {
+	upper := strings.TrimSpace(base.MaxAgentVersion)
+	lower := strings.TrimSpace(contract.MinAgentVersion)
+	return upper != "" && lower != "" && compareVersion(lower, upper) >= 0
 }
 
 func unionHookContractStrings(

@@ -3464,3 +3464,27 @@ func TestHookContractGitBuildVersion(t *testing.T) {
 		t.Fatalf("hermes release = %+v", got)
 	}
 }
+
+// The best-effort union keeps the default's ContractID, so it must not pull in
+// events of a contract gated above the default's range: an unversioned Claude
+// Code setup renders exactly the v1 matrix a pin of claudecode-hooks-v1
+// verifies (no v2-only DirectoryAdded).
+func TestBestEffortHookContractExcludesNewerGatedContracts(t *testing.T) {
+	fallback := BestEffortHookContract(ResolveHookContract("claudecode", ""))
+	pinned, ok := hookContractByID("claudecode", fallback.ContractID)
+	if !ok || fallback.ContractID != "claudecode-hooks-v1" {
+		t.Fatalf("fallback=%s registered=%t, want claudecode-hooks-v1", fallback.ContractID, ok)
+	}
+	if strings.Join(fallback.Events, ",") != strings.Join(pinned.Events, ",") {
+		t.Fatalf("unversioned events=%v, want the pinned v1 events %v", fallback.Events, pinned.Events)
+	}
+	for _, event := range fallback.Events {
+		if event == "DirectoryAdded" {
+			t.Fatal("unversioned Claude Code contract includes v2-only DirectoryAdded")
+		}
+	}
+	groups, err := claudeCodeHookGroupsForSetup(SetupOpts{})
+	if err != nil || len(groups) != len(hookGroups) {
+		t.Fatalf("unversioned setup groups=%d err=%v, want %d", len(groups), err, len(hookGroups))
+	}
+}
