@@ -58,10 +58,40 @@ type GenerationState struct {
 	Generation   uint64 `json:"generation"`
 	ConfigSHA256 string `json:"config_sha256"`
 	Actor        string `json:"actor"`
+	LocalActor   string `json:"local_actor,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	// WrittenAt is RFC 3339 UTC.
 	WrittenAt       string `json:"written_at"`
 	GenerationReset bool   `json:"generation_reset,omitempty"`
+	// BundleID, BundleVersion and SignerKeyID name the signed policy bundle
+	// whose config the enterprise lifecycle installed in this generation;
+	// absent for every other writer.
+	BundleID      string `json:"bundle_id,omitempty"`
+	BundleVersion uint64 `json:"bundle_version,omitempty"`
+	SignerKeyID   string `json:"signer_key_id,omitempty"`
+	// Transaction* identifies the attempted bundle on a rollback generation.
+	// Bundle* above continues to identify the policy that is now enforcing.
+	TransactionActor         string `json:"transaction_actor,omitempty"`
+	TransactionBundleID      string `json:"transaction_bundle_id,omitempty"`
+	TransactionBundleVersion uint64 `json:"transaction_bundle_version,omitempty"`
+	TransactionSignerKeyID   string `json:"transaction_signer_key_id,omitempty"`
+	TransactionSummary       string `json:"transaction_summary,omitempty"`
+}
+
+// Writer is who records a generation and why, and the policy bundle it
+// installs (only the enterprise lifecycle sets the bundle fields).
+type Writer struct {
+	Actor                    string
+	LocalActor               string
+	Reason                   string
+	BundleID                 string
+	BundleVersion            uint64
+	SignerKeyID              string
+	TransactionActor         string
+	TransactionBundleID      string
+	TransactionBundleVersion uint64
+	TransactionSignerKeyID   string
+	TransactionSummary       string
 }
 
 // LockPath returns the writer lock path for a config path.
@@ -199,7 +229,7 @@ func (t *Txn) Read() (raw []byte, mode os.FileMode, exists bool, err error) {
 // full disk before the generation file), the previous bytes are put back so
 // the error means nothing changed; if that restore fails too, the error says
 // config.yaml holds the new bytes.
-func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.FileMode, actor, reason string) (GenerationState, error) {
+func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.FileMode, w Writer) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
 	}
@@ -214,7 +244,7 @@ func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.Fi
 	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
 		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
 	}
-	state, err := t.RecordGeneration(SHA256Hex(candidate), actor, reason)
+	state, err := t.RecordGeneration(SHA256Hex(candidate), w)
 	if err != nil {
 		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
 	}
@@ -244,15 +274,24 @@ func (t *Txn) undoCommit(cause error, candidate, previous []byte, existed bool, 
 // RecordGeneration advances config.generation.json for bytes that are
 // already on disk (a writer that installs the file itself, such as the
 // enterprise lifecycle). The lock must still be held.
-func (t *Txn) RecordGeneration(configSHA256, actor, reason string) (GenerationState, error) {
+func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: generation update without the writer lock")
 	}
 	next := GenerationState{
-		ConfigSHA256: configSHA256,
-		Actor:        actor,
-		Reason:       reason,
-		WrittenAt:    time.Now().UTC().Format(time.RFC3339),
+		ConfigSHA256:             configSHA256,
+		Actor:                    w.Actor,
+		LocalActor:               w.LocalActor,
+		Reason:                   w.Reason,
+		WrittenAt:                time.Now().UTC().Format(time.RFC3339),
+		BundleID:                 w.BundleID,
+		BundleVersion:            w.BundleVersion,
+		SignerKeyID:              w.SignerKeyID,
+		TransactionActor:         w.TransactionActor,
+		TransactionBundleID:      w.TransactionBundleID,
+		TransactionBundleVersion: w.TransactionBundleVersion,
+		TransactionSignerKeyID:   w.TransactionSignerKeyID,
+		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
 	switch {

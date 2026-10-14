@@ -36,6 +36,7 @@
 		<string>/opt/cisco/defenseclaw/etc/config.yaml</string>
 		<string>/opt/cisco/defenseclaw/etc/secrets</string>
 		<string>/opt/cisco/defenseclaw/etc/policies</string>
+		<string>/opt/cisco/defenseclaw/etc/bundles/inbox</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>/</string>

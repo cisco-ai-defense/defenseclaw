@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -82,6 +83,8 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 			{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 			{Path: l.ConfigDir, Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 			{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 			{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 			{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},
@@ -101,6 +104,8 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 		{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 		{Path: l.ConfigDir, Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 		{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 		{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},

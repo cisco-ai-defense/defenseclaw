@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/unix"
 )
 
@@ -105,11 +106,11 @@ func hookAPIValidateLinuxPOSIXACL(path string, data []byte) error {
 			if hookAPITrustedOwner(id) {
 				continue
 			}
-			return fmt.Errorf("untrusted uid %d has write access in POSIX ACL on %s", id, path)
+			return managed.NewTrustVerdict("untrusted uid %d has write access in POSIX ACL on %s", id, path)
 		case hookAPILinuxACLGroupObj, hookAPILinuxACLGroup:
-			return fmt.Errorf("group has write access in POSIX ACL on %s", path)
+			return managed.NewTrustVerdict("group has write access in POSIX ACL on %s", path)
 		case hookAPILinuxACLOther:
-			return fmt.Errorf("other has write access in POSIX ACL on %s", path)
+			return managed.NewTrustVerdict("other has write access in POSIX ACL on %s", path)
 		case hookAPILinuxACLMask:
 			continue
 		}

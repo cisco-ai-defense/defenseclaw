@@ -2399,7 +2399,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 	for _, original := range []agentHookResponse{
 		{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
-			Reason: "standalone allow", Mode: "action",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 		},
 		{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
@@ -2415,6 +2415,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 			if got.Action != original.Action || got.RawAction != original.RawAction ||
 				got.Reason != original.Reason ||
 				got.EvaluationID != original.EvaluationID ||
+				got.SuppressNotification != original.SuppressNotification ||
 				!slices.Equal(got.Findings, original.Findings) ||
 				!slices.Equal(got.RuleIDs, original.RuleIDs) {
 				t.Fatalf(
@@ -2483,7 +2484,7 @@ func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPan
 	}
 	original := agentHookResponse{
 		Action: "allow", RawAction: "allow", Severity: "NONE",
-		Reason: "standalone allow", Mode: "action",
+		Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 	}
 
 	discoveryCapture := &toolChainHookCapture{}

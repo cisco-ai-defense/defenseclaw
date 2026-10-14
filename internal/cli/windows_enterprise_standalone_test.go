@@ -888,6 +888,26 @@ func installedStatus(action string) map[string]any {
 	}
 }
 
+func TestWindowsEnterpriseConfirmedBundleVerifyFailureDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report *windowsEnterpriseInstallerReport
+		drift  string
+		want   string
+	}{
+		{"verified ACL failure", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true, Errors: []string{"managed ACL is invalid"}}, "", "managed ACL is invalid"},
+		{"gateway unavailable", &windowsEnterpriseInstallerReport{Installed: true}, "", "the gateway is not ready"},
+		{"pending transaction", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true, TransactionPending: true}, "", "a lifecycle transaction is pending"},
+		{"hook runtime permissions", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true}, "machine policy summary ACL drift", "machine policy summary ACL drift"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowsEnterpriseVerifyFailureDetail(tc.report, tc.drift); got != tc.want {
+				t.Fatalf("failure detail = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // ensure's Status and Verify probes carry no mutation inputs: the installer
 // refuses -NoStart, -Mode, and -Connector for them, and a refused probe must
 // not be read as "not installed".
@@ -1403,6 +1423,18 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
+	failedReport, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_registrations_failed":["claudecode/` + sid + `: settings still holds DefenseClaw's hook"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedPurge := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(failedPurge, &windowsEnterpriseLifecycleOptions{purge: true}, failedReport, windowsEnterpriseStandaloneRun{})
+	if len(failedPurge.Errors) != 1 || failedPurge.Errors[0].Code != "user_registrations_failed" {
+		t.Fatalf("failed hook purge errors = %+v", failedPurge.Errors)
+	}
+	if code := failedPurge.Finish("windows", windowsEnterpriseFailureCodeFor(failedPurge)); failedPurge.OK || code == 0 {
+		t.Fatalf("failed hook purge finished ok=%t exit %d", failedPurge.OK, code)
+	}
 	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)
 	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts had no active (connected) session (signed out, or signed in with a disconnected session)") {
 		t.Fatalf("signed-out warnings = %+v", signedOut)
@@ -1422,9 +1454,12 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	}
 	purge := enterprisestatus.New("uninstall", "standalone", "windows", "test")
 	applyWindowsEnterpriseInstallerReport(purge, &windowsEnterpriseLifecycleOptions{purge: true}, purged, windowsEnterpriseStandaloneRun{})
-	if len(purge.Warnings) != 1 || purge.Warnings[0].Code != "per_user_state_remaining" ||
-		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
-		t.Fatalf("purge warnings = %+v", purge.Warnings)
+	if len(purge.Errors) != 1 || purge.Errors[0].Code != "per_user_state_remaining" ||
+		!strings.Contains(purge.Errors[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
+		t.Fatalf("purge errors = %+v", purge.Errors)
+	}
+	if code := purge.Finish("windows", windowsEnterpriseFailureCodeFor(purge)); purge.OK || code == 0 {
+		t.Fatalf("incomplete purge finished ok=%t exit %d", purge.OK, code)
 	}
 	// GAP-1111: a purge that did not run as LocalSystem left every enrolled
 	// account's data, so it fails and names the LocalSystem rerun.

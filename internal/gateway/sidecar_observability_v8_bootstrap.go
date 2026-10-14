@@ -282,6 +282,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapReporter, err)
 	}
+	configPath := s.currentConfig().ConfigFilePath
+	if configPath == "" {
+		configPath = s.bootConfigSourceName
+	}
+	reporter.SetBundleAttribution(func() (observabilityruntime.BundleAttribution, bool) {
+		return observabilityruntime.ReadBundleAttribution(configPath)
+	})
 	failureBuilder, err := observability.NewRecordBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
 		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),

@@ -122,6 +122,9 @@ func TestManagedSetupSelectionRefusesUnknownContractsAndUnprotectedConnectors(t 
 // guardian's managed selection receipt is the authority that re-establishes
 // it, and it still binds the contract to the exact selected image.
 func TestManagedSetupSelectionRepublishesOpenCodeAfterLostProtectedState(t *testing.T) {
+	// A managed Windows contract entry binds the gateway service that
+	// publishes it.
+	t.Setenv(WindowsGatewayServiceNameEnv, "DefenseClawGateway")
 	opts := prepareOpenCodeSetupAdmissionFixture(t)
 	// The moved state: no protected lock and no receipt.
 	if err := os.Remove(filepath.Join(opts.DataDir, agentSelectionFile)); err != nil {

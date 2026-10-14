@@ -89,6 +89,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	if metricErr != nil {
 		return metricErr
 	}
+	activityMetrics = append(activityMetrics, policyBundleReceiptMetrics(auditEv, in.BundleReceipt)...)
 	evidence, evidenceErr := controlPlaneV8ActivityEvidence(in)
 	if evidenceErr != nil {
 		return evidenceErr

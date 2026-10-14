@@ -1257,6 +1257,13 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if lock.Connector != target.conn.Name() {
 		return fmt.Errorf("enterprise hooks: connector %s hook contract lock is missing", target.conn.Name())
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: connector %s managed gateway binding: %w",
+			target.conn.Name(),
+			err,
+		)
+	}
 	current, err := connector.NewHookContractLockEntryForMode(
 		target.setup,
 		target.conn,
@@ -1992,6 +1999,13 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 		return "", nil, err
 	}
 	return home, target, nil
+}
+
+// ValidateWindowsEnterpriseHome pins a recorded profile to its owner SID for
+// a LocalSystem cleanup that does not need the user's active logon session.
+func ValidateWindowsEnterpriseHome(home, sid string) (string, error) {
+	verified, _, err := validateWindowsEnterpriseHome(home, sid)
+	return verified, err
 }
 
 // validateWindowsEnterpriseHomeAnchor treats the profile root as an identity

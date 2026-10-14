@@ -524,6 +524,12 @@ macOS host as Secure Client. On Linux and macOS, `data_dir` must be exactly
 `/var/lib/defenseclaw` or `/opt/cisco/defenseclaw/runtime` (or unset). On
 Windows leave `data_dir` and `policy_dir` unset. `gateway.api_bind` must be
 `127.0.0.1`, and on Linux and macOS `gateway.api_port` must be `18970` if set.
+For offline bundle signing on Windows, an omitted `data_dir` is modeled as
+`C:\ProgramData\Cisco\DefenseClaw\runtime`. An explicit `data_dir` is accepted
+only when it equals that standard runtime path; signing refuses any other
+value with `config_invalid`. A device registered under another ProgramData root
+reports `digest_unverifiable` for the signed digest while still checking its
+installed and gateway digests against each other.
 Quote `ownership: "off"` (YAML reads a bare `off` as false).
 
 Minimal config (Linux; the enterprise overview page has the same config per

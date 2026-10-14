@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -73,10 +74,14 @@ func (e *Env) savePolicyState(record enterprisestatus.PolicyStateRecord) error {
 	return e.writeFileAtomic(e.policyStatePath(), append(data, '\n'), 0o600, rootOwner())
 }
 
-// gatewayPolicyHealth is policy.effective_digest and policy.last_reload_error
-// from a /health body, "" for what the gateway does not publish.
+// gatewayPolicyHealth is policy.effective_digest and the current config or
+// policy reload error from /health, "" for what the gateway does not publish.
 func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 	var health struct {
+		Config struct {
+			State     string `json:"state"`
+			LastError string `json:"last_error"`
+		} `json:"config"`
 		Policy *struct {
 			EffectiveDigest string `json:"effective_digest"`
 			LastReloadError string `json:"last_reload_error"`
@@ -85,7 +90,14 @@ func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
 		return "", ""
 	}
-	return health.Policy.EffectiveDigest, health.Policy.LastReloadError
+	reloadError = health.Policy.LastReloadError
+	if reloadError == "" && health.Config.State == "error" {
+		reloadError = health.Config.LastError
+		if reloadError == "" {
+			reloadError = "gateway config.state=error"
+		}
+	}
+	return health.Policy.EffectiveDigest, reloadError
 }
 
 // computePolicy runs the installed gateway's `policy digest` with the
@@ -126,8 +138,32 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 	env, r := l.env, l.result
 	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
 	computed := false
-	if digest, generation, ok := l.computePolicy(ctx); ok {
-		state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
+	// A same-build bundle already had its rendered policy computed during
+	// verification. Match the installed bytes and writer record to this
+	// transaction before using that digest, including before the receipt is
+	// confirmed.
+	// Avoid a third full generation build in a separate CLI during hot apply.
+	if l.bundle != nil && l.bundle.receipt != nil {
+		rc := l.bundle.receipt
+		wantSHA := rc.ConfigSHA256
+		if wantSHA == "" {
+			wantSHA = l.bundle.configSHA
+		}
+		if rc.DigestComparable && rc.ExpectedDigest != "" && wantSHA != "" {
+			path := env.P(env.Layout.ConfigPath)
+			if sha, err := sha256File(path); err == nil && sha == wantSHA {
+				if generation, err := configwrite.ReadGenerationState(path); err == nil &&
+					generation.BundleID == rc.BundleID && generation.BundleVersion == rc.Version &&
+					generation.ConfigSHA256 == sha {
+					state.EffectiveDigest, state.ConfigGeneration, computed = rc.ExpectedDigest, generation.Generation, true
+				}
+			}
+		}
+	}
+	if !computed {
+		if digest, generation, ok := l.computePolicy(ctx); ok {
+			state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
+		}
 	}
 	if !computed {
 		if record, err := env.loadPolicyState(); err == nil && record != nil {
@@ -158,11 +194,11 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			shortDigest(reported), shortDigest(state.EffectiveDigest)))
 		return
 	}
-	if err := env.savePolicyState(enterprisestatus.PolicyStateRecord{
+	if err := env.savePolicyState(env.withBundleFields(enterprisestatus.PolicyStateRecord{
 		EffectiveDigest:  state.EffectiveDigest,
 		ConfigGeneration: state.ConfigGeneration,
 		AppliedAt:        env.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
+	})); err != nil {
 		r.AddWarning(codeState, "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
 }

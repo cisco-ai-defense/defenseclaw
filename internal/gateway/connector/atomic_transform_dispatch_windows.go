@@ -13,5 +13,5 @@ func atomicTransformFileWithStateDir(
 	perm os.FileMode,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
-	return atomicTransformFileV2(path, transactionDir, perm, transform)
+	return atomicTransformFileV2(path, transactionDir, perm, atomicTransformV2Options{}, transform)
 }

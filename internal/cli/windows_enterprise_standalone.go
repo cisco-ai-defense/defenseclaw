@@ -312,6 +312,11 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
+		if err := settleWindowsBundleStatus(ctx); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("settle policy bundle receipt: %w", err))
+		}
+	}
 	if action == "upgrade" || action == "repair" {
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
@@ -1015,7 +1020,7 @@ func applyWindowsEnterpriseInstallerReport(
 			result.AddWarning("transaction_pending", step)
 		}
 	}
-	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+	addWindowsEnterpriseUserRegistrationWarnings(result, report, opts != nil && opts.purge)
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
@@ -1099,7 +1104,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		))
 	}
 	if len(remaining) > 0 {
-		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+		result.AddError("per_user_state_remaining", fmt.Sprintf(
 			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
 			len(remaining),
 			windowsEnterpriseBoundedLabels(remaining),
@@ -1251,10 +1256,10 @@ const windowsEnterpriseUserRegistrationListMax = 20
 
 // addWindowsEnterpriseUserRegistrationWarnings tells the administrator which
 // DefenseClaw per-user registrations an uninstall left in place: those of
-// users who were signed out, of every user when the uninstall did not run as
-// LocalSystem, and removals that failed. They stay inert (enrollment
-// revoked, hook runtime and binary removed).
-func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+// users who were signed out, those another account could not clean without
+// LocalSystem, and removals that failed. They stay inert (enrollment revoked,
+// hook runtime and binary removed).
+func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport, purge bool) {
 	failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed)
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
 		reason := "those accounts " + windowsEnterpriseNoActiveSession
@@ -1270,20 +1275,30 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 			attempted = append(attempted, failure)
 		}
 		failed = attempted
-		result.AddWarning("user_registrations_pending", fmt.Sprintf(
+		message := fmt.Sprintf(
 			"uninstall could not act as %d user connector registration(s) because %s; DefenseClaw's inert registration stays in that account's agent configuration. To remove them, %s. Accounts: %s",
 			len(pending),
 			reason,
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
 			windowsEnterpriseBoundedLabels(windowsEnterpriseRegistrationsByAccount(pending)),
-		))
+		)
+		if purge {
+			result.AddError("user_registrations_pending", message)
+		} else {
+			result.AddWarning("user_registrations_pending", message)
+		}
 	}
 	if len(failed) > 0 {
-		result.AddWarning("user_registrations_failed", fmt.Sprintf(
+		message := fmt.Sprintf(
 			"removing DefenseClaw per-user registrations failed: %s. The entries that stay are inert (the managed install is gone); remove the named DefenseClaw entries from those files as that user, or %s",
 			windowsEnterpriseBoundedLabels(failed),
 			windowsEnterpriseLocalSystemRemedy("/uninstall"),
-		))
+		)
+		if purge {
+			result.AddError("user_registrations_failed", message)
+		} else {
+			result.AddWarning("user_registrations_failed", message)
+		}
 	}
 }
 
@@ -1889,6 +1904,7 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	finishWindowsEnterpriseBundle(cmd, opts, result)
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
@@ -1973,6 +1989,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 			continue
 		}
 		fmt.Fprintf(output, "  warning %s: %s\n", message.Code, message.Message)
+	}
+	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		enterprisestatus.WriteSessionEntries(output, *result.Bundle.SessionsRestartRequired)
 	}
 	if result.LogPath != "" {
 		fmt.Fprintf(output, "  Log: %s\n", result.LogPath)
@@ -2383,6 +2402,7 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 type windowsEnterpriseEnsurePlan struct {
 	Action string // "", install, upgrade, repair
 	Reason string
+	Detail string // the failed read-only check behind a verify_failed repair
 }
 
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
@@ -2449,6 +2469,58 @@ func windowsEnterpriseInstallLostRace(report *windowsEnterpriseInstallerReport) 
 // runWindowsEnterpriseStandaloneEnsureOnce plans and runs one ensure pass.
 // With allowRetry it returns retry=true, without finishing the result, when
 // its Install lost a race with a concurrent install.
+// A warning-only verify can report security_incomplete while its checks and
+// gateway succeeded. That warning is not an installer failure to repair by
+// stopping services. Errors and an unavailable gateway still require repair.
+func windowsEnterpriseVerifyAcceptable(report *windowsEnterpriseInstallerReport) bool {
+	return report != nil && report.Installed && report.GatewayReady && !report.TransactionPending &&
+		len(report.Errors) == 0 && report.Error == ""
+}
+
+// A repeated confirmed bundle checks the installed deployment with its own
+// installer. Setup's staged module and hash-pinned manifest describe the
+// incoming package, not the installed release. Passing that manifest into
+// Verify also prevents PowerShell from loading the installed release's
+// recorded payload pins, so a package-specific failure could trigger repair.
+func windowsEnterpriseConfirmedBundleProbe(opts *windowsEnterpriseLifecycleOptions, run *windowsBundleRun) (string, *windowsEnterpriseLifecycleOptions, error) {
+	if run == nil || strings.TrimSpace(run.layout.InstallRoot) == "" {
+		return "", nil, errors.New("installed bundle layout has no install root")
+	}
+	installed := filepath.Join(run.layout.InstallRoot, "libexec", "install-enterprise.ps1")
+	script, err := windowsEnterpriseScriptFinder(installed)
+	if err != nil {
+		return "", nil, fmt.Errorf("read the installed enterprise installer: %w", err)
+	}
+	probe := windowsEnterpriseEnsureProbeOptions(opts)
+	probe.trustMode = windowsEnterpriseTrustAuthenticode
+	probe.payloadManifest = ""
+	probe.allowedSigners = nil
+	return script, probe, nil
+}
+
+func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerReport, hookDrift string) string {
+	if report != nil {
+		for _, message := range append(append([]string{}, report.Errors...), report.Error) {
+			if detail := strings.TrimSpace(message); detail != "" {
+				return windowsEnterpriseBoundedDiagnostic(detail)
+			}
+		}
+		if !report.Installed {
+			return "the deployment is not installed"
+		}
+		if report.TransactionPending {
+			return "a lifecycle transaction is pending"
+		}
+		if !report.GatewayReady {
+			return "the gateway is not ready"
+		}
+	}
+	if hookDrift != "" {
+		return windowsEnterpriseBoundedDiagnostic(hookDrift)
+	}
+	return "the installed deployment failed verification without a diagnostic"
+}
+
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2464,7 +2536,50 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		applyWindowsEnterpriseRecordedDeployment(result)
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
-	plan, planErr := planWindowsEnterpriseEnsure(statusReport, opts, script)
+	alreadyAppliedNeedsRepair := false
+	verifyFailure := ""
+	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
+		statusReport.Installed && !statusReport.TransactionPending &&
+		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
+		windowsBundleInstalledSHA(run.layout.ConfigPath) == run.prepared.ConfigSHA256 {
+		verifyScript, verifyOpts, probeErr := windowsEnterpriseConfirmedBundleProbe(opts, run)
+		if probeErr != nil {
+			verifyFailure = windowsEnterpriseBoundedDiagnostic(probeErr.Error())
+		}
+		var verifyReport *windowsEnterpriseInstallerReport
+		var verifyRun windowsEnterpriseStandaloneRun
+		var verifyErr error
+		if probeErr == nil {
+			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, verifyOpts, verifyScript,
+				windowsEnterprisePowerShellArgs("verify", verifyOpts))
+		}
+		if verifyErr != nil {
+			result.AddError(windowsEnterpriseMessageCode(verifyErr.Error(), "lifecycle_launch_failed"), verifyErr.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		_, drifted := windowsEnterpriseHookRuntimeDrift()
+		if probeErr == nil && windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+			// The module can set ok:false for security_incomplete with no
+			// failed check. Keep its warning, without turning that into a
+			// synthetic not_ready error during result translation.
+			accepted := *verifyReport
+			accepted.OK = true
+			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
+			result.Noop = true
+			result.NoopReason = "already_applied"
+			applyWindowsEnterprisePolicy(ctx, result)
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		alreadyAppliedNeedsRepair = true
+		if verifyFailure == "" {
+			verifyFailure = windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)
+		}
+	}
+	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
+	var planErr error
+	if !alreadyAppliedNeedsRepair {
+		plan, planErr = planWindowsEnterpriseEnsure(statusReport, opts, script)
+	}
 	if planErr != nil {
 		applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 		result.Errors = []enterprisestatus.Message{}
@@ -2477,8 +2592,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		if _, drifted := windowsEnterpriseHookRuntimeDrift(); verifyReport.OK && drifted == "" {
-			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+		if _, drifted := windowsEnterpriseHookRuntimeDrift(); windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+			accepted := *verifyReport
+			accepted.OK = true
+			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 			if windowsEnterpriseIsElevated() {
 				// A copy an earlier upgrade kept of a binary an editor still
 				// ran goes once nothing runs it (GAP-0934).
@@ -2519,9 +2636,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	keptConfig := ""
 	var startOnlyKeys []string
-	if plan.Action == "upgrade" && plan.Reason == "drift:config" {
+	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
 		if applied {
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		if plan.Reason == "drift:bundle" {
+			result.AddError("bundle_apply_failed", "the policy bundle apply did not complete; check the preceding bundle error and gateway health")
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		startOnlyKeys = keys
@@ -2557,6 +2678,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		if plan.Reason != "verify_failed" {
 			clearWindowsEnterpriseSources(&actionOpts)
 		}
+		if alreadyAppliedNeedsRepair {
+			actionOpts.configPath = ""
+		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
 		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
 			result.Changes = append(result.Changes, repaired)
@@ -2580,7 +2704,16 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if cleanupManifest != nil {
 		defer cleanupManifest()
 	}
+	beforeGatewayPID := uint32(0)
+	if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+		beforeGatewayPID = windowsStandaloneGatewayPID()
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
+	if beforeGatewayPID != 0 {
+		if afterGatewayPID := windowsStandaloneGatewayPID(); afterGatewayPID != 0 && beforeGatewayPID != afterGatewayPID {
+			opts.bundle.gatewayRestarted = true
+		}
+	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -2666,6 +2799,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 		}
 	}
+	if beforeGatewayPID != 0 {
+		if afterGatewayPID := windowsStandaloneGatewayPID(); afterGatewayPID != 0 && beforeGatewayPID != afterGatewayPID {
+			opts.bundle.gatewayRestarted = true
+		}
+	}
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
@@ -2677,6 +2815,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if len(startOnlyKeys) > 0 {
 		// Say why a config-only change stopped the services (GAP-0719).
 		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
+	}
+	if plan.Reason == "verify_failed" && plan.Detail != "" {
+		reason += ": " + plan.Detail
 	}
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -2764,7 +2905,7 @@ func planWindowsEnterpriseEnsure(
 		return windowsEnterpriseEnsurePlan{}, err
 	}
 	if drift != "" {
-		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 {
+		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 && drift != "bundle" {
 			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
 				// The installed CLI carries no payload, so it can never pass
 				// the binary flags; naming them sent administrators the wrong
@@ -2909,6 +3050,9 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		// A config_version 8 source is installed as its v9 migration, so the
 		// same source is not drift while the installed file is that result.
 		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
+			if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+				return "bundle", nil
+			}
 			return "config", nil
 		}
 	}

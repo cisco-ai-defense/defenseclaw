@@ -48,6 +48,8 @@ type policyDigestReport struct {
 	gateway.EffectivePolicy
 	GatewayReportedDigest           string `json:"gateway_reported_digest,omitempty"`
 	GatewayReportedConfigGeneration uint64 `json:"gateway_reported_config_generation,omitempty"`
+	GatewayReportedBundleID         string `json:"gateway_reported_bundle_id,omitempty"`
+	GatewayReportedBundleVersion    uint64 `json:"gateway_reported_bundle_version,omitempty"`
 	GatewayLastReloadError          string `json:"gateway_last_reload_error,omitempty"`
 	Error                           string `json:"error,omitempty"`
 	// ConfigRecordedAsHandEdit is set on a standalone host whose config
@@ -200,6 +202,8 @@ gateway applied this configuration.`,
 			reported := gatewayReportedPolicy(cfg)
 			report.GatewayReportedDigest = reported.EffectiveDigest
 			report.GatewayReportedConfigGeneration = reported.ConfigGeneration
+			report.GatewayReportedBundleID = reported.BundleID
+			report.GatewayReportedBundleVersion = reported.BundleVersion
 			report.GatewayLastReloadError = reported.LastReloadError
 			report.ConfigRecordedAsHandEdit = configRecordedAsHandEdit(cfg)
 		}

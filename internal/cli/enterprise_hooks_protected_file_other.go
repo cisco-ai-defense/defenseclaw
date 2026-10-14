@@ -11,6 +11,13 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return safefile.Write(path, data)
 }
 
+// writeEnterpriseHookAdminOnlyFile mirrors the Windows-only variant on non-
+// Windows hosts. Off-Windows there is no AdminFile SDDL to enforce, so the
+// implementation folds into safefile.Write like the protected-file variant.
+func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
+	return safefile.Write(path, data)
+}
+
 // enterpriseHookGuardianRecordBusy is Windows-only: an atomic rename never
 // leaves a guardian record unopenable here.
 func enterpriseHookGuardianRecordBusy(error) bool { return false }

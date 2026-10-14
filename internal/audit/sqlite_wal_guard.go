@@ -23,14 +23,16 @@ const walFrameBytes = 4096 + 24
 // that checkpoint finishes. The log then grew with every audit row (about
 // 3.4 MB per hook decision, 5 GB after 1,500 hooks) until the load stopped.
 //
-// The checkpoint here runs on the store's single writer connection, so it
-// takes its turn between statements: no other connection writes meanwhile and
-// the writer finds the log fully copied afterwards. A TRUNCATE or RESTART
-// checkpoint from the second connection waits for readers while holding off
+// The final restart checkpoint runs on the store's single writer connection,
+// so it takes its turn between statements: no other connection writes
+// meanwhile and the writer finds the log fully copied afterwards. A TRUNCATE
+// or RESTART checkpoint from the second connection waits for readers while holding off
 // the writer, and under load it stalled some appends for seconds. The pause is
 // bounded by the frames written since the second connection's copy. The
-// frames in use come from a NOOP checkpoint, not from the file size: a
-// restarted log keeps its length on disk.
+// frames in use come from a PASSIVE checkpoint on the dedicated connection,
+// not from the file size: a restarted log keeps its length on disk. SQLite
+// treats an unknown checkpoint mode such as NOOP as PASSIVE, so using NOOP
+// on the single writer connection copies and syncs the WAL there.
 func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("audit: WAL checkpoint context is required")
@@ -40,19 +42,20 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64) (boo
 		return false, err
 	}
 	defer release()
+	db, err := s.checkpointConn()
+	if err != nil {
+		return false, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
+	}
 	var busy, frames, copied int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(NOOP)").Scan(&busy, &frames, &copied); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied); err != nil {
 		return false, fmt.Errorf("audit: read SQLite WAL length: %w", err)
 	}
 	if int64(frames)*walFrameBytes <= limitBytes {
 		return false, nil
 	}
-	// Copy the bulk from the second connection first: it does not hold off the
-	// writer. The writer connection then only has the frames written meanwhile
-	// left to copy, which keeps the pause short.
-	if db, err := s.checkpointConn(); err == nil {
-		_ = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied)
-	}
+	// The dedicated connection copied the bulk above without holding off the
+	// writer. The writer connection only has frames written meanwhile left to
+	// copy, which lets it restart the log without a long pause.
 	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied); err != nil {
 		return false, fmt.Errorf("audit: checkpoint SQLite WAL: %w", err)
 	}

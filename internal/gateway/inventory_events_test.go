@@ -444,6 +444,7 @@ func TestInventorySnapshotCompleteEmptyCarriesTypedEmptyArrays(t *testing.T) {
 			if err := emitInventorySnapshot(
 				t.Context(), capture, test.source, test.scannedAt, nil, false,
 				test.record, test.action, test.phase, test.detector,
+				endpointInventoryCycle{},
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -476,7 +477,7 @@ func TestConnectorInventoryCarrierIsDeterministicallyAligned(t *testing.T) {
 		capture := &endpointInventoryCapture{}
 		if err := emitEndpointInventorySnapshot(
 			t.Context(), capture, endpointConnectorInventorySource, input, false,
-			config.ObservabilityV8ManagedConnectorInventoryAction,
+			config.ObservabilityV8ManagedConnectorInventoryAction, endpointInventoryCycle{},
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -555,6 +556,7 @@ func TestManagedInventoryCarrierBoundsFailClosedWithoutTruncation(t *testing.T) 
 			exact := &endpointInventoryCapture{}
 			if err := emitEndpointInventorySnapshot(
 				t.Context(), exact, test.source, components[:test.limit], false, test.action,
+				endpointInventoryCycle{},
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -569,6 +571,7 @@ func TestManagedInventoryCarrierBoundsFailClosedWithoutTruncation(t *testing.T) 
 			overflow := &endpointInventoryCapture{}
 			if err := emitEndpointInventorySnapshot(
 				t.Context(), overflow, test.source, components, false, test.action,
+				endpointInventoryCycle{},
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -1240,7 +1243,7 @@ func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	}
 	cfg := &config.Config{PluginDir: pluginRoot}
 	capture := &endpointInventoryCapture{}
-	makeEndpointInventoryEmitter(cfg, capture, nil)(t.Context())
+	makeEndpointInventoryEmitter(cfg, capture, nil, nil)(t.Context())
 
 	builtinComponents, _ := endpointConnectorComponents(connector.NewDefaultRegistry())
 	wantBuiltins := len(builtinComponents)

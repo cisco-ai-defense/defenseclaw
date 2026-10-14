@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
@@ -28,6 +30,28 @@ import (
 )
 
 type reporterTestClock struct{ now time.Time }
+
+func TestReadBundleAttributionUsesRollbackTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+		Actor: "operator:old", LocalActor: "os:uid:0:root", Lifecycle: true,
+		Bundle:             configwrite.BundleRef{ID: "b-01JA0000000000000000000001", Version: 1, SignerKeyID: "old"},
+		TransactionActor:   "operator:tip",
+		TransactionBundle:  configwrite.BundleRef{ID: "b-01JA0000000000000000000002", Version: 2, SignerKeyID: "new"},
+		TransactionSummary: "rollback after failed apply",
+	}, func() (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := ReadBundleAttribution(path)
+	if !ok || got.Actor != "os:uid:0:root" || got.Principal != "operator:tip" || got.ID != "b-01JA0000000000000000000002" || got.Version != 2 || got.ChangeSummary != "rollback after failed apply" {
+		t.Fatalf("rollback reload attribution = %+v, %t", got, ok)
+	}
+}
 
 func (clock reporterTestClock) Now() time.Time { return clock.now }
 
@@ -87,6 +111,23 @@ func TestReloadReporterPersistsExactGraphAndDeduplicatesStableDelivery(t *testin
 	})
 	if err := manager.FlushReports(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
+	}
+	// The queued report keeps the bundle principal captured before rollback,
+	// even after the live generation reader can no longer find that bundle.
+	reporter.SetBundleAttribution(func() (BundleAttribution, bool) { return BundleAttribution{}, false })
+	applied, err := reporter.buildRecord(manager.Active(), runtimegraph.Report{
+		Code: runtimegraph.ReportReloadApplied, Outcome: "applied", Generation: 1,
+		OccurredAt: now, AttributionCaptured: true,
+		Bundle: &runtimegraph.BundleAttribution{Actor: "os:uid:0:root", Principal: "operator:tip", ID: "b-01JA0000000000000000000033", Version: 3, SignerKeyID: "k1"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := applied.Bytes()
+	for _, want := range []string{`"defenseclaw.admin.actor_ref":"os:uid:0:root"`, `"defenseclaw.admin.principal_ref":"operator:tip"`, `"defenseclaw.policy.bundle.id":"b-01JA0000000000000000000033"`, `"defenseclaw.policy.bundle.version":3`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("delayed bundle reload lost %s: %s", want, encoded)
+		}
 	}
 
 	report := runtimegraph.Report{

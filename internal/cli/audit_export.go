@@ -815,6 +815,11 @@ func buildAuditEventLine(
 	actionOut, detailsOut := strings.TrimSpace(action), details
 	if !v8Action {
 		actionOut, detailsOut = normalizeAuditAction(action, details)
+	} else if eventName == "config.change.applied" && actionOut == string(audit.ActionConfigUpdate) {
+		// LogActivity stores the historical operation as config-update and
+		// the canonical event identity separately. Export the canonical event
+		// as its action so audit queries can find the applied bundle.
+		actionOut = eventName
 	}
 	sev := normalizeSeverity(severity)
 	act := strings.TrimSpace(actor)

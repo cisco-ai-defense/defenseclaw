@@ -13,6 +13,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// RunWithWindowsAdministratorOwnerRestorePrivilege runs fn on a dedicated
+// administrator thread with the backup/restore privileges needed to preserve
+// an inactive target user's ownership while rewriting managed runtime state.
+func RunWithWindowsAdministratorOwnerRestorePrivilege(fn func() error) error {
+	return runWindowsManagedRuntimeSetupPrivilege(fn)
+}
+
 // RunWithWindowsOwnerRestorePrivilege runs fn on a locked OS thread holding
 // SeBackupPrivilege and SeRestorePrivilege from the process token. Assigning an
 // owner other than the caller's SID requires SeRestorePrivilege, which a

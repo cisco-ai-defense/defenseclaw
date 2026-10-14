@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,6 +50,13 @@ func TestConfigReloadHoldsTheProfileOracleUntilApplied(t *testing.T) {
 	ready, done := make(chan error, 1), make(chan error, 1)
 	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
 	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +66,29 @@ func TestConfigReloadHoldsTheProfileOracleUntilApplied(t *testing.T) {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the configuration write was not reloaded")
+	}
+	// The profile oracle intentionally waits for the reload. A managed
+	// PreToolUse decision must keep serving from its pinned generation.
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{N: 1, Config: initial}
+	})
+	hookDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+			strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"date"}}`))
+		api.handleAgentHook("claudecode").ServeHTTP(response, request)
+		hookDone <- response
+	}()
+	select {
+	case response := <-hookDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("hook status during reload = %d: %s", response.Code, response.Body.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("hook decision waited for the hot reload")
 	}
 	answered := make(chan struct{})
 	go awaitConfigReload(func(http.ResponseWriter, *http.Request) { close(answered) })(httptest.NewRecorder(),

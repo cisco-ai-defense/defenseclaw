@@ -1,0 +1,281 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+)
+
+const testBundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
+
+type fakeBundleReceiptSink struct {
+	receipts   []audit.PolicyBundleReceipt
+	bundles    []audit.PolicyBundle
+	principals []string
+	versions   []uint64
+}
+
+func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
+	f.bundles, f.receipts = append(f.bundles, b), append(f.receipts, r)
+	f.principals = append(f.principals, principal)
+	return nil
+}
+
+func (f *fakeBundleReceiptSink) RecordPolicyBundleVersion(_ context.Context, v uint64) error {
+	f.versions = append(f.versions, v)
+	return nil
+}
+
+func writeTestPublicReceipt(t *testing.T, path string, r enterprisestatus.PublicReceipt) {
+	t.Helper()
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	newReporter := func() *bundleReceiptReporter {
+		r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+			sink: sink, enforcedVersion: func() uint64 { return 4 }}
+		r.reported = r.readMarker()
+		return r
+	}
+	reporter := newReporter()
+	reporter.poll(context.Background()) // no receipt yet: only the gauge
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
+		BundleID: testBundleID, Version: 4, Actor: "os:uid:0:root", Principal: "operator:manual-r4", State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
+		CurrentBundleID: testBundleID, CurrentVersion: 4, ChangeSummary: "first", Restart: true, RestartRequired: true})
+	reporter.poll(context.Background())
+	reporter.poll(context.Background())
+	newReporter().poll(context.Background()) // a restarted gateway does not report it again
+	if len(sink.receipts) != 1 || sink.receipts[0].State != "confirmed" || sink.bundles[0].ChangeSummary != "first" ||
+		sink.receipts[0].Actor != "os:uid:0:root" || sink.principals[0] != "operator:manual-r4" ||
+		sink.receipts[0].EnforcingVersion != 4 || !sink.receipts[0].Restart || !sink.receipts[0].RestartRequired {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
+		Version: 5, State: enterprisestatus.BundleFailed, ErrorCode: "signature_invalid",
+		FinishedAt: "2026-10-12T10:05:00.000Z", CurrentBundleID: testBundleID, CurrentVersion: 4})
+	reporter.lastModTime = time.Time{} // same second as the first write
+	reporter.poll(context.Background())
+	if len(sink.receipts) != 2 || sink.receipts[1].ErrorCode != "signature_invalid" || sink.receipts[1].EnforcingVersion != 4 {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+	if len(sink.versions) != 2 || sink.versions[0] != 4 {
+		t.Fatalf("version gauge = %v, want one record per reporter start", sink.versions)
+	}
+}
+
+func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: sink,
+		enforcedVersion: func() uint64 { return 2 }}
+	base := enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
+		BundleID: testBundleID, Version: 2, State: enterprisestatus.BundleConfirmed,
+		FinishedAt: "2026-10-13T06:13:33Z", CurrentBundleID: testBundleID, CurrentVersion: 2}
+	writeTestPublicReceipt(t, path, base)
+	r.poll(context.Background())
+	base.LastRefusal = &enterprisestatus.BundleRefusal{ReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
+		BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 1,
+		ErrorCode: "capability_loss", Time: "2026-10-13T06:16:41Z",
+		WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}}
+	writeTestPublicReceipt(t, path, base)
+	r.lastModTime = time.Time{}
+	r.poll(context.Background())
+	r.poll(context.Background())
+	if len(sink.receipts) != 2 || sink.receipts[0].State != "confirmed" ||
+		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "capability_loss" ||
+		len(sink.receipts[1].WarningCodes) != 1 || sink.receipts[1].WarningCodes[0] != "capability_disabled" ||
+		len(sink.receipts[1].DisabledByBundle) != 1 || sink.receipts[1].DisabledByBundle[0] != "sandbox" ||
+		sink.receipts[1].EnforcingVersion != 2 {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+}
+
+func TestBundleReceiptReporterDoesNotRepeatInitialRefusal(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{}
+	r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: sink,
+		enforcedVersion: func() uint64 { return 2 }}
+	refusal := &enterprisestatus.BundleRefusal{ReceiptID: testBundleID, BundleID: testBundleID,
+		Version: 1, ErrorCode: "signature_invalid", Time: "2026-10-13T06:00:00Z"}
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
+		ReceiptID: testBundleID, BundleID: testBundleID, Version: 1, State: "failed",
+		ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time, LastRefusal: refusal})
+	r.poll(context.Background())
+	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1,
+		ReceiptID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8", BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
+		Version: 2, State: "confirmed", FinishedAt: "2026-10-13T06:05:00Z", LastRefusal: refusal})
+	r.lastModTime = time.Time{}
+	r.poll(context.Background())
+	if len(sink.receipts) != 2 {
+		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+}
+
+func TestBundleReceiptReporterDrainsConsecutiveRefusalsBeforePoll(t *testing.T) {
+	dir := t.TempDir()
+	store := enterprisebundle.NewStore(filepath.Join(dir, "bundles"), filepath.Join(dir, "lifecycle"))
+	var ids []string
+	codes := []enterprisebundle.Code{enterprisebundle.CodeSignatureInvalid, enterprisebundle.CodeConfigInvalid}
+	for _, code := range codes {
+		receipt, err := store.Receive(testBundleID, 9)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, receipt.ReceiptID)
+		if err := store.Fail(receipt, code, "refused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("deliveries reused receipt ID %q", ids[0])
+	}
+	private, err := store.Receipts()
+	if err != nil || len(private) != 2 || private[0].State != enterprisebundle.StateFailed ||
+		private[1].State != enterprisebundle.StateFailed {
+		t.Fatalf("private failed receipts = %+v, %v", private, err)
+	}
+	if latest, err := enterprisestatus.ReadPublicReceipt(store.PublicReceiptPath()); err != nil ||
+		latest.LastRefusal == nil || latest.LastRefusal.ReceiptID != ids[1] {
+		t.Fatalf("latest refusal = %+v, %v", latest, err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	newReporter := func() *bundleReceiptReporter {
+		r := &bundleReceiptReporter{receiptPath: store.PublicReceiptPath(),
+			markerPath:        filepath.Join(dir, bundleReceiptMarkerName),
+			refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: logger,
+			enforcedVersion: func() uint64 { return 0 }}
+		r.reported, r.reportedRefusal = r.readMarker(), r.readRefusalMarker()
+		return r
+	}
+	reporter := newReporter()
+	reporter.poll(context.Background())
+	reporter.poll(context.Background())
+	newReporter().poll(context.Background())
+	records := capture.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("audit records = %d, want both refusals once", len(records))
+	}
+	for i, record := range records {
+		if record.EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+			t.Fatalf("audit event %d = %s", i, record.EventName())
+		}
+		encoded, err := record.Bytes()
+		if err != nil || !strings.Contains(string(encoded), `"defenseclaw.policy.bundle.receipt_id":"`+ids[i]+`"`) ||
+			!strings.Contains(string(encoded), `"defenseclaw.policy.bundle.error_code":"`+string(codes[i])+`"`) ||
+			!strings.Contains(string(encoded), `"defenseclaw.policy.bundle.version":9`) {
+			t.Fatalf("audit record %d = %s, %v", i, encoded, err)
+		}
+	}
+}
+
+func TestBundleReceiptReporterOnlyOnStandaloneEnterprise(t *testing.T) {
+	if r := newBundleReceiptReporter(&config.Config{DataDir: t.TempDir()}, filepath.Join(t.TempDir(), "config.yaml"), &audit.Logger{}); r != nil {
+		t.Fatal("a per-user gateway started the bundle receipt reporter")
+	}
+}
+
+func TestPolicyHealthBundleFieldsGolden(t *testing.T) {
+	previous := liveGeneration.Load()
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	liveGeneration.Store(&Generation{Config: &config.Config{}, N: 5, ConfigGen: 9, ConfigGenRecorded: true,
+		BundleID: testBundleID, BundleVersion: 4, Digest: "sha256:" + strings.Repeat("b", 64),
+		BuiltAt: time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)})
+	health, ok := CurrentPolicyHealth()
+	if !ok {
+		t.Fatal("no policy health")
+	}
+	health.LastReloadError, health.OPAUnavailable, health.PendingRestart = "", "", nil
+	raw, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"effective_digest":"sha256:` + strings.Repeat("b", 64) + `","generation":5,"config_generation":9,` +
+		`"config_generation_recorded":true,"bundle_id":"` + testBundleID + `","bundle_version":4,` +
+		`"built_at":"2026-10-12T00:00:00Z","component_count":0}`
+	if string(raw) != want {
+		t.Fatalf("/health policy =\n%s\nwant\n%s", raw, want)
+	}
+}
+
+func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]any{"generation": 3, "config_sha256": configSHA256ForTest(raw), "actor": "control-plane:acme/alice",
+		"reason": "policy bundle " + testBundleID + " version 4: tighten egress", "written_at": "2026-10-12T00:00:00Z",
+		"bundle_id": testBundleID, "bundle_version": 4, "signer_key_id": "fleet-2026-10"}
+	encoded, _ := json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "config.generation.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, generation, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 2, true)
+	if !ok || generation != 3 || in.Bundle == nil || in.Bundle.ID != testBundleID || in.Bundle.Version != 4 ||
+		in.Bundle.SignerKeyID != "fleet-2026-10" || in.Bundle.ChangeSummary != "tighten egress" || in.After["bundle_id"] != testBundleID {
+		t.Fatalf("activity = %+v bundle=%+v", in, in.Bundle)
+	}
+	state["local_actor"] = "os:uid:0:root"
+	encoded, _ = json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "config.generation.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if applied, _, ok := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 2, true); !ok ||
+		applied.Actor != "os:uid:0:root" || applied.Principal != "control-plane:acme/alice" {
+		t.Fatalf("bundle actor/principal = %+v, ok=%v", applied, ok)
+	}
+	if in, _, _ := configChangeActivity(path, nil, raw, []string{"guardrail"}, []string{}, 1, true); in.Bundle == nil ||
+		in.Actor != "os:uid:0:root" || in.Principal != "control-plane:acme/alice" || len(in.Diff) != 0 || in.After["coalesced"] != true {
+		t.Fatalf("coalesced signed bundle lost its final policy identity or attributed the aggregate diff: %+v", in)
+	}
+}
+
+func configSHA256ForTest(raw []byte) string {
+	return configwrite.SHA256Hex(raw)
+}

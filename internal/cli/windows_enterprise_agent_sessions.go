@@ -118,6 +118,11 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	default:
 		return
 	}
+	// Bundle status has already scanned and attached the live sessions. Do
+	// not run a second inventory here and risk a contradictory status warning.
+	if result.Action == "status" && result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
+		return
+	}
 	metadata, ok := windowsEnterpriseActivationMetadata()
 	if !ok {
 		return

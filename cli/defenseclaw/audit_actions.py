@@ -75,6 +75,7 @@ ACTION_TOOL_RESULT: Final[str] = "tool-result"
 
 # Operator mutations (v7 Activity)
 ACTION_CONFIG_UPDATE: Final[str]   = "config-update"
+ACTION_CONFIG_BUNDLE_RECEIPT: Final[str] = "config.bundle.receipt"
 ACTION_POLICY_UPDATE: Final[str]   = "policy-update"
 ACTION_POLICY_RELOAD: Final[str]   = "policy-reload"
 ACTION_ACTION: Final[str]          = "action"
@@ -352,6 +353,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_CALL,
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
+    ACTION_CONFIG_BUNDLE_RECEIPT,
     ACTION_POLICY_UPDATE,
     ACTION_POLICY_RELOAD,
     ACTION_ACTION,

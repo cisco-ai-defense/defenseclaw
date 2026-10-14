@@ -89,6 +89,7 @@ func executeEnterpriseSetup(
 	}{
 		{label: "config", value: &opts.Config},
 		{label: "manifest", value: &opts.Manifest},
+		{label: "trust anchors", value: &opts.TrustAnchors},
 	} {
 		if strings.TrimSpace(*input.value) == "" {
 			continue
@@ -100,6 +101,15 @@ func executeEnterpriseSetup(
 		*input.value = canonical
 	}
 
+	if strings.TrimSpace(opts.Bundle) != "" {
+		// A signed bundle may come from any folder: the lifecycle copies it
+		// into its store and verifies that copy, never this path again.
+		bundle, err := validateEnterpriseSetupBundle(opts.Bundle)
+		if err != nil {
+			return 0, standaloneEnterpriseSetupInputError(standalone, err)
+		}
+		opts.Bundle = bundle
+	}
 	if standalone {
 		// Refuse a too-full volume before anything is staged. The Secure
 		// Client Setup keeps its historical behavior.
@@ -268,6 +278,30 @@ func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
 	return err
 }
 
+// validateEnterpriseSetupBundle accepts an existing absolute local
+// regular file that is not a link. Unlike CONFIG=, the folder need not be
+// administrator-only: the bundle signature and file hashes are checked on
+// the copy the lifecycle makes in its store.
+func validateEnterpriseSetupBundle(value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
+		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
+		return "", enterpriseSetupPathError{errors.New("bundle path is empty, relative, padded, or environment-expanded")}
+	}
+	full := filepath.Clean(value)
+	volume := filepath.VolumeName(full)
+	if len(volume) != 2 || volume[1] != ':' {
+		return "", enterpriseSetupPathError{errors.New("bundle must use an absolute local Win32 drive path")}
+	}
+	info, err := os.Lstat(full)
+	if err != nil {
+		return "", enterpriseSetupPathError{fmt.Errorf("inspect bundle: %w", err)}
+	}
+	if !info.Mode().IsRegular() {
+		return "", enterpriseSetupPathError{fmt.Errorf("bundle is not a regular non-link file: %s", full)}
+	}
+	return full, nil
+}
+
 func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
 		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
@@ -332,7 +366,7 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		if err != nil {
 			return "", nil, errors.Join(fmt.Errorf("create staged enterprise payload %s: %w", name, err), cleanup())
 		}
-		source, sourceErr := embeddedPayload.Open("payload/" + name)
+		source, sourceErr := payload.PayloadFS.Open("payload/" + name)
 		if sourceErr != nil {
 			_ = file.Close()
 			return "", nil, errors.Join(fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr), cleanup())
@@ -570,6 +604,15 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	appendValue("--gateway-service-name", opts.GatewayServiceName)
 	appendValue("--guardian-service-name", opts.GuardianServiceName)
 	appendValue("--certification-codex-home", opts.CertificationCodexHome)
+	// Forward the outer Setup's protected scratch directory under
+	// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch as the
+	// installer's one-shot bootstrap parent. install-enterprise.ps1 uses
+	// this instead of C:\Windows\Temp so its rendered YAML content passes
+	// the module's later trusted-ancestor walk on Azure-AD-joined hosts,
+	// where C:\Windows\Temp carries an inherited Allow ACE for the
+	// interactive AAD principal with Delete rights.
+	arguments = append(arguments, "--bootstrap-parent",
+		filepath.Join(stageRoot, enterpriseSetupScratchDirName))
 	if opts.NoStart {
 		arguments = append(arguments, "--no-start")
 	}
@@ -611,6 +654,13 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		}
 		for _, signer := range strings.Split(opts.AllowedSigners, ",") {
 			appendValue("--allowed-signer", strings.ToLower(strings.TrimSpace(signer)))
+		}
+		if opts.Action == "ensure" {
+			appendValue("--bundle", opts.Bundle)
+			appendValue("--trust-anchors", opts.TrustAnchors)
+			if opts.RefuseCapabilityLoss {
+				arguments = append(arguments, "--refuse-capability-loss")
+			}
 		}
 	}
 	return arguments

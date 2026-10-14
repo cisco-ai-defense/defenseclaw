@@ -476,6 +476,9 @@ func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
 			t.Errorf("v8 record %q exported action=%v details=%v, want the action kept", action, ev["action"], ev["details"])
 		}
 	}
+	if ev := build("config-update", "config.change.applied"); ev["action"] != "config.change.applied" {
+		t.Errorf("canonical config change exported action=%v", ev["action"])
+	}
 	for _, eventName := range []string{"", "legacy.audit.action"} {
 		ev := build("circuit_breaker_open", eventName)
 		if ev["action"] != "action" || ev["details"] != "legacy_action=circuit_breaker_open | destination=otlp" {

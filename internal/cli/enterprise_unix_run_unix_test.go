@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,6 +29,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestBundleDigestWarningAgreesInLifecycleJSONAndText(t *testing.T) {
+	for _, crossVersion := range []bool{false, true} {
+		r := enterprisestatus.New("status", "standalone", "linux", "1.0.0")
+		r.Bundle = &enterprisestatus.BundleState{State: enterprisestatus.BundleConfirmed}
+		if crossVersion {
+			r.Bundle.WarningCodes = []string{"digest_unverifiable"}
+		}
+		r.SetBundleReceiptWarnings()
+		r.Finish("linux", 0)
+		var jsonOut, textOut bytes.Buffer
+		if err := printLifecycleResult(&jsonOut, r, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := printLifecycleResult(&textOut, r, false); err != nil {
+			t.Fatal(err)
+		}
+		var decoded enterprisestatus.Result
+		if err := json.Unmarshal(jsonOut.Bytes(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		jsonWarning := false
+		for _, warning := range decoded.Warnings {
+			jsonWarning = jsonWarning || warning.Code == "digest_unverifiable"
+		}
+		textWarning := strings.Contains(textOut.String(), "digest_unverifiable:")
+		if jsonWarning != crossVersion || textWarning != crossVersion ||
+			(decoded.Bundle != nil && len(decoded.Bundle.WarningCodes) > 0) != crossVersion {
+			t.Fatalf("cross_version=%t JSON=%s text=%s", crossVersion, jsonOut.String(), textOut.String())
+		}
+	}
+}
 
 // A standard account running `enterprise secret status` on a managed host
 // got the raw "open /etc/defenseclaw/secrets: permission denied".

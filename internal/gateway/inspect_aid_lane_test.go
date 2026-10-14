@@ -217,6 +217,9 @@ func TestMergeWithAIDVerdict_StrictestWins(t *testing.T) {
 		if merged.Action != "block" {
 			t.Errorf("expected block, got %q", merged.Action)
 		}
+		if !merged.aiDefenseBlock {
+			t.Error("AID block provenance was not retained")
+		}
 		if merged.Severity != "HIGH" {
 			t.Errorf("expected HIGH, got %q", merged.Severity)
 		}
@@ -235,6 +238,9 @@ func TestMergeWithAIDVerdict_StrictestWins(t *testing.T) {
 		if merged.Severity != "CRITICAL" {
 			t.Errorf("local CRITICAL must not be downgraded; got %q", merged.Severity)
 		}
+		if merged.aiDefenseBlock {
+			t.Error("AID allow must not label a local block as AID-enforced")
+		}
 	})
 
 	t.Run("nil_aid_returns_local_verbatim", func(t *testing.T) {
@@ -249,6 +255,9 @@ func TestMergeWithAIDVerdict_StrictestWins(t *testing.T) {
 		merged := mergeWithAIDVerdict(nil, aid)
 		if merged.Action != "block" {
 			t.Errorf("expected block, got %q", merged.Action)
+		}
+		if !merged.aiDefenseBlock {
+			t.Error("AID block provenance was not retained")
 		}
 	})
 }

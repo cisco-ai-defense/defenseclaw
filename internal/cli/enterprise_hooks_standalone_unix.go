@@ -556,6 +556,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
+	var machineClaudeRows []int
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
@@ -649,7 +650,25 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			case !covered:
 				failRow(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
 			default:
-				row.OK = true
+				index := len(rows)
+				if strings.EqualFold(row.Connector, "claudecode") {
+					// An older personal install can leave a second hook in
+					// settings.json. The managed hook is already published;
+					// neutralize that personal script as the target user.
+					job, exists := jobs[account.UID]
+					if !exists {
+						job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
+						jobs[account.UID] = job
+					}
+					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
+						Mode: enterpriseHookWorkerModeBlockPersonalClaude,
+						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+							ConnectorName: "claudecode", UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+						})})
+					machineClaudeRows = append(machineClaudeRows, index)
+				} else {
+					row.OK = true
+				}
 				rows = append(rows, row)
 				next.Bindings[enterpriseHookProtectedTargetKey(row)] = enterpriseHookUnixBinding{
 					UID: account.UID, Home: account.Home, HomeInode: check.Inode,
@@ -752,6 +771,21 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	for _, index := range machineClaudeRows {
+		row := rows[index]
+		outcome, ok := outcomes[index]
+		switch {
+		case !ok:
+			row.Error = errEnterpriseHookWorkerNoResult.Error()
+		case outcome.pending:
+			row.Pending = true
+		case outcome.ok:
+			row.OK = true
+		default:
+			row.Error = outcome.err
+		}
+		rows[index] = row
+	}
 	repairs := 0
 	var repaired []enterpriseHookGuardianRepair
 	verified := map[int]bool{}

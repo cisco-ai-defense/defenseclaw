@@ -21,9 +21,11 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,21 @@ func writeTestConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestCurrentOSActorIdentifiesExecutingAccount(t *testing.T) {
+	actor := CurrentOSActor()
+	current, err := user.Current()
+	if err != nil {
+		t.Skipf("OS account lookup unavailable: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		if !strings.HasPrefix(actor, "os:sid:"+current.Uid+":") {
+			t.Fatalf("actor %q does not identify Windows account %q", actor, current.Uid)
+		}
+	} else if !strings.HasPrefix(actor, "os:uid:"+strconv.Itoa(os.Getuid())+":") || !strings.Contains(actor, current.Username) {
+		t.Fatalf("actor %q does not identify Unix account %q", actor, current.Username)
+	}
 }
 
 func TestApplyPatchesValidatesAndAdvancesGeneration(t *testing.T) {
@@ -156,6 +173,53 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	}
 }
 
+// Bundle principals are accepted only from the lifecycle (Options.Lifecycle)
+// and are then recorded with the bundle fields in config.generation.json; a
+// CLI, TUI or API caller naming one is refused before anything is written.
+func TestBundlePrincipalActorsOnlyFromTheLifecycle(t *testing.T) {
+	// A managed standalone config declares its profile: on Windows an unset
+	// profile resolves to secure_client without the service pin, so the
+	// accepted writes below would fail validation.
+	path := writeTestConfig(t, "enterprise:\n  profile: standalone\nobservability: {}\n")
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+	change := []Change{{Path: "guardrail.mode", Value: "action"}}
+	bundle := BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 7, SignerKeyID: "k1"}
+	for _, opt := range []Options{
+		{Actor: "control-plane:t1/alice"},
+		{Actor: "operator:root"},
+		{Actor: ActorLifecycle, Bundle: bundle},
+		{Actor: "cli:alice", Lifecycle: true},
+	} {
+		if _, err := Apply(context.Background(), path, change, opt); err == nil {
+			t.Fatalf("%+v was accepted", opt)
+		}
+	}
+	for _, actor := range []string{"control-plane:t1", "control-plane:/alice", "control-plane:t1/a/b", "operator:", "operator:a\nb"} {
+		if _, err := Apply(context.Background(), path, change, Options{Actor: actor, Lifecycle: true}); err == nil {
+			t.Fatalf("malformed principal %q was accepted", actor)
+		}
+	}
+	if _, err := ReadGenerationState(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused write recorded a generation: %v", err)
+	}
+	res, err := Apply(context.Background(), path, change, Options{Actor: "control-plane:t1/alice", Reason: "tighten", Lifecycle: true, Bundle: bundle})
+	if err != nil {
+		t.Fatalf("lifecycle principal write: %v", err)
+	}
+	state, err := ReadGenerationState(path)
+	if err != nil || state.Generation != res.Generation || state.Actor != "control-plane:t1/alice" ||
+		state.BundleID != bundle.ID || state.BundleVersion != 7 || state.SignerKeyID != "k1" || state.Reason != "tighten" {
+		t.Fatalf("generation state = %+v, %v", state, err)
+	}
+	if _, err := Apply(context.Background(), path, []Change{{Path: "guardrail.mode", Value: "observe"}}, Options{Actor: "operator:root", Lifecycle: true}); err != nil {
+		t.Fatalf("lifecycle operator write: %v", err)
+	}
+	if state, _ := ReadGenerationState(path); state.BundleID != "" || state.Actor != "operator:root" {
+		t.Fatalf("bundle fields leaked into the next generation: %+v", state)
+	}
+}
+
 func TestApplyPutsTheOldConfigBackWhenTheGenerationRecordFails(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
@@ -227,6 +291,20 @@ func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *test
 	})
 	if want := "gateway.api_port,enterprise.enrollment.home_roots"; strings.Join(got, ",") != want {
 		t.Fatalf("ManagedRestartRequired = %v, want %s", got, want)
+	}
+}
+
+func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
+	before := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n")
+	restart := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n")
+	for _, level := range []string{"CRITICAL", "HIGH", "LOW"} {
+		hot := []byte("config_version: 9\nguardrail:\n  block_at: " + level + "\n  hook_self_heal_debounce_ms: 500\n")
+		if keys, err := ManagedConfigRestartRequired(before, hot); err != nil || len(keys) != 0 {
+			t.Fatalf("MEDIUM to %s = %v, %v; want hot", level, keys, err)
+		}
+	}
+	if keys, err := ManagedConfigRestartRequired(before, restart); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
+		t.Fatalf("debounce change = %v, %v; want restart", keys, err)
 	}
 }
 

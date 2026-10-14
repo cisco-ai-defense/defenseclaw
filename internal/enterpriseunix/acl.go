@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -67,6 +68,7 @@ type aclTarget struct {
 	private       bool
 	publishedDir  bool
 	publishedFile bool
+	gatewayRead   bool
 	requireList   bool
 	ancestor      bool
 }
@@ -116,6 +118,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		targets = append(targets, aclTarget{
 			path: rooted, private: closed,
 			publishedDir: info.IsDir() && published[rooted], publishedFile: info.Mode().IsRegular() && published[rooted],
+			gatewayRead: rooted == e.P(e.Layout.ConfigPath) || rooted == e.P(e.Layout.ConfigDir),
 			requireList: filepath.Base(rooted) == "managed-settings.d" || filepath.Base(rooted) == "policy.d",
 		})
 	}
@@ -145,6 +148,22 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			return nil
 		})
 	}
+	// The public bundle parent is traversable; its other children still need
+	// their own protection even if an ACL grants read despite their mode bits.
+	bundles := e.P(filepath.Join(e.Layout.ConfigDir, "bundles"))
+	events := filepath.Join(bundles, enterprisestatus.PublicReceiptEventsDirName)
+	_ = filepath.WalkDir(bundles, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || writerTemporary(d.Name()) {
+			return nil
+		}
+		if path == events && d.IsDir() {
+			return fs.SkipDir
+		}
+		if path != bundles && path != filepath.Join(bundles, enterprisestatus.PublicReceiptName) {
+			add(path, &yes)
+		}
+		return nil
+	})
 	// A nested vendor pack can gain an ACL without changing its mode bits.
 	// Include every installed entry, not just the top-level managed folders.
 	_ = filepath.WalkDir(e.P(e.Layout.VendorPolicyDir), func(path string, d fs.DirEntry, err error) error {
@@ -270,8 +289,8 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					}
 					continue
 				}
-				deny := (target.publishedDir && entry.DeniesDirectoryAccess(target.requireList)) ||
-					(target.publishedFile && entry.DeniesFileRead())
+				deny := ((target.publishedDir || target.gatewayRead) && entry.DeniesDirectoryAccess(target.requireList)) ||
+					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead())
 				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
 					finding.entries = append(finding.entries, entry.Text)
 					finding.write = finding.write || entry.GrantsWrite()
@@ -376,9 +395,9 @@ func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) 
 	return l.removeACLTargets(ctx, l.env.aclTargets(files, connectors))
 }
 
-// removeConfigACLs removes the macOS ACL entries that let another account
-// write config.yaml or put another file in its folder. replaceWritableConfig
-// runs it before it reads and replaces the file (GAP-1441).
+// removeConfigACLs removes macOS ACL entries that let another account write
+// the config or prevent the gateway from reading it or traversing its folder.
+// replaceWritableConfig runs it before reading and replacing the file.
 func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 	env := l.env
 	if env.GOOS != "darwin" {
@@ -387,7 +406,7 @@ func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 	var targets []aclTarget
 	for _, canonical := range []string{filepath.Dir(env.Layout.ConfigPath), env.Layout.ConfigPath} {
 		if info, err := os.Lstat(env.P(canonical)); err == nil && info.Mode()&os.ModeSymlink == 0 {
-			targets = append(targets, aclTarget{path: env.P(canonical)})
+			targets = append(targets, aclTarget{path: env.P(canonical), gatewayRead: true})
 		}
 	}
 	return l.removeACLTargets(ctx, targets)

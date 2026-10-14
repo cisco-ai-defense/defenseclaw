@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +40,40 @@ import (
 )
 
 const enterpriseHookWorkerHelperEnv = "DEFENSECLAW_TEST_APPLY_TARGET_HELPER"
+
+func TestManagedClaudePolicyBlocksLeftoverPersonalHook(t *testing.T) {
+	home := t.TempDir()
+	hooks := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hooks, "claude-code-hook.sh")
+	old := []byte("#!/bin/sh\n# defenseclaw-managed-hook v7\necho 'gateway unreachable, allowing claude-code tool' >&2\nexit 0\n")
+	if err := os.WriteFile(path, old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := enterprisehooks.InstallOptions{ConnectorName: "claudecode", UserHome: home}
+	if err := blockPersonalClaudeHook(opts); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/bin/sh", path)
+	output, err := command.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !bytes.Contains(output, []byte("this computer is managed")) {
+		t.Fatalf("personal hook exit=%v output=%q", err, output)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := blockPersonalClaudeHook(opts); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("second repair changed blocking hook: %v", err)
+	}
+}
 
 // TestEnterpriseHookWorkerHelperProcess is the apply-target worker body for
 // the protocol tests. It does nothing when run as an ordinary test.

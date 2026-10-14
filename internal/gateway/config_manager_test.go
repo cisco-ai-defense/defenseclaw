@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,6 +83,32 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	// (GAP-0109).
 	if raw, _ := json.Marshal(health.Snapshot().Config.Details["restart_required"]); string(raw) != "[]" {
 		t.Fatalf("restart_required = %s, want []", raw)
+	}
+}
+
+func TestConfigWatcherErrorReconcilesBeforeChangingHealth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := NewSidecarHealth()
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		return nil
+	})
+	health.SetConfig(StateError, "permission denied", map[string]interface{}{"path": path})
+	mgr.reconcileWatchError(context.Background(), os.ErrPermission)
+	if got := health.Snapshot().Config; got.State != StateRunning || got.LastError != "" {
+		t.Fatalf("readable config after a watcher error: %+v", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reconcileWatchError(context.Background(), os.ErrPermission)
+	if got := health.Snapshot().Config; got.State != StateError || !strings.Contains(got.LastError, path) {
+		t.Fatalf("unreadable config after a watcher error: %+v", got)
 	}
 }
 
@@ -1729,6 +1756,65 @@ func TestConfigManagerStartupRebuildsAssetBeforeReady(t *testing.T) {
 		}
 	default:
 		t.Fatal("startup reported readiness without rebuilding the edited asset")
+	}
+	cancel()
+	<-done
+}
+
+func TestConfigManagerRetriesPermissionErrorAfterRollbackWithoutAnotherWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var denied atomic.Bool
+	applied := make(chan struct{}, 1)
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			select {
+			case applied <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+	mgr.permissionRetryInterval = 20 * time.Millisecond
+	read := mgr.readSnapshot
+	mgr.readSnapshot = func(path string) (configFileSnapshot, error) {
+		if denied.Load() {
+			return configFileSnapshot{}, os.ErrPermission
+		}
+		return read(path)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-applied:
+	default:
+	}
+	denied.Store(true)
+	if err := mgr.Reload(ctx, "rollback"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("permission refusal = %v", err)
+	}
+	denied.Store(false)
+	select {
+	case <-applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission recovery did not retry the config reload")
+	}
+	mgr.mu.Lock()
+	retry := mgr.permissionRetry
+	rejected := mgr.rejected
+	mgr.mu.Unlock()
+	if retry || rejected {
+		t.Fatal("a recovered config is still marked rejected")
 	}
 	cancel()
 	<-done

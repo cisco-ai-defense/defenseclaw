@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
@@ -32,7 +33,13 @@ func openJudgeBodyFileNoFollow(path string, create bool) (*os.File, error) {
 	return file, nil
 }
 
-func validateJudgeBodyPlatformTrust(_ string, info os.FileInfo, directory, _ bool) error {
+// validateJudgeBodyPlatformTrust mirrors validateAuditDBPlatformTrust in
+// audit_db_path_unix.go — same AIFW-34262 ancestor-advisory downgrade so a
+// group/other-writable /opt/cisco (0775 root-owned, no sticky) doesn't fail
+// the managed_enterprise gateway on startup. Structural failures (untrusted
+// owner, ownership lookup) stay fatal in either mode; strict=true (the leaf,
+// or managed.TrustStrictAncestorsEnv=1) keeps every verdict fatal too.
+func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, strict bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("judge_body: database path ownership is unavailable")
@@ -51,7 +58,10 @@ func validateJudgeBodyPlatformTrust(_ string, info os.FileInfo, directory, _ boo
 		if directory {
 			kind = "directory"
 		}
-		return fmt.Errorf("judge_body: database %s is group- or other-writable", kind)
+		verdict := managed.NewTrustVerdict("judge_body: database %s is group- or other-writable", kind)
+		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		label := fmt.Sprintf("judge body database %s", kind)
+		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
 	return nil
 }

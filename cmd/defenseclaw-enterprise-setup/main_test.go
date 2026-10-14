@@ -38,9 +38,30 @@ func TestParseEnterpriseSetupInstallContract(t *testing.T) {
 	}
 }
 
+func TestParseEnterpriseSetupDefaultsEmptyInstallToDeferredConfiguration(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"/quiet",
+		"DEFERREDCONFIG=1",
+	})
+	if err != nil || help {
+		t.Fatalf("parse deferred install: help=%v err=%v", help, err)
+	}
+	if !opts.DeferredConfig || opts.Config != "" || opts.Manifest != "" {
+		t.Fatalf("deferred install = %+v", opts)
+	}
+
+	opts, help, err = parseEnterpriseSetupOptions([]string{"/install"})
+	if err != nil || help || !opts.DeferredConfig {
+		t.Fatalf("implicit deferred install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+}
+
 func TestParseEnterpriseSetupRejectsUnsafeScopeCombinations(t *testing.T) {
 	tests := [][]string{
 		{"/install", "--config", "config.yaml"},
+		{"/install", "--manifest", "targets.yaml"},
+		{"/install", "--deferred-config", "--config", "config.yaml", "--manifest", "targets.yaml"},
 		{"/status", "--no-start"},
 		{"/repair", "--purge"},
 		{"/install", "--config", "config.yaml", "--manifest", "targets.yaml", "--allow-unsigned"},
@@ -114,11 +135,15 @@ func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 	}
 }
 
+// TestPlaceholderBuildFailsClosedWithoutEnterprisePayload asserts the
+// runtime refuses to install when the outer EXE has no
+// setuppayload trailer at its tail. Under `go test` the running
+// binary is the test executable, which has no trailer — so the
+// setuppayload.ErrTrailerMissing path is exercised. The failure
+// message points the operator at DefenseClawAssembler.exe.
 func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
-	if err == nil ||
-		!strings.Contains(err.Error(), "packaging-windows-enterprise-installer") ||
-		!strings.Contains(err.Error(), "packaging-windows-avc-buildkit") {
+	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
 	}
 }
@@ -320,7 +345,7 @@ func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
 	var secureClient bytes.Buffer
 	writeEnterpriseSetupUsage(&secureClient)
 	if want := enterpriseSetupArtifactName + " --action <install|reconcile|repair|status|uninstall|upgrade|verify> [options]\n" +
-		"Install requires --config <config.yaml> and --manifest <targets.yaml>.\n" +
+		"Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.\n" +
 		"Production paths and service names are fixed by the enterprise lifecycle.\n"; secureClient.String() != want {
 		t.Fatalf("Secure Client usage = %q", secureClient.String())
 	}
@@ -496,6 +521,29 @@ func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
 	}
 	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1"}, false); err == nil {
 		t.Fatal("the Secure Client Setup accepted FORCE=1")
+	}
+}
+
+// BUNDLE= and TRUSTANCHORS= are standalone /ensure properties; the signed
+// bundle carries the config, so BUNDLE= with CONFIG= is invalid arguments,
+// and the Secure Client Setup does not know them.
+func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TrustAnchors=C:\b\a.json`, "REFUSECAPABILITYLOSS=1", "JSON=1"}, true)
+	if err != nil || opts.Bundle != `C:\b\v7.dcbundle` || opts.TrustAnchors != `C:\b\a.json` || !opts.RefuseCapabilityLoss {
+		t.Fatalf("standalone /ensure BUNDLE=: opts %+v, err %v", opts, err)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `CONFIG=C:\c.yaml`},
+		{"/repair", `BUNDLE=C:\b\v7.dcbundle`},
+		{"/status", `TRUSTANCHORS=C:\b\a.json`},
+		{"/ensure", "REFUSECAPABILITYLOSS=1"},
+	} {
+		if _, _, err := parseEnterpriseSetupOptionsForFlavor(arguments, true); err == nil {
+			t.Errorf("standalone %v was accepted", arguments)
+		}
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted BUNDLE=")
 	}
 }
 

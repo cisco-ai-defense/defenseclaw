@@ -32,6 +32,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -74,7 +75,8 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover = "remove_leftover"
+	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
 	// removals and only when every one of them succeeded: the state holds
@@ -410,7 +412,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
@@ -569,6 +571,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = enterpriseHookWorkerRemover(ctx, opts)
 				outcome.Removed = err == nil
 			}
+		case enterpriseHookWorkerModeBlockPersonalClaude:
+			err = blockPersonalClaudeHook(opts)
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
 			if removalFailed {
 				err = errors.New("a DefenseClaw hook registration of this account was not removed")
@@ -603,6 +608,46 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// blockPersonalClaudeHook replaces only an existing DefenseClaw-owned
+// personal script, as the target user. A managed policy may cover the agent
+// while an old personal registration still invokes this script. Its direct
+// invocation must deny instead of allowing on a dead personal gateway port.
+func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
+	if opts.ConnectorName != "claudecode" {
+		return errors.New("personal hook blocking is only for Claude Code")
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	path := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("personal Claude Code hook %s is not a regular file", path)
+	}
+	if info.Size() > 1<<20 {
+		return fmt.Errorf("personal Claude Code hook %s is too large", path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if !bytes.Contains(body[:min(len(body), 160)], []byte("# defenseclaw-managed-hook v")) {
+		return fmt.Errorf("personal Claude Code hook %s is not DefenseClaw-owned", path)
+	}
+	const blocked = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
+	if string(body) == blocked {
+		return nil
+	}
+	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
 }
 
 // enterpriseHookWorkerManagedRegistration reports whether the user's hook

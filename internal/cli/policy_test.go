@@ -369,6 +369,22 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	}
 }
 
+func TestPolicyReloadPreRunLeavesAuditStoreToGateway(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managed.ConfigPathEnv, configPath)
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	if err := policyReloadCmd.PersistentPreRunE(policyReloadCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "audit.db")); !os.IsNotExist(err) {
+		t.Fatalf("reload pre-run opened the gateway audit store: %v", err)
+	}
+}
+
 // A Secure Client host keeps the policy reload output of main (issue #1092):
 // the HTTP status and body of a refused reload, not the GAP-0160 sentence.
 func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {

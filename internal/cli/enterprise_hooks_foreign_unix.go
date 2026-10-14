@@ -189,6 +189,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
+	// The descriptor names policy actually published by the lifecycle;
+	// config alone can name Claude with ownership turned off.
+	_, claudeManaged := enterpriseHookStandaloneMachinePolicySet()[enterprisepolicy.ConnectorClaudeCode]
 	leftovers := func(user string) []string {
 		out := []string{}
 		for _, name := range vendor {
@@ -199,6 +202,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return out
 	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
+	fingerprint += fmt.Sprintf("claude-managed:%t;", claudeManaged)
 	if vscode != nil {
 		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
 	}
@@ -233,7 +237,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	enterpriseHookForeignCleanupState.unrepaired = stillUnrepaired
 	due := newDrift || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
-		((len(cleanups) > 0 || governed || !enterpriseHookForeignCleanupState.leftoversClean) &&
+		((len(cleanups) > 0 || governed || claudeManaged || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
@@ -278,6 +282,16 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 					OwnerGID:      account.GID,
 					DataDir:       filepath.Join(account.Home, ".defenseclaw"),
 				},
+			})
+		}
+		if claudeManaged {
+			// Machine policy covers eligible users even when they have no
+			// manifest row. An old personal settings.json can still invoke
+			// its script, so make that script deny as the target user.
+			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+				Index: len(names), Mode: enterpriseHookWorkerModeBlockPersonalClaude,
+				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
+					OwnerUID: account.UID, OwnerGID: account.GID},
 			})
 		}
 		jobs = append(jobs, enterpriseHookWorkerJob{
@@ -341,6 +355,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		for _, target := range outcome.Job.Request.Targets {
 			name := target.Options.ConnectorName
 			result, ok := answered[target.Index]
+			if target.Mode == enterpriseHookWorkerModeBlockPersonalClaude {
+				if !ok || !result.OK {
+					clean = false
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not block the personal Claude Code hook for %s: %s\n", user,
+						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				}
+				continue
+			}
 			switch {
 			case ok && result.Removed:
 				removed++

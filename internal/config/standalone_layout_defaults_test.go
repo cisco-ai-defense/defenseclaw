@@ -28,9 +28,6 @@ import (
 // the rule pack to the vendor default pack. Explicit values are kept as
 // written so the lifecycle can refuse a wrong one.
 func TestStandaloneLayoutConfigDefaultsLayoutFixedPaths(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Linux and macOS layout paths are not paths on Windows")
-	}
 	t.Setenv(managed.ConfigPathEnv, "")
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.EnterpriseProfileEnv, "")
@@ -50,7 +47,7 @@ guardrail:
 			t.Fatal(err)
 		}
 		t.Run(goos, func(t *testing.T) {
-			cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, []byte(minimal))
+			cfg, err := LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, []byte(minimal), layout.DataDir, goos)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -80,7 +77,7 @@ guardrail:
 			// The compile inspects the local store paths, so on a host where
 			// this layout is really installed (its data directory exists and
 			// is private to the service) only the loader is checked.
-			if _, err := os.Lstat(layout.DataDir); errors.Is(err, fs.ErrNotExist) {
+			if _, err := os.Lstat(layout.DataDir); runtime.GOOS == goos && errors.Is(err, fs.ErrNotExist) {
 				compiled, err := ParseCompileObservabilityV8(layout.ConfigPath, []byte(minimal), ObservabilityV8CompileOptions{DefaultDataDir: filepath.Join(t.TempDir(), "elsewhere")})
 				if err != nil {
 					t.Fatal(err)
@@ -96,7 +93,7 @@ guardrail:
 			}
 
 			explicit := strings.Replace(minimal, "deployment_mode: managed_enterprise\n", "deployment_mode: managed_enterprise\ndata_dir: "+layout.ConfigDir+"\n", 1)
-			cfg, err = LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, []byte(explicit))
+			cfg, err = LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, []byte(explicit), layout.DataDir, goos)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +108,8 @@ guardrail:
 		t.Fatal(err)
 	}
 	t.Run("unmanaged config at the layout path", func(t *testing.T) {
-		cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(linux.ConfigPath, []byte("config_version: 8\nguardrail:\n  enabled: true\n"))
+		cfg, err := LoadRuntimeV8InspectionCandidateForLayout(linux.ConfigPath,
+			[]byte("config_version: 8\nguardrail:\n  enabled: true\n"), linux.ConfigDir, "linux")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,4 +136,29 @@ guardrail:
 			t.Fatalf("a Secure Client config got the standalone data_dir %q", dir)
 		}
 	})
+}
+
+func TestManagedStandaloneLoaderIgnoresPerUserLLMEnvironment(t *testing.T) {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const source = "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"
+	load := func() *Config {
+		t.Helper()
+		cfg, err := LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, []byte(source), layout.DataDir, "linux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	baseline := load()
+	t.Setenv(DefenseClawLLMModelEnv, "host-only-model")
+	t.Setenv(DefenseClawLLMKeyEnv, "host-only-secret")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	changed := load()
+	if changed.LLM.Model != baseline.LLM.Model || changed.LLM.APIKeyEnv != baseline.LLM.APIKeyEnv || changed.Environment != baseline.Environment {
+		t.Fatalf("host environment changed managed defaults: before=%+v after=%+v", baseline.LLM, changed.LLM)
+	}
 }

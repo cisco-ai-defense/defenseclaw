@@ -32,6 +32,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+// The Windows bundle lifecycle supplies generation metadata for a staged
+// bundle whose rendered config is the file installed by Setup.
+var managedStandaloneBundleGeneration = func(string, []byte) (configwrite.Options, bool, error) {
+	return configwrite.Options{}, false, nil
+}
+
 // config is the operator-facing config group of the gateway binary. Like
 // config-v8 it runs without the root pre-run, which would load the very
 // file being migrated. Main has no config group, so a Secure Client
@@ -225,6 +231,13 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"}
+	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, raw); err != nil {
+		return err
+	} else if ok {
+		opt = bundleOpt
+		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
+	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {
 		return fmt.Errorf("read the access control list of %s: %w", path, err)
@@ -239,20 +252,31 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		if _, err := config.MigrateV9(ctx, input); err != nil {
 			return fmt.Errorf("migrate %s to config_version 9: %w", path, err)
 		}
+		if opt.Bundle.ID != "" {
+			migrated, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			opt.ExpectSHA256 = configwrite.SHA256Hex(migrated)
+			if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
+				return err
+			}
+		}
 		// Only config-owned files take config.yaml's DACL. MigrateV9 also
 		// writes .env and may touch policy files; their ACLs belong to
 		// those files, not to the readable config (GAP-0440).
 		return restoreACL(append(written, path, path+config.ConfigV8BackupSuffix, config.MigrationRecordPath(path))...)
 	}
-	if state, err := configwrite.ReadGenerationState(path); err == nil && state.ConfigSHA256 == configwrite.SHA256Hex(raw) {
+	if state, err := configwrite.ReadGenerationState(path); err == nil &&
+		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
+		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
+			state.BundleVersion == opt.Bundle.Version && state.SignerKeyID == opt.Bundle.SignerKeyID) {
 		// Already recorded, but the record still takes the DACL of the
 		// config: an uninstall that keeps state leaves it administrator-only,
 		// and the gateway service reads it for its generation (GAP-0293).
 		return restoreACL(written...)
 	}
-	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure",
-	}, func() (bool, error) { return true, nil }); err != nil {
+	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
 	}
 	return restoreACL(written...)
