@@ -6789,6 +6789,8 @@ function Get-DefenseClawBundlePathKind {
     }
     $top = ($RelativePath -split '\\', 2)[0]
     if ($top -ceq 'receipt-events') {
+        # Terminal receipt events share the public bundles descriptor; Setup
+        # repair and the Go pre-apply creator must use the same exact ACL.
         if ($RelativePath -ceq $top -and $IsDirectory) {
             return 'BundleDirectory'
         }

@@ -104,6 +104,9 @@ $bundlePaths = @(
     [pscustomobject]@{ relative = "$versionName\policies"; directory = $true; kind = 'BundleVersionDirectory' },
     [pscustomobject]@{ relative = "$versionName\policies\rule.yaml"; directory = $false; kind = 'BundleVersionFile' },
     [pscustomobject]@{ relative = 'receipt.json'; directory = $false; kind = 'BundleReceipt' },
+    [pscustomobject]@{ relative = 'receipt-events'; directory = $true; kind = 'BundleDirectory' },
+    [pscustomobject]@{ relative = 'receipt-events\b-01JA0000000000000000000033.json'; directory = $false; kind = 'BundleReceipt' },
+    [pscustomobject]@{ relative = 'receipt-events\invalid.json'; directory = $false; kind = 'AdminFile' },
     [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8'; directory = $true; kind = 'AdminDirectory' },
     [pscustomobject]@{ relative = '.staging-r-01M4VBXHT0DS0QNK83AKADPAK8\policies'; directory = $true; kind = 'AdminDirectory' }
 )

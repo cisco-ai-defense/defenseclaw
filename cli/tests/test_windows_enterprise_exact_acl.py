@@ -433,6 +433,42 @@ def test_public_receipt_event_paths_select_public_exact_acl() -> None:
     for path, public_receipt in cases.items():
         assert (re.fullmatch(pattern.group(1), path) is not None) is public_receipt, path
 
+    builder = _extract_function_body(
+        source,
+        "function New-DefenseClawCanonicalPathAcl",
+        "function Test-DefenseClawExactRawDACL",
+    )
+    for kind, right in (("BundleDirectory", "ReadAndExecute"), ("BundleReceipt", "Read")):
+        entry = builder.split(f"        '{kind}' {{", 1)[1].split("\n        }", 1)[0]
+        assert "$script:UsersSID" in entry
+        assert f"[Security.AccessControl.FileSystemRights]::{right}" in entry
+
+    smoke = SMOKE.read_text(encoding="utf-8")
+    for path, kind in (
+        ("receipt-events", "BundleDirectory"),
+        (r"receipt-events\b-01JA0000000000000000000033.json", "BundleReceipt"),
+        (r"receipt-events\invalid.json", "AdminFile"),
+    ):
+        assert f"relative = '{path}'; directory = $" in smoke
+        assert f"kind = '{kind}'" in smoke.split(f"relative = '{path}'", 1)[1].split("}", 1)[0]
+
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
+    public_dir = go_acl.split("func windowsBundleDirectorySDDL(", 1)[1].split("\n}", 1)[0]
+    public_file = go_acl.split("func windowsBundleReceiptSDDL(", 1)[1].split("\n}", 1)[0]
+    assert ";;;BU)" in public_dir and ";;;BU)" in public_file
+    setup_ensure = go.split("func ensureWindowsBundleReceiptEvents(", 1)[1].split("\n}", 1)[0]
+    publisher = go.split("func publishWindowsBundleReceipt(", 1)[1].split("\n}", 1)[0]
+    assert "windowsBundleDirectorySDDL(" in setup_ensure
+    assert "windowsBundleReceiptSDDL(" in setup_ensure
+    assert "windowsBundleDirectorySDDL(" in publisher
+    assert "windowsBundleReceiptSDDL(" in publisher
+    assert "windowsBundlePrivateSDDL()" not in setup_ensure + publisher
+    assert "windowsBundleAdminFileSDDL()" not in publisher
+
 
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:
     source = MODULE.read_text(encoding="utf-8")

@@ -342,18 +342,20 @@ func publishWindowsBundlePrivateFile(path string) error {
 }
 
 func publishWindowsBundleReceipt(path string) error {
-	if filepath.Base(filepath.Dir(path)) == enterprisestatus.PublicReceiptEventsDirName {
-		if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
-			return err
-		}
-		if err := applyWindowsBundleSDDL(filepath.Dir(path), windowsBundlePrivateSDDL()); err != nil {
-			return err
-		}
-		return applyWindowsBundleSDDL(path, windowsBundleAdminFileSDDL())
-	}
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
 	if err != nil {
 		return err
+	}
+	if filepath.Base(filepath.Dir(path)) == enterprisestatus.PublicReceiptEventsDirName {
+		name := filepath.Base(path)
+		if !strings.HasSuffix(name, ".json") ||
+			!enterprisestatus.ValidReceiptID(strings.TrimSuffix(name, ".json")) {
+			return fmt.Errorf("invalid public receipt event name: %s", name)
+		}
+		if err := createWindowsBundleDirectory(filepath.Dir(path), windowsBundleDirectorySDDL(service.String())); err != nil {
+			return err
+		}
+		return applyWindowsBundleSDDL(path, windowsBundleReceiptSDDL(service.String()))
 	}
 	return applyWindowsBundleSDDL(path, windowsBundleReceiptSDDL(service.String()))
 }
@@ -397,20 +399,14 @@ func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
 	if err := createWindowsBundleDirectory(path, sddl); err != nil {
 		return err
 	}
-	return ensureWindowsBundleReceiptEvents(path)
+	return ensureWindowsBundleReceiptEvents(path, service.String())
 }
 
-func ensureWindowsBundleReceiptEvents(path string) error {
-	// Terminal receipts may have created this directory after the previous
-	// apply's Verify. Protect it and its existing files before the next Verify.
+func ensureWindowsBundleReceiptEvents(path, serviceSID string) error {
+	// A previous build may have left the public spool administrator-only.
+	// Repair it before Setup's first apply and exact-ACL verification.
 	events := filepath.Join(path, enterprisestatus.PublicReceiptEventsDirName)
-	if err := os.MkdirAll(events, 0o700); err != nil {
-		return err
-	}
-	if err := winpath.RejectReparseChain(events); err != nil {
-		return err
-	}
-	if err := applyWindowsBundleSDDL(events, windowsBundlePrivateSDDL()); err != nil {
+	if err := createWindowsBundleDirectory(events, windowsBundleDirectorySDDL(serviceSID)); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(events)
@@ -425,7 +421,14 @@ func ensureWindowsBundleReceiptEvents(path string) error {
 		if err := winpath.RejectReparseChain(file); err != nil {
 			return err
 		}
-		if err := applyWindowsBundleSDDL(file, windowsBundleAdminFileSDDL()); err != nil {
+		// Only terminal receipt IDs are public. Unknown files retain the
+		// verifier's AdminFile descriptor.
+		sddl := windowsBundleAdminFileSDDL()
+		if strings.HasSuffix(entry.Name(), ".json") &&
+			enterprisestatus.ValidReceiptID(strings.TrimSuffix(entry.Name(), ".json")) {
+			sddl = windowsBundleReceiptSDDL(serviceSID)
+		}
+		if err := applyWindowsBundleSDDL(file, sddl); err != nil {
 			return err
 		}
 	}

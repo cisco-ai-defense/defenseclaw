@@ -342,10 +342,11 @@ type Store struct {
 	// the rename; Unix sets its group mode during SealVersion.
 	PublishVersion func(root string) error
 	// PublishReceipt applies the platform's public-file permissions after an
-	// atomic replacement of receipt.json.
+	// atomic replacement of receipt.json or a terminal receipt event.
 	PublishReceipt func(path string) error
-	// EnsurePublicReceiptEventsDirectory creates the public event spool with
-	// the platform's protected directory descriptor before publishing files.
+	// EnsurePublicReceiptEventsDirectory creates or repairs the public event
+	// spool with the same protected directory descriptor that Setup verifies.
+	// PublishReceipt must use the matching public file descriptor for events.
 	EnsurePublicReceiptEventsDirectory func(path string) error
 	// EnsurePrivateDirectory creates the lifecycle and receipts directories
 	// with the platform's private descriptor. Nil uses ordinary mkdir.
