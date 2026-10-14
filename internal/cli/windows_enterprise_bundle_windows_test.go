@@ -71,6 +71,72 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation uint64
+		digest     string
+		want       bool
+	}{
+		{"enforced", 7, windowsBundleTestDigest, true},
+		{"wrong generation", 6, windowsBundleTestDigest, false},
+		{"wrong digest", 7, "sha256:" + strings.Repeat("2", 64), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout := stubWindowsBundleHost(t)
+			driver := newWindowsBundleDriver(layout)
+			rc, err := driver.Store.Receive("b-01JA0000000000000000000033", 13)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := driver.Store.Stage(rc, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := driver.Store.Advance(rc, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+				r.ManifestSHA256 = strings.Repeat("a", 64)
+				r.ExpectedDigest = windowsBundleTestDigest
+				r.SetDigestComparison(true, false, false)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := driver.Store.Promote(rc); err != nil {
+				t.Fatal(err)
+			}
+			installed := []byte("config_version: 9\n")
+			if err := driver.Store.Advance(rc, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) {
+				r.ConfigSHA256 = configwrite.SHA256Hex(installed)
+				r.EffectivePolicyDigest = windowsBundleTestDigest
+				r.ConfigGeneration = 7
+			}); err != nil {
+				t.Fatal(err)
+			}
+			policy := &enterprisebundle.GatewayPolicy{EffectiveDigest: tc.digest, Digest: tc.digest, Generation: tc.generation, Applied: true}
+			got, err := settleWindowsAppliedBundle(driver, installed, policy)
+			if err != nil || got != tc.want {
+				t.Fatalf("settled=%v, err=%v", got, err)
+			}
+			st, err := driver.Store.LoadState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (st.Current != nil) != tc.want {
+				t.Fatalf("current=%+v", st.Current)
+			}
+			receipts, err := driver.Store.Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantState := enterprisebundle.StateApplied
+			if tc.want {
+				wantState = enterprisebundle.StateConfirmed
+			}
+			if len(receipts) != 1 || receipts[0].State != wantState {
+				t.Fatalf("receipts=%+v", receipts)
+			}
+		})
+	}
+}
+
 func windowsBundleScratchDir(t *testing.T) string {
 	t.Helper()
 	if scratch := os.Getenv("DC_WINDOWS_BUNDLE_TEST_TEMP_DIR"); scratch != "" {

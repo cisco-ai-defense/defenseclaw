@@ -6,8 +6,9 @@
     on Windows.
 
 .DESCRIPTION
-    Read-only. Works in Windows PowerShell 5.1 (32- or 64-bit, as Intune runs
-    custom detection and Remediations scripts) and in PowerShell 7.
+    Works in Windows PowerShell 5.1 (32- or 64-bit, as Intune runs
+    custom detection and Remediations scripts) and in PowerShell 7. Bundle
+    status may confirm an applied receipt left by an interrupted apply.
 
     Detected when the protected HKLM marker (64-bit view) names the standalone
     profile at or above -MinimumVersion, the installed CLI sits in the
@@ -345,6 +346,16 @@ if ($RequireBundle) {
     if (-not $byVersion -and $wanted -cnotmatch '^b-[0-9A-HJKMNP-TV-Z]{26}$') {
         Exit-NotDetected -Reason "-RequireBundle '$wanted' is neither a bundle id (b-<ULID>) nor a version number"
     }
+    # Status settles an applied receipt left by a killed CLI before the
+    # marker is read. Both checks then describe the same confirmed bundle.
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
+        $status = ([string]$run.StdOut) | ConvertFrom-Json
+    } catch {
+        Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
+    }
+    if ($run.ExitCode -ne 0) { Exit-NotDetected -Reason 'bundle status could not be read' }
     $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
     if ($null -eq $key) { Exit-NotDetected -Reason 'the enterprise marker is missing' }
     try {
@@ -362,14 +373,7 @@ if ($RequireBundle) {
     if (-not $byVersion -and $bundleId -ne $wanted) {
         Exit-NotDetected -Reason "the confirmed policy bundle is $bundleId, not $wanted"
     }
-    try {
-        $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
-            'enterprise', 'bundle', 'status', '--json') -TimeoutSeconds 300
-        $status = ([string]$run.StdOut) | ConvertFrom-Json
-    } catch {
-        Exit-NotDetected -Reason "bundle status could not be read: $($_.Exception.Message)"
-    }
-    if ($run.ExitCode -ne 0 -or $null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
+    if ($null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
         Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"
     }
     $bundleText = ", policy bundle $bundleId version $bundleVersion"

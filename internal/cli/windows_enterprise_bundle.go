@@ -63,6 +63,8 @@ const (
 	windowsBundlePolicyWaits = 4
 )
 
+var errWindowsBundleStoreBusy = errors.New("another policy bundle run holds the bundle store; retry when it ends")
+
 // Seams for tests.
 var (
 	windowsBundleLayout                 = managed.StandaloneWindowsLayout
@@ -92,6 +94,97 @@ func init() {
 		return nil
 	}
 	managedStandaloneBundleGeneration = windowsStagedBundleGeneration
+	bundleSettleStatus = settleWindowsBundleStatus
+}
+
+// settleWindowsBundleStatus closes the crash window between the applied
+// receipt and the confirmed state. The store lock excludes a live apply; an
+// active writer retains ownership and status reports its pending receipt.
+func settleWindowsBundleStatus(ctx context.Context) error {
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		return err
+	}
+	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
+	if err != nil {
+		// A live apply may hold this lock. It will settle its own receipt.
+		if errors.Is(err, errWindowsBundleStoreBusy) {
+			return nil
+		}
+		return err
+	}
+	defer unlock()
+	driver := newWindowsBundleDriver(layout)
+	receipts, err := driver.Store.Receipts()
+	if err != nil {
+		return err
+	}
+	pending := false
+	for _, rc := range receipts {
+		if rc.State == enterprisebundle.StateApplied {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return syncWindowsBundleMarker(driver.Store)
+	}
+	installed, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
+	if err != nil {
+		return err
+	}
+	confirmed, err := settleWindowsAppliedBundle(driver, installed, windowsBundlePolicy(ctx))
+	if err != nil || !confirmed {
+		return err
+	}
+	return syncWindowsBundleMarker(driver.Store)
+}
+
+// A crash between confirming the receipt and updating the MDM marker is
+// repaired by the next status call, including when the receipt is already
+// confirmed. Matching values do not cause a registry write.
+func syncWindowsBundleMarker(store *enterprisebundle.Store) error {
+	st, err := store.LoadState()
+	if err != nil || st.Current == nil {
+		return err
+	}
+	marker, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey,
+		registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return fmt.Errorf("open the enterprise marker to publish the confirmed bundle: %w", err)
+	}
+	defer marker.Close()
+	id, _, idErr := marker.GetStringValue("BundleId")
+	version, _, versionErr := marker.GetStringValue("BundleVersion")
+	state, _, stateErr := marker.GetStringValue("BundleState")
+	if idErr == nil && versionErr == nil && stateErr == nil &&
+		id == st.Current.BundleID && version == strconv.FormatUint(st.Current.Version, 10) && state == enterprisebundle.StateConfirmed {
+		return nil
+	}
+	return writeWindowsBundleMarker(marker)
+}
+
+// A status read may confirm only the exact config already installed and
+// enforced. A failed health check leaves the receipt open for the normal
+// lifecycle recovery, which can roll back through the ensure transaction.
+func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byte, policy *enterprisebundle.GatewayPolicy) (bool, error) {
+	receipts, err := driver.Store.Receipts()
+	if err != nil {
+		return false, err
+	}
+	installedSHA := sha256HexBytes(installed)
+	for _, rc := range receipts {
+		if rc.State != enterprisebundle.StateApplied || rc.ConfigSHA256 != installedSHA || policy == nil ||
+			!policy.Applied || policy.ReloadError != "" || policy.EffectiveDigest != rc.EffectivePolicyDigest ||
+			policy.Digest != rc.EffectivePolicyDigest || policy.Generation != rc.ConfigGeneration {
+			continue
+		}
+		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err == nil {
+			_, err = driver.Store.Confirm(rc)
+			return err == nil, err
+		}
+	}
+	return false, nil
 }
 
 // windowsStagedBundleGeneration ties the installer child process's config
@@ -1015,7 +1108,7 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped); err != nil {
 		_ = windows.CloseHandle(handle)
 		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return nil, errors.New("another policy bundle run holds the bundle store; retry when it ends")
+			return nil, errWindowsBundleStoreBusy
 		}
 		return nil, fmt.Errorf("lock the bundle store: %w", err)
 	}

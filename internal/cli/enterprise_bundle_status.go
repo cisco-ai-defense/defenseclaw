@@ -29,6 +29,8 @@ var (
 	bundleStore         = func() (*enterprisebundle.Store, error) { return enterprisebundle.StoreFor(runtime.GOOS) }
 	bundleGatewayPolicy = lifecycleGatewayPolicy
 	bundleSessionStatus = platformBundleSessionStatus
+	// Windows uses this to finish a receipt left applied by a killed CLI.
+	bundleSettleStatus = func(context.Context) error { return nil }
 )
 
 type bundleStatusResult struct {
@@ -60,12 +62,14 @@ func newEnterpriseBundleStatusCommand() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the bundle that enforces, the last receipt, refusal and version floor",
+		Short: "Show the confirmed bundle, running digest, last receipt and version floor",
 		Long: `Report the policy bundle state of this standalone managed device: the
-current (confirmed) bundle that enforces, the last good bundle kept for
+current (confirmed) bundle, the last good bundle kept for
 rollback, the version floor, the last enforcing receipt, the last refusal
 and whether the running gateway enforces the current bundle digest.
-It changes nothing. Run it as root or an administrator.`,
+On Windows, status confirms an applied receipt left by an interrupted run
+only after the installed config and running gateway pass the confirm gate.
+Run it as root or an administrator.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
@@ -114,6 +118,9 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	store, err := bundleStore()
 	if err != nil {
 		return err
+	}
+	if err := bundleSettleStatus(ctx); err != nil {
+		return bundleStateError(err)
 	}
 	st, err := store.LoadState()
 	if err != nil {

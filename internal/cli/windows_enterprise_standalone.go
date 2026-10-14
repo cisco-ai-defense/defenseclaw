@@ -312,6 +312,11 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
+		if err := settleWindowsBundleStatus(ctx); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("settle policy bundle receipt: %w", err))
+		}
+	}
 	if action == "upgrade" || action == "repair" {
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)

@@ -26,10 +26,11 @@ import (
 // store in a temp dir and anchors trusted without the root-owner check.
 func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 	t.Helper()
-	savedStore, savedPolicy, savedAnchors, savedTrust, savedSessions := bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust, bundleSessionStatus
+	savedStore, savedPolicy, savedAnchors, savedTrust, savedSessions, savedSettle := bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust, bundleSessionStatus, bundleSettleStatus
 	t.Cleanup(func() {
 		bundleStore, bundleGatewayPolicy, bundleDefaultAnchors, bundleAnchorTrust = savedStore, savedPolicy, savedAnchors, savedTrust
 		bundleSessionStatus = savedSessions
+		bundleSettleStatus = savedSettle
 	})
 	store := enterprisebundle.NewStore(filepath.Join(e.dir, "etc", "bundles"), filepath.Join(e.dir, "lifecycle"))
 	t.Cleanup(func() {
@@ -48,6 +49,7 @@ func bundleDevice(t *testing.T, e *bundleCLIEnv) *enterprisebundle.Store {
 	bundleSessionStatus = func(context.Context) enterprisestatus.SessionRestartStatus {
 		return enterprisestatus.SessionRestartStatus{State: "known", Entries: []enterprisestatus.SessionEntry{}}
 	}
+	bundleSettleStatus = func(context.Context) error { return nil }
 	return store
 }
 
@@ -61,6 +63,35 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_admin"`) ||
 		strings.Contains(out, `"bundle_mode"`) || strings.Contains(out, `"current"`) {
 		t.Fatalf("privilege refusal exit=%d: %s", code, out)
+	}
+}
+
+func TestBundleStatusSettlesBeforeReadingCurrent(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	store := bundleDevice(t, e)
+	saved := bundleSettleStatus
+	t.Cleanup(func() { bundleSettleStatus = saved })
+	const id = "b-01JA0000000000000000000037"
+	digest := "sha256:" + strings.Repeat("7", 64)
+	called := false
+	bundleSettleStatus = func(context.Context) error {
+		called = true
+		confirmBundle(t, store, id, 7, digest)
+		return nil
+	}
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: digest, GatewayReportedDigest: digest, Applied: true}
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != 0 || !called {
+		t.Fatalf("status exit=%d, settlement called=%v: %s", code, called, out)
+	}
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Current == nil || result.Current.BundleID != id || !result.Applied || result.LastReceipt == nil || result.LastReceipt.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("status did not report settled policy: %s", out)
 	}
 }
 
