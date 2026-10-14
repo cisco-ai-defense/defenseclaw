@@ -75,13 +75,15 @@ var requiredPayloadFiles = []string{
 // requiredStandalonePayloadFiles is the pinned inventory for the
 // standalone (MDM-deployable) flavor. No Cisco Secure Client CMID
 // broker — standalone profiles use PowerShell 7 and vendor-neutral
-// paths. A change here MUST match cmd/defenseclaw-enterprise-setup/
-// main.go standalonePayloadFiles verbatim.
+// paths — plus the scanner runtime launcher the standalone lifecycle
+// installs into its own root. A change here MUST match
+// cmd/defenseclaw-enterprise-setup/main.go standalonePayloadFiles verbatim.
 var requiredStandalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
 	"defenseclaw-acp.exe",
 	"defenseclaw-gateway.exe",
 	"defenseclaw-hook.exe",
+	"defenseclaw-scanners.exe",
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",

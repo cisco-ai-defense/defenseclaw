@@ -3130,12 +3130,13 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 	period := arrivals[3].Sub(arrivals[2])
 	// Reset-before contract: period ≈ scanInterval (200 ms).
 	// Reset-after bug: period ≈ scanDuration + scanInterval (320 ms).
-	// Fail with generous margin either way — 250 ms is above the
-	// contract but below the bug regime.
-	if period > scanInterval+50*time.Millisecond {
+	// Fail at the midpoint (260 ms) so CI scheduling delay on either side
+	// of the contract cannot flip the verdict.
+	threshold := scanInterval + scanDuration/2
+	if period > threshold {
 		t.Fatalf("period between slow ticks = %s, want ≤ %s "+
 			"(reset-after regression — cadence is stretching with scan duration; arrivals=%v)",
-			period, scanInterval+50*time.Millisecond, arrivals)
+			period, threshold, arrivals)
 	}
 }
 

@@ -194,4 +194,15 @@ if ($tombstoneClauseBody.Contains('reconciling existing installation')) {
     throw 'enterprise-install-reconcile-smoke: reconcile warning must not appear in the tombstone clause'
 }
 
-'enterprise-install-reconcile-smoke OK'
+# The packaging smoke harness parses one JSON report from stdout, like the
+# sibling smokes; each field names an assertion this script proved above.
+[ordered]@{
+    schema_version = 1
+    ok = $true
+    # Only the active-metadata clause sets the reconcile-only flag.
+    reconcileInstall = 'reconcile_clause_only'
+    # The reconcile clause is gated on an installed (active) deployment.
+    'Test-DefenseClawMetadataInstalled' = 'gates_reconcile_clause'
+    # The inactive-metadata tombstone lane retires the teardown journal.
+    tombstone = 'retires_teardown_journal'
+} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress

@@ -824,7 +824,9 @@ targets:
                 # real call sites, which pass these for the shared state root.
                 [switch]$AdvisoryUntrustedAccess,
                 [string]$SelfHealKind,
-                [string]$SelfHealGatewayServiceSID
+                [string]$SelfHealGatewayServiceSID,
+                # Accepted and ignored: the config ACL repair gate passes it.
+                [switch]$IgnoreCreatorTemplates
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
                 [bool]$script:HarnessState.purge_acl_invalid -and

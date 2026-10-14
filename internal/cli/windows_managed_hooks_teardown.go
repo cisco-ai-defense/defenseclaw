@@ -2192,13 +2192,14 @@ func parseWindowsManagedHooksTeardownJournalBody(
 	}
 	// Connector-optional fields (codex_policy_active, codex_targets,
 	// cursor_targets, claude_target_sids) were previously strict-required
-	// too. The writer's append([]T(nil), src...) pattern for the activated
-	// state emits "null" instead of "[]" when the input slice has length
-	// zero — a legitimate state whenever a deployment's connector had no
-	// eligible interactive users at install time. Downstream code paths
-	// use len() semantics that are nil-safe, so decoding a null field
-	// into a nil slice is functionally identical to decoding an empty
-	// array. Do not require presence here; json.Decoder below still
+	// too. The current writer emits "[]" for an empty target list
+	// (windowsManagedHooksTeardownExpectedEnrollment), but journals written
+	// by earlier releases used append([]T(nil), src...) and carry "null"
+	// whenever a connector had no eligible interactive users at install
+	// time. Keep reading those legacy journals: downstream code paths use
+	// nil-safe len() semantics, so decoding a null field into a nil slice
+	// is functionally identical to decoding an empty array. Do not require
+	// presence here, and do not drop the writer fix; json.Decoder below still
 	// enforces DisallowUnknownFields, so a foreign extra key still fails
 	// closed, and validateWindowsManagedHooksTeardownJournal still binds
 	// every target list to the recomputed activation identity.

@@ -35,10 +35,18 @@
 #       with distribution_flavor "standalone", then signs the outer Setup
 #       with the same command. Exclusive with --payload-dir.
 #
+#   Both signed channels need --signing-type DEV|PROD and
+#   --expected-signer-sha256 <64-hex>: windows-avc-assembler verifies every
+#   inner file against that chain policy and signer fingerprint before it
+#   appends the payload trailer. That check runs powershell.exe, so the
+#   signed channels need a Windows build host (Git Bash or MSYS2); the
+#   default unsigned channel builds anywhere.
+#
 # Usage:
 #   packaging/windows/standalone/build-setup.sh --version 1.4.0 \
 #       [--out-dir dist/windows-standalone-1.4.0]
 #       [--payload-dir <signed> | --sign-command <cmd>]
+#       [--signing-type DEV|PROD --expected-signer-sha256 <sha256>]
 #
 # defenseclaw-scanners.exe carries the Python scanner runtime
 # (build-scanner-runtime.sh: CPython 3.13 and the uv.lock scanner pins).
@@ -49,7 +57,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '4,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,53p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -61,12 +69,16 @@ VERSION=""
 OUT_DIR=""
 SIGNED_PAYLOAD_DIR=""
 SIGN_COMMAND=""
+SIGNING_TYPE=""
+EXPECTED_SIGNER_SHA256=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)      VERSION="${2:?--version needs a value}"; shift 2 ;;
         --out-dir)      OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
         --payload-dir)  SIGNED_PAYLOAD_DIR="${2:?--payload-dir needs a value}"; shift 2 ;;
         --sign-command) SIGN_COMMAND="${2:?--sign-command needs a value}"; shift 2 ;;
+        --signing-type) SIGNING_TYPE="${2:?--signing-type needs a value}"; shift 2 ;;
+        --expected-signer-sha256) EXPECTED_SIGNER_SHA256="${2:?--expected-signer-sha256 needs a value}"; shift 2 ;;
         -h|--help)     usage; exit 0 ;;
         *)             usage >&2; die "unknown argument: $1" ;;
     esac
@@ -75,6 +87,18 @@ done
 [ -n "${VERSION}" ] || die "--version is required"
 [ -z "${SIGNED_PAYLOAD_DIR}" ] || [ -z "${SIGN_COMMAND}" ] || die "--payload-dir and --sign-command are exclusive"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "--version must be a release version (got '${VERSION}')"
+# Check the signing policy before any build work: the assembler needs it to
+# verify a signed payload, and an unsigned build must not carry one.
+if [ -n "${SIGNED_PAYLOAD_DIR}" ] || [ -n "${SIGN_COMMAND}" ]; then
+    [[ "${SIGNING_TYPE}" =~ ^(DEV|PROD)$ ]] || die "--payload-dir and --sign-command need --signing-type DEV or PROD"
+    [[ "${EXPECTED_SIGNER_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] || die "--payload-dir and --sign-command need --expected-signer-sha256 <64-hex>"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) die "signed standalone builds need a Windows build host: windows-avc-assembler verifies Authenticode with powershell.exe" ;;
+    esac
+elif [ -n "${SIGNING_TYPE}" ] || [ -n "${EXPECTED_SIGNER_SHA256}" ]; then
+    die "--signing-type and --expected-signer-sha256 apply only with --payload-dir or --sign-command"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
@@ -206,17 +230,17 @@ echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
 # inventory + "standalone[-unsigned]" distribution tag. The AVC
 # Enterprise path is unaffected.
 echo "==> appending ${FLAVOR} payload trailer -> ${SETUP##*/}"
-ASSEMBLER_UNSIGNED_FLAG=()
+ASSEMBLER_SIGNING_FLAGS=()
 if [ "${FLAVOR}" = "standalone-unsigned" ]; then
-    ASSEMBLER_UNSIGNED_FLAG=(-AllowUnsigned)
+    ASSEMBLER_SIGNING_FLAGS=(-AllowUnsigned)
 else
-    # Signed-flavor needs -SigningType / -ExpectedSignerSha256; the two
-    # existing standalone paths (--payload-dir / --sign-command) stage
-    # already-signed inputs that the AVC assembler would re-verify,
-    # which this standalone pipeline is not configured to do. The
-    # trailer-only path remains valid for the hash-pinned MDM build —
-    # a signed-standalone CI matrix is a follow-up.
-    die "signed standalone pipeline is not yet wired to windows-avc-assembler (flavor=${FLAVOR})"
+    # The signed channels (--payload-dir / --sign-command) hand the
+    # assembler already-signed inner files; it verifies each one against
+    # the chain policy and signer fingerprint before appending the trailer.
+    ASSEMBLER_SIGNING_FLAGS=(
+        -SigningType "${SIGNING_TYPE}"
+        -ExpectedSignerSha256 "${EXPECTED_SIGNER_SHA256}"
+    )
 fi
 ( unset GOOS GOARCH GOFLAGS CGO_ENABLED; cd "${REPO_ROOT}" && \
     go run ./cmd/windows-avc-assembler \
@@ -226,7 +250,7 @@ fi
         -Version "${VERSION}" \
         -Out "${OUT_DIR}" \
         -Flavor Standalone \
-        "${ASSEMBLER_UNSIGNED_FLAG[@]}" )
+        "${ASSEMBLER_SIGNING_FLAGS[@]}" )
 
 if [ -n "${SIGN_COMMAND}" ]; then
     echo "==> signing ${SETUP##*/}"
