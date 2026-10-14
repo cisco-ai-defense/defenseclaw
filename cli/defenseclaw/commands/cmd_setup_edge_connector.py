@@ -291,12 +291,15 @@ def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
     try:
         subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True)
         subprocess.run(
+            ["sudo", "install", "-m", "600", "/dev/null", str(target_path)],
+            check=True,
+        )
+        subprocess.run(
             ["sudo", "tee", str(target_path)],
             input=content.encode(),
             stdout=subprocess.DEVNULL,
             check=True,
         )
-        subprocess.run(["sudo", "chmod", "600", str(target_path)], check=True)
         write_ok = True
     except subprocess.CalledProcessError:
         write_ok = False

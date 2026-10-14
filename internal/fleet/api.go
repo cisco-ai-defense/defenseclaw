@@ -356,23 +356,10 @@ func (a *API) registerRoutes() {
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
-	devices := a.manager.ListDevices()
-	health := a.manager.GetFleetHealth()
+	const maxPageSize = 10000
 
-	tid := a.tenantFromRequest(r)
-	if tid != 0 {
-		filtered := make([]manager.Device, 0, len(devices))
-		for _, d := range devices {
-			if d.TenantID == tid {
-				filtered = append(filtered, d)
-			}
-		}
-		devices = filtered
-	}
-
-	total := len(devices)
 	offset := 0
-	limit := total // default: no limit
+	limit := maxPageSize
 
 	if offStr := r.URL.Query().Get("offset"); offStr != "" {
 		if v, err := strconv.Atoi(offStr); err == nil && v >= 0 {
@@ -384,14 +371,23 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 			limit = v
 		}
 	}
-
-	// Cap page size to prevent unbounded memory usage from large limit values.
-	const maxPageSize = 10000
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
 
-	// Clamp offset and limit to valid range.
+	tid := a.tenantFromRequest(r)
+	allDevices := a.manager.ListDevices()
+	health := a.manager.GetFleetHealth()
+
+	filtered := allDevices[:0:0]
+	for _, d := range allDevices {
+		if tid != 0 && d.TenantID != tid {
+			continue
+		}
+		filtered = append(filtered, d)
+	}
+
+	total := len(filtered)
 	if offset > total {
 		offset = total
 	}
@@ -399,7 +395,7 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	if end > total {
 		end = total
 	}
-	paged := devices[offset:end]
+	paged := filtered[offset:end]
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"devices": paged,
@@ -1157,6 +1153,8 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d key_delete_failed:%d",
 			len(req.Devices), decommissioned, len(notFound), len(keyDeleteFailed)))
 
+	deadlineExceeded := decommissioned+len(notFound)+len(tenantDenied) < len(req.Devices)
+
 	resp := map[string]any{
 		"batch_id":       batchID,
 		"requested":      len(req.Devices),
@@ -1169,13 +1167,17 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		resp["tenant_denied_count"] = len(tenantDenied)
 	}
 
-	// If any key deletions failed, report partial failure with HTTP 207
-	// Multi-Status so operators know the device keys were not fully revoked.
-	// The decommission itself succeeded but key cleanup did not.
 	if len(keyDeleteFailed) > 0 {
 		resp["key_delete_failed"] = keyDeleteFailed
 		resp["status"] = "partial_failure"
 		resp["error"] = "some device keys could not be deleted — those devices may still authenticate"
+		writeJSON(w, http.StatusMultiStatus, resp)
+		return
+	}
+
+	if deadlineExceeded {
+		resp["status"] = "partial_timeout"
+		resp["processed"] = decommissioned + len(notFound) + len(tenantDenied)
 		writeJSON(w, http.StatusMultiStatus, resp)
 		return
 	}

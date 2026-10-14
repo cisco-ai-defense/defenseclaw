@@ -550,12 +550,15 @@ def _provision_local_service_env(broker_url: str) -> None:
     try:
         subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True, timeout=30)
         subprocess.run(
+            ["sudo", "install", "-m", "600", "/dev/null", str(svc_env_path)],
+            check=True, timeout=30,
+        )
+        subprocess.run(
             ["sudo", "tee", str(svc_env_path)],
             input=env_content.encode(),
             stdout=subprocess.DEVNULL,
             check=True, timeout=30,
         )
-        subprocess.run(["sudo", "chmod", "600", str(svc_env_path)], check=True, timeout=30)
         result_ok = True
     except subprocess.CalledProcessError:
         result_ok = False

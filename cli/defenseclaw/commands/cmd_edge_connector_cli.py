@@ -395,10 +395,16 @@ def policy_push(app: AppContext, file: str, tenant_id: int | None, fleet_id: int
         ux.err(f"Failed to read policy file: {exc}")
         raise SystemExit(1)
     meta = data.get("metadata", {}) or {}
+    try:
+        resolved_tid = tenant_id if tenant_id is not None else int(meta.get("tenant_id", 1))
+        resolved_fid = fleet_id if fleet_id is not None else int(meta.get("fleet_id", 1))
+    except (ValueError, TypeError):
+        ux.err("Invalid tenant_id or fleet_id in policy metadata — must be integers.")
+        raise SystemExit(1)
     payload = {"policy_yaml": raw_yaml,
                "profile": str(meta.get("profile", "standard")),
-               "tenant_id": tenant_id if tenant_id is not None else int(meta.get("tenant_id", 1)),
-               "fleet_id": fleet_id if fleet_id is not None else int(meta.get("fleet_id", 1))}
+               "tenant_id": resolved_tid,
+               "fleet_id": resolved_fid}
     c = _client(app)
     try:
         resp = c.post("/policy/push", payload)

@@ -561,8 +561,12 @@ def _load_fleet_policy(app: AppContext, path: str, data: dict) -> None:
     )
 
     metadata = data.get("metadata", {}) or {}
-    tenant_id = int(metadata.get("tenant_id", 1))
-    fleet_id = int(metadata.get("fleet_id", 1))
+    try:
+        tenant_id = int(metadata.get("tenant_id", 1))
+        fleet_id = int(metadata.get("fleet_id", 1))
+    except (ValueError, TypeError):
+        ux.err("Invalid tenant_id or fleet_id in policy metadata — must be integers.")
+        raise SystemExit(1)
 
     # Read the raw YAML string — the fleet API expects the unparsed YAML text
     # in ``policy_yaml``, not a parsed object in ``policy``.

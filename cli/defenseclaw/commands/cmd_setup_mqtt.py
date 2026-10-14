@@ -60,7 +60,7 @@ def _validate_path_within_home(path: Path) -> None:
     resolved = path.resolve()
     home = Path.home().resolve()
     dclaw_dir = home / ".defenseclaw"
-    if not str(resolved).startswith(str(dclaw_dir)):
+    if not resolved.is_relative_to(dclaw_dir):
         raise click.ClickException(
             f"Path {path} resolves outside ~/.defenseclaw/: {resolved}"
         )

@@ -326,30 +326,70 @@ int main(int argc, char *argv[]) {
 
 #if DCLAW_MQTT_ENABLED
                 if (msg_len >= 16 && memcmp(base, "release_lockdown", 16) == 0) {
+                    static uint32_t lockdown_release_seq = 0;
                     bool authenticated = false;
                     if (msg_len == 16) {
-                        /* No HMAC provided — only allow in dev mode */
 #if DCLAW_DEV_MODE
                         authenticated = true;
 #else
                         const char *deny = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"HMAC required for lockdown release in production\"},\"id\":null}\n";
                         if (write(client_fds[i], deny, strlen(deny)) < 0) { /* best-effort */ }
 #endif
-                    } else if (msg_len == 81 && base[16] == ':') {
-                        /* Verify HMAC-SHA256(audit_key, "release_lockdown") */
-                        uint8_t provided[32];
-                        bool hex_ok = (dclaw_hex_decode(base + 17, provided, 32) == 0);
-                        if (hex_ok) {
-                            extern const uint8_t *dclaw_emergency_get_key(size_t *out_len);
-                            size_t key_len = 0;
-                            const uint8_t *ekey = dclaw_emergency_get_key(&key_len);
-                            if (ekey && key_len == 32) {
-                                uint8_t expected[32];
-                                dclaw_hmac_sha256(ekey, key_len,
-                                    (const uint8_t *)"release_lockdown", 16, expected);
-                                authenticated = ct_compare(provided, expected, 32);
-                                if (!authenticated) {
-                                    fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
+                    } else if (msg_len > 17 && base[16] == ':') {
+                        char *colon2 = memchr(base + 17, ':', msg_len - 17);
+                        if (colon2 != NULL) {
+                            size_t seq_len = (size_t)(colon2 - (base + 17));
+                            size_t hmac_hex_len = msg_len - 17 - seq_len - 1;
+                            if (seq_len > 0 && seq_len <= 8 && hmac_hex_len == 64) {
+                                uint32_t req_seq = 0;
+                                bool seq_ok = true;
+                                for (size_t si = 0; si < seq_len; si++) {
+                                    char ch = base[17 + si];
+                                    if (ch < '0' || ch > '9') { seq_ok = false; break; }
+                                    uint32_t prev = req_seq;
+                                    req_seq = req_seq * 10 + (uint32_t)(ch - '0');
+                                    if (req_seq < prev) { seq_ok = false; break; }
+                                }
+                                if (seq_ok && req_seq > lockdown_release_seq) {
+                                    uint8_t provided[32];
+                                    bool hex_ok = (dclaw_hex_decode(colon2 + 1, provided, 32) == 0);
+                                    if (hex_ok) {
+                                        extern const uint8_t *dclaw_emergency_get_key(size_t *out_len);
+                                        size_t key_len = 0;
+                                        const uint8_t *ekey = dclaw_emergency_get_key(&key_len);
+                                        if (ekey && key_len == 32) {
+                                            size_t prefix_len = (size_t)(colon2 - base);
+                                            uint8_t expected[32];
+                                            dclaw_hmac_sha256(ekey, key_len,
+                                                (const uint8_t *)base, prefix_len, expected);
+                                            authenticated = ct_compare(provided, expected, 32);
+                                            if (authenticated) {
+                                                lockdown_release_seq = req_seq;
+                                            } else {
+                                                fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
+                                            }
+                                        }
+                                    }
+                                } else if (seq_ok) {
+                                    fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release replay rejected (seq=%u, last=%u)\n",
+                                            req_seq, lockdown_release_seq);
+                                }
+                            }
+                        } else if (msg_len == 81) {
+                            uint8_t provided[32];
+                            bool hex_ok = (dclaw_hex_decode(base + 17, provided, 32) == 0);
+                            if (hex_ok) {
+                                extern const uint8_t *dclaw_emergency_get_key(size_t *out_len);
+                                size_t key_len = 0;
+                                const uint8_t *ekey = dclaw_emergency_get_key(&key_len);
+                                if (ekey && key_len == 32) {
+                                    uint8_t expected[32];
+                                    dclaw_hmac_sha256(ekey, key_len,
+                                        (const uint8_t *)"release_lockdown", 16, expected);
+                                    authenticated = ct_compare(provided, expected, 32);
+                                    if (!authenticated) {
+                                        fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
+                                    }
                                 }
                             }
                         }

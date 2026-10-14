@@ -378,6 +378,14 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	} else {
 		fm.deviceLocks[shard].Lock()
 		defer fm.deviceLocks[shard].Unlock()
+
+		fm.mu.RLock()
+		refreshedDev, stillExists := fm.devices[fullID]
+		fm.mu.RUnlock()
+		if !stillExists {
+			return
+		}
+		dev = refreshedDev
 	}
 
 	//
