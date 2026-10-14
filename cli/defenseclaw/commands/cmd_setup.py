@@ -7675,7 +7675,7 @@ def _setup_runtime_subject(name: object) -> str:
 
 
 def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, str]:
-    raw = os.fspath(path) if isinstance(path, (str, os.PathLike)) else ""
+    raw = os.fspath(path) if isinstance(path, str | os.PathLike) else ""
     if not raw or not os.path.isabs(raw) or "\x00" in raw:
         raise OSError(f"{role} evidence {_setup_runtime_ref(raw)} has an invalid identity")
     normalized = os.path.normcase(os.path.normpath(os.path.abspath(raw)))
@@ -8950,7 +8950,7 @@ def _teardown_restored_inactive_connectors(data_dir: str, connectors: tuple[str,
 
     if not connectors:
         return
-    raw_data_dir = os.fspath(data_dir) if isinstance(data_dir, (str, os.PathLike)) else ""
+    raw_data_dir = os.fspath(data_dir) if isinstance(data_dir, str | os.PathLike) else ""
     if (
         not raw_data_dir
         or raw_data_dir.strip() != raw_data_dir
@@ -16283,7 +16283,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     batch_targets_raw = ctx.meta.get(_SETUP_BATCH_READINESS_KEY)
     batch_targets = (
         [normalize_connector(name) for name in batch_targets_raw if isinstance(name, str) and name]
-        if isinstance(batch_targets_raw, (list, tuple))
+        if isinstance(batch_targets_raw, list | tuple)
         else []
     )
     batch_audits_raw = ctx.meta.get(_SETUP_BATCH_AUDIT_KEY)
@@ -16293,8 +16293,8 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             for connector, mode in batch_audits_raw
             if isinstance(connector, str) and connector and mode in ("observe", "action")
         ]
-        if isinstance(batch_audits_raw, (list, tuple))
-        and all(isinstance(item, (list, tuple)) and len(item) == 2 for item in batch_audits_raw)
+        if isinstance(batch_audits_raw, list | tuple)
+        and all(isinstance(item, list | tuple) and len(item) == 2 for item in batch_audits_raw)
         else []
     )
     # GAP-2356: a changed key in .env needs the restart too.
@@ -16313,7 +16313,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         focus = [
             name
             for name in (
-                normalize_connector(raw) for raw in (required_raw if isinstance(required_raw, (list, tuple)) else ())
+                normalize_connector(raw) for raw in (required_raw if isinstance(required_raw, list | tuple) else ())
                 if isinstance(raw, str) and raw
             )
             if name in batch_targets
@@ -17772,7 +17772,7 @@ def _apply_native_windows_logs_config(
             raise click.ClickException(
                 "Local Splunk setup failed and rollback was incomplete: " + "; ".join(rollback_errors)
             ) from exc
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if isinstance(exc, KeyboardInterrupt | SystemExit):
             raise
         if isinstance(exc, click.ClickException):
             raise
@@ -18487,7 +18487,7 @@ def _disable_splunk(
             raise click.ClickException(
                 "Splunk disable failed and rollback was incomplete: " + "; ".join(rollback_errors)
             ) from exc
-        if isinstance(exc, (KeyboardInterrupt, SystemExit, click.ClickException)):
+        if isinstance(exc, KeyboardInterrupt | SystemExit | click.ClickException):
             raise
         raise click.ClickException(f"Splunk disable failed: {exc}") from exc
 

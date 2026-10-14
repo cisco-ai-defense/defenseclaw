@@ -538,10 +538,9 @@ type PrivacyConfig struct {
 	// DisableRedaction, when true, instructs the sidecar to bypass
 	// every ForSink* redaction helper at startup — including
 	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Equivalent to setting
-	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
-	// the choice survives restarts and TUI invocations without
-	// per-shell env-var ceremony.
+	// HEC, webhooks). Persisted in config so the choice survives
+	// restarts and TUI invocations without per-shell env-var
+	// ceremony.
 	//
 	// WARNING: this violates the unconditional-redaction contract
 	// documented in OBSERVABILITY.md. Only enable on single-tenant

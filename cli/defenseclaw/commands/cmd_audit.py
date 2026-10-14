@@ -188,10 +188,10 @@ def audit_log_activity(app: AppContext, payload_file: Path) -> None:
             "add the constant to defenseclaw.audit_actions and internal/audit/actions.go first",
         )
 
-    VALID_SEVERITIES = {"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
+    valid_severities = {"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
     severity = str(data.get("severity") or "INFO").upper()
-    if severity not in VALID_SEVERITIES:
-        click.echo(f"Invalid severity: {severity}. Must be one of {VALID_SEVERITIES}", err=True)
+    if severity not in valid_severities:
+        click.echo(f"Invalid severity: {severity}. Must be one of {valid_severities}", err=True)
         raise SystemExit(1)
 
     logger.log_activity(

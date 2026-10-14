@@ -813,7 +813,7 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
             errno.EFBIG: "not enough space to save the configuration",
         }.get(exc.errno, exc.strerror or "write failed")
         return f"cannot write in {directory}: {reason}"
-    cause = exc.__cause__ if isinstance(exc.__cause__, (ConfigInspectError, V8ConfigError)) else exc
+    cause = exc.__cause__ if isinstance(exc.__cause__, ConfigInspectError | V8ConfigError) else exc
     if isinstance(cause, ConfigInspectError) and cause.field_path and cause.reason:
         path, reason = cause.field_path, cause.reason
     elif isinstance(cause, V8ConfigError):

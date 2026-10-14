@@ -558,7 +558,7 @@ def _live_gateway_pid(cfg) -> int:
 
 def _format_uptime(ms: object) -> str:
     """``3725000`` → ``1h 2m``; empty for a missing or bad value."""
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms < 0:
+    if isinstance(ms, bool) or not isinstance(ms, int | float) or ms < 0:
         return ""
     minutes = int(ms // 60000)
     days, rem = divmod(minutes, 1440)
@@ -1125,7 +1125,7 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
         for row in discovered[:8]:
             conn = str(row.get("connector") or "").strip()
             conf = row.get("confidence")
-            conf_text = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "?"
+            conf_text = f"{float(conf):.2f}" if isinstance(conf, int | float) else "?"
             state_text = str(row.get("state") or "active")
             ux.echo(
                 f"                  {_friendly_connector_name(conn)} ({conn}) — "

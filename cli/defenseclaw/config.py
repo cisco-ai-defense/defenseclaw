@@ -489,7 +489,7 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
         return value
     if value is None:
         return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return value != 0
     if isinstance(value, str):
         token = value.strip().lower()
@@ -4658,7 +4658,7 @@ def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
         return items or _V8_MISSING
     if value is None or value == "":
         return _V8_MISSING
-    is_zero = isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    is_zero = isinstance(value, int | float) and not isinstance(value, bool) and value == 0
     if drop_false and (value is False or is_zero):
         return _V8_MISSING
     return value
@@ -5921,7 +5921,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     private_upstreams_raw = raw.get("allow_private_upstreams", [])
     private_upstreams = (
         [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
-        if isinstance(private_upstreams_raw, (list, tuple))
+        if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
     return GuardrailConfig(
@@ -5999,7 +5999,7 @@ def _merge_guardrail_connectors(
 
 
 def _string_list(raw: Any) -> list[str]:
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list | tuple):
         return []
     return [str(item) for item in raw if str(item).strip()]
 
@@ -6033,7 +6033,7 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
 
 def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssignment]:
     """Parse the ordered ``guardrail.profile_assignments`` list."""
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list | tuple):
         return []
     out: list[GuardrailProfileAssignment] = []
     for entry in raw:
@@ -6313,7 +6313,7 @@ def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
 
 def _mcp_analyzers_text(raw: Any) -> str:
     """The v8 comma-separated analyzers string; a v9 list is joined."""
-    if isinstance(raw, (list, tuple)):
+    if isinstance(raw, list | tuple):
         return ",".join(str(item) for item in raw)
     return str(raw) if raw is not None else ""
 
