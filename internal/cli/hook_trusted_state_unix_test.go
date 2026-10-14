@@ -200,7 +200,7 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
 		rootedMachinePolicy(dir), filepath.Join(dir, "no-secure-client"))
 	opts, _ := rootedMachinePolicy(dir)("linux")
-	connectors := []string{"claudecode", "codex", "copilot"}
+	connectors := []string{"claudecode", "codex", "copilot", "cursor", "opencode"}
 	if _, err := enterprisepolicy.Publish(opts, connectors); err != nil {
 		t.Fatal(err)
 	}
@@ -212,10 +212,15 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 		}
 		for _, tc := range []struct {
 			connector, toolEvent, stopEvent, toolDeny string
+			toolCode                                  int
 		}{
-			{"claudecode", "PreToolUse", "Stop", `"permissionDecision":"deny"`},
-			{"codex", "PreToolUse", "Stop", `"permissionDecision":"deny"`},
-			{"copilot", "preToolUse", "agentStop", `"permissionDecision":"deny"`},
+			{"claudecode", "PreToolUse", "Stop", `"permissionDecision":"deny"`, 0},
+			{"codex", "PreToolUse", "Stop", `"permissionDecision":"deny"`, 0},
+			{"copilot", "preToolUse", "agentStop", `"permissionDecision":"deny"`, 0},
+			{"cursor", "beforeShellExecution", "stop", `"permission":"deny"`, 2},
+			{"devin", "PreToolUse", "Stop", "DefenseClaw blocked this tool call", 2},
+			{"kiro", "PreToolUse", "Stop", "", 2},
+			{"opencode", "tool.execute.before", "session.idle", `"decision":"deny"`, 2},
 		} {
 			if enterpriseManagedHookRuntimeNoop(tc.connector) {
 				t.Fatalf("%s: missing descriptor became a no-op with policy=%v", tc.connector, policyPresent)
@@ -241,7 +246,8 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 				hookOpts.Stdout, hookOpts.Stderr = &stdout, &stderr
 				code := hookexec.Run(context.Background(), hookOpts)
 				if event == tc.toolEvent {
-					if code != 0 || !strings.Contains(stdout.String(), tc.toolDeny) {
+					if code != tc.toolCode || (tc.toolDeny != "" && !strings.Contains(stdout.String(), tc.toolDeny)) ||
+						(tc.connector == "kiro" && (stdout.Len() != 0 || !strings.Contains(stderr.String(), "DefenseClaw blocked"))) {
 						t.Fatalf("%s %s with policy=%v: want native deny, got code=%d stdout=%q stderr=%q", tc.connector, event, policyPresent, code, stdout.String(), stderr.String())
 					}
 				} else if code != 0 || strings.Contains(stdout.String(), "deny") || strings.Contains(stdout.String(), "block") {
