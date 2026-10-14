@@ -12726,31 +12726,29 @@ function Restore-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service))
     }
-    # A standalone snapshot does not record the sensor helper, yet activation
-    # starts it first, so a rollback after activation would find its binary
-    # locked. Quiesce it with the other services and bring it back below only
-    # when a pre-existing deployment is restored.
+    # A snapshot does not record the sensor helper (both profiles register
+    # it), yet activation starts it first, so a rollback after activation
+    # would find its binary locked. Quiesce it with the other services and
+    # bring it back below only when a pre-existing deployment is restored.
     $standaloneSensorHelper = ''
     $standaloneSensorHelperRestart = $false
-    if (Test-DefenseClawStandaloneProfile) {
-        $standaloneSensorHelper = Get-DefenseClawSensorHelperServiceName `
-            -GatewayServiceName ([string]$snapshot.gateway_service)
-        $standaloneSensorHelperRestart = @(
-            $snapshot.services |
-                Microsoft.PowerShell.Core\Where-Object {
-                    [string]::Equals(
-                        [string]$_.name,
-                        [string]$snapshot.gateway_service,
-                        [StringComparison]::OrdinalIgnoreCase
-                    ) -and [bool]$_.existed
-                }
-        ).Count -eq 1
-        if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
-            Assert-DefenseClawStandaloneSensorHelperOwned `
-                -Name $standaloneSensorHelper `
-                -Layout $Layout
-            Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 4
-        }
+    $standaloneSensorHelper = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName ([string]$snapshot.gateway_service)
+    $standaloneSensorHelperRestart = @(
+        $snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and [bool]$_.existed
+            }
+    ).Count -eq 1
+    if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
+        Assert-DefenseClawStandaloneSensorHelperOwned `
+            -Name $standaloneSensorHelper `
+            -Layout $Layout
+        Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 4
     }
     # A retained snapshot may be recovered after a reboot or after the final
     # validated activation step. Disable every live owned service before the
@@ -17494,15 +17492,13 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
     )) {
         $excluded[$name.ToUpperInvariant()] = $true
     }
-    if (Test-DefenseClawStandaloneProfile) {
-        # The sensor helper belongs to this same scope. A standalone first
-        # install registers it before anything else, so rollback reaches this
-        # check while it still exists; treating it as another deployment
-        # retained pending recovery and wedged the host.
-        $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
-            -GatewayServiceName $GatewayServiceName
-        $excluded[$sensorHelperName.ToUpperInvariant()] = $true
-    }
+    # The sensor helper belongs to this same scope on both profiles. A
+    # first install registers it before anything else, so rollback
+    # reaches this check while it still exists; treating it as another
+    # deployment retained pending recovery and wedged the host.
+    $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName $GatewayServiceName
+    $excluded[$sensorHelperName.ToUpperInvariant()] = $true
     $allServices = @(Microsoft.PowerShell.Management\Get-Service `
         -ErrorAction Stop)
     foreach ($service in @($allServices |
