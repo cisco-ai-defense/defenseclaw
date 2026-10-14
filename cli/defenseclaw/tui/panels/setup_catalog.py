@@ -321,13 +321,14 @@ def _destinations(observability: Any) -> list[Any] | None:
 def _fail_mode_text(cfg: Any) -> str:
     """What the active connectors' hooks do when the guardrail can't answer.
 
-    The effective value per connector (observe mode and agents that fail open
-    upstream stay open, as in ``defenseclaw status``), not the raw global
-    ``guardrail.hook_fail_mode`` (GAP-0152). A mixed set reads "fail closed,
-    1 open".
+    The effective value per connector (connector overrides, Cursor's
+    mode-pinned value and agents that fail open upstream, as in ``defenseclaw
+    status``), not the raw global ``guardrail.hook_fail_mode`` (GAP-0152). An
+    unset value is the open default (spec 007). A mixed set reads "fail
+    closed, 1 open".
     """
 
-    global_mode = _text(cfg, "guardrail.hook_fail_mode") or "closed"
+    global_mode = _text(cfg, "guardrail.hook_fail_mode") or "open"
     resolver = getattr(getattr(cfg, "guardrail", None), "effective_hook_fail_mode", None)
     modes: list[str] = []
     enabled = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)

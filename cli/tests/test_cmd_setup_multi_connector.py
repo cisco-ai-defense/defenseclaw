@@ -1158,8 +1158,10 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "devin")
 
     def test_add_seed_does_not_pin_observe_fail_open(self):
-        # GAP-1109: seeding an observe predecessor must not pin its derived
-        # "open" fail mode, so switching it to action inherits closed.
+        # GAP-1109: seeding a predecessor must not pin a per-connector fail
+        # mode, so it keeps inheriting the global value. Spec 007: delivery
+        # fail mode is independent of guardrail mode, so the explicit global
+        # closed applies in observe and in action alike.
         gc = self.app.cfg.guardrail
         gc.connector = "claudecode"
         gc.connectors = {}
@@ -1167,9 +1169,11 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
+        gc.hook_fail_mode = "open"
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
 
     def test_add_does_not_seed_proxy_predecessor(self):
         gc = self.app.cfg.guardrail

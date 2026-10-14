@@ -687,6 +687,15 @@ _probe_opencode_json_version() {
   printf '%s' "${version}"
 }
 
+# _probe_cursor_app_version INFO_PLIST -> echoes CFBundleShortVersionString
+# from a Cursor.app Info.plist, or nothing when the file or key is absent.
+# PlistBuddy is an Apple system metadata reader; Cursor is never launched.
+_probe_cursor_app_version() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 0
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${plist}" 2>/dev/null || true
+}
+
 # _probe_opencode_app_version INFO_PLIST -> echoes the version only for the
 # official production desktop bundle. PlistBuddy is an Apple system metadata
 # reader; the OpenCode executable is never launched by this probe.
@@ -1117,11 +1126,13 @@ discover_agent_version() {
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather
       # than exec'ing the binary. PlistBuddy is an Apple system tool.
-      local cursor_root
+      # A bundle whose Info.plist carries no version falls through to the
+      # next root instead of ending discovery.
+      local cursor_root cursor_version
       for cursor_root in "${home}/Applications/Cursor.app" /Applications/Cursor.app; do
-        if [[ -f "${cursor_root}/Contents/Info.plist" ]]; then
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-            "${cursor_root}/Contents/Info.plist" 2>/dev/null || true
+        cursor_version="$(_probe_cursor_app_version "${cursor_root}/Contents/Info.plist")"
+        if [[ -n "${cursor_version}" ]]; then
+          echo "${cursor_version}"
           return
         fi
       done

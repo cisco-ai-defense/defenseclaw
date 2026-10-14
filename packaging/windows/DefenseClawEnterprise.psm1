@@ -26330,6 +26330,11 @@ function Complete-DefenseClawStatePurge {
             gateway_service_sid = $cleanupGatewaySID
             validate_only = $false
         }
+        if (Test-DefenseClawStandaloneProfile) {
+            # The native boundary accepts only the named profile's exact
+            # layouts; Secure Client requests keep their original shape.
+            $request['profile'] = 'standalone'
+        }
         $requestPath = Microsoft.PowerShell.Management\Join-Path `
             $Layout.LifecycleLockDirectory `
             "state-root-cleanup-$($Layout.PurgeScopeSHA256)-request.json"
@@ -27022,6 +27027,9 @@ function Invoke-DefenseClawUninstallInstallRootNativeCleanup {
         expected_identity = $ExpectedIdentity
         gateway_service_sid = $GatewayServiceSID
         validate_only = $false
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        $request['profile'] = 'standalone'
     }
     $requestPath = Microsoft.PowerShell.Management\Join-Path `
         $Layout.LifecycleLockDirectory `

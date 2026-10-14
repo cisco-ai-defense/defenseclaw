@@ -169,3 +169,24 @@ func TestShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizeHookFailModeOpenIgnoresCase mirrors the config resolvers: the
+// "open" sentinel is case-insensitive after trimming; anything else that is
+// non-empty stays closed.
+func TestNormalizeHookFailModeOpenIgnoresCase(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":         "open",
+		"  ":       "open",
+		"open":     "open",
+		"Open":     "open",
+		" OPEN ":   "open",
+		"closed":   "closed",
+		"Closed":   "closed",
+		"opn":      "closed",
+		"open-ish": "closed",
+	} {
+		if got := normalizeHookFailMode(raw); got != want {
+			t.Errorf("normalizeHookFailMode(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

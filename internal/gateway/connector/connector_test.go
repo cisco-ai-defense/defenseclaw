@@ -1708,8 +1708,8 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 			}
 		}
 	}
-	if managedCount != len(hookGroups) {
-		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); managedCount != want {
+		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, want)
 	}
 	if thirdPartyCount != 1 {
 		t.Fatalf("third-party hook count=%d, want 1", thirdPartyCount)
@@ -2077,9 +2077,22 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 			}
 		}
 	}
-	if oldCount != 0 || newCount != len(hookGroups) || foreignCount != 1 {
-		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); oldCount != 0 || newCount != want || foreignCount != 1 {
+		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, want)
 	}
+}
+
+// claudeCodeSetupHookGroupCount is the number of events Setup wires for opts.
+// An unversioned Setup selects the best-effort contract (the union of every
+// registered contract's events, e.g. v2's DirectoryAdded), so the expected
+// managed-hook count is the setup-selected matrix, not the v1 hookGroups list.
+func claudeCodeSetupHookGroupCount(t *testing.T, opts SetupOpts) int {
+	t.Helper()
+	groups, err := claudeCodeHookGroupsForSetup(opts)
+	if err != nil {
+		t.Fatalf("claudeCodeHookGroupsForSetup: %v", err)
+	}
+	return len(groups)
 }
 
 func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
@@ -2370,8 +2383,8 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 	if !repoFound {
 		t.Fatal("untracked source-tree command was claimed without exact migration evidence")
 	}
-	if managedCount != len(hookGroups) {
-		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); managedCount != want {
+		t.Fatalf("managed hook count=%d, want %d", managedCount, want)
 	}
 	if !foreignFound {
 		t.Fatal("third-party hook was removed")

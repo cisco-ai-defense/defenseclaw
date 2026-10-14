@@ -450,8 +450,9 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
-    # 0.8.x sealed the global fail mode into observe-mode hooks.
-    _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    # 0.8.x sealed closed into hooks whose config never set it; spec 007
+    # defaults hook delivery to open whatever the guardrail mode.
+    _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: action\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
 
@@ -459,7 +460,7 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
 
     assert result.exit_code == 0, result.output
     assert "claudecode hooks now fail open" in result.output
-    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "defenseclaw guardrail fail-mode closed --connector claudecode" in result.output
     assert "codex" not in result.output
 
     # GAP-0276: a reinstall of a current config migrates nothing and says nothing.
@@ -467,6 +468,19 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
     assert again.exit_code == 0, again.output
     assert "Configuration is current" in again.output
     assert "fail open" not in again.output
+
+
+def test_upgrade_keeps_an_explicit_closed_fail_mode_silently(data_dir: Path, recorded: list[str]) -> None:
+    # Spec 007: an explicit closed is preserved, in observe mode too, so its
+    # sealed closed hooks do not change and nothing is reported.
+    _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
+
+    assert result.exit_code == 0, result.output
+    assert "fail open" not in result.output
 
 
 def test_upgrade_cursor_action_does_not_report_observe_fail_open(data_dir: Path, recorded: list[str]) -> None:

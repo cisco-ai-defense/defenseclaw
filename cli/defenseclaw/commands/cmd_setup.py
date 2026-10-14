@@ -13574,16 +13574,17 @@ def _prompt_hook_fail_mode(gc) -> None:
     ux.subhead("How hooks behave when delivery/authentication fails or")
     ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
     click.echo()
-    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure")
-    click.echo("                 " + ux.dim("A stopped gateway lets calls that policy blocks run."))
     ux.echo(
         "    "
-        + ux.bold("[2] closed")
-        + " — block supported events when inspection is unavailable "
+        + ux.bold("[1] open  ")
+        + " — allow the tool/prompt and log the failure "
         + ux.dim("(recommended)")
     )
-    click.echo("                 " + ux.dim("The default on a new install: action mode keeps"))
-    click.echo("                 " + ux.dim("blocking while the gateway is down."))
+    click.echo("                 " + ux.dim("The default on a new install: a stopped gateway"))
+    click.echo("                 " + ux.dim("won't brick your agent; calls run uninspected."))
+    ux.echo("    " + ux.bold("[2] closed") + " — block supported events when inspection is unavailable")
+    click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
+    click.echo("                 " + ux.dim("prompt MUST be inspected."))
     click.echo()
     click.echo(
         "  "
@@ -13593,12 +13594,13 @@ def _prompt_hook_fail_mode(gc) -> None:
             "choice is open."
         )
     )
-    current_fail = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
-    fail_default = "1" if current_fail == "open" else "2"
-    if fail_default == "1":
+    # Spec 007: unset is the open default; an explicit closed is preserved.
+    current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_default = "2" if current_fail == "closed" else "1"
+    if fail_default == "2":
         # The default keeps the saved value, which can differ from the
-        # recommended choice; say so instead of leaving [1] unexplained.
-        click.echo("  " + ux.dim("Current setting: open. Press Enter to keep it, or type 2 for closed."))
+        # recommended choice; say so instead of leaving [2] unexplained.
+        click.echo("  " + ux.dim("Current setting: closed. Press Enter to keep it, or type 1 for open."))
     fail_choice = click.prompt(
         "  Select hook fail mode",
         type=click.Choice(["1", "2"]),

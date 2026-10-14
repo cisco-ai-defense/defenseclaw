@@ -22,7 +22,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
-	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/windows"
 )
 
@@ -139,6 +138,9 @@ func ReconcileWindowsCodexMachineRequirements(
 
 		var state windowsCodexMachineOwnership
 		ownershipAdopted := !ownership.existed
+		// discarded is the parseable record of another layout that the
+		// identity-drift branch below adopts over; nil when there is none.
+		var discarded *windowsCodexMachineOwnership
 		if ownership.existed {
 			state, err = parseWindowsCodexMachineOwnership(ownership.data)
 			if err != nil {
@@ -188,9 +190,12 @@ func ReconcileWindowsCodexMachineRequirements(
 						"match current scope): %v\n",
 					opts.OwnershipPath, err)
 				ownershipAdopted = true
+				previous := state
+				discarded = &previous
 				state = windowsCodexMachineOwnership{}
 			}
 		}
+		requirementsBase := requirements.data
 		if ownershipAdopted {
 			// Managed-mode trust posture: the ownership JSON being absent while
 			// a DefenseClaw hook or managed-state file is present is the signature
@@ -205,54 +210,38 @@ func ReconcileWindowsCodexMachineRequirements(
 			// writes the canonical ACL (via Set-DefenseClawPathAcl's own self-heal
 			// chain) so the resulting trio is internally consistent.
 			//
-			// If an orphan canonical hook is already in requirements.toml, strip
-			// it from the preimage we persist. Otherwise an eventual uninstall
-			// would restore the preimage, see the canonical hook still present,
-			// and refuse to commit ("exact DefenseClaw Codex managed hooks
-			// would remain after removal"). The uninstall path invokes
-			// `removeWindowsCodexRequirementsOwnedChanges(current, baseline, ...)`
-			// to reduce the candidate to the baseline minus owned changes; we
-			// mirror the same cleanup here using a baseline that preserves
-			// administrator-set `features.hooks` and `allow_managed_hooks_only`
-			// (an empty baseline would strip them, which would wipe shared
-			// isolation controls the administrator configured before
-			// DefenseClaw installed).
-			preimage := append([]byte(nil), requirements.data...)
-			contains, detectErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
-			if detectErr != nil {
-				return fmt.Errorf("detect adopted Codex managed hooks: %w", detectErr)
+			// Strip DefenseClaw's own changes from the preimage we persist.
+			// Otherwise an eventual uninstall would restore the preimage, see
+			// the canonical hook still present, and refuse to commit ("exact
+			// DefenseClaw Codex managed hooks would remain after removal"), or
+			// restore a stale prior-install layout. On identity drift the
+			// discarded record names the prior layout: its hook groups and
+			// windows_managed_dir are stripped from both the live base and the
+			// preimage, and the shared isolation controls stay in the preimage
+			// only when that record's trustworthy preimage shows they predate
+			// DefenseClaw (see windowsCodexAdoptRequirements).
+			adoption, adoptErr := windowsCodexAdoptRequirements(requirements.data, requirements.existed, discarded, opts)
+			if adoptErr != nil {
+				return fmt.Errorf("prepare adopted Codex requirements preimage: %w", adoptErr)
 			}
-			if contains {
-				baselineBytes, baselineErr := windowsCodexAdoptPreimageBaseline(requirements.data)
-				if baselineErr != nil {
-					return fmt.Errorf("build adopted Codex preimage baseline: %w", baselineErr)
-				}
-				cleaned, _, cleanupErr := removeWindowsCodexRequirementsOwnedChanges(
-					requirements.data,
-					baselineBytes,
-					opts,
-				)
-				if cleanupErr != nil {
-					return fmt.Errorf("prepare adopted Codex requirements preimage: %w", cleanupErr)
-				}
-				preimage = cleaned
-			}
+			requirementsBase = adoption.base
 			state = windowsCodexMachineOwnership{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
 				RequirementsPath: opts.RequirementsPath,
 				ManagedDir:       opts.ManagedDir,
 				HookBinary:       opts.HookBinary,
-				PreimageExisted:  requirements.existed,
-				Preimage:         preimage,
-				PreimageSHA256:   windowsCodexMachineHash(preimage),
+				PreimageExisted:  adoption.preimageExisted,
+				Preimage:         adoption.preimage,
+				PreimageSHA256:   windowsCodexMachineHash(adoption.preimage),
 			}
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
 
-		rendered, requirementsChanged, err := reconcileWindowsCodexRequirements(requirements.data, opts)
+		rendered, _, err := reconcileWindowsCodexRequirements(requirementsBase, opts)
 		if err != nil {
 			return err
 		}
+		requirementsChanged := !bytes.Equal(requirements.data, rendered)
 		postHash := windowsCodexMachineHash(rendered)
 		report.PostimageSHA256 = postHash
 
@@ -986,39 +975,6 @@ func ReadWindowsCodexManagedRuntimeTargets(
 		return nil, err
 	}
 	return registry.Targets, nil
-}
-
-// windowsCodexAdoptPreimageBaseline synthesizes a minimal baseline TOML that
-// preserves the administrator-set shared isolation controls (features.hooks
-// and allow_managed_hooks_only) when adopting an orphan DefenseClaw managed
-// hook in the ownership-absent reconcile path. Running
-// removeWindowsCodexRequirementsOwnedChanges with this baseline strips the
-// orphan hook groups while keeping those two keys in the cleaned preimage, so
-// a subsequent uninstall that restores the preimage does not inadvertently
-// delete isolation controls the administrator configured before DefenseClaw
-// installed.
-func windowsCodexAdoptPreimageBaseline(current []byte) ([]byte, error) {
-	cfg, err := parseWindowsCodexRequirements(current)
-	if err != nil {
-		return nil, fmt.Errorf("parse Codex requirements for baseline synthesis: %w", err)
-	}
-	baseline := map[string]interface{}{}
-	if value, ok := cfg["allow_managed_hooks_only"]; ok {
-		baseline["allow_managed_hooks_only"] = value
-	}
-	if features, ok := cfg["features"].(map[string]interface{}); ok {
-		if hookValue, hookOk := features["hooks"]; hookOk {
-			baseline["features"] = map[string]interface{}{"hooks": hookValue}
-		}
-	}
-	if len(baseline) == 0 {
-		return nil, nil
-	}
-	rendered, err := toml.Marshal(baseline)
-	if err != nil {
-		return nil, fmt.Errorf("marshal Codex adopt baseline: %w", err)
-	}
-	return rendered, nil
 }
 
 func windowsCodexMachinePathExists(path string) (bool, error) {

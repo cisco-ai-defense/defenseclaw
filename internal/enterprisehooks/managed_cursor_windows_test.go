@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -825,5 +826,42 @@ func TestPurgeWindowsCursorManagedTombstoneRemovesOnlyTheTombstone(t *testing.T)
 	}
 	if _, err := os.Stat(paths.Adapter); err != nil {
 		t.Fatalf("the tombstone was removed while managed ownership state remains: %v", err)
+	}
+}
+
+// The public validator runs unlocked in every Cursor hook process and in
+// lifecycle restore validation, so it must never rewrite hooks.json, even in
+// the non-strict (bulldoze) posture. Orphan reclaim belongs to the locked
+// install/repair paths (validateWindowsCursorManagedArtifactsReclaimingOrphans).
+func TestWindowsCursorPublicValidatorDoesNotReclaimOrphanHookRefs(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	dir := t.TempDir()
+	adapterPath := filepath.Join(dir, "defenseclaw-hook.ps1")
+	hooksPath := filepath.Join(dir, "hooks.json")
+	foreign := []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`)
+	orphaned, err := connector.MergeWindowsCursorEnterpriseHooks(foreign, adapterPath, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, orphaned, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := windowsCursorManagedArtifacts{
+		hooks:   windowsManagedFileSnapshot{path: hooksPath, existed: true, data: append([]byte(nil), orphaned...)},
+		adapter: windowsManagedFileSnapshot{path: adapterPath},
+	}
+	validated, err := validateWindowsCursorManagedPublicArtifacts(artifacts)
+	if !errors.Is(err, errWindowsCursorOrphanHookRefs) {
+		t.Fatalf("orphan Cursor hook refs error = %v, want errWindowsCursorOrphanHookRefs", err)
+	}
+	if !bytes.Equal(validated.hooks.data, orphaned) {
+		t.Fatal("public validator changed the in-memory hooks snapshot")
+	}
+	onDisk, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(onDisk, orphaned) {
+		t.Fatal("public validator rewrote hooks.json outside the locked install/repair path")
 	}
 }

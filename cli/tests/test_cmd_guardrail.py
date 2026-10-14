@@ -319,10 +319,11 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("BLOCK", result.output)
 
     def test_single_connector_observe_mode_names_the_mode_switch(self):
-        # GAP-1341: --connector is refused on a single-connector install, and
-        # observe mode is what keeps the hooks fail-open.
+        # GAP-1341: --connector is refused on a single-connector install.
+        # Spec 007: only Cursor's observe mode keeps its hooks fail-open, so
+        # only Cursor is pointed at the mode switch.
         runner = CliRunner()
-        app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
+        app = make_ctx(enabled=True, connector="cursor", hook_fail_mode="closed")
         app.cfg.guardrail.connectors = {}
         app.cfg.guardrail.effective_mode = lambda _name: "observe"
         app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
@@ -333,6 +334,17 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("observe mode keeps hooks fail-open", result.output)
         self.assertIn("defenseclaw guardrail mode action", result.output)
         self.assertNotIn("--connector <name>", result.output)
+
+        # Any other connector still open is closed by the fail-mode command.
+        app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
+        app.cfg.guardrail.connectors = {}
+        app.cfg.guardrail.effective_mode = lambda _name: "observe"
+        app.cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
+        with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("observe mode keeps hooks fail-open", result.output)
+        self.assertIn("Close it with: defenseclaw guardrail fail-mode closed", result.output)
 
     def test_show_hermes_closed_provenance_reports_effective_open(self):
         runner = CliRunner()

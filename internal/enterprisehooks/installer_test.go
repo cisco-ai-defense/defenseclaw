@@ -90,14 +90,14 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 					opts := newOpts(t.TempDir())
 					writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
 
-					err := validateHookContract(guardrailMode, conn, opts)
+					err := validateHookContract(conn, opts)
 					if err == nil ||
 						!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
 						!strings.Contains(err.Error(), "byte limit") {
 						t.Fatalf("managed lock validation error = %v, want bounded load context", err)
 					}
 					opts.ManagedEnterprise = false
-					if err := validateHookContract(guardrailMode, conn, opts); err != nil {
+					if err := validateHookContract(conn, opts); err != nil {
 						t.Fatalf("unmanaged lock validation changed: %v", err)
 					}
 				})
@@ -116,13 +116,13 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 					}
 					writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
 
-					err := validateHookContract(guardrailMode, conn, opts)
+					err := validateHookContract(conn, opts)
 					if err == nil ||
 						!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
 						!strings.Contains(err.Error(), "byte limit") {
 						t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
 					}
-					if err := validateHookContract(guardrailMode, conn, unmanagedOpts); err != nil {
+					if err := validateHookContract(conn, unmanagedOpts); err != nil {
 						t.Fatalf("unmanaged runtime validation changed: %v", err)
 					}
 				})
@@ -137,12 +137,12 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 						t.Fatalf("seed incompatible contract lock: %v", err)
 					}
 
-					managedPrepared, err := prepareHookContract(guardrailMode, conn, opts)
+					managedPrepared, err := prepareHookContract(conn, opts)
 					if err != nil || managedPrepared.HookFailMode != "open" {
 						t.Fatalf("managed contract preparation = %+v, err=%v, want open fallback", managedPrepared, err)
 					}
 					opts.ManagedEnterprise = false
-					prepared, err := prepareHookContract(guardrailMode, conn, opts)
+					prepared, err := prepareHookContract(conn, opts)
 					if err != nil {
 						t.Fatalf("unmanaged contract preparation changed: %v", err)
 					}
@@ -172,7 +172,7 @@ func TestPrepareHookContractUsesFailOpenOnlyForUnverifiedOrIncompatibleContracts
 		{name: "known", agentVersion: "codex 0.142.0", wantContract: "codex-hooks-v3-generic", wantFailMode: "closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opts, err := prepareHookContract("action", conn, connector.SetupOpts{
+			opts, err := prepareHookContract(conn, connector.SetupOpts{
 				DataDir:      t.TempDir(),
 				AgentVersion: tc.agentVersion,
 				HookFailMode: "closed",
@@ -230,7 +230,7 @@ func TestPrepareHookContractDistinguishesVersionDriftFromContractDrift(t *testin
 				t.Fatalf("seed hook contract lock: %v", err)
 			}
 
-			opts, err := prepareHookContract("action", conn, connector.SetupOpts{
+			opts, err := prepareHookContract(conn, connector.SetupOpts{
 				DataDir:      dataDir,
 				AgentVersion: tc.currentVersion,
 				HookFailMode: "closed",
@@ -260,7 +260,7 @@ func TestPrepareClaudeCodePatchVersionDriftRetainsConfiguredMode(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed hook contract lock: %v", err)
 	}
-	opts, err := prepareHookContract("action", connector.NewClaudeCodeConnector(), connector.SetupOpts{
+	opts, err := prepareHookContract(connector.NewClaudeCodeConnector(), connector.SetupOpts{
 		DataDir:      dataDir,
 		AgentVersion: "2.1.293 (Claude Code)",
 		HookFailMode: "closed",
@@ -276,7 +276,7 @@ func TestPrepareClaudeCodePatchVersionDriftRetainsConfiguredMode(t *testing.T) {
 func TestPrepareHookContractDriftOverridePreservesConfiguredMode(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
-	opts, err := prepareHookContract("action", connector.NewCodexConnector(), connector.SetupOpts{
+	opts, err := prepareHookContract(connector.NewCodexConnector(), connector.SetupOpts{
 		DataDir:      t.TempDir(),
 		AgentVersion: "codex nightly",
 		HookFailMode: "closed",
@@ -2233,7 +2233,7 @@ func TestPrepareHookContractFollowsVersionChangesWithoutRefusing(t *testing.T) {
 			{version: "2.1.230", wantFailMode: "open"},
 			{version: "2.1.100", wantFailMode: "open"},
 		} {
-			opts, err := prepareHookContract("action", conn, withVersion(tc.version))
+			opts, err := prepareHookContract(conn, withVersion(tc.version))
 			if err != nil {
 				t.Fatalf("standalone=%t change to %s = %v, want no refusal", standalone, tc.version, err)
 			}

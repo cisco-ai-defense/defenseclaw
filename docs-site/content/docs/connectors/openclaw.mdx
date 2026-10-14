@@ -73,7 +73,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
 | HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Hook fail-mode | current config; `open` when unset (an explicit `closed` is preserved) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |

@@ -9479,14 +9479,24 @@ function Invoke-ContractRun {
         # Fresh installs default open; an explicit closed policy must still
         # render and verify independently. Restore open before the corpus.
         Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        # A failed restore must not mask the closed-mode failure that caused
+        # it: keep the primary error, warn about the restore, rethrow primary.
+        $ampFailModeError = $null
         try {
             Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
             Invoke-Setup observe
             Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
-        } finally {
+        } catch {
+            $ampFailModeError = $_
+        }
+        try {
             Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
             Invoke-Setup observe
+        } catch {
+            if ($null -eq $ampFailModeError) { throw }
+            Write-Warning "Amp fail-mode restore to open failed after the closed-mode check failed: $($_.Exception.Message)"
         }
+        if ($null -ne $ampFailModeError) { throw $ampFailModeError }
         Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
         Write-Result 'amp:delivery-mode-contract' pass 'default open and explicit closed plugins both rendered and verified'
     }

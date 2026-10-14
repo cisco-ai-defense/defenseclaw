@@ -1740,10 +1740,10 @@ def fail_mode_cmd(
 
       \b
       open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
-      closed — block supported events when inspection is unavailable.
-               The default on a new install: every prompt and
-               tool call is inspected or blocked.
+               The default on a new install: a gateway outage
+               never blocks your agent.
+      closed — block supported events when inspection is unavailable,
+               so every prompt and tool call is inspected or blocked.
 
     Transport failures (gateway unreachable / timeout / 5xx) follow the
     same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
@@ -1958,8 +1958,8 @@ def fail_mode_cmd(
         ux.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
     if mode == "closed" and not fail_mode_targets:
-        # The multi-connector fan-out gives every connector its own value,
-        # so observe mode no longer keeps it fail-open (GAP-1977).
+        # The fail mode applies in observe mode too (spec 007); only Cursor's
+        # observe mode keeps it fail-open (GAP-1977).
         _observe_open = [name for name in active_names if _observe_keeps_fail_open(gc, name)]
         if _observe_open:
             ux.warn(
@@ -2080,11 +2080,15 @@ def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
 
 
 def _observe_keeps_fail_open(gc, name: str) -> bool:
-    """Observe mode keeps a connector fail-open unless it has its own fail mode."""
-    if normalize_connector(name) == "hermes":
-        return False
-    override = gc._connector_override(name) if hasattr(gc, "_connector_override") else None
-    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+    """Whether observe mode, not the fail-mode setting, keeps a connector fail-open.
+
+    Spec 007: the hook fail mode is independent of the guardrail mode, so an
+    explicit or inherited ``closed`` applies in observe mode too. Only Cursor
+    still follows its guardrail mode (observe is open, action is closed),
+    mirroring ``GuardrailConfig.effective_hook_fail_mode``; switching it to
+    action is what closes it.
+    """
+    if normalize_connector(name) != "cursor":
         return False
     mode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")
     return str(mode or "").strip().lower() != "action"
@@ -4644,14 +4648,13 @@ def mode_cmd(
     Sets only ``guardrail.mode``, or with ``--connector X`` only
     ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
     --connector X`` removes X's override. The guardrail's on/off state, rule
-    pack and port are never touched. A connector without its own fail mode
-    fails open in observe mode and uses the global hook fail mode
-    (``guardrail fail-mode``) in action mode; the command says when that
-    changes. The running gateway applies a mode change on its next reload.
-    A changed hook fail mode is re-rendered into the hook scripts of Claude
-    Code, Codex, Amp and OpenCode in place; the other hook connectors need a
-    gateway restart (``--no-restart`` to skip; a stopped gateway is never
-    started). Cursor's hook fail mode follows its guardrail mode.
+    pack and port are never touched. The hook fail mode (``guardrail
+    fail-mode``) is a separate setting that applies in observe and action
+    mode alike, so a mode change leaves it as it is. Only Cursor's hook fail
+    mode follows its guardrail mode (action is closed, observe is open); the
+    command says when that changes, and a gateway restart re-bakes Cursor's
+    hooks (``--no-restart`` to skip; a stopped gateway is never started). The
+    running gateway applies a mode change on its next reload.
     """
     from defenseclaw import policy_catalog
 
@@ -4868,6 +4871,18 @@ def mode_cmd(
         )
         for c, fm in fail_flips.items()
     ]
+    if new_mode == "action":
+        # The hook fail mode no longer follows the guardrail mode (spec 007),
+        # so entering action flips nothing; an operator who configured closed
+        # must still learn that these connectors fail open upstream.
+        notes.extend(
+            f"Hook failures for {_connector_label(c)} remain fail-open (upstream limitation): "
+            "the action can go ahead if the hook cannot reach the gateway."
+            for c in affected
+            if c not in fail_flips
+            and normalize_connector(c) in _UPSTREAM_FAIL_OPEN_CONNECTORS
+            and fail_after.get(c) == "closed"
+        )
     notes.extend(
         f"{_connector_label(c)} keeps its own mode ({policy_catalog.mode_label(_override(c))}); "
         f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"

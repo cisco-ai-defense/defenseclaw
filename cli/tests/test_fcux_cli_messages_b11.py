@@ -84,12 +84,14 @@ def test_bare_disable_names_only_the_connectors_it_tears_down(monkeypatch: pytes
 
 def test_fail_mode_closed_lists_the_observe_connector_it_closes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # GAP-1977 (a): the fan-out gives codex its own "closed", which applies in
-    # observe mode too, but the output said codex stays fail-open.
+    # observe mode too, but the output said codex stays fail-open. Spec 007:
+    # every fail mode applies in observe mode, so no observe caveat is shown.
     cfg = _roster(monkeypatch, tmp_path)
     result = _fail_mode(cfg, "closed")
     assert result.exit_code == 0, result.output
     assert "stays fail-open while in observe mode" not in result.output
-    assert "Codex (codex): open → closed (its own setting, also in observe mode)" in result.output
+    assert "also in observe mode" not in result.output
+    assert "Codex (codex): open → closed" in result.output
     assert "Cursor (cursor): " in result.output
     assert "global default + 3 connector overrides = closed)" in result.output
     assert cfg.guardrail.effective_hook_fail_mode("codex") == "closed"

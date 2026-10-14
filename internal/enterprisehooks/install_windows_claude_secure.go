@@ -136,7 +136,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		); err != nil {
 			return err
 		}
-		setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+		setup, err = prepareHookContract(conn, setup)
 		if err != nil {
 			return err
 		}

@@ -892,8 +892,9 @@ def test_unix_registration_freshness_requires_current_script_path(
 def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # GAP-1370: observe connectors already run fail-open, and a mixed roster
-    # (hermes has no runtime registration) must not start a stopped gateway.
+    # GAP-1370: a mixed roster (hermes has no runtime registration) must not
+    # start a stopped gateway. Spec 007: the global closed applies in observe
+    # mode too, so both connectors really change closed -> open.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
     cfg.guardrail.hook_fail_mode = "closed"
     app = AppContext()
@@ -908,8 +909,9 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     assert result.exit_code == 0, result.output
     restart.assert_not_called()
     reconcile.assert_called_once_with(cfg, "claudecode")
-    assert "closed → open" not in result.output
-    assert "(hermes): already open; saved as its own setting" in result.output
+    assert "Claude Code (claudecode): closed → open" in result.output
+    assert "Hermes (hermes): closed → open" in result.output
+    assert "also in observe mode" not in result.output
     assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
 

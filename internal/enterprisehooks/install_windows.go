@@ -263,7 +263,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if setupOpts.HookAPIToken == "" {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+	setupOpts, err = prepareHookContract(conn, setupOpts)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -484,7 +484,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if setup.HookAPIToken == "" {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+	setup, err = prepareHookContract(conn, setup)
 	if err != nil {
 		return windowsGenericManagedTarget{}, err
 	}

@@ -3682,8 +3682,11 @@ else {
         "DefenseClaw Windows enterprise {0}: {1}" -f
         $Action.ToLowerInvariant(), $resultState
     )
-    if ($resultState -eq 'INCOMPLETE') {
-        foreach ($message in @($result.errors)) {
+    # StrictMode Latest throws on a missing property, so read errors the same
+    # guarded way as ok.
+    $errorsProperty = $result.PSObject.Properties['errors']
+    if ($resultState -eq 'INCOMPLETE' -and $null -ne $errorsProperty) {
+        foreach ($message in @($errorsProperty.Value)) {
             if (-not [string]::IsNullOrWhiteSpace([string]$message)) {
                 Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$message)
             }

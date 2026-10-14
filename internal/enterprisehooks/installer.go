@@ -226,7 +226,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
-		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+		setupOpts, err = prepareHookContract(conn, setupOpts)
 		if err != nil {
 			return err
 		}
@@ -438,7 +438,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		requestedHookFailMode := canonicalHookFailMode(setupOpts.HookFailMode)
-		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+		setupOpts, err = prepareHookContract(conn, setupOpts)
 		if err != nil {
 			return err
 		}
@@ -465,7 +465,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		if standalonePerUserRepair(uid) {
 			// Refuse a contract the install cannot meet before creating any
 			// folder, so a refused install leaves the home as it was.
-			if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+			if err := validateHookContract(conn, setupOpts); err != nil {
 				return err
 			}
 			if err := withOwnerCredentials(uid, gid, func() error {
@@ -1116,7 +1116,7 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 // best-effort contract in open delivery instead of refusing installation
 // (#1163). The standalone profile's certification floor for a not-gated
 // connector (Kiro) stays mandatory.
-func prepareHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) (connector.SetupOpts, error) {
+func prepareHookContract(conn connector.Connector, opts connector.SetupOpts) (connector.SetupOpts, error) {
 	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)
 	if strings.TrimSpace(opts.HookContractID) == "" {
 		opts.HookContractID = connector.BestEffortHookContract(resolution).ContractID
@@ -1238,8 +1238,8 @@ func loadHookContractLockPair(
 // focused validation tests and callers that only need an error result. Install
 // and Verify use prepareHookContract directly so its effective fail mode and
 // fallback contract reach the generated hooks.
-func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
-	_, err := prepareHookContract(mode, conn, opts)
+func validateHookContract(conn connector.Connector, opts connector.SetupOpts) error {
+	_, err := prepareHookContract(conn, opts)
 	return err
 }
 

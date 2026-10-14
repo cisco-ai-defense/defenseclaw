@@ -617,6 +617,60 @@ PLIST
   assert_eq "${got}" "" "lookalike OpenCode app bundle identity rejected"
 }
 
+t_cursor_versionless_user_bundle_falls_through_to_system_root() {
+  # A ~/Applications/Cursor.app whose Info.plist carries no version must not
+  # end discovery; the /Applications root is probed next. Hermetic seam: the
+  # plist reader is stubbed so the host's /Applications is never consulted.
+  local home; home="$(mktest_tmp)"
+  _probe_cursor_app_version() {
+    case "$1" in
+      "${home}/Applications/Cursor.app/Contents/Info.plist") return 0 ;;
+      /Applications/Cursor.app/Contents/Info.plist) printf '%s\n' '1.7.42' ;;
+      *) return 0 ;;
+    esac
+  }
+  local got
+  got="$(without_host_agent_bins discover_agent_version cursor "${home}")"
+  assert_eq "${got}" "1.7.42" "versionless user Cursor.app falls through to /Applications"
+
+  _probe_cursor_app_version() {
+    case "$1" in
+      "${home}/Applications/Cursor.app/Contents/Info.plist") printf '%s\n' '1.8.0' ;;
+      /Applications/Cursor.app/Contents/Info.plist) printf '%s\n' '1.7.42' ;;
+      *) return 0 ;;
+    esac
+  }
+  got="$(without_host_agent_bins discover_agent_version cursor "${home}")"
+  assert_eq "${got}" "1.8.0" "versioned user Cursor.app wins over /Applications"
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_cursor_app_version_reads_plist_or_nothing() {
+  if [[ ! -x /usr/libexec/PlistBuddy ]]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (PlistBuddy unavailable)\n'; fi
+    return 0
+  fi
+  local dir; dir="$(mktest_tmp)"
+  local plist="${dir}/Info.plist"
+  cat > "${plist}" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.todesktop.230313mzl4w4u92</string>
+</dict></plist>
+PLIST
+  local got
+  got="$(_probe_cursor_app_version "${plist}")"
+  assert_eq "${got}" "" "Cursor Info.plist without a version yields nothing"
+
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleShortVersionString string 1.7.42' "${plist}"
+  got="$(_probe_cursor_app_version "${plist}")"
+  assert_eq "${got}" "1.7.42" "Cursor Info.plist version read"
+
+  got="$(_probe_cursor_app_version "${dir}/missing/Info.plist")"
+  assert_eq "${got}" "" "missing Cursor Info.plist yields nothing"
+}
+
 t_bounded_agent_probe_uses_target_user_and_exact_binary() {
   local dir; dir="$(mktest_tmp)"
   local fakebin="${dir}/fakebin"
@@ -1057,6 +1111,8 @@ run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_witho
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
+run_case "cursor versionless user bundle falls through" t_cursor_versionless_user_bundle_falls_through_to_system_root
+run_case "cursor app plist version probe" t_cursor_app_version_reads_plist_or_nothing
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode via native installer symlink" t_claudecode_via_native_installer_symlink
 run_case "claudecode native installer wins over stale Desktop bundle" t_claudecode_native_installer_wins_over_stale_desktop_bundle

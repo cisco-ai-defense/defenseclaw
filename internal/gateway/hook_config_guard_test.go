@@ -48,7 +48,7 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				connector.AMPPluginPathOverride = pluginPath
 				t.Cleanup(func() { connector.AMPPluginPathOverride = previous })
 				cfg := config.DefaultConfig()
-				cfg.DataDir = t.TempDir()
+				cfg.DataDir = testenv.PrivateTempDir(t)
 				cfg.Guardrail.Mode = mode
 				cfg.Guardrail.HookFailMode = tc.global
 				cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
@@ -60,6 +60,9 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				if opts.HookFailMode != tc.want {
 					t.Fatalf("initial delivery mode = %q, want %q", opts.HookFailMode, tc.want)
 				}
+				// Native Windows Amp setup admits only a protected,
+				// setup-selected executable; seed that evidence (no-op elsewhere).
+				pluginPath = admitAmpSelfHealSetup(t, cfg.DataDir, &opts)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				if err := conn.Setup(ctx, opts); err != nil {

@@ -174,9 +174,11 @@ def _upgraded_from_0x(result) -> bool:
 def _report_hook_fail_mode_changes(data_dir: str) -> None:
     """Name each connector whose hooks change from fail-closed to fail-open.
 
-    0.8.x sealed the global fail mode into the hooks of observe-mode
-    connectors. This release applies the documented rule that observe-mode
-    hooks fail open, so say so before the gateway rewrites the hooks.
+    0.8.x sealed a closed fail mode into hooks a config never set closed. This
+    release defaults hook delivery failures to open, independent of the
+    guardrail mode, and preserves an explicit ``closed`` (spec 007), so name
+    each connector that loses fail-closed delivery before the gateway
+    rewrites its hooks, and how to keep it.
     """
     try:
         with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as stream:
@@ -191,14 +193,17 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
         return
     for name, entry in sorted(connectors.items()):
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if (
-            sealed != "closed"
-            or guardrail.effective_mode(name).strip().lower() != "observe"
-            or guardrail.effective_hook_fail_mode(name) != "open"
-        ):
+        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
             continue
         ux.warn(
-            f"{name} hooks now fail open: in observe mode they let a call through when "
-            "inspection is unavailable, where the previous release blocked it."
+            f"{name} hooks now fail open: they let a call through when inspection is "
+            "unavailable, where the previous release blocked it."
         )
-        ux.subhead(f"To block such calls, enforce policy: defenseclaw setup {name} --mode action", indent="    ")
+        if name.strip().lower() == "cursor":
+            # Cursor's fail mode follows its guardrail mode (action is closed).
+            ux.subhead("To block such calls: defenseclaw setup cursor --mode action", indent="    ")
+        else:
+            ux.subhead(
+                f"To block such calls: defenseclaw guardrail fail-mode closed --connector {name}",
+                indent="    ",
+            )

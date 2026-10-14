@@ -148,7 +148,7 @@ const cursorAdapterTimeoutMS = 10_000
 // the two values the hook scripts understand. Empty defaults open; malformed
 // non-empty values collapse to closed.
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "" || strings.TrimSpace(mode) == "open" {
+	if trimmed := strings.TrimSpace(mode); trimmed == "" || strings.EqualFold(trimmed, "open") {
 		return "open"
 	}
 	return "closed"

@@ -2127,7 +2127,7 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
 		return "open"
 	}
-	if strings.TrimSpace(g.HookFailMode) == "" || strings.TrimSpace(g.HookFailMode) == "open" {
+	if trimmed := strings.TrimSpace(g.HookFailMode); trimmed == "" || strings.EqualFold(trimmed, "open") {
 		return "open"
 	}
 	return "closed"

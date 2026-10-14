@@ -18,7 +18,7 @@ and invalid-response failures.
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Can be overridden per connector. See [Which value applies](#which-value-applies). |
+| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `open` when unset, on a fresh install and after an upgrade. An explicit `closed` is preserved, never migrated. A malformed non-empty value is treated as `closed`. Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
@@ -40,17 +40,19 @@ classified as transport.
 
 Each connector's effective fail mode resolves in this order:
 
-1. The connector's own value (`guardrail.connectors.<name>.hook_fail_mode`),
-   set with `guardrail fail-mode open|closed --connector <name>`.
-2. Otherwise, a connector in **observe** mode stays `open`, whatever the global
-   value says. Switch it to action mode with
-   `defenseclaw guardrail mode action --connector <name>`, or give it its own
-   fail mode.
-3. Otherwise, the global `guardrail.hook_fail_mode`.
+1. Cursor's fail mode follows its guardrail mode: `closed` in action mode,
+   `open` in observe mode, whatever `hook_fail_mode` says. Switch it with
+   `defenseclaw guardrail mode action --connector cursor`.
+2. Otherwise, the connector's own value
+   (`guardrail.connectors.<name>.hook_fail_mode`), set with
+   `guardrail fail-mode open|closed --connector <name>`.
+3. Otherwise, the global `guardrail.hook_fail_mode`, and `open` when it is unset.
 
-When rule 2 keeps a connector open although the global value is `closed`,
-`defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
-`fail-mode=open`, so it does not read as drift.
+The fail mode is independent of the guardrail mode: observe and action
+connectors use the same value. When rule 1 keeps Cursor open although the
+configured value is `closed`, `defenseclaw status` and the `Mode` row of
+`defenseclaw doctor` say so next to `fail-mode=open`, so it does not read as
+drift.
 
 Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
 their generated hooks stay open even when the effective mode is `closed`. See
@@ -120,23 +122,22 @@ defenseclaw guardrail fail-mode closed --connector claudecode --yes
 ```
 
 Run bare, `guardrail fail-mode` prints the global value and each active
-connector's effective value. On a Claude Code and Codex install in observe
-mode, after `guardrail fail-mode closed --connector codex --yes`:
+connector's effective value. On a new Claude Code and Codex install, after
+`guardrail fail-mode closed --connector codex --yes`:
 
 ```text
-  guardrail.hook_fail_mode: closed
+  guardrail.hook_fail_mode: open
 
   per connector:
       - Claude Code (claudecode): open
       - Codex (codex): closed
 
-  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above; Hermes remains fail-open.
-  ! Still fail-open: claudecode (observe mode keeps hooks fail-open). Switch to action with: defenseclaw guardrail mode action --connector <name>
-  Switch to open:   defenseclaw guardrail fail-mode open
+  Invalid, unauthorized, incomplete, and unreachable gateway responses ALLOW the tool/prompt for connectors that are open above and BLOCK it for those that are closed.
+  Switch to closed: defenseclaw guardrail fail-mode closed
 ```
 
-Claude Code shows `open` because it is in observe mode and has no value of its
-own; Codex shows `closed` because of its connector override.
+Claude Code shows `open` because it has no value of its own and inherits the
+open global default; Codex shows `closed` because of its connector override.
 
 Omitting `--connector` writes the broad posture. On a multi-connector install,
 a broad write reconciles active connector overrides so an old per-connector

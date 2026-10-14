@@ -553,6 +553,50 @@ func validateWindowsCursorManagedArtifacts(
 	return artifacts, nil
 }
 
+// errWindowsCursorOrphanHookRefs reports DefenseClaw adapter references in
+// the Cursor enterprise hooks.json while no protected ownership state exists.
+var errWindowsCursorOrphanHookRefs = errors.New("enterprise hooks: Cursor hook references remain without ownership metadata")
+
+// validateWindowsCursorManagedArtifactsReclaimingOrphans is the mutation-path
+// form of validateWindowsCursorManagedArtifacts. Callers MUST hold
+// withWindowsCursorManagedTransaction.
+//
+// Bulldoze reclaim (#1068): a prior scoped install stamped hook entries into
+// hooks.json but its ownership metadata (state/receipt) is gone, either from a
+// crash between the hooks write and the state write or from a manual clean-up
+// that wiped only the sidecars. The entries are DefenseClaw's by adapter-path
+// match, so outside strict mode hooks.json is rewritten with only those
+// entries removed, through the metadata-preserving writer every other
+// hooks.json write uses, and the re-read artifacts are validated again.
+// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1) keeps refusing.
+func validateWindowsCursorManagedArtifactsReclaimingOrphans(
+	current windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
+	artifacts, err := validateWindowsCursorManagedArtifacts(current)
+	if !errors.Is(err, errWindowsCursorOrphanHookRefs) || managed.TrustStrictAncestors() {
+		return artifacts, err
+	}
+	cleaned, removeErr := connector.RemoveWindowsCursorEnterpriseHooks(current.hooks.data, current.adapter.path)
+	if removeErr != nil {
+		return artifacts, err
+	}
+	fmt.Fprintf(os.Stderr,
+		"[enterprise-hooks] reclaiming orphan Cursor hook refs at %s (state ownership metadata absent)\n",
+		current.hooks.path)
+	if writeErr := writeWindowsCursorManagedFilePreservingMetadata(
+		current.hooks,
+		current.hooksMetadata,
+		cleaned,
+	); writeErr != nil {
+		return artifacts, fmt.Errorf("enterprise hooks: reclaim orphan Cursor hook refs: %w", writeErr)
+	}
+	reclaimed, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		return reclaimed, err
+	}
+	return validateWindowsCursorManagedArtifacts(reclaimed)
+}
+
 func validateWindowsCursorManagedPublicArtifacts(
 	artifacts windowsCursorManagedArtifacts,
 ) (windowsCursorManagedArtifacts, error) {
@@ -567,37 +611,12 @@ func validateWindowsCursorManagedPublicArtifacts(
 			)
 			if removeErr == nil &&
 				!connector.WindowsCursorEnterpriseHooksSemanticallyEqual(cleaned, artifacts.hooks.data) {
-				if managed.TrustStrictAncestors() {
-					return artifacts, errors.New("enterprise hooks: Cursor hook references remain without ownership metadata")
-				}
-				// Bulldoze reclaim: a prior scoped install stamped
-				// hook entries into hooks.json but its ownership
-				// metadata (state/receipt) is gone - either from a
-				// crash between the hooks write and the state write,
-				// or from a manual clean-up that wiped only the
-				// sidecars. The entries are DefenseClaw's by
-				// adapter-path match, so overwrite hooks.json with
-				// the cleaned bytes and continue. Route through the
-				// metadata-preserving writer that every other
-				// hooks.json write uses so the file's security
-				// descriptor and attributes stay intact. The caller
-				// is already inside withWindowsCursorManagedTransaction
-				// so this write is lock-serialized.
-				fmt.Fprintf(os.Stderr,
-					"[enterprise-hooks] reclaiming orphan Cursor hook "+
-						"refs at %s (state ownership metadata absent)\n",
-					artifacts.hooks.path)
-				if writeErr := writeWindowsCursorManagedFilePreservingMetadata(
-					artifacts.hooks,
-					artifacts.hooksMetadata,
-					cleaned,
-				); writeErr != nil {
-					return artifacts, fmt.Errorf(
-						"enterprise hooks: reclaim orphan Cursor hook refs: %w",
-						writeErr,
-					)
-				}
-				artifacts.hooks.data = append([]byte(nil), cleaned...)
+				// Stay side-effect free: unlocked readers (every hook
+				// process resolving its policy target, lifecycle restore
+				// validation) reach this validator. Locked install and
+				// repair paths reclaim through
+				// validateWindowsCursorManagedArtifactsReclaimingOrphans.
+				return artifacts, errWindowsCursorOrphanHookRefs
 			}
 		}
 		artifacts.active = false
@@ -797,7 +816,7 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(current)
+		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
 		if err != nil {
 			candidate, candidateErr := windowsCursorManagedAdapterDriftCandidate(current, hookExecutable)
 			if candidateErr != nil {
@@ -1095,9 +1114,16 @@ func installWindowsCursorManagedPolicy(
 		if err != nil {
 			return err
 		}
-		current, err := validateWindowsCursorManagedArtifacts(before)
+		current, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(before)
 		if err != nil {
 			return err
+		}
+		if !windowsCursorManagedFileSnapshotEqual(current.hooks, current.hooksMetadata, before.hooks, before.hooksMetadata) {
+			// An orphan reclaim rewrote hooks.json. The cleaned file is the
+			// preimage: the receipt's original config, the merge base and the
+			// concurrent-change checks below must all see it, not the stale
+			// pre-reclaim bytes.
+			before = current
 		}
 		gateway, err := connector.NormalizeWindowsManagedGatewayAddr(opts.APIAddr)
 		if err != nil {
@@ -1376,7 +1402,7 @@ func removeWindowsCursorManagedPolicyTarget(targetSID *windows.SID) error {
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(current)
+		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(current)
 		if err != nil || !artifacts.active {
 			return err
 		}
@@ -1423,7 +1449,7 @@ func PublishWindowsCursorManagedPolicyTargets(
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(currentArtifacts)
+		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(currentArtifacts)
 		if err != nil {
 			return err
 		}
@@ -2191,7 +2217,7 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(currentArtifacts)
+		artifacts, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(currentArtifacts)
 		if err != nil {
 			return err
 		}

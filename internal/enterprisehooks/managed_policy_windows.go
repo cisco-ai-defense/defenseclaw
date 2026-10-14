@@ -177,25 +177,29 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 			// restore.
 			//
 			// The strict identity check is still used by Teardown/Restore
-			// callers (lines 526, 743) where recovery MUST authenticate the
+			// callers where recovery MUST authenticate the
 			// exact prior deployment; this bulldoze path is only in Capture.
 			fmt.Fprintf(os.Stderr,
 				"[enterprise-hooks] reclaiming identity-drifted Claude managed "+
 					"policy at %s and state at %s (prior scoped install's "+
 					"identity does not match current scope): %v\n",
 				path, statePath, err)
-			if removeErr := os.Remove(path); removeErr != nil &&
-				!errors.Is(removeErr, os.ErrNotExist) {
-				return fmt.Errorf(
-					"enterprise hooks: reclaim identity-drifted Claude managed policy %s: %w",
-					path, removeErr,
-				)
-			}
+			// Remove the state sidecar first. If the policy removal then
+			// fails, the leftover is policy-without-state, which
+			// reclaimOrphanClaudeManagedPolicy recovers on the next run;
+			// the reverse order would strand state-without-policy.
 			if removeErr := os.Remove(statePath); removeErr != nil &&
 				!errors.Is(removeErr, os.ErrNotExist) {
 				return fmt.Errorf(
 					"enterprise hooks: reclaim identity-drifted Claude managed state %s: %w",
 					statePath, removeErr,
+				)
+			}
+			if removeErr := os.Remove(path); removeErr != nil &&
+				!errors.Is(removeErr, os.ErrNotExist) {
+				return fmt.Errorf(
+					"enterprise hooks: reclaim identity-drifted Claude managed policy %s: %w",
+					path, removeErr,
 				)
 			}
 			// With the stale pair removed, the current install is now
