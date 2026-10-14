@@ -893,6 +893,24 @@ int dclaw_ipc_release_lockdown(void) {
 #define EMERGENCY_MAGIC_0       0xDC
 #define EMERGENCY_MAGIC_1       0xE9
 
+#define LOCKDOWN_RELEASE_SEQ_OFFSET (EMERGENCY_FLASH_OFFSET + EMERGENCY_FLASH_SIZE)
+
+uint32_t dclaw_load_lockdown_release_seq(void) {
+    uint8_t buf[4];
+    if (hal_flash_read(LOCKDOWN_RELEASE_SEQ_OFFSET, buf, 4) != 0) return 0;
+    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
+}
+
+void dclaw_store_lockdown_release_seq(uint32_t seq) {
+    uint8_t buf[4] = {
+        (uint8_t)(seq >> 24), (uint8_t)(seq >> 16),
+        (uint8_t)(seq >> 8), (uint8_t)seq
+    };
+    hal_flash_write(LOCKDOWN_RELEASE_SEQ_OFFSET, buf, 4);
+    hal_flash_sync();
+}
+
 void dclaw_emergency_persist(void) {
     dclaw_state_t *s = dclaw_get_state();
     uint8_t buf[EMERGENCY_FLASH_SIZE];

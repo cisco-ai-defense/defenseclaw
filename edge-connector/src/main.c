@@ -344,7 +344,14 @@ int main(int argc, char *argv[]) {
 
 #if DCLAW_MQTT_ENABLED
                 if (msg_len >= 16 && memcmp(base, "release_lockdown", 16) == 0) {
+                    extern uint32_t dclaw_load_lockdown_release_seq(void);
+                    extern void dclaw_store_lockdown_release_seq(uint32_t);
                     static uint32_t lockdown_release_seq = 0;
+                    static bool release_seq_loaded = false;
+                    if (!release_seq_loaded) {
+                        lockdown_release_seq = dclaw_load_lockdown_release_seq();
+                        release_seq_loaded = true;
+                    }
                     bool authenticated = false;
                     if (msg_len == 16) {
 #if DCLAW_DEV_MODE
@@ -383,6 +390,7 @@ int main(int argc, char *argv[]) {
                                             authenticated = ct_compare(provided, expected, 32);
                                             if (authenticated) {
                                                 lockdown_release_seq = req_seq;
+                                                dclaw_store_lockdown_release_seq(req_seq);
                                             } else {
                                                 fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
                                             }

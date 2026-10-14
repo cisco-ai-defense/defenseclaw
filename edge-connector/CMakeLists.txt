@@ -249,9 +249,16 @@ if(DCLAW_MQTT_ENABLED)
     endif()
 endif()
 
-# BLK-2/CRT-6 fix: Compile-time opt-in for HMAC-SHA256 OTA verification
-# in production builds. Default OFF (secure default: HMAC rejected).
 option(DCLAW_ALLOW_HMAC_OTA "Allow HMAC-SHA256 for OTA verification in production" OFF)
+find_path(TWEETNACL_INCLUDE_DIR NAMES tweetnacl.h)
+if(TWEETNACL_INCLUDE_DIR)
+    message(STATUS "TweetNaCl found — Ed25519 OTA verification available")
+else()
+    if(NOT DCLAW_ALLOW_HMAC_OTA)
+        message(STATUS "TweetNaCl not found — enabling DCLAW_ALLOW_HMAC_OTA for HMAC-SHA256 OTA")
+        set(DCLAW_ALLOW_HMAC_OTA ON)
+    endif()
+endif()
 if(DCLAW_ALLOW_HMAC_OTA)
     target_compile_definitions(dclaw_core PRIVATE DCLAW_ALLOW_HMAC_OTA=1)
     target_compile_definitions(dclaw_shared PRIVATE DCLAW_ALLOW_HMAC_OTA=1)

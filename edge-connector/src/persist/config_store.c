@@ -190,6 +190,12 @@ static void load_active_partition_from_flash(void) {
         uint8_t raw[PARTITION_RECORD_SIZE];
         if (hal_flash_read(PARTITION_FLASH_OFFSET_A, raw, PARTITION_RECORD_SIZE) == 0 &&
             raw[0] == PARTITION_MAGIC_0 && raw[1] == PARTITION_MAGIC_1) {
+#if !DCLAW_DEV_MODE
+            fprintf(stderr, "[DCLAW] ERROR: Detected unprotected legacy 4-byte flash format. "
+                    "Run once in dev mode to migrate, or re-flash.\n");
+            persist_active_partition();
+            goto apply_version;
+#endif
             fprintf(stderr, "[DCLAW] Detected old 4-byte flash format at record A — migrating.\n");
             uint8_t old_partition = raw[2];
             if (old_partition <= 1) {

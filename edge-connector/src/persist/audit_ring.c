@@ -504,10 +504,10 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     }
     compute_hmac(&entry, prev_hmac, entry.hmac);
 
-    /* INVARIANT: BLOCK events bypass the coalescing buffer */
     if (action == DCLAW_ACTION_BLOCK) {
-        /* Flush existing buffer first, then write BLOCK entry directly */
-        flush_buffer_to_flash(w);
+        if (flush_buffer_to_flash(w) != 0) {
+            return -1;
+        }
 
         const uint32_t entry_base = HAL_FLASH_AUDIT_OFFSET + AUDIT_RING_HDR_SIZE;
 
