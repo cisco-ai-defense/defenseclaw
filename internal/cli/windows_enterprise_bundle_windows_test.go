@@ -71,6 +71,24 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func windowsBundleScratchDir(t *testing.T) string {
+	t.Helper()
+	if scratch := os.Getenv("DC_WINDOWS_BUNDLE_TEST_TEMP_DIR"); scratch != "" {
+		// GetTempPath2 ignores TEMP for SYSTEM on current Windows builds.
+		root, err := os.MkdirTemp(scratch, "bundle-acl-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.RemoveAll(root); err != nil {
+				t.Error(err)
+			}
+		})
+		return root
+	}
+	return t.TempDir()
+}
+
 func TestWindowsBundleVersionACLGrantsServiceReadOnly(t *testing.T) {
 	const sid = "S-1-5-80-1-2-3-4-5"
 	if got, want := windowsBundleDirectorySDDL(sid), "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICI;0x1200a9;;;"+sid+")"; got != want {
@@ -141,7 +159,7 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 			name = "inherited"
 		}
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			root := windowsBundleScratchDir(t)
 			bundles := filepath.Join(root, enterprisebundle.BundlesDirName)
 			if err := os.MkdirAll(bundles, 0o755); err != nil {
 				t.Fatal(err)
@@ -158,6 +176,22 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 				if err := os.MkdirAll(store.PublicReceiptEventsDir(), 0o755); err != nil {
 					t.Fatal(err)
 				}
+				// Hosted runners can leave it owned by the local Administrator
+				// account; lab hosts commonly use the Administrators group.
+				user, err := windows.GetCurrentProcessToken().GetTokenUser()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := windows.SetNamedSecurityInfo(store.PublicReceiptEventsDir(), windows.SE_FILE_OBJECT,
+					windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				before, err := windows.GetNamedSecurityInfo(store.PublicReceiptEventsDir(), windows.SE_FILE_OBJECT,
+					windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("pre-existing receipt-events ACL: %s", before.String())
 			}
 			receipt, err := store.Receive("b-01JA0000000000000000000033", 1)
 			if err != nil {
@@ -183,6 +217,70 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 				if err != nil || !matches {
 					t.Fatalf("public receipt path differs from exact ACL: %s: %s (%v)", path, actual.String(), err)
 				}
+				if inherited && path == store.PublicReceiptEventsDir() {
+					t.Logf("repaired receipt-events ACL: %s", actual.String())
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsBundleInheritedDirectoriesRepairExactACL(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	const sid = "S-1-5-80-1-2-3-4-5"
+	private := windowsBundlePrivateSDDL()
+	public := windowsBundleDirectorySDDL(sid)
+	cases := []struct {
+		name, relative, sddl string
+		ensure               func(root, path string) error
+	}{
+		{"staging", filepath.Join("bundles", ".staging"), private, func(root, path string) error {
+			return ensureWindowsBundleStageDirectory(filepath.Join(root, "bundles"), path)
+		}},
+		{"receipts", filepath.Join("lifecycle", enterprisebundle.ReceiptsDirName), private, func(_, path string) error {
+			return ensureWindowsBundlePrivateDirectory(path)
+		}},
+		{"trust", "trust", private, func(_, path string) error {
+			return ensureWindowsBundlePrivateDirectory(path)
+		}},
+		{"bundles", enterprisebundle.BundlesDirName, public, func(_, path string) error {
+			return createWindowsBundleDirectory(path, public)
+		}},
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := windowsBundleScratchDir(t)
+			path := filepath.Join(root, tc.relative)
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := tc.ensure(root, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected, err := windows.SecurityDescriptorFromString(tc.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+			if err != nil || !matches {
+				t.Fatalf("inherited %s directory differs from exact ACL: %s (%v)", tc.name, actual.String(), err)
 			}
 		})
 	}

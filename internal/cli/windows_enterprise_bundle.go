@@ -183,8 +183,9 @@ func privateWindowsBundleStage(root string) error {
 }
 
 // createWindowsBundleDirectory gives a new directory its final protected
-// descriptor in CreateDirectory. Existing administrator-owned directories are
-// opened without following reparse points and repaired through that handle.
+// descriptor in CreateDirectory. Existing directories owned by Administrators
+// or the elevated caller are opened without following reparse points and
+// repaired through that handle when their descriptor is not exact.
 func createWindowsBundleDirectory(path, sddl string) error {
 	if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
 		return err
@@ -238,7 +239,9 @@ func createWindowsBundleDirectory(path, sddl string) error {
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return fmt.Errorf("bundle directory is not a regular directory: %s", path)
 	}
-	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	securityInfo := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION |
+		windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, securityInfo)
 	if err != nil {
 		return err
 	}
@@ -255,7 +258,26 @@ func createWindowsBundleDirectory(path, sddl string) error {
 		return err
 	}
 	if !windowsEnterpriseSIDEqual(actualOwner, owner) {
-		return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
+		// An older publisher may have left a directory owned by the
+		// elevated account (or SYSTEM) that created it. Only that same
+		// principal may migrate it to the Administrators-owned descriptor.
+		if !windowsEnterpriseIsElevated() {
+			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
+		}
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil {
+			return err
+		}
+		if user == nil || !windowsEnterpriseSIDEqual(actualOwner, user.User.Sid) {
+			return fmt.Errorf("bundle directory has an unexpected owner: %s", path)
+		}
+	}
+	matches, err := windowsEnterpriseExactDescriptorMatch(actual, descriptor)
+	if err != nil {
+		return err
+	}
+	if matches {
+		return nil
 	}
 	group, _, err := descriptor.Group()
 	if err != nil {
@@ -265,10 +287,24 @@ func createWindowsBundleDirectory(path, sddl string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|
 			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		owner, group, dacl, nil)
+		owner, group, dacl, nil); err != nil {
+		return err
+	}
+	actual, err = windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, securityInfo)
+	if err != nil {
+		return err
+	}
+	matches, err = windowsEnterpriseExactDescriptorMatch(actual, descriptor)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return fmt.Errorf("bundle directory descriptor differs after repair: %s", path)
+	}
+	return nil
 }
 
 func ensureWindowsBundlePrivateDirectory(path string) error {
