@@ -570,19 +570,130 @@ func TestWindowsHotBundleWaitsForGatewayBundleIdentity(t *testing.T) {
 func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testing.T) {
 	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	host, opts := newHotConfigHost(t, current, current)
+	installedRoot := filepath.Join(t.TempDir(), "installed")
+	installedScript := filepath.Join(installedRoot, "libexec", "install-enterprise.ps1")
+	stagedScript := `C:\stage\install-enterprise.ps1`
 	unlocks := 0
 	opts.bundle = &windowsBundleRun{
-		layout:   managed.StandaloneLayout{ConfigPath: host.configPath},
+		layout:   managed.StandaloneLayout{InstallRoot: installedRoot, ConfigPath: host.configPath},
 		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
 		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
 		unlock:   func() { unlocks++ },
 	}
+	// Setup's staged hash pins belong to its embedded release. Verify must
+	// run the protected installed release with its recorded pins instead.
+	opts.trustMode = windowsEnterpriseTrustHashPinned
+	opts.payloadManifest = filepath.Join(t.TempDir(), "setup-payload-trust.json")
+	opts.allowedSigners = []string{strings.Repeat("a", 64)}
+	previousFinder := windowsEnterpriseScriptFinder
+	windowsEnterpriseScriptFinder = func(path string) (string, error) {
+		if path != installedScript {
+			t.Fatalf("installed installer lookup = %q, want %q", path, installedScript)
+		}
+		return installedScript, nil
+	}
+	t.Cleanup(func() { windowsEnterpriseScriptFinder = previousFinder })
 	previousDir := windowsEnterpriseHookRuntimeDir
 	windowsEnterpriseHookRuntimeDir = func() (string, error) { return filepath.Join(t.TempDir(), "missing"), nil }
 	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = previousDir })
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
-	result := runHotConfigEnsure(t, host, opts, stub)
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+		t.Fatal("already-applied bundle reached drift planning")
+		return "", nil
+	}
+	runner := windowsEnterpriseStandaloneRunner
+	var scripts []string
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, cmd *cobra.Command, script string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		scripts = append(scripts, script)
+		return runner(ctx, cmd, script, args)
+	}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, stagedScript); err != nil {
+		t.Fatalf("Setup ensure: %v\n%s", err, stdout.String())
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
 	if !result.Noop || result.NoopReason != "already_applied" || len(stub.calls) != 2 || len(host.writes) != 0 || unlocks != 1 {
 		t.Fatalf("same bundle = %+v, installer calls=%q writes=%q unlocks=%d", result, stub.calls, host.writes, unlocks)
+	}
+	if len(scripts) != 2 || scripts[0] != stagedScript || scripts[1] != installedScript {
+		t.Fatalf("status/verify installers = %q", scripts)
+	}
+	verifyArgs := stub.calls[1]
+	if !containsString(verifyArgs, "-TrustMode") || !containsString(verifyArgs, "Authenticode") ||
+		containsString(verifyArgs, "-PayloadManifest") || containsString(verifyArgs, "-AllowedSigners") {
+		t.Fatalf("installed verify received Setup trust inputs: %q", verifyArgs)
+	}
+	if opts.trustMode != windowsEnterpriseTrustHashPinned || opts.payloadManifest == "" || len(opts.allowedSigners) != 1 {
+		t.Fatal("the read-only probe changed Setup's payload trust inputs")
+	}
+}
+
+func TestWindowsConfirmedBundleRepairsVerifiedInstallDamageWithReason(t *testing.T) {
+	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	host, opts := newHotConfigHost(t, current, current)
+	previousLayout := windowsEnterpriseStandaloneLayoutForPreflight
+	previousPending := windowsEnterpriseStandaloneTransactionPending
+	previousVersion := windowsEnterpriseInstalledProductVersion
+	previousRestoredVersion := windowsEnterprisePendingRestoredVersion
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}, nil
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseInstalledProductVersion = func(*windowsEnterpriseLifecycleOptions) (string, error) { return "1.4.0", nil }
+	windowsEnterprisePendingRestoredVersion = func(*windowsEnterpriseLifecycleOptions) (string, bool) { return "", false }
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = previousLayout
+		windowsEnterpriseStandaloneTransactionPending = previousPending
+		windowsEnterpriseInstalledProductVersion = previousVersion
+		windowsEnterprisePendingRestoredVersion = previousRestoredVersion
+	})
+	installedRoot := filepath.Join(t.TempDir(), "installed")
+	opts.bundle = &windowsBundleRun{
+		layout:   managed.StandaloneLayout{InstallRoot: installedRoot, ConfigPath: host.configPath},
+		driver:   &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
+		prepared: &enterprisebundle.Prepared{AlreadyApplied: true, ConfigSHA256: configwrite.SHA256Hex([]byte(current))},
+		unlock:   func() {},
+	}
+	previousFinder := windowsEnterpriseScriptFinder
+	windowsEnterpriseScriptFinder = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() { windowsEnterpriseScriptFinder = previousFinder })
+	failed := installedStatus("verify")
+	failed["ok"] = false
+	failed["errors"] = []string{"managed ACL is invalid"}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failed, installedStatus("repair")}}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+		t.Fatal("already-applied bundle reached drift planning")
+		return "", nil
+	}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("repair damaged install: %v\n%s", err, stdout.String())
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Noop || len(stub.calls) != 3 || stub.calls[2][1] != "Repair" {
+		t.Fatalf("unhealthy bundle result = %+v, installer calls = %q", result, stub.calls)
+	}
+	found := false
+	for _, warning := range result.Warnings {
+		found = found || warning.Code == "ensure_repair" && strings.Contains(warning.Message, "verify_failed: managed ACL is invalid")
+	}
+	if !found {
+		t.Fatalf("repair did not name the failed check: %+v", result.Warnings)
 	}
 }

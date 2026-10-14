@@ -2397,6 +2397,7 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 type windowsEnterpriseEnsurePlan struct {
 	Action string // "", install, upgrade, repair
 	Reason string
+	Detail string // the failed read-only check behind a verify_failed repair
 }
 
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
@@ -2471,6 +2472,50 @@ func windowsEnterpriseVerifyAcceptable(report *windowsEnterpriseInstallerReport)
 		len(report.Errors) == 0 && report.Error == ""
 }
 
+// A repeated confirmed bundle checks the installed deployment with its own
+// installer. Setup's staged module and hash-pinned manifest describe the
+// incoming package, not the installed release. Passing that manifest into
+// Verify also prevents PowerShell from loading the installed release's
+// recorded payload pins, so a package-specific failure could trigger repair.
+func windowsEnterpriseConfirmedBundleProbe(opts *windowsEnterpriseLifecycleOptions, run *windowsBundleRun) (string, *windowsEnterpriseLifecycleOptions, error) {
+	if run == nil || strings.TrimSpace(run.layout.InstallRoot) == "" {
+		return "", nil, errors.New("installed bundle layout has no install root")
+	}
+	installed := filepath.Join(run.layout.InstallRoot, "libexec", "install-enterprise.ps1")
+	script, err := windowsEnterpriseScriptFinder(installed)
+	if err != nil {
+		return "", nil, fmt.Errorf("read the installed enterprise installer: %w", err)
+	}
+	probe := windowsEnterpriseEnsureProbeOptions(opts)
+	probe.trustMode = windowsEnterpriseTrustAuthenticode
+	probe.payloadManifest = ""
+	probe.allowedSigners = nil
+	return script, probe, nil
+}
+
+func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerReport, hookDrift string) string {
+	if report != nil {
+		for _, message := range append(append([]string{}, report.Errors...), report.Error) {
+			if detail := strings.TrimSpace(message); detail != "" {
+				return windowsEnterpriseBoundedDiagnostic(detail)
+			}
+		}
+		if !report.Installed {
+			return "the deployment is not installed"
+		}
+		if report.TransactionPending {
+			return "a lifecycle transaction is pending"
+		}
+		if !report.GatewayReady {
+			return "the gateway is not ready"
+		}
+	}
+	if hookDrift != "" {
+		return windowsEnterpriseBoundedDiagnostic(hookDrift)
+	}
+	return "the installed deployment failed verification without a diagnostic"
+}
+
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2487,17 +2532,28 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	alreadyAppliedNeedsRepair := false
+	verifyFailure := ""
 	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
 		compareWindowsEnterpriseVersions(opts.productVersion, statusReport.InstalledVersion) == 0 &&
 		windowsBundleInstalledSHA(run.layout.ConfigPath) == run.prepared.ConfigSHA256 {
-		verifyReport, verifyRun, verifyErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
-			windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
+		verifyScript, verifyOpts, probeErr := windowsEnterpriseConfirmedBundleProbe(opts, run)
+		if probeErr != nil {
+			verifyFailure = windowsEnterpriseBoundedDiagnostic(probeErr.Error())
+		}
+		var verifyReport *windowsEnterpriseInstallerReport
+		var verifyRun windowsEnterpriseStandaloneRun
+		var verifyErr error
+		if probeErr == nil {
+			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, verifyOpts, verifyScript,
+				windowsEnterprisePowerShellArgs("verify", verifyOpts))
+		}
 		if verifyErr != nil {
 			result.AddError(windowsEnterpriseMessageCode(verifyErr.Error(), "lifecycle_launch_failed"), verifyErr.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		if _, drifted := windowsEnterpriseHookRuntimeDrift(); windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		_, drifted := windowsEnterpriseHookRuntimeDrift()
+		if probeErr == nil && windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
 			// The module can set ok:false for security_incomplete with no
 			// failed check. Keep its warning, without turning that into a
 			// synthetic not_ready error during result translation.
@@ -2510,8 +2566,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		alreadyAppliedNeedsRepair = true
+		if verifyFailure == "" {
+			verifyFailure = windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)
+		}
 	}
-	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
+	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
 	var planErr error
 	if !alreadyAppliedNeedsRepair {
 		plan, planErr = planWindowsEnterpriseEnsure(statusReport, opts, script)
@@ -2751,6 +2810,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if len(startOnlyKeys) > 0 {
 		// Say why a config-only change stopped the services (GAP-0719).
 		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
+	}
+	if plan.Reason == "verify_failed" && plan.Detail != "" {
+		reason += ": " + plan.Detail
 	}
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))

@@ -888,6 +888,26 @@ func installedStatus(action string) map[string]any {
 	}
 }
 
+func TestWindowsEnterpriseConfirmedBundleVerifyFailureDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report *windowsEnterpriseInstallerReport
+		drift  string
+		want   string
+	}{
+		{"verified ACL failure", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true, Errors: []string{"managed ACL is invalid"}}, "", "managed ACL is invalid"},
+		{"gateway unavailable", &windowsEnterpriseInstallerReport{Installed: true}, "", "the gateway is not ready"},
+		{"pending transaction", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true, TransactionPending: true}, "", "a lifecycle transaction is pending"},
+		{"hook runtime permissions", &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: true}, "machine policy summary ACL drift", "machine policy summary ACL drift"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowsEnterpriseVerifyFailureDetail(tc.report, tc.drift); got != tc.want {
+				t.Fatalf("failure detail = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // ensure's Status and Verify probes carry no mutation inputs: the installer
 // refuses -NoStart, -Mode, and -Connector for them, and a refused probe must
 // not be read as "not installed".
