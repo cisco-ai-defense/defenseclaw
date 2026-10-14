@@ -58,11 +58,14 @@ Run `python3 intune_tenant.py COMMAND --help` for the options. Python 3.9 or lat
 | `remediation` | with `--apply` | Create or update a Remediations package from `../windows/Remediate-*.ps1` (run as SYSTEM) and assign it on a daily schedule |
 | `macos-script` | with `--apply` | Create or update a macOS shell script from a file (run as root) and assign it |
 
-For the kit's macOS wrapper, fill in either `dc_inline_config` alone, or both
-`dc_inline_bundle` (base64 signed bundle) and `dc_inline_trust_anchors` (JSON).
-Leave `dc_inline_config` empty for a bundle because the bundle carries its own
-config. The helper checks these blocks before its Graph calls, including in
-preview mode. Do not put credentials in any inline block.
+For the kit's macOS wrapper, set an inline config or `DC_CONFIG_FILE`, or use
+`dc_inline_bundle` (base64) or `DC_BUNDLE_FILE` for a signed bundle. The bundle
+carries its own config, so leave both config inputs empty when using one. Trust
+anchors can already be installed on the device, supplied by
+`DC_TRUST_ANCHOR_FILE`, or pasted into `dc_inline_trust_anchors` (JSON). The
+helper also accepts source-only installs, read-only actions, and re-apply runs
+with existing settings. It checks conflicting settings before Graph calls,
+including in preview mode. Do not put credentials in any inline block.
 
 Rules: credentials only from the environment; every command that changes the tenant prints a
 plan until you pass `--apply` (and `--dry-run` is accepted); objects are found by exact display

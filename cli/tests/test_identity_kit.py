@@ -642,10 +642,37 @@ def test_intune_read_script_accepts_utf8_without_bom(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    ("settings", "config", "bundle", "anchors", "error"),
+    [
+        ({}, "config_version: 9\n", "", "", None),
+        ({}, "", "YQ==\n", "", None),
+        ({"DC_TRUST_ANCHOR_FILE": "/etc/anchors.json"}, "", "YQ==\n", "", None),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "", "", "", None),
+        ({"DC_CONFIG_FILE": "/etc/config.yaml"}, "", "", "", None),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
+        ({"DC_SOURCE_URL": "https://example.test/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", "hash_pinned trust requires --sha256 for the source"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_URL": "https://example.test/pkg"}, "", "", "", "--source and --source-url are exclusive"),
+        ({"DC_ACTION": "status"}, "", "", "", None),
+        ({"DC_ACTION": "verify"}, "", "", "", None),
+        ({"DC_ACTION": "verify"}, "", "YQ==\n", "", None),
+        ({"DC_ACTION": "remove"}, "", "", "", "--action must be ensure, status or verify (use uninstall.sh to remove)"),
+        ({}, "", "", "{}\n", None),
+        ({"DC_REFUSE_CAPABILITY_LOSS": "1"}, "", "", "", "--refuse-capability-loss requires a bundle"),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "config_version: 9\n", "", "", "a signed bundle carries its own config; empty the inline config block"),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle", "DC_CONFIG_FILE": "/etc/config.yaml"}, "", "", "", "--bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"),
+        ({"DC_CONFIG_FILE": "/etc/config.yaml"}, "", "YQ==\n", "", "a signed bundle carries its own config; empty the inline config block"),
+        ({}, "config_version: 9\n", "YQ==\n", "", "a signed bundle carries its own config; empty the inline config block"),
+        ({"DC_ACTION": "status", "DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "", "", "", "--action status is read-only and takes no source, config, secret, bundle or trust anchor file"),
+        ({}, "", "", "", "fill in the macOS wrapper settings block before upload"),
+    ],
+)
 def test_intune_macos_script_validates_before_graph_calls(
-    tmp_path: Path, newline: str, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, newline: str, settings: dict[str, str], config: str, bundle: str,
+    anchors: str, error: str | None, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The helper checks the wrapper's inline settings before any Graph call.
+    # The helper follows the wrapper's settings and config/bundle precedence before Graph calls.
     intune = _load(INTUNE)
     script = tmp_path / "wrapper.sh"
     template = (ROOT / "packaging/mdm/macos/defenseclaw-enterprise.sh").read_text(encoding="ascii")
@@ -655,27 +682,20 @@ def test_intune_macos_script_validates_before_graph_calls(
         def get_all(self, _path: str) -> list[dict]:
             return []
 
-    def upload(config: str = "", bundle: str = "", anchors: str = "") -> int:
-        content = template
-        for marker, value in (("DEFENSECLAW_CONFIG", config), ("DC_BUNDLE_BASE64", bundle),
-                              ("DC_TRUST_ANCHORS_JSON", anchors)):
-            content = content.replace(f"\n{marker}\n", f"\n{value}{marker}\n", 1)
-        script.write_bytes(content.replace("\n", newline).encode("ascii"))
-        return intune.cmd_macos_script(Graph(), args)
-
-    assert upload(config="config_version: 9\n") == 0
-    assert upload(bundle="YQ==\n", anchors="{}\n") == 0
-    assert capsys.readouterr().out.count("would create macOS shell script") == 2
-    with pytest.raises(SystemExit, match="a signed bundle carries its own config; empty the inline config block"):
-        upload(config="config_version: 9\n", bundle="YQ==\n", anchors="{}\n")
-    with pytest.raises(SystemExit, match="a signed bundle requires inline trust anchors"):
-        upload(bundle="YQ==\n")
-    with pytest.raises(SystemExit, match="fill in the macOS wrapper settings block before upload"):
-        upload()
-    script.write_bytes("#!/bin/sh\necho ok\n".replace("\n", newline).encode())
-    args.frequency = "bad"
-    with pytest.raises(SystemExit, match="frequency"):
-        intune.cmd_macos_script(object(), args)
+    content = template
+    for name, value in settings.items():
+        content = re.sub(rf"(?m)^{name}=[^\n]*$", lambda _: f'{name}="{value}"', content, count=1)
+    for marker, value in (("DEFENSECLAW_CONFIG", config), ("DC_BUNDLE_BASE64", bundle),
+                          ("DC_TRUST_ANCHORS_JSON", anchors)):
+        content = content.replace(f"\n{marker}\n", f"\n{value}{marker}\n", 1)
+    script.write_bytes(content.replace("\n", newline).encode("ascii"))
+    if error:
+        with pytest.raises(SystemExit, match=re.escape(error)):
+            intune.cmd_macos_script(Graph(), args)
+        assert capsys.readouterr().out == ""
+    else:
+        assert intune.cmd_macos_script(Graph(), args) == 0
+        assert "would create macOS shell script" in capsys.readouterr().out
 
 
 def test_okta_assign_posix_rejects_taken_name_before_writes(monkeypatch: pytest.MonkeyPatch) -> None:

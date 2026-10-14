@@ -878,6 +878,14 @@ def _inline_wrapper_block(content: bytes, function: bytes, marker: bytes) -> byt
     return match.group(1) if match else None
 
 
+def _wrapper_setting(content: bytes, name: bytes) -> bytes:
+    match = re.search(
+        rb"(?m)^" + re.escape(name) + rb"=(?:\"([^\"\r\n]*)\"|'([^'\r\n]*)'|([^\s#\r\n]*))[ \t]*(?:#.*)?\r?$",
+        content,
+    )
+    return next((value for value in match.groups() if value is not None), b"") if match else b""
+
+
 def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     if args.retries is not None and not 0 <= args.retries <= 3:
         raise SystemExit("error: --retries must be between 0 and 3")
@@ -891,11 +899,43 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
         has_config = bool(config and config.strip())
         has_bundle = bool(bundle and bundle.strip())
         has_anchors = bool(anchors and anchors.strip())
-        if has_config and has_bundle:
+        action = _wrapper_setting(content, b"DC_ACTION") or b"ensure"
+        source = _wrapper_setting(content, b"DC_SOURCE")
+        source_url = _wrapper_setting(content, b"DC_SOURCE_URL")
+        source_sha256 = _wrapper_setting(content, b"DC_SOURCE_SHA256")
+        trust_mode = _wrapper_setting(content, b"DC_TRUST_MODE") or b"hash_pinned"
+        config_file = _wrapper_setting(content, b"DC_CONFIG_FILE")
+        bundle_file = _wrapper_setting(content, b"DC_BUNDLE_FILE")
+        anchor_file = _wrapper_setting(content, b"DC_TRUST_ANCHOR_FILE")
+        refuse_capability_loss = _wrapper_setting(content, b"DC_REFUSE_CAPABILITY_LOSS") == b"1"
+        if action not in (b"ensure", b"status", b"verify"):
+            raise SystemExit("error: --action must be ensure, status or verify (use uninstall.sh to remove)")
+        if trust_mode not in (b"hash_pinned", b"signed"):
+            raise SystemExit("error: --trust-mode must be hash_pinned or signed")
+        if source and source_url:
+            raise SystemExit("error: --source and --source-url are exclusive")
+        if source_sha256 and not re.fullmatch(rb"[0-9a-fA-F]{64}", source_sha256):
+            raise SystemExit("error: --sha256 must be 64 hexadecimal characters")
+        if (source or source_url) and trust_mode == b"hash_pinned" and not source_sha256:
+            raise SystemExit("error: hash_pinned trust requires --sha256 for the source")
+        if action != b"ensure":
+            if any((source, source_url, config_file, bundle_file, anchor_file,
+                    _wrapper_setting(content, b"DC_SECRET_NAME"), _wrapper_setting(content, b"DC_SECRET_FILE"))) or \
+                    refuse_capability_loss:
+                raise SystemExit(
+                    f"error: --action {action.decode('utf-8', 'replace')} is read-only and takes no source, "
+                    "config, secret, bundle or trust anchor file"
+                )
+        elif refuse_capability_loss and not (bundle_file or has_bundle):
+            raise SystemExit("error: --refuse-capability-loss requires a bundle")
+        elif bundle_file and config_file:
+            raise SystemExit(
+                "error: --bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
+            )
+        elif (bundle_file or has_bundle) and (config_file or has_config):
             raise SystemExit("error: a signed bundle carries its own config; empty the inline config block")
-        if has_bundle and not has_anchors:
-            raise SystemExit("error: a signed bundle requires inline trust anchors")
-        if not has_config and not has_bundle:
+        if action == b"ensure" and not any((has_config, has_bundle, has_anchors, source, source_url,
+                                            config_file, bundle_file, anchor_file)):
             raise SystemExit("error: fill in the macOS wrapper settings block before upload")
     if args.frequency is not None and not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
         raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")

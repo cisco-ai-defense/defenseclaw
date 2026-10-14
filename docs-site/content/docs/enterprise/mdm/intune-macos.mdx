@@ -126,9 +126,11 @@ DEFENSECLAW_CONFIG
 }
 ```
 
-For a signed bundle deployment, leave `dc_inline_config` empty. Paste the
-base64 bundle into `dc_inline_bundle` and the JSON trust anchors into
-`dc_inline_trust_anchors` in the same wrapper. The bundle carries its own config.
+For a signed bundle deployment, leave `dc_inline_config` and `DC_CONFIG_FILE`
+empty. Paste the base64 bundle into `dc_inline_bundle` or set `DC_BUNDLE_FILE`.
+Trust anchors may already be installed on the device, come from
+`DC_TRUST_ANCHOR_FILE`, or be pasted into `dc_inline_trust_anchors`. The bundle
+carries its own config.
 
 For inline config on macOS, `data_dir` must be exactly
 `/opt/cisco/defenseclaw/runtime`. Omit `data_dir` from bundle config; the gateway
