@@ -28,7 +28,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const testBundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7"
@@ -150,6 +152,65 @@ func TestBundleReceiptReporterDoesNotRepeatInitialRefusal(t *testing.T) {
 	r.poll(context.Background())
 	if len(sink.receipts) != 2 {
 		t.Fatalf("receipts = %+v", sink.receipts)
+	}
+}
+
+func TestBundleReceiptReporterDrainsConsecutiveRefusalsBeforePoll(t *testing.T) {
+	dir := t.TempDir()
+	store := enterprisebundle.NewStore(filepath.Join(dir, "bundles"), filepath.Join(dir, "lifecycle"))
+	var ids []string
+	codes := []enterprisebundle.Code{enterprisebundle.CodeSignatureInvalid, enterprisebundle.CodeConfigInvalid}
+	for _, code := range codes {
+		receipt, err := store.Receive(testBundleID, 9)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, receipt.ReceiptID)
+		if err := store.Fail(receipt, code, "refused"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("deliveries reused receipt ID %q", ids[0])
+	}
+	private, err := store.Receipts()
+	if err != nil || len(private) != 2 || private[0].State != enterprisebundle.StateFailed ||
+		private[1].State != enterprisebundle.StateFailed {
+		t.Fatalf("private failed receipts = %+v, %v", private, err)
+	}
+	if latest, err := enterprisestatus.ReadPublicReceipt(store.PublicReceiptPath()); err != nil ||
+		latest.LastRefusal == nil || latest.LastRefusal.ReceiptID != ids[1] {
+		t.Fatalf("latest refusal = %+v, %v", latest, err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	newReporter := func() *bundleReceiptReporter {
+		r := &bundleReceiptReporter{receiptPath: store.PublicReceiptPath(),
+			markerPath:        filepath.Join(dir, bundleReceiptMarkerName),
+			refusalMarkerPath: filepath.Join(dir, bundleRefusalMarkerName), sink: logger,
+			enforcedVersion: func() uint64 { return 0 }}
+		r.reported, r.reportedRefusal = r.readMarker(), r.readRefusalMarker()
+		return r
+	}
+	reporter := newReporter()
+	reporter.poll(context.Background())
+	reporter.poll(context.Background())
+	newReporter().poll(context.Background())
+	records := capture.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("audit records = %d, want both refusals once", len(records))
+	}
+	for i, record := range records {
+		if record.EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+			t.Fatalf("audit event %d = %s", i, record.EventName())
+		}
+		encoded, err := record.Bytes()
+		if err != nil || !strings.Contains(string(encoded), `"defenseclaw.policy.bundle.receipt_id":"`+ids[i]+`"`) ||
+			!strings.Contains(string(encoded), `"defenseclaw.policy.bundle.error_code":"`+string(codes[i])+`"`) ||
+			!strings.Contains(string(encoded), `"defenseclaw.policy.bundle.version":9`) {
+			t.Fatalf("audit record %d = %s, %v", i, encoded, err)
+		}
 	}
 }
 

@@ -124,6 +124,11 @@ func (e *Env) stateTrees(account Account) []stateTree {
 			switch {
 			case rel == enterprisestatus.PublicReceiptName && !dir:
 				return stateMode{mode: 0o644, owner: rootOwner()}
+			case name == enterprisestatus.PublicReceiptEventsDirName:
+				if dir {
+					return stateMode{mode: 0o755, owner: rootOwner()}
+				}
+				return stateMode{mode: 0o644, owner: rootOwner()}
 			case name == bundleInboxDirName || strings.HasPrefix(name, ".staging-"):
 				if dir {
 					return stateMode{mode: 0o700, owner: rootOwner()}

@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,15 +32,15 @@ import (
 )
 
 // The gateway reports the signed policy bundle receipts of a standalone
-// managed device: it reads the public receipt.json the enterprise lifecycle
-// writes when a receipt ends, emits one config.bundle.receipt audit event
+// managed device: it reads the public receipt-events spool the enterprise
+// lifecycle writes when a receipt ends, emits one config.bundle.receipt audit event
 // (with the defenseclaw.policy.bundle.applies counter) per terminal receipt,
 // and records the defenseclaw.policy.bundle.version gauge for the bundle the
 // live generation runs. Reporting only: nothing here changes what is
 // enforced.
 
 var (
-	// bundleReceiptPollInterval is how often receipt.json is looked at.
+	// bundleReceiptPollInterval is how often the receipt spool is read.
 	bundleReceiptPollInterval = 5 * time.Second
 	// bundleReceiptRetries bounds how often one receipt is offered to an
 	// audit logger that refuses it before the reporter waits for the next
@@ -47,8 +48,8 @@ var (
 	bundleReceiptRetries = 12
 )
 
-// bundleReceiptMarkerName, in the data directory, holds the key of the last
-// receipt reported, so a gateway restart does not report it again.
+// These legacy single-slot markers also let a new reporter recognize events
+// emitted before the per-receipt marker directory existed.
 const bundleReceiptMarkerName = "bundle-receipt.reported"
 const bundleRefusalMarkerName = "bundle-refusal.reported"
 
@@ -70,6 +71,7 @@ type bundleReceiptReporter struct {
 	reportedRefusal string
 	attempts        int
 	gaugeVersion    uint64
+	seen            map[string]bool
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -111,14 +113,15 @@ func (r *bundleReceiptReporter) run(ctx context.Context) {
 	}
 }
 
-// poll records the version gauge when the enforced bundle changed and
-// reports receipt.json once per terminal receipt.
+// poll records the version gauge and drains every terminal receipt in the
+// spool. receipt.json remains a fallback for lifecycle versions without it.
 func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	if v := r.enforcedVersion(); v != 0 && v != r.gaugeVersion {
 		if r.sink.RecordPolicyBundleVersion(ctx, v) == nil {
 			r.gaugeVersion = v
 		}
 	}
+	r.reportSpool()
 	info, err := os.Lstat(r.receiptPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return
@@ -133,7 +136,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		return
 	}
 	key := receipt.Key()
-	if key == r.reported {
+	if key == r.reported || r.hasSeen(receipt.ReceiptID) {
 		// The public receipt remains confirmed when a pre-staging delivery
 		// is refused. Its separate refusal still needs an audit event.
 	} else {
@@ -145,6 +148,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		}
 		r.reported = key
 		_ = configwrite.WriteFileDurable(r.markerPath, []byte(key+"\n"), 0o600)
+		r.markSeen(receipt.ReceiptID)
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID == receipt.ReceiptID {
 		r.reportedRefusal = refusal.ReceiptID + "|" + refusal.Time
@@ -154,7 +158,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
 		refusalKey := refusal.ReceiptID + "|" + refusal.Time
-		if refusalKey != r.reportedRefusal {
+		if refusalKey != r.reportedRefusal && !r.hasSeen(refusal.ReceiptID) {
 			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID,
 				BundleID: refusal.BundleID, Version: refusal.Version, State: enterprisestatus.BundleFailed,
 				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
@@ -166,12 +170,80 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 				return
 			}
 			r.reportedRefusal = refusalKey
+			r.markSeen(refusal.ReceiptID)
 			if r.refusalMarkerPath != "" {
 				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(refusalKey+"\n"), 0o600)
 			}
 		}
 	}
 	seen()
+}
+
+func (r *bundleReceiptReporter) spoolDir() string {
+	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.PublicReceiptEventsDirName)
+}
+
+func (r *bundleReceiptReporter) seenDir() string { return r.markerPath + ".d" }
+
+func (r *bundleReceiptReporter) hasSeen(id string) bool {
+	if !enterprisestatus.ValidReceiptID(id) {
+		return false
+	}
+	if r.seen[id] {
+		return true
+	}
+	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (r *bundleReceiptReporter) markSeen(id string) {
+	if !enterprisestatus.ValidReceiptID(id) {
+		return
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]bool)
+	}
+	r.seen[id] = true
+	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
+		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+	}
+}
+
+func (r *bundleReceiptReporter) reportSpool() {
+	info, err := os.Lstat(r.spoolDir())
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	entries, err := os.ReadDir(r.spoolDir())
+	if err != nil {
+		return
+	}
+	var receipts []enterprisestatus.PublicReceipt
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !enterprisestatus.ValidReceiptID(id) || !entry.Type().IsRegular() || r.hasSeen(id) {
+			continue
+		}
+		receipt, err := enterprisestatus.ReadPublicReceipt(filepath.Join(r.spoolDir(), entry.Name()))
+		if err == nil && receipt.ReceiptID == id {
+			receipts = append(receipts, receipt)
+		}
+	}
+	sort.Slice(receipts, func(i, j int) bool {
+		if receipts[i].FinishedAt != receipts[j].FinishedAt {
+			return receipts[i].FinishedAt < receipts[j].FinishedAt
+		}
+		return receipts[i].ReceiptID < receipts[j].ReceiptID
+	})
+	for _, receipt := range receipts {
+		if receipt.Key() == r.reported || receipt.ReceiptID+"|"+receipt.FinishedAt == r.reportedRefusal {
+			r.markSeen(receipt.ReceiptID)
+			continue
+		}
+		if r.report(receipt) == nil {
+			r.markSeen(receipt.ReceiptID)
+		}
+	}
 }
 
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {

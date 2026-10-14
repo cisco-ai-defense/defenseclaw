@@ -23,22 +23,26 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 const (
-	// PublicReceiptName is the public summary of the last policy receipt that
+	// PublicReceiptName is the public status summary of the last receipt that
 	// reached staging, with the last pre-staging refusal recorded separately.
-	// bundle receipt: <etc>/bundles/receipt.json. The enterprise lifecycle
-	// writes it (mode 0644, no secrets, no error message) whenever a receipt
-	// ends confirmed or failed; the gateway reads it to emit the
-	// config.bundle.receipt audit event and the bundle metrics.
+	// It has no secrets or error message. The gateway uses it as a fallback
+	// for lifecycle versions that predate the per-receipt audit spool.
 	PublicReceiptName = "receipt.json"
+	// PublicReceiptEventsDirName holds one immutable public receipt per
+	// terminal delivery for the gateway's audit reporter.
+	PublicReceiptEventsDirName = "receipt-events"
 	// PublicReceiptSchemaVersion is the receipt.json schema.
 	PublicReceiptSchemaVersion = 1
 
 	maxPublicReceiptBytes = 16 << 10
 )
+
+var receiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 
 // PublicReceipt is receipt.json. Decoding is lenient so an older gateway
 // reads the file of a newer lifecycle; readers validate every field again.
@@ -95,6 +99,9 @@ type BundleRefusal struct {
 func PublicReceiptPath(configDir string) string {
 	return filepath.Join(configDir, "bundles", PublicReceiptName)
 }
+
+// ValidReceiptID permits only lifecycle receipt IDs in spool file names.
+func ValidReceiptID(id string) bool { return receiptIDPattern.MatchString(id) }
 
 // Key identifies one terminal receipt: a new delivery or a retry of the same
 // bundle gets a new key.

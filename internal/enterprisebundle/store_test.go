@@ -299,6 +299,28 @@ func TestRefusedReplayPreservesEnforcingReceipt(t *testing.T) {
 	}
 }
 
+func TestPrunedReceiptIDIsNotReusedWhileAuditEventRemains(t *testing.T) {
+	s := testStore(t)
+	id := testBundleID(85)
+	first, err := s.Receive(id, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Fail(first, CodeSignatureInvalid, "bad signature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(s.receiptPath(first.ReceiptID)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Receive(id, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ReceiptID == first.ReceiptID {
+		t.Fatal("a later delivery reused a receipt ID still present in the audit spool")
+	}
+}
+
 func TestStagedFailureReplacesEnforcingReceipt(t *testing.T) {
 	s := testStore(t)
 	good := applyThrough(t, s, 1, 1, StateConfirmed)

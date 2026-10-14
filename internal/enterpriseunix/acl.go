@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -150,11 +151,15 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	// The public bundle parent is traversable; its other children still need
 	// their own protection even if an ACL grants read despite their mode bits.
 	bundles := e.P(filepath.Join(e.Layout.ConfigDir, "bundles"))
+	events := filepath.Join(bundles, enterprisestatus.PublicReceiptEventsDirName)
 	_ = filepath.WalkDir(bundles, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || writerTemporary(d.Name()) {
 			return nil
 		}
-		if path != bundles && path != filepath.Join(bundles, "receipt.json") {
+		if path == events && d.IsDir() {
+			return fs.SkipDir
+		}
+		if path != bundles && path != filepath.Join(bundles, enterprisestatus.PublicReceiptName) {
 			add(path, &yes)
 		}
 		return nil

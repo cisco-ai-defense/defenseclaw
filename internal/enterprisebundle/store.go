@@ -465,7 +465,7 @@ func (s *Store) writeReceipt(r *Receipt) error {
 		return err
 	}
 	if Finished(r.State) {
-		// Reporting only: the gateway reads receipt.json for the audit
+		// Reporting only: the gateway reads receipt-events/ for the audit
 		// event and the metrics. A failed write must not fail the apply,
 		// whose outcome the root-only receipt and status already record.
 		_ = s.writePublicReceipt(r)
@@ -478,16 +478,15 @@ func (s *Store) PublicReceiptPath() string {
 	return filepath.Join(s.BundlesDir, enterprisestatus.PublicReceiptName)
 }
 
+// PublicReceiptEventsDir holds one durable event per terminal receipt.
+func (s *Store) PublicReceiptEventsDir() string {
+	return filepath.Join(s.BundlesDir, enterprisestatus.PublicReceiptEventsDirName)
+}
+
 // writePublicReceipt replaces receipt.json with the finished receipt r and
 // the bundle that enforces now. It leaves out the error message (it can
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
-	if refusal := r.Refusal(); refusal != nil {
-		if previous, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath()); err == nil {
-			previous.LastRefusal = refusal
-			return s.publishReceipt(previous)
-		}
-	}
 	out := enterprisestatus.PublicReceipt{
 		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
@@ -505,11 +504,56 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 	if st, err := s.LoadState(); err == nil && st.Current != nil {
 		out.CurrentBundleID, out.CurrentVersion = st.Current.BundleID, st.Current.Version
 	}
+	// Publish the delivery before updating the single-slot status summary.
+	// The reporter can then observe every refusal even between poll ticks.
+	if err := s.publishReceiptEvent(out); err != nil {
+		return err
+	}
+	if refusal := r.Refusal(); refusal != nil {
+		if previous, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath()); err == nil {
+			previous.LastRefusal = refusal
+			return s.publishReceipt(previous)
+		}
+	}
 	out.LastRefusal = r.Refusal()
 	if out.LastRefusal == nil {
 		_, out.LastRefusal, _ = s.Latest()
 	}
 	return s.publishReceipt(out)
+}
+
+func (s *Store) publishReceiptEvent(out enterprisestatus.PublicReceipt) error {
+	if !enterprisestatus.ValidReceiptID(out.ReceiptID) {
+		return fmt.Errorf("invalid public receipt id %q", out.ReceiptID)
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	eventsDir := s.PublicReceiptEventsDir()
+	if err := os.MkdirAll(eventsDir, 0o755); err != nil {
+		return err
+	}
+	info, err := os.Lstat(eventsDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("public receipt events directory is not a regular directory: %s", eventsDir)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		if err := os.Chmod(eventsDir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := syncDir(s.BundlesDir); err != nil {
+		return err
+	}
+	path := filepath.Join(eventsDir, out.ReceiptID+".json")
+	if err := configwrite.WriteFileDurable(path, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	if s.PublishReceipt != nil {
+		return s.PublishReceipt(path)
+	}
+	return nil
 }
 
 func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
@@ -601,6 +645,12 @@ func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
 // Every delivery keeps its own history, including repeated refusals.
 func (s *Store) receiptReusable(bundleID string) bool {
 	_, err := readStoreFile(s.receiptPath(bundleID))
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	// A finished private receipt may have been pruned. The public audit
+	// spool retains its ID, so a later delivery must still get a new one.
+	_, err = os.Lstat(filepath.Join(s.PublicReceiptEventsDir(), bundleID+".json"))
 	return errors.Is(err, fs.ErrNotExist)
 }
 

@@ -71,7 +71,8 @@ const (
 	// ActionConfigBundleReceipt is the terminal receipt (confirmed or
 	// failed) of a signed policy bundle on a standalone managed device
 	// (log.config.bundle.receipt). The gateway emits it from the public
-	// receipt.json the enterprise lifecycle writes; it reports, never enforces.
+	// per-receipt public spool the enterprise lifecycle writes; it reports,
+	// never enforces.
 	ActionConfigBundleReceipt Action = "config.bundle.receipt"
 	ActionPolicyUpdate        Action = "policy-update"
 	ActionPolicyReload        Action = "policy-reload"

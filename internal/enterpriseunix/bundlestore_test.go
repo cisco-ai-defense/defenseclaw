@@ -124,6 +124,7 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 			}
 			h.owners[state] = [2]int{0, 0}
 			privateReceipt := filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")
+			publicEvent := filepath.Join(store.PublicReceiptEventsDir(), r.ReceiptID+".json")
 			staging := filepath.Join(store.BundlesDir, ".staging-test")
 			if err := os.Mkdir(staging, 0o700); err != nil {
 				t.Fatal(err)
@@ -152,6 +153,8 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 			}
 			check(store.BundlesDir, 0o755)
 			check(store.PublicReceiptPath(), 0o644)
+			check(store.PublicReceiptEventsDir(), 0o755)
+			check(publicEvent, 0o644)
 			check(state, 0o600)
 			check(privateReceipt, 0o600)
 			check(h.env.bundleInboxDir(), 0o700)
@@ -170,6 +173,9 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 				}
 				if targets[store.PublicReceiptPath()] {
 					t.Fatal("public receipt is treated as private by the macOS ACL check")
+				}
+				if targets[store.PublicReceiptEventsDir()] || targets[publicEvent] {
+					t.Fatal("public receipt spool is treated as private by the macOS ACL check")
 				}
 			}
 			writeFreshLedger(t, h)
