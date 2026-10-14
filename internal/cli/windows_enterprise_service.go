@@ -1416,10 +1416,18 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 			}
 			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
 		}
-		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		for attempt := 0; ; attempt++ {
+			err := ops.removeAll(path)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if attempt == 2 || (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
+				!errors.Is(err, windows.ERROR_ACCESS_DENIED)) {
+				return err
+			}
+			// A just-terminated descendant can briefly retain a temp file.
+			time.Sleep(50 * time.Millisecond)
 		}
-		return nil
 	}
 	return filepath.Clean(path), cleanup, nil
 }

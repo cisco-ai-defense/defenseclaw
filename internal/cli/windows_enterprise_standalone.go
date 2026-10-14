@@ -315,8 +315,8 @@ func (filter *windowsEnterprisePhaseFilter) Flush() error {
 }
 
 // Standalone installers can launch native descendants which inherit stdout.
-// The job closes after Wait, killing those descendants even when PowerShell
-// itself exited successfully and Wait returned ErrWaitDelay.
+// Keep the job's kill-on-close limit until PowerShell has exited cleanly, so
+// cancellation and a delayed pipe wait still terminate the process tree.
 func newWindowsEnterprisePowerShellJob() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -357,7 +357,18 @@ func runWindowsEnterprisePowerShellChild(child *exec.Cmd) error {
 		_ = child.Wait()
 		return fmt.Errorf("assign Windows enterprise installer to kill-on-close job: %w", err)
 	}
-	return child.Wait()
+	if err := child.Wait(); err != nil {
+		return err
+	}
+	// A committed self-uninstall launches a non-inheriting finalizer which
+	// must outlive PowerShell and the installed CLI. Only a clean Wait may
+	// release descendants from the job's kill-on-close limit.
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		return fmt.Errorf("release Windows enterprise installer job after clean exit: %w", err)
+	}
+	return nil
 }
 
 func windowsEnterpriseTimeoutPhases(stderr []byte) string {
@@ -808,8 +819,8 @@ func runWindowsEnterpriseStandaloneInstaller(
 		if run.PipeWaitDelayed {
 			opts.powerShellPipeWaitDelayed = true
 		}
-		if len(run.PhaseLines) != 0 {
-			opts.diagnostics = append(opts.diagnostics, run.PhaseLines...)
+		if remaining := windowsEnterpriseEnsureDiagnosticsLimit - len(opts.diagnostics); remaining > 0 {
+			opts.diagnostics = append(opts.diagnostics, run.PhaseLines[:min(len(run.PhaseLines), remaining)]...)
 		}
 	}
 	noteWindowsEnterpriseMigration(opts, migrationRecord)

@@ -1431,6 +1431,25 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupAcceptsARemovedFolder(t
 	}
 }
 
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRetriesLockedFile(t *testing.T) {
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	removeCalls := 0
+	ops.removeAll = func(string) error {
+		removeCalls++
+		if removeCalls == 1 {
+			return &os.PathError{Op: "RemoveAll", Err: windows.ERROR_SHARING_VIOLATION}
+		}
+		return nil
+	}
+	_, cleanup, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup(); err != nil || removeCalls != 2 {
+		t.Fatalf("cleanup after locked file = %v, RemoveAll calls = %d", err, removeCalls)
+	}
+}
+
 func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(t *testing.T) {
 	validateCalls := 0
 	removeAllCalled := false

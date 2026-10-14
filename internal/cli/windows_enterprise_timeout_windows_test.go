@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -52,6 +53,52 @@ func TestWindowsEnterprisePowerShellChildBoundsInheritedPipe(t *testing.T) {
 	err := runWindowsEnterprisePowerShellChild(child)
 	if !errors.Is(err, exec.ErrWaitDelay) || time.Since(start) > 4*time.Second || !strings.Contains(output.String(), "pipe held") {
 		t.Fatalf("child wait = %v after %s, output %q", err, time.Since(start), output.String())
+	}
+}
+
+func TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait(t *testing.T) {
+	switch os.Getenv("DC_ENTERPRISE_DETACHED_HELPER") {
+	case "parent":
+		grandchild := exec.Command(os.Args[0], "-test.run=^TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait$")
+		grandchild.Env = append(os.Environ(), "DC_ENTERPRISE_DETACHED_HELPER=grandchild")
+		grandchild.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags:    windows.DETACHED_PROCESS,
+			NoInheritHandles: true,
+		}
+		if err := grandchild.Start(); err != nil {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "grandchild_pid=%d\n", grandchild.Process.Pid)
+		os.Exit(0)
+	case "grandchild":
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait$")
+	child.Env = append(os.Environ(), "DC_ENTERPRISE_DETACHED_HELPER=parent")
+	var output bytes.Buffer
+	child.Stdout = &output
+	err := runWindowsEnterprisePowerShellChild(child)
+	match := regexp.MustCompile(`grandchild_pid=(\d+)`).FindStringSubmatch(output.String())
+	if len(match) != 2 {
+		t.Fatalf("grandchild PID missing after child wait %v from %q", err, output.String())
+	}
+	pid, _ := strconv.ParseUint(match[1], 10, 32)
+	handle, openErr := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(pid))
+	if openErr != nil {
+		t.Fatalf("open detached grandchild %d after child wait %v: %v", pid, err, openErr)
+	}
+	t.Cleanup(func() {
+		_ = windows.TerminateProcess(handle, 1)
+		_, _ = windows.WaitForSingleObject(handle, 2000)
+		_ = windows.CloseHandle(handle)
+	})
+	if err != nil {
+		t.Fatalf("clean child wait: %v", err)
+	}
+	state, waitErr := windows.WaitForSingleObject(handle, 0)
+	if waitErr != nil || state != uint32(windows.WAIT_TIMEOUT) {
+		t.Fatalf("detached grandchild %d did not survive clean wait: state %d, error %v", pid, state, waitErr)
 	}
 }
 
@@ -193,6 +240,13 @@ func TestWindowsEnterprisePipeWaitWarningReachesResult(t *testing.T) {
 	addWindowsEnterprisePipeWaitWarning(result, opts)
 	if len(result.Warnings) != 1 || result.Warnings[0].Code != "installer_pipe_wait_delayed" {
 		t.Fatalf("result warnings = %+v", result.Warnings)
+	}
+	bounded := &windowsEnterpriseLifecycleOptions{diagnostics: make([]string, windowsEnterpriseEnsureDiagnosticsLimit)}
+	if _, _, err := runWindowsEnterpriseStandaloneInstaller(context.Background(), &cobra.Command{}, bounded, "unused.ps1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded.diagnostics) != windowsEnterpriseEnsureDiagnosticsLimit {
+		t.Fatalf("diagnostics exceeded limit: %d", len(bounded.diagnostics))
 	}
 }
 
