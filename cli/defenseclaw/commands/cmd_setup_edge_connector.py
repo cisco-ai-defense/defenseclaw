@@ -41,6 +41,7 @@ from defenseclaw.config import (
     write_config_yaml_secure,
 )
 from defenseclaw.context import AppContext
+from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
 _DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:13400/api/v1/fleet"
@@ -248,9 +249,6 @@ def edge_connector(
         ux.warn(f"Could not update config.yaml (managed device?): {exc}")
     except Exception as exc:
         ux.warn(f"Could not update config.yaml: {exc}")
-
-
-from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
 def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:

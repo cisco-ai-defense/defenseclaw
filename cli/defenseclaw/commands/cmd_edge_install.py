@@ -33,6 +33,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.context import pass_ctx
+from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
 def _find_edge_connector_source() -> Path | None:
@@ -479,9 +480,6 @@ def _start_remote_daemon(target: str, user: str) -> bool:
     ux.echo("  Or to run in the foreground for debugging:")
     ux.echo(f"    ssh {user}@{target} 'sudo edge-connector'")
     return False
-
-
-from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
 def _provision_local_service_env(broker_url: str) -> None:

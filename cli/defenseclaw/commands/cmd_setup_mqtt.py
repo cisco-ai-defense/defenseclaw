@@ -37,6 +37,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.context import pass_ctx
+from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 _MOSQUITTO_IMAGE = "eclipse-mosquitto:2"
 _CONTAINER_NAME = "defenseclaw-mqtt"
@@ -50,9 +51,6 @@ password_file /mosquitto/config/passwd
 persistence false
 log_dest stdout
 """
-
-
-from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
 def _validate_path_within_home(path: Path) -> None:
@@ -506,12 +504,13 @@ def mqtt_broker(app, port: int, mode: str) -> None:
 
     # Write fleet section to config.yaml (Source of Truth)
     try:
+        import yaml as _yaml
+
         from defenseclaw.config import (
             config_path_for_data_dir,
             locked_config_yaml,
             write_config_yaml_secure,
         )
-        import yaml as _yaml
 
         cfg_path = str(config_path_for_data_dir(
             os.environ.get("DEFENSECLAW_HOME", str(Path.home() / ".defenseclaw"))))
@@ -527,7 +526,7 @@ def mqtt_broker(app, port: int, mode: str) -> None:
                 fleet_sec["mqtt_user_env"] = "DCLAW_MQTT_USER"
                 fleet_sec["mqtt_pass_env"] = "DCLAW_MQTT_PASS"
             write_config_yaml_secure(cfg_path, raw)
-        ux.ok(f"Updated fleet.mqtt_broker_url in config.yaml")
+        ux.ok("Updated fleet.mqtt_broker_url in config.yaml")
     except PermissionError as exc:
         ux.warn(f"Could not update config.yaml (managed device?): {exc}")
     except Exception as exc:

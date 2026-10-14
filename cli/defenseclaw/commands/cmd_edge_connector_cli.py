@@ -38,6 +38,7 @@ _CONN_ERR = "Cannot reach the gateway. Is it running?"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_fleet_token() -> str:
     """Read DCLAW_FLEET_API_TOKEN from env or ~/.defenseclaw/.env."""
     token = os.environ.get(_TOKEN_ENV, "").strip()
@@ -78,6 +79,7 @@ class _Fleet:
 
 def _client(app: AppContext) -> _Fleet:
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
     cfg = app.cfg
     gw = getattr(cfg, "gateway", None)
     port = int(getattr(gw, "api_port", 0) or 0) if gw else 0
@@ -91,8 +93,10 @@ def _client(app: AppContext) -> _Fleet:
     except Exception:  # noqa: BLE001
         token = ""
     orch = OrchestratorClient(
-        host=gateway_api_client_host(cfg), port=port,
-        token=(_load_fleet_token() or token or "").strip(), timeout=10,
+        host=gateway_api_client_host(cfg),
+        port=port,
+        token=(_load_fleet_token() or token or "").strip(),
+        timeout=10,
     )
     return _Fleet(orch._session, orch.base_url, orch.timeout)
 
@@ -125,6 +129,7 @@ def _body(resp: req_lib.Response):
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
+
 
 @click.group()
 def edge_connector_group() -> None:
@@ -180,8 +185,18 @@ def _compose_device_id(device_id: str, tenant_id: int, fleet_id: int) -> str:
 
 @edge_connector_group.command("device")
 @click.argument("device_id")
-@click.option("--tenant-id", default=1, type=click.IntRange(0, 65535), help="Tenant ID for composing the full device ID (default 1).")
-@click.option("--fleet-id", default=1, type=click.IntRange(0, 65535), help="Fleet ID for composing the full device ID (default 1).")
+@click.option(
+    "--tenant-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Tenant ID for composing the full device ID (default 1).",
+)
+@click.option(
+    "--fleet-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Fleet ID for composing the full device ID (default 1).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit device details as JSON.")
 @pass_ctx
 def device_detail(app: AppContext, device_id: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
@@ -203,8 +218,17 @@ def device_detail(app: AppContext, device_id: str, tenant_id: int, fleet_id: int
         click.echo(json.dumps(data, indent=2))
         return
     ux.echo(ux.bold(f"  Device: {full_id}"))
-    for key in ("status", "last_seen", "last_heartbeat", "firmware", "policy_version",
-                "ip_address", "hostname", "tags", "registered_at"):
+    for key in (
+        "status",
+        "last_seen",
+        "last_heartbeat",
+        "firmware",
+        "policy_version",
+        "ip_address",
+        "hostname",
+        "tags",
+        "registered_at",
+    ):
         val = data.get(key)
         if val is not None:
             ux.echo(f"    {ux.dim(f'{key}:'.ljust(20))}{val}")
@@ -248,9 +272,12 @@ def decommission(app: AppContext, device_id: int, tenant_id: int, fleet_id: int,
         return
     c = _client(app)
     try:
-        resp = c.post("/devices/decommission-batch", {
-            "devices": [{"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": device_id}],
-        })
+        resp = c.post(
+            "/devices/decommission-batch",
+            {
+                "devices": [{"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": device_id}],
+            },
+        )
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
@@ -265,11 +292,22 @@ def decommission(app: AppContext, device_id: int, tenant_id: int, fleet_id: int,
 
 @edge_connector_group.command("decommission-batch")
 @click.option(
-    "--ids", required=True,
+    "--ids",
+    required=True,
     help="Comma-separated device IDs (format: tenant:fleet:device or just device_id).",
 )
-@click.option("--tenant-id", default=1, type=click.IntRange(0, 65535), help="Default tenant ID when using plain device IDs (default 1).")
-@click.option("--fleet-id", default=1, type=click.IntRange(0, 65535), help="Default fleet ID when using plain device IDs (default 1).")
+@click.option(
+    "--tenant-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Default tenant ID when using plain device IDs (default 1).",
+)
+@click.option(
+    "--fleet-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Default fleet ID when using plain device IDs (default 1).",
+)
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
 def decommission_batch(app: AppContext, ids: str, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
@@ -345,8 +383,18 @@ def health(app: AppContext, as_json: bool) -> None:
 @edge_connector_group.command("command")
 @click.argument("device_id")
 @click.argument("cmd", type=click.Choice(["reboot", "policy-refresh", "diagnostics"]))
-@click.option("--tenant-id", default=1, type=click.IntRange(0, 65535), help="Tenant ID for composing the full device ID (default 1).")
-@click.option("--fleet-id", default=1, type=click.IntRange(0, 65535), help="Fleet ID for composing the full device ID (default 1).")
+@click.option(
+    "--tenant-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Tenant ID for composing the full device ID (default 1).",
+)
+@click.option(
+    "--fleet-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Fleet ID for composing the full device ID (default 1).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
 def send_command(app: AppContext, device_id: str, cmd: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
@@ -373,6 +421,7 @@ def send_command(app: AppContext, device_id: str, cmd: str, tenant_id: int, flee
 # edge connector policy (subgroup)
 # ---------------------------------------------------------------------------
 
+
 @edge_connector_group.group("policy")
 def edge_connector_group_policy() -> None:
     """Manage fleet-wide policies -- push, list versions, emergency commands."""
@@ -380,13 +429,18 @@ def edge_connector_group_policy() -> None:
 
 @edge_connector_group_policy.command("push")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
-@click.option("--tenant-id", default=None, type=click.IntRange(0, 65535), help="Tenant ID (overrides YAML metadata; default 1).")
-@click.option("--fleet-id", default=None, type=click.IntRange(0, 65535), help="Fleet ID (overrides YAML metadata; default 1).")
+@click.option(
+    "--tenant-id", default=None, type=click.IntRange(0, 65535), help="Tenant ID (overrides YAML metadata; default 1)."
+)
+@click.option(
+    "--fleet-id", default=None, type=click.IntRange(0, 65535), help="Fleet ID (overrides YAML metadata; default 1)."
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
 def policy_push(app: AppContext, file: str, tenant_id: int | None, fleet_id: int | None, as_json: bool) -> None:
     """Push a edge connector policy file (compile, sign, distribute)."""
     import yaml
+
     try:
         with open(file) as fh:
             raw_yaml = fh.read()
@@ -401,10 +455,12 @@ def policy_push(app: AppContext, file: str, tenant_id: int | None, fleet_id: int
     except (ValueError, TypeError):
         ux.err("Invalid tenant_id or fleet_id in policy metadata — must be integers.")
         raise SystemExit(1)
-    payload = {"policy_yaml": raw_yaml,
-               "profile": str(meta.get("profile", "standard")),
-               "tenant_id": resolved_tid,
-               "fleet_id": resolved_fid}
+    payload = {
+        "policy_yaml": raw_yaml,
+        "profile": str(meta.get("profile", "standard")),
+        "tenant_id": resolved_tid,
+        "fleet_id": resolved_fid,
+    }
     c = _client(app)
     try:
         resp = c.post("/policy/push", payload)
@@ -444,16 +500,26 @@ def policy_versions(app: AppContext, tenant_id: int, fleet_id: int, as_json: boo
     ux.echo(ux.bold(f"  {'VERSION':<12s} {'STATUS':<12s} {'PUSHED AT'}"))
     ux.echo(f"  {'─' * 12} {'─' * 12} {'─' * 24}")
     for v in items:
-        ux.echo(f"  {str(v.get('version') or v.get('id') or '?'):<12s} "
-                f"{str(v.get('status') or 'unknown'):<12s} "
-                f"{str(v.get('pushed_at') or v.get('created_at') or '—')}")
+        ux.echo(
+            f"  {str(v.get('version') or v.get('id') or '?'):<12s} "
+            f"{str(v.get('status') or 'unknown'):<12s} "
+            f"{str(v.get('pushed_at') or v.get('created_at') or '—')}"
+        )
 
 
 @edge_connector_group_policy.command("emergency")
-@click.argument("cmd", type=click.Choice([
-    "block-all", "enter-lockdown", "release-lockdown",
-    "revoke-sessions", "force-sync",
-]))
+@click.argument(
+    "cmd",
+    type=click.Choice(
+        [
+            "block-all",
+            "enter-lockdown",
+            "release-lockdown",
+            "revoke-sessions",
+            "force-sync",
+        ]
+    ),
+)
 @click.option("--tenant-id", default=1, type=click.IntRange(0, 65535), help="Tenant ID (default 1).")
 @click.option("--fleet-id", default=1, type=click.IntRange(0, 65535), help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
@@ -517,6 +583,7 @@ def _check_broker(url: str) -> bool:
 def _heartbeat_age(last_seen: str) -> str:
     """Human-readable age from an ISO timestamp."""
     from datetime import datetime, timezone
+
     try:
         ts = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
         secs = int((datetime.now(timezone.utc) - ts).total_seconds())
@@ -545,10 +612,21 @@ def _status_line(label: str, passed: bool, detail: str) -> None:
 
 @edge_connector_group.command("test")
 @click.option("--device-id", default=None, help="Specific device ID to verify.")
-@click.option("--tenant-id", default=1, type=click.IntRange(0, 65535), help="Tenant ID for composing the full device ID (default 1).")
-@click.option("--fleet-id", default=1, type=click.IntRange(0, 65535), help="Fleet ID for composing the full device ID (default 1).")
 @click.option(
-    "--broker-url", default=None,
+    "--tenant-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Tenant ID for composing the full device ID (default 1).",
+)
+@click.option(
+    "--fleet-id",
+    default=1,
+    type=click.IntRange(0, 65535),
+    help="Fleet ID for composing the full device ID (default 1).",
+)
+@click.option(
+    "--broker-url",
+    default=None,
     help="MQTT broker URL (reads DCLAW_MQTT_BROKER_URL from env if omitted).",
 )
 @click.option("--timeout", default=10, type=int, help="Per-check timeout in seconds.")
@@ -602,11 +680,7 @@ def test_fleet(
 
     # 2. Broker reachable? ------------------------------------------------
     if broker_url is None:
-        broker_url = (
-            _load_env_var("DCLAW_MQTT_BROKER_URL")
-            or _load_env_var("DCLAW_BROKER_URL")
-            or ""
-        )
+        broker_url = _load_env_var("DCLAW_MQTT_BROKER_URL") or _load_env_var("DCLAW_BROKER_URL") or ""
     if broker_url:
         bok = _check_broker(broker_url)
         results["broker"] = {"status": "ok" if bok else "unreachable", "url": broker_url}
@@ -627,10 +701,7 @@ def test_fleet(
             dev_resp = c.get("/devices")
             if 200 <= dev_resp.status_code < 300:
                 raw = _body(dev_resp)
-                devices = (
-                    raw if isinstance(raw, list)
-                    else (raw.get("devices", []) if isinstance(raw, dict) else [])
-                )
+                devices = raw if isinstance(raw, list) else (raw.get("devices", []) if isinstance(raw, dict) else [])
                 for d in devices:
                     if str(d.get("status") or "offline").lower() in ("online", "active", "healthy"):
                         online += 1
@@ -638,7 +709,9 @@ def test_fleet(
                         offline += 1
                 results["devices"] = {
                     "status": "ok" if devices else "empty",
-                    "online": online, "offline": offline, "total": len(devices),
+                    "online": online,
+                    "offline": offline,
+                    "total": len(devices),
                 }
                 if not devices:
                     all_ok = False
@@ -696,7 +769,8 @@ def test_fleet(
                     ver = latest.get("version") or latest.get("id")
                     status_str = str(latest.get("status") or "unknown")
                     results["policy"] = {
-                        "status": "ok", "version": ver,
+                        "status": "ok",
+                        "version": ver,
                         "policy_status": status_str,
                         "total_versions": len(versions_list),
                         "total_devices": len(devices),
