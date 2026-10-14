@@ -29,6 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -2405,6 +2406,8 @@ type windowsEnterpriseEnsurePlan struct {
 	Detail string // the failed read-only check behind a verify_failed repair
 }
 
+var windowsEnterpriseEnsureTimeout = 12 * time.Minute
+
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
 // payload and config: a pending transaction is repaired, an absent
 // deployment is installed, an older one upgraded, drifted binaries or
@@ -2416,6 +2419,8 @@ func runWindowsEnterpriseStandaloneEnsure(
 	opts *windowsEnterpriseLifecycleOptions,
 	script string,
 ) error {
+	ctx, cancel := context.WithTimeout(ctx, windowsEnterpriseEnsureTimeout)
+	defer cancel()
 	defaultWindowsEnterpriseEnsurePayload(opts, script)
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true)
@@ -2426,6 +2431,70 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// concurrent run installed the host. Re-plan once from a fresh status.
 	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false)
 	return err
+}
+
+var windowsEnterpriseRestoreStartModes = restoreWindowsEnterpriseStartModes
+var windowsEnterpriseRestoreServiceName = regexp.MustCompile(`^DefenseClaw[A-Za-z0-9_]+$`)
+
+// restoreWindowsEnterpriseStartModes is the last-resort startup-mode cleanup
+// when an installer child was terminated before its transaction rollback.
+// The read-only status report is the preimage; only its recorded services are
+// changed, and no service is started outside the installer's coverage gates.
+func restoreWindowsEnterpriseStartModes(report *windowsEnterpriseInstallerReport) error {
+	if report == nil || !report.Installed || len(report.ServiceStartModes) == 0 {
+		return nil
+	}
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return fmt.Errorf("open Windows service manager: %w", err)
+	}
+	defer windows.CloseServiceHandle(manager)
+	var failures []error
+	for _, name := range []string{report.GuardianService, report.GatewayService, report.EnumeratorService, report.SensorHelperService} {
+		mode := strings.ToLower(strings.TrimSpace(report.ServiceStartModes[name]))
+		var startType uint32
+		switch mode {
+		case "auto":
+			startType = windows.SERVICE_AUTO_START
+		case "manual":
+			startType = windows.SERVICE_DEMAND_START
+		case "disabled":
+			startType = windows.SERVICE_DISABLED
+		default:
+			continue
+		}
+		if !windowsEnterpriseRestoreServiceName.MatchString(name) {
+			failures = append(failures, fmt.Errorf("refusing unrecognized service name %q", name))
+			continue
+		}
+		namePointer, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("service %s name: %w", name, err))
+			continue
+		}
+		handle, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_CONFIG|windows.SERVICE_CHANGE_CONFIG)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("open service %s: %w", name, err))
+			continue
+		}
+		service := &mgr.Service{Name: name, Handle: handle}
+		current, configErr := service.Config()
+		if configErr == nil && current.StartType != startType {
+			configErr = windows.ChangeServiceConfig(handle, windows.SERVICE_NO_CHANGE, startType,
+				windows.SERVICE_NO_CHANGE, nil, nil, nil, nil, nil, nil, nil)
+			if configErr == nil {
+				current, configErr = service.Config()
+				if configErr == nil && current.StartType != startType {
+					configErr = fmt.Errorf("service manager still reports startup mode %d", current.StartType)
+				}
+			}
+		}
+		_ = service.Close()
+		if configErr != nil {
+			failures = append(failures, fmt.Errorf("restore service %s startup mode to %s: %w", name, mode, configErr))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // windowsEnterpriseEnsureProbeOptions builds ensure's read-only Status and
@@ -2536,6 +2605,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		applyWindowsEnterpriseRecordedDeployment(result)
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
+	serviceMutationAttempted := false
+	// The installer records the startup modes before it quiesces any service.
+	// Its rollback normally restores them, but a child that misses the ensure
+	// deadline cannot run that rollback. Keep the preimage outside that child.
+	defer func() {
+		if returnErr == nil || !serviceMutationAttempted || statusReport == nil || statusReport.probeFailed {
+			return
+		}
+		if err := windowsEnterpriseRestoreStartModes(statusReport); err != nil {
+			returnErr = fmt.Errorf("%w; restore prior service startup modes: %w", returnErr, err)
+		}
+	}()
 	alreadyAppliedNeedsRepair := false
 	verifyFailure := ""
 	if run := opts.bundle; run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
@@ -2708,6 +2789,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
 		beforeGatewayPID = windowsStandaloneGatewayPID()
 	}
+	serviceMutationAttempted = true
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 	if beforeGatewayPID != 0 {
 		if afterGatewayPID := windowsStandaloneGatewayPID(); afterGatewayPID != 0 && beforeGatewayPID != afterGatewayPID {

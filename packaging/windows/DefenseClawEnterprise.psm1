@@ -3129,6 +3129,7 @@ function Invoke-DefenseClawProcess {
 
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
     try {
         if (-not $process.Start()) {
             throw "native process did not start: $resolved"
@@ -3150,7 +3151,21 @@ function Invoke-DefenseClawProcess {
             } catch {}
             throw "native process timed out after $TimeoutSeconds seconds: $resolved"
         }
-        $process.WaitForExit()
+        if (Test-DefenseClawStandaloneProfile) {
+            # WaitForExit() can wait indefinitely for inherited pipe handles
+            # after the native process itself exited. Keep stream drain in
+            # the same deadline as the process wait so transaction rollback
+            # receives a terminating error (GAP-0096).
+            $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+            if (-not [Threading.Tasks.Task]::WaitAll(
+                    [Threading.Tasks.Task[]]@($standardOutput, $standardError),
+                    $remaining)) {
+                throw "native process output timed out after $TimeoutSeconds seconds: $resolved"
+            }
+        }
+        else {
+            $process.WaitForExit()
+        }
         $stdout = [string]$standardOutput.Result
         $stderr = [string]$standardError.Result
         return [pscustomobject]@{

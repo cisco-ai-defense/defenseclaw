@@ -1188,6 +1188,9 @@ func runWindowsEnterprisePowerShellEngine(
 	cleanupErr := cleanupTemp()
 	cleanupPending = false
 	if runErr != nil || cleanupErr != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return childOutput, fmt.Errorf("lifecycle_timeout: Windows enterprise installer did not finish before the ensure deadline: %w", ctx.Err())
+		}
 		var failures []error
 		if runErr != nil {
 			// The child's own code is the first thing an operator needs, and

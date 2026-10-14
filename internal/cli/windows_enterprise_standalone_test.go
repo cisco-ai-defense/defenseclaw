@@ -972,6 +972,69 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.T) {
+	previousTimeout := windowsEnterpriseEnsureTimeout
+	previousRestore := windowsEnterpriseRestoreStartModes
+	windowsEnterpriseEnsureTimeout = 30 * time.Millisecond
+	t.Cleanup(func() {
+		windowsEnterpriseEnsureTimeout = previousTimeout
+		windowsEnterpriseRestoreStartModes = previousRestore
+	})
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	restored := false
+	windowsEnterpriseRestoreStartModes = func(report *windowsEnterpriseInstallerReport) error {
+		restored = true
+		if report.ServiceStartModes["DefenseClawGateway"] != "auto" ||
+			report.ServiceStartModes["DefenseClawHookGuardian"] != "auto" ||
+			report.ServiceStartModes["DefenseClawHookEnumerator"] != "auto" {
+			t.Fatalf("lost service startup preimage: %+v", report.ServiceStartModes)
+		}
+		return nil
+	}
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		if windowsEnterpriseInstallerAction(args) == "Status" {
+			body, err := json.Marshal(map[string]any{
+				"schema_version": 1, "ok": true, "action": "status", "installed": true,
+				"transaction_pending": true, "gateway_service": "DefenseClawGateway",
+				"guardian_service": "DefenseClawHookGuardian", "enumerator_service": "DefenseClawHookEnumerator",
+				"service_start_modes": map[string]string{
+					"DefenseClawGateway": "auto", "DefenseClawHookGuardian": "auto", "DefenseClawHookEnumerator": "auto",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return windowsEnterpriseStandaloneRun{Output: body}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return windowsEnterpriseStandaloneRun{}, fmt.Errorf("lifecycle_timeout: repair exceeded ensure deadline: %w", ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+			return windowsEnterpriseStandaloneRun{}, errors.New("installer did not receive an ensure deadline")
+		}
+	}
+	command := &cobra.Command{}
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&bytes.Buffer{})
+	started := time.Now()
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
+		t.Fatalf("ensure exceeded its deadline: %s", elapsed)
+	}
+	if commandExitCode(err) != 1603 || !restored {
+		t.Fatalf("ensure error = %v, restored = %v", err, restored)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) == 0 || result.Errors[0].Code != "lifecycle_timeout" {
+		t.Fatalf("ensure result lacks timeout diagnostic: %+v", result.Errors)
+	}
+}
+
 func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
 	for _, body := range []string{
 		`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`,

@@ -196,6 +196,7 @@ function Invoke-DefenseClawNative {
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
@@ -206,10 +207,29 @@ function Invoke-DefenseClawNative {
     }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        # End the CLI and its PowerShell child before reporting the timeout.
+        # Process.Kill() alone leaves the child holding the lifecycle lock.
+        try {
+            $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = "/PID $($process.Id) /T /F"
+            $killInfo.UseShellExecute = $false
+            $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true
+            $killInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killInfo)
+            if (-not $killer.WaitForExit(10000)) { $killer.Kill() }
+            $killer.Dispose()
+        } catch { $null = $_ }
         try { $process.Kill() } catch { $null = $_ }
+        [void]$process.WaitForExit(5000)
         throw "native_timeout: $FilePath did not finish within $TimeoutSeconds seconds"
     }
-    $process.WaitForExit()
+    $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+        throw "native_timeout: $FilePath output did not close within $TimeoutSeconds seconds"
+    }
     return New-Object -TypeName PSObject -Property @{
         ExitCode = $process.ExitCode; StdOut = $stdout.Result; StdErr = $stderr.Result
     }
@@ -270,6 +290,51 @@ function Get-DefenseClawStoppedSideServices {
     return @($down | ForEach-Object { [string]$_.name })
 }
 
+function Get-DefenseClawRemediationStartModes {
+    $modes = [ordered]@{}
+    foreach ($name in @('DefenseClawHookGuardian', 'DefenseClawGateway',
+            'DefenseClawHookEnumerator', 'DefenseClawSensorHelper')) {
+        $key = Get-DefenseClawRegistryKey64 -SubKey "SYSTEM\CurrentControlSet\Services\$name"
+        if ($null -eq $key) { continue }
+        try {
+            $mode = [int]$key.GetValue('Start', -1)
+        } finally { $key.Dispose() }
+        if ($mode -notin @(2, 3, 4)) { throw "unexpected startup mode for $name`: $mode" }
+        $modes[$name] = $mode
+    }
+    return $modes
+}
+
+function Restore-DefenseClawRemediationStartModes {
+    param([Parameter(Mandatory = $true)]$PriorModes)
+    $sc = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'sc.exe')
+    $failures = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $PriorModes.Keys) {
+        $key = Get-DefenseClawRegistryKey64 -SubKey "SYSTEM\CurrentControlSet\Services\$name"
+        if ($null -eq $key) {
+            $failures.Add("$name disappeared")
+            continue
+        }
+        try { $current = [int]$key.GetValue('Start', -1) } finally { $key.Dispose() }
+        if ($current -eq [int]$PriorModes[$name]) { continue }
+        $mode = switch ([int]$PriorModes[$name]) {
+            2 { 'auto' }
+            3 { 'demand' }
+            4 { 'disabled' }
+        }
+        try {
+            $change = Invoke-DefenseClawNative -FilePath $sc -TimeoutSeconds 30 -ArgumentList @(
+                'config', $name, 'start=', $mode)
+            if ($change.ExitCode -ne 0) { throw "sc.exe exited $($change.ExitCode)" }
+            $key = Get-DefenseClawRegistryKey64 -SubKey "SYSTEM\CurrentControlSet\Services\$name"
+            if ($null -eq $key) { throw 'service disappeared after sc.exe config' }
+            try { $restored = [int]$key.GetValue('Start', -1) } finally { $key.Dispose() }
+            if ($restored -ne [int]$PriorModes[$name]) { throw "startup mode is still $restored" }
+        } catch { $failures.Add("$name`: $($_.Exception.Message)") }
+    }
+    return ($failures -join '; ')
+}
+
 try {
     $deployment = Get-DefenseClawInstalledDeployment
 } catch {
@@ -281,7 +346,7 @@ if ($null -eq $deployment) {
     exit 0
 }
 try {
-    $check = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 900 -ArgumentList @(
+    $check = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 180 -ArgumentList @(
         'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
     $stopped = @(Get-DefenseClawStoppedSideServices -Json ([string]$check.StdOut))
     if ($check.ExitCode -ne 0 -and $stopped.Count -gt 0) {
@@ -291,7 +356,7 @@ try {
             [void](Invoke-DefenseClawNative -FilePath $sc -TimeoutSeconds 60 -ArgumentList @('start', $name))
         }
         Start-Sleep -Seconds 15
-        $after = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 900 -ArgumentList @(
+        $after = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 180 -ArgumentList @(
             'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
         if ($after.ExitCode -eq 0) {
             [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): repaired (started $($stopped -join ', '))")
@@ -300,10 +365,31 @@ try {
     }
 } catch { $null = $_ }
 try {
-    $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
+    $priorModes = Get-DefenseClawRemediationStartModes
+} catch {
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): ensure could not begin: $($_.Exception.Message)")
+    exit 1603
+}
+$ensureFailure = ''
+$run = $null
+try {
+    $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 840 -ArgumentList @(
         'enterprise', 'windows', 'ensure', '--profile', 'standalone', '--json')
 } catch {
-    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): ensure could not run: $($_.Exception.Message)")
+    $ensureFailure = $_.Exception.Message
+}
+if ($null -eq $run -and -not $ensureFailure) { $ensureFailure = 'native ensure returned no result' }
+$restoreFailure = ''
+if ($ensureFailure -or ($null -ne $run -and $run.ExitCode -ne 0)) {
+    try { $restoreFailure = [string](Restore-DefenseClawRemediationStartModes -PriorModes $priorModes) }
+    catch { $restoreFailure = $_.Exception.Message }
+}
+if ($ensureFailure) {
+    $summary = "ensure could not run: $ensureFailure"
+    if ($restoreFailure) { $summary += "; startup-mode restore failed: $restoreFailure" }
+    $line = "DefenseClaw $($deployment.Version): $summary"
+    if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
+    [Console]::Out.WriteLine($line)
     exit 1603
 }
 $code = $run.ExitCode
@@ -339,6 +425,10 @@ try {
         }
     }
 } catch { $summary = "exit $code, no lifecycle result" }
+if ($restoreFailure) {
+    $summary += "; startup-mode restore failed: $restoreFailure"
+    $code = 1603
+}
 $line = "DefenseClaw $($deployment.Version): $summary"
 if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
 [Console]::Out.WriteLine($line)
