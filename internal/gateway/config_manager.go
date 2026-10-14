@@ -885,6 +885,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if m == nil {
 		return nil
 	}
+	started := time.Now()
+	var applyElapsed, auditElapsed time.Duration
+	hot := true
+	defer func() {
+		if hot && time.Since(started) > time.Second {
+			fmt.Fprintf(os.Stderr, "[config] slow hot reload elapsed_ms=%d apply_ms=%d audit_ms=%d\n",
+				time.Since(started).Milliseconds(), applyElapsed.Milliseconds(), auditElapsed.Milliseconds())
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1038,6 +1047,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 	}
 	setPendingRestart(pendingRestart)
+	hot = len(diff.RestartRequired) == 0
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
@@ -1094,7 +1104,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.recordLoadError(ctx, "apply_unavailable")
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
+	applyStarted := time.Now()
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
+	applyElapsed = time.Since(applyStarted)
 	if errors.Is(applyErr, errGenerationUnchanged) {
 		// The rebuild succeeded and matches the live generation: nothing to
 		// swap, but an earlier rejected edit is resolved (a pack restored
@@ -1161,12 +1173,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	// configChangeActivity only attributes that swap when its generation
 	// record advanced; an ordinary asset rebuild cannot reuse the writer.
 	if m.logger != nil && (next.SecureClientIntegration() || !bytes.Equal(m.appliedRaw, source.raw) || recorded) {
+		auditStarted := time.Now()
 		if recorded && !next.SecureClientIntegration() {
 			_ = m.logger.LogActivity(activity)
 		} else {
 			_ = m.logger.LogActionCtx(ctx, string(audit.ActionConfigUpdate), m.path,
 				fmt.Sprintf("generation=%d changed=%s reason=%s", gen, strings.Join(diff.Changed, ","), reason))
 		}
+		auditElapsed = time.Since(auditStarted)
 	}
 	m.appliedRaw = source.raw
 	if m.health != nil {
