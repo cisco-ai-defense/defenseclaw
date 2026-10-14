@@ -78,6 +78,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	reloadSeam := windowsEnterpriseHotBundleReload
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
@@ -86,6 +87,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
 		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
@@ -97,6 +99,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		host.refreshes++
 		return nil
 	}
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
@@ -544,6 +547,48 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 				t.Fatalf("applied=%t restarts=%d receiptRestart=%t installerCalls=%q", applied, restarts, opts.bundle.gatewayRestarted, stub.calls)
 			}
 		})
+	}
+}
+
+func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	reloads := 0
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error {
+		reloads++
+		host.adopted = true
+		return nil
+	}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+	stub.install(t)
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if !applied || reloads != 1 || opts.bundle.gatewayRestarted || len(host.writes) != 1 {
+		t.Fatalf("applied=%t reloads=%d restarted=%t writes=%q", applied, reloads, opts.bundle.gatewayRestarted, host.writes)
+	}
+}
+
+func TestWindowsHotBundleReloadCannotConfirmWrongDigest(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	got, _ := os.ReadFile(host.configPath)
+	if applied || string(got) != previous || len(host.writes) != 2 || !windowsBundleHasCode(result.Errors, "bundle_policy_not_adopted") {
+		t.Fatalf("mismatched gateway confirmed=%t config=%q writes=%q errors=%v", applied, got, host.writes, result.Errors)
 	}
 }
 

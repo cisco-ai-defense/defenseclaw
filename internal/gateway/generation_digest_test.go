@@ -83,6 +83,55 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	}
 }
 
+// A bundle's offline Windows digest and the digest published by a running
+// generation must agree for every supported block threshold, including LOW.
+func TestBundleAndGatewayDigestForEveryBlockAt(t *testing.T) {
+	previous := liveGeneration.Load()
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	root := t.TempDir()
+	seen := map[string]string{}
+	for _, level := range []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"} {
+		t.Run(level, func(t *testing.T) {
+			cfg := &config.Config{ConfigVersion: config.ConfigVersionV9, DataDir: t.TempDir(),
+				DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Guardrail.Enabled = true
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.BlockAt = level
+			raw := []byte("config_version: 9\nguardrail:\n  enabled: true\n  mode: action\n  block_at: " + level + "\n")
+			bundle, err := ComputeEffectivePolicyFor(context.Background(), cfg,
+				EffectivePolicyOptions{GOOS: "windows", BundleRoot: root, Raw: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			packs, err := generationRulePacks(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profiles, err := newGuardrailProfileSet(cfg, packs.cache, false)
+			if err != nil {
+				profiles = nil
+			}
+			generation, err := buildGeneration(context.Background(), generationInputs{
+				cfg: cfg, raw: raw, rulePacks: packs, profiles: profiles,
+				goos: "windows", bundleRoot: root,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			liveGeneration.Store(generation)
+			reported, ok := CurrentPolicyHealth()
+			if !ok || bundle.Digest != reported.EffectiveDigest {
+				t.Fatalf("block_at %s: bundle digest %s, gateway digest %s", level, bundle.Digest, reported.EffectiveDigest)
+			}
+			if earlier, duplicate := seen[bundle.Digest]; duplicate {
+				t.Fatalf("block_at %s and %s have the same digest %s", earlier, level, bundle.Digest)
+			}
+			seen[bundle.Digest] = level
+		})
+	}
+}
+
 // A bundle must not pick up a confidence policy from the signer's or the
 // device's runtime directory. Only files shipped in the bundle are signed.
 func TestBundleDigestIgnoresHostConfidencePolicy(t *testing.T) {

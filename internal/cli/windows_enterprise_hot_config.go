@@ -80,7 +80,26 @@ var (
 	windowsEnterpriseHotConfigSourceCheck = managed.ValidateTrustedConfigPath
 	windowsEnterpriseHotConfigRestart     = restartWindowsStandaloneGateway
 	windowsEnterpriseHotConfigRecover     = startWindowsStandaloneGatewayIfStopped
+	windowsEnterpriseHotBundleReload      = reloadWindowsStandaloneBundlePolicy
 )
+
+// reloadWindowsStandaloneBundlePolicy asks the installed gateway to load the
+// config now. A Windows directory notification can be lost during an atomic
+// config replacement; the bundle must not depend on that notification for
+// activation. The adoption check below remains the authority if this request
+// fails or races with the file watcher.
+func reloadWindowsStandaloneBundlePolicy(ctx context.Context, layout managed.StandaloneLayout) error {
+	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, installedCLI, "policy", "reload")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
+	_, err = command.Output()
+	return err
+}
 
 // windowsEnterpriseServicePins are the environment pins the gateway service
 // starts with. Any process that loads the managed config as the service
@@ -205,6 +224,11 @@ func windowsEnterpriseHotConfigApply(
 		refreshTargets = true
 	}
 	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	failBundle := func(code, message string) {
+		if bundleChange {
+			result.AddError(code, message)
+		}
+	}
 	if len(startOnly) > 0 && !bundleChange {
 		return false, startOnly
 	}
@@ -242,7 +266,16 @@ func windowsEnterpriseHotConfigApply(
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
 		undo()
+		failBundle("bundle_config_validation_failed", "the installed bundle config failed post-write validation")
 		return false, nil
+	}
+	if bundleChange && len(startOnly) == 0 {
+		// The watcher also observes the atomic write, but its notification is
+		// best effort on Windows. A reload request makes a policy-only bundle
+		// deterministic; a failed request cannot bypass adoption confirmation.
+		if err := windowsEnterpriseHotBundleReload(ctx, layout); err != nil {
+			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy")
+		}
 	}
 	if len(startOnly) > 0 {
 		restarted, restartErr := windowsEnterpriseHotConfigRestart()
@@ -263,6 +296,7 @@ func windowsEnterpriseHotConfigApply(
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
 		undo()
+		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		if opts.bundle != nil && opts.bundle.gatewayRestarted {
 			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
 				_, _ = windowsEnterpriseHotConfigRecover()
@@ -276,6 +310,7 @@ func windowsEnterpriseHotConfigApply(
 	if refreshTargets {
 		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 			undo()
+			failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets could not be refreshed")
 			if opts.bundle != nil && opts.bundle.gatewayRestarted {
 				if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
 					_, _ = windowsEnterpriseHotConfigRecover()
@@ -288,6 +323,7 @@ func windowsEnterpriseHotConfigApply(
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil || !windowsEnterpriseVerifyAcceptable(verifyReport) {
 		undo()
+		failBundle("bundle_post_verify_failed", "the standalone post-apply verification did not pass")
 		if opts.bundle != nil && opts.bundle.gatewayRestarted {
 			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
 				_, _ = windowsEnterpriseHotConfigRecover()
