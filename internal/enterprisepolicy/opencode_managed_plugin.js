@@ -270,8 +270,9 @@ async function defenseclawSend(event, payload) {
   }
   const data = defenseclawLastJSON(result.stdout);
   if (data === undefined && result.code === 0) {
-    // The hook is a no-op only after an administrator removed DefenseClaw.
-    return { reason: "", mode: "" };
+    // A cached plugin must fail closed while its deployment artifact exists.
+    if (await defenseclawDeploymentRemoved()) return { reason: "", mode: "" };
+    return { reason: "DefenseClaw hook failed closed (empty response)", mode: "" };
   }
   const out = data && data.hook_output;
   if (out && (out.decision === "deny" || out.decision === "block")) {

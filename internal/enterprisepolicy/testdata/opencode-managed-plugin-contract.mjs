@@ -117,11 +117,11 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks), pattern);
 }
 
-// No output and exit 0 is the uninstalled no-op: allow.
+// No output and exit 0 while the plugin still exists must block.
 {
   const hooks = await load();
   answer("event.json", "", 0);
-  await before(hooks);
+  await assert.rejects(before(hooks), /failed closed \(empty response\)/);
 }
 
 // Action mode needs authoritative arguments: a plugin after this one could
