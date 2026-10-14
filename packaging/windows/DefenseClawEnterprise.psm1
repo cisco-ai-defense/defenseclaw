@@ -6788,6 +6788,15 @@ function Get-DefenseClawBundlePathKind {
         return 'BundleReceipt'
     }
     $top = ($RelativePath -split '\\', 2)[0]
+    if ($top -ceq 'receipt-events') {
+        if ($RelativePath -ceq $top -and $IsDirectory) {
+            return 'BundleDirectory'
+        }
+        if ($RelativePath -cmatch '^receipt-events\\[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}\.json$' -and
+            -not $IsDirectory) {
+            return 'BundleReceipt'
+        }
+    }
     # The immutable name includes the receipt ID. Match the same shape as
     # enterprisebundle.IsVersionDirName, including pre-receipt installations.
     if ($top -cmatch '^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$' -and

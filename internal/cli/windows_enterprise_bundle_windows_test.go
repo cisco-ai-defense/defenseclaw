@@ -130,6 +130,64 @@ func TestWindowsBundleReceiptsDirectoryCreatedProtected(t *testing.T) {
 	}
 }
 
+func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("setting the Administrators owner requires elevation")
+	}
+	const sid = "S-1-5-80-1-2-3-4-5"
+	for _, inherited := range []bool{false, true} {
+		name := "fresh"
+		if inherited {
+			name = "inherited"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			bundles := filepath.Join(root, enterprisebundle.BundlesDirName)
+			if err := os.MkdirAll(bundles, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			store := enterprisebundle.NewStore(bundles, filepath.Join(root, "lifecycle"))
+			store.EnsurePublicReceiptEventsDirectory = func(path string) error {
+				return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(sid))
+			}
+			store.PublishReceipt = func(path string) error {
+				return applyWindowsBundleSDDL(path, windowsBundleReceiptSDDL(sid))
+			}
+			if inherited {
+				// Model the directory left by the old publisher.
+				if err := os.MkdirAll(store.PublicReceiptEventsDir(), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			receipt, err := store.Receive("b-01JA0000000000000000000033", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Fail(receipt, enterprisebundle.CodeInterrupted, "test refusal"); err != nil {
+				t.Fatal(err)
+			}
+			for path, sddl := range map[string]string{
+				store.PublicReceiptEventsDir():                                           windowsBundleDirectorySDDL(sid),
+				filepath.Join(store.PublicReceiptEventsDir(), receipt.ReceiptID+".json"): windowsBundleReceiptSDDL(sid),
+			} {
+				expected, err := windows.SecurityDescriptorFromString(sddl)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+					windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+				if err != nil {
+					t.Fatal(err)
+				}
+				matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
+				if err != nil || !matches {
+					t.Fatalf("public receipt path differs from exact ACL: %s: %s (%v)", path, actual.String(), err)
+				}
+			}
+		})
+	}
+}
+
 func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T) {
 	if !windowsEnterpriseIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")

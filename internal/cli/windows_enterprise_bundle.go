@@ -158,6 +158,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.SealVersion = windowsBundleSealVersion
 	store.PublishVersion = windowsBundlePublishVersion
 	store.PublishReceipt = windowsBundlePublishReceipt
+	store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	return &enterprisebundle.Driver{
@@ -349,6 +350,14 @@ func ensureWindowsBundleDirectory(layout managed.StandaloneLayout) error {
 	sddl := windowsBundleDirectorySDDL(service.String())
 	path := filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
 	return createWindowsBundleDirectory(path, sddl)
+}
+
+func ensureWindowsBundlePublicReceiptEventsDirectory(path string) error {
+	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
+	return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(service.String()))
 }
 
 // sealWindowsBundleVersionAssets grants the gateway service SID read and

@@ -344,6 +344,9 @@ type Store struct {
 	// PublishReceipt applies the platform's public-file permissions after an
 	// atomic replacement of receipt.json.
 	PublishReceipt func(path string) error
+	// EnsurePublicReceiptEventsDirectory creates the public event spool with
+	// the platform's protected directory descriptor before publishing files.
+	EnsurePublicReceiptEventsDirectory func(path string) error
 	// EnsurePrivateDirectory creates the lifecycle and receipts directories
 	// with the platform's private descriptor. Nil uses ordinary mkdir.
 	EnsurePrivateDirectory func(path string) error
@@ -531,8 +534,14 @@ func (s *Store) publishReceiptEvent(out enterprisestatus.PublicReceipt) error {
 		return err
 	}
 	eventsDir := s.PublicReceiptEventsDir()
-	if err := os.MkdirAll(eventsDir, 0o755); err != nil {
-		return err
+	var ensureErr error
+	if s.EnsurePublicReceiptEventsDirectory != nil {
+		ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)
+	} else {
+		ensureErr = os.MkdirAll(eventsDir, 0o755)
+	}
+	if ensureErr != nil {
+		return ensureErr
 	}
 	info, err := os.Lstat(eventsDir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {

@@ -276,6 +276,10 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
         "function Invoke-DefenseClawBundleAclContract",
     )
     assert "$RelativePath -ceq 'receipt.json' -and -not $IsDirectory" in classifier
+    assert "$top -ceq 'receipt-events'" in classifier
+    assert "return 'BundleDirectory'" in classifier
+    assert "^receipt-events\\\\[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
     assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
     assert "'BundleVersionDirectory'" in contract
@@ -283,6 +287,12 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     assert "'bundle-state.json'" in contract
     assert "'receipts'" in contract
     assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
+    go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
+    store = GO_STORE.read_text(encoding="utf-8")
+    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    assert "return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(service.String()))" in go
+    assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
+    assert "ensureErr = os.MkdirAll(eventsDir, 0o755)" in store
     assert "Set-DefenseClawPathAcl -Path $item.Path -Kind $item.Kind" in contract
 
     provisioner = _extract_function_body(
@@ -395,6 +405,32 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
     assert "windowsEnterpriseSIDEqual(actualOwner, owner)" in go
     assert "windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT," in go
     assert "windows.PROTECTED_DACL_SECURITY_INFORMATION" in go
+
+
+def test_public_receipt_event_paths_select_public_exact_acl() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    classifier = _extract_function_body(
+        source,
+        "function Get-DefenseClawBundlePathKind",
+        "function Invoke-DefenseClawBundleAclContract",
+    )
+    event_branch = classifier.split("if ($top -ceq 'receipt-events') {", 1)[1].split(
+        "# The immutable name", 1,
+    )[0]
+    assert "if ($RelativePath -ceq $top -and $IsDirectory)" in event_branch
+    assert "return 'BundleDirectory'" in event_branch
+    assert "-not $IsDirectory" in event_branch
+    assert "return 'BundleReceipt'" in event_branch
+    pattern = re.search(r"\$RelativePath -cmatch '([^']+)'", event_branch)
+    assert pattern
+    cases = {
+        r"receipt-events\b-01JA0000000000000000000033.json": True,
+        r"receipt-events\r-01JA0000000000000000000033.json": True,
+        r"receipt-events\invalid.json": False,
+        r"receipt-events\nested\b-01JA0000000000000000000033.json": False,
+    }
+    for path, public_receipt in cases.items():
+        assert (re.fullmatch(pattern.group(1), path) is not None) is public_receipt, path
 
 
 def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:
