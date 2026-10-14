@@ -624,7 +624,8 @@ function Write-LifecycleResult {
     }
     if ($code -eq 0) { $code = $script:ExitFailure }
     $stderr = ConvertTo-WrapperPublicText -Text ([string]$Run.StdErr) -Staged $script:StagedConfig -Public $ConfigPath
-    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($text + ' ' + $stderr).Trim()) }
+    $stderr = [regex]::Replace($stderr, '(?m)^DC_LIFECYCLE_PHASE: [^\r\n]*(?:\r?\n)?', '')
+    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($stderr + ' ' + $text).Trim()) }
     if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $code -Code 'mdm_lifecycle_no_result' -Message "$Label printed no lifecycle result: $detail"
     [Console]::Out.WriteLine($json)

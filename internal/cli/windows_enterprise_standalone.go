@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -47,9 +48,11 @@ import (
 
 // windowsEnterpriseStandaloneRun is one installer run on PowerShell 7.
 type windowsEnterpriseStandaloneRun struct {
-	Output    []byte
-	Truncated bool
-	ExitCode  int
+	Output          []byte
+	Truncated       bool
+	ExitCode        int
+	PipeWaitDelayed bool
+	PhaseLines      []string
 }
 
 // windowsEnterpriseInstallerReport is the subset of the installer's schema-1
@@ -217,15 +220,21 @@ func runWindowsEnterprisePowerShell7(
 		return env, err
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
-	capture, runErr := runWindowsEnterprisePowerShellEngine(
+	console := &windowsEnterprisePhaseFilter{writer: cmd.ErrOrStderr()}
+	capture, runErr := runWindowsEnterprisePowerShellEngineWithRunner(
 		ctx, cmd, engine.Executable, environment, script, args,
-		io.Discard, io.MultiWriter(cmd.ErrOrStderr(), stderr),
+		io.Discard, io.MultiWriter(stderr, console), true, runWindowsEnterprisePowerShellChild,
 	)
+	if err := console.Flush(); err != nil && runErr == nil {
+		runErr = err
+	}
 	run := windowsEnterpriseStandaloneRun{}
 	if capture != nil {
 		run.Output = append([]byte(nil), capture.buffer.Bytes()...)
 		run.Truncated = capture.truncated
+		run.PipeWaitDelayed = capture.pipeWaitDelayed
 	}
+	run.PhaseLines = windowsEnterprisePhaseLines(stderr.buffer.Bytes())
 	if runErr != nil {
 		// A nonzero installer exit that still produced its JSON document is
 		// a reported failure, not a launch failure.
@@ -251,19 +260,127 @@ func runWindowsEnterprisePowerShell7(
 	return run, nil
 }
 
+// The phase marker is diagnostic output for the protected lifecycle log.
+// Hold only the possible prefix; ordinary stderr streams through promptly.
+type windowsEnterprisePhaseFilter struct {
+	writer io.Writer
+	prefix []byte
+	mode   byte // 0: prefix undecided, 1: pass, 2: discard until newline
+}
+
+func (filter *windowsEnterprisePhaseFilter) Write(body []byte) (int, error) {
+	const marker = "DC_LIFECYCLE_PHASE: "
+	visible := make([]byte, 0, len(body))
+	for _, b := range body {
+		switch filter.mode {
+		case 2:
+			if b == '\n' {
+				filter.mode = 0
+			}
+		case 1:
+			visible = append(visible, b)
+			if b == '\n' {
+				filter.mode = 0
+			}
+		default:
+			filter.prefix = append(filter.prefix, b)
+			if string(filter.prefix) == marker {
+				filter.prefix = filter.prefix[:0]
+				filter.mode = 2
+			} else if !strings.HasPrefix(marker, string(filter.prefix)) {
+				visible = append(visible, filter.prefix...)
+				filter.prefix = filter.prefix[:0]
+				filter.mode = 1
+				if b == '\n' {
+					filter.mode = 0
+				}
+			}
+		}
+	}
+	if len(visible) != 0 {
+		if _, err := filter.writer.Write(visible); err != nil {
+			return 0, err
+		}
+	}
+	return len(body), nil
+}
+
+func (filter *windowsEnterprisePhaseFilter) Flush() error {
+	if len(filter.prefix) == 0 {
+		return nil
+	}
+	_, err := filter.writer.Write(filter.prefix)
+	filter.prefix = filter.prefix[:0]
+	return err
+}
+
+// Standalone installers can launch native descendants which inherit stdout.
+// The job closes after Wait, killing those descendants even when PowerShell
+// itself exited successfully and Wait returned ErrWaitDelay.
+func newWindowsEnterprisePowerShellJob() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	_, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	if err != nil {
+		_ = windows.CloseHandle(job)
+		return 0, err
+	}
+	return job, nil
+}
+
+func runWindowsEnterprisePowerShellChild(child *exec.Cmd) error {
+	child.WaitDelay = 2 * time.Second
+	job, err := newWindowsEnterprisePowerShellJob()
+	if err != nil {
+		return fmt.Errorf("create Windows enterprise installer job: %w", err)
+	}
+	defer windows.CloseHandle(job) //nolint:errcheck -- closes the kill-on-close job.
+	child.Cancel = func() error {
+		_ = windows.TerminateJobObject(job, 1)
+		return child.Process.Kill()
+	}
+	if err := child.Start(); err != nil {
+		return err
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(child.Process.Pid))
+	if err == nil {
+		err = windows.AssignProcessToJobObject(job, process)
+		_ = windows.CloseHandle(process)
+	}
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return fmt.Errorf("assign Windows enterprise installer to kill-on-close job: %w", err)
+	}
+	return child.Wait()
+}
+
 func windowsEnterpriseTimeoutPhases(stderr []byte) string {
+	var phases []string
+	for _, line := range windowsEnterprisePhaseLines(stderr) {
+		phases = append(phases, strings.TrimPrefix(line, "DC_LIFECYCLE_PHASE: "))
+	}
+	return strings.Join(phases, " | ")
+}
+
+func windowsEnterprisePhaseLines(stderr []byte) []string {
 	const prefix = "DC_LIFECYCLE_PHASE: "
 	var phases []string
 	for _, line := range strings.Split(string(stderr), "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimSuffix(line, "\r")
 		if strings.HasPrefix(line, prefix) && len(line) <= 160 {
-			phases = append(phases, strings.TrimPrefix(line, prefix))
+			phases = append(phases, line)
 		}
 	}
 	if len(phases) > 12 {
 		phases = phases[len(phases)-12:]
 	}
-	return strings.Join(phases, " | ")
+	return phases
 }
 
 // windowsEnterpriseForcedUninstallVariable carries --force (Setup /uninstall
@@ -687,6 +804,14 @@ func runWindowsEnterpriseStandaloneInstaller(
 	}
 	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)
+	if opts != nil {
+		if run.PipeWaitDelayed {
+			opts.powerShellPipeWaitDelayed = true
+		}
+		if len(run.PhaseLines) != 0 {
+			opts.diagnostics = append(opts.diagnostics, run.PhaseLines...)
+		}
+	}
 	noteWindowsEnterpriseMigration(opts, migrationRecord)
 	if err != nil {
 		return nil, run, err
@@ -1925,6 +2050,7 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	addWindowsEnterprisePipeWaitWarning(result, opts)
 	finishWindowsEnterpriseBundle(cmd, opts, result)
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
@@ -1974,6 +2100,12 @@ func finishWindowsEnterpriseStandalone(
 		}
 	}
 	return withExitCode(errors.New(summary), exitCode)
+}
+
+func addWindowsEnterprisePipeWaitWarning(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	if opts != nil && opts.powerShellPipeWaitDelayed {
+		result.AddWarning("installer_pipe_wait_delayed", "PowerShell exited successfully, but a descendant held an output pipe open; Setup closed the installer job and ended the descendant")
+	}
 }
 
 func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterprisestatus.Result) {
@@ -2664,7 +2796,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		var verifyRun windowsEnterpriseStandaloneRun
 		var verifyErr error
 		if probeErr == nil {
-			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, verifyOpts, verifyScript,
+			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, verifyScript,
 				windowsEnterprisePowerShellArgs("verify", verifyOpts))
 		}
 		if verifyErr != nil {

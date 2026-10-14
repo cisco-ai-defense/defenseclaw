@@ -71,6 +71,21 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func TestWindowsBundleDeadlineRecordsSkippedRollback(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	receipt := &enterprisebundle.Receipt{}
+	result := &enterprisestatus.Result{}
+	if !windowsBundleRollbackDeadlineExpired(ctx, receipt, result) ||
+		len(receipt.WarningCodes) != 1 || receipt.WarningCodes[0] != "rollback_skipped_deadline" ||
+		len(result.Warnings) != 1 || result.Warnings[0].Code != "rollback_skipped_deadline" {
+		t.Fatalf("deadline rollback receipt = %+v, result = %+v", receipt, result)
+	}
+	if windowsBundleRollbackDeadlineExpired(context.Background(), &enterprisebundle.Receipt{}, &enterprisestatus.Result{}) {
+		t.Fatal("live deadline skipped rollback")
+	}
+}
+
 func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

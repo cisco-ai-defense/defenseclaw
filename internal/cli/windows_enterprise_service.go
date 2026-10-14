@@ -146,6 +146,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// ensure. They go to the lifecycle log, not next to the JSON result an
 	// MDM parses.
 	diagnostics []string
+	// Set by a standalone PowerShell run whose own exit succeeded while a
+	// descendant still held an inherited output pipe.
+	powerShellPipeWaitDelayed bool
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
@@ -177,8 +180,9 @@ type windowsEnterpriseLifecyclePreflightFailure struct {
 }
 
 type windowsEnterpriseOutputCapture struct {
-	buffer    bytes.Buffer
-	truncated bool
+	buffer          bytes.Buffer
+	truncated       bool
+	pipeWaitDelayed bool
 }
 
 func (capture *windowsEnterpriseOutputCapture) Write(body []byte) (int, error) {
@@ -1151,6 +1155,22 @@ func runWindowsEnterprisePowerShellEngine(
 	stdout io.Writer,
 	stderr io.Writer,
 ) (*windowsEnterpriseOutputCapture, error) {
+	return runWindowsEnterprisePowerShellEngineWithRunner(ctx, cmd, powerShell, environment, script, args,
+		stdout, stderr, false, (*exec.Cmd).Run)
+}
+
+func runWindowsEnterprisePowerShellEngineWithRunner(
+	ctx context.Context,
+	cmd *cobra.Command,
+	powerShell string,
+	environment func(string) ([]string, error),
+	script string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	standalone bool,
+	runner func(*exec.Cmd) error,
+) (*windowsEnterpriseOutputCapture, error) {
 	commandArgs := []string{
 		"-NoLogo",
 		"-NoProfile",
@@ -1160,7 +1180,6 @@ func runWindowsEnterprisePowerShellEngine(
 	}
 	commandArgs = append(commandArgs, args...)
 	child := exec.CommandContext(ctx, powerShell, commandArgs...)
-	child.WaitDelay = 2 * time.Second
 	powerShellTemp, cleanupTemp, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
 		return nil, err
@@ -1185,11 +1204,15 @@ func runWindowsEnterprisePowerShellEngine(
 	childOutput := &windowsEnterpriseOutputCapture{}
 	child.Stdout = io.MultiWriter(stdout, childOutput)
 	child.Stderr = stderr
-	runErr := windowsEnterprisePowerShellChildRunner(child)
+	runErr := runner(child)
+	if standalone && errors.Is(runErr, exec.ErrWaitDelay) && child.ProcessState != nil && child.ProcessState.Success() {
+		childOutput.pipeWaitDelayed = true
+		runErr = nil
+	}
 	cleanupErr := cleanupTemp()
 	cleanupPending = false
 	if runErr != nil || cleanupErr != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if standalone && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return childOutput, fmt.Errorf("lifecycle_timeout: Windows enterprise installer did not finish before the ensure deadline: %w", ctx.Err())
 		}
 		var failures []error
@@ -1224,55 +1247,6 @@ func runWindowsEnterprisePowerShellEngine(
 		return childOutput, errors.Join(failures...)
 	}
 	return childOutput, nil
-}
-
-// The installer can launch native children which inherit its stdout pipe.
-// Closing this job ends those children as well as PowerShell on cancellation.
-var windowsEnterprisePowerShellJobFactory = newWindowsEnterprisePowerShellJob
-var windowsEnterprisePowerShellChildRunner = runWindowsEnterprisePowerShellChild
-
-func newWindowsEnterprisePowerShellJob() (windows.Handle, error) {
-	job, err := windows.CreateJobObject(nil, nil)
-	if err != nil {
-		return 0, err
-	}
-	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
-	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-	_, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
-	if err != nil {
-		_ = windows.CloseHandle(job)
-		return 0, err
-	}
-	return job, nil
-}
-
-func runWindowsEnterprisePowerShellChild(child *exec.Cmd) error {
-	job, err := windowsEnterprisePowerShellJobFactory()
-	if err != nil {
-		return fmt.Errorf("create Windows enterprise installer job: %w", err)
-	}
-	defer windows.CloseHandle(job) //nolint:errcheck -- closes the kill-on-close job.
-	child.Cancel = func() error {
-		// A deadline can arrive between Start and assignment. Killing the
-		// process as well covers that narrow interval.
-		_ = windows.TerminateJobObject(job, 1)
-		return child.Process.Kill()
-	}
-	if err := child.Start(); err != nil {
-		return err
-	}
-	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(child.Process.Pid))
-	if err == nil {
-		err = windows.AssignProcessToJobObject(job, process)
-		_ = windows.CloseHandle(process)
-	}
-	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		return fmt.Errorf("assign Windows enterprise installer to kill-on-close job: %w", err)
-	}
-	return child.Wait()
 }
 
 func windowsEnterpriseInstallerFailureDiagnostic(

@@ -343,6 +343,7 @@ if ($null -ne $document -and ($document.PSObject.Properties.Name -contains 'sche
     exit $code
 }
 if ($code -eq 0) { $code = 1603 }
-$detail = (($text + ' ' + [string]$run.StdErr).Trim())
+$stderr = [regex]::Replace([string]$run.StdErr, '(?m)^DC_LIFECYCLE_PHASE: [^\r\n]*(?:\r?\n)?', '')
+$detail = (($stderr + ' ' + $text).Trim())
 if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
 Exit-Launcher $code 'mdm_lifecycle_no_result' "Setup printed no lifecycle result: $detail"

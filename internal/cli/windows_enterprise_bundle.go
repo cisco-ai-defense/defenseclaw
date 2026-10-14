@@ -778,6 +778,9 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			}
 		}
 		_, err := run.driver.Finish(p, installed, failure, policy, run.gatewayRestarted, func() (string, bool) {
+			if windowsBundleRollbackDeadlineExpired(run.ctx, p.Receipt, result) {
+				return "", false
+			}
 			return rollbackWindowsBundle(cmd, opts, run)
 		})
 		if err != nil {
@@ -792,6 +795,15 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		receipt = p.Receipt
 	}
 	attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
+}
+
+func windowsBundleRollbackDeadlineExpired(ctx context.Context, receipt *enterprisebundle.Receipt, result *enterprisestatus.Result) bool {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	receipt.WarningCodes = append(receipt.WarningCodes, "rollback_skipped_deadline")
+	result.AddWarning("rollback_skipped_deadline", "the ensure deadline expired; bundle rollback was skipped and the installed policy may need recovery on the next ensure")
+	return true
 }
 
 func windowsBundleEnforces(p enterprisebundle.GatewayPolicy) bool {
