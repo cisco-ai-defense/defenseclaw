@@ -43,7 +43,9 @@ Intune's execution contexts shape the design:
   own trusted PowerShell 7 engine. Lifecycle logic never runs inside the
   Intune host.
 - **macOS.** Shell scripts run as root unless you choose the signed-in user.
-  They must be smaller than 1 MB and are stopped after 60 minutes. Intune
+  In one tenant on 2026-10-14, Graph accepted scripts through 1,100,000 bytes
+  and the Intune Mac agent executed the 1,100,000-byte probe. The maximum size
+  was not measured. Scripts are stopped after 60 minutes. Intune
   does not support running them through a proxy. Intune passes them no
   arguments, so the wrapper's settings block carries every value. Use inline
   config without a bundle, or a signed bundle with an empty config block.

@@ -13,6 +13,8 @@ or a password that was expanded a second time would only show up on a Linux host
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -652,6 +654,15 @@ def test_intune_read_script_accepts_utf8_without_bom(tmp_path: Path) -> None:
         ({"DC_CONFIG_FILE": "/etc/config.yaml"}, "", "", "", None),
         ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
         ({"DC_SOURCE_URL": "https://example.test/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
+        ({"DC_TRUST_MODE": "signed", "DC_ALLOWED_TEAM_IDS": "TEAMID", "DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", None),
+        ({"DC_CONFIG_FILE": "config.yaml"}, "", "", "", "config must be an absolute path"),
+        ({"DC_SOURCE": "defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", "source must be an absolute path"),
+        ({"DC_SOURCE_URL": "http://example.test/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", "download URLs must use https://"),
+        ({"DC_TRUST_MODE": "signed", "DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", "signed trust on macOS needs --allowed-team-id"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.deb", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", ".deb sources are Linux packages"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.rpm", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", ".rpm sources are Linux packages"),
+        ({"DC_STAGING_DIR": "staging"}, "config_version: 9\n", "", "", "--staging-dir must be an absolute path"),
+        ({"DC_SCRIPT_OS": "linux"}, "config_version: 9\n", "", "", "this copy of the wrapper is for linux, not darwin"),
         ({"DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", "hash_pinned trust requires --sha256 for the source"),
         ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_URL": "https://example.test/pkg"}, "", "", "", "--source and --source-url are exclusive"),
         ({"DC_ACTION": "status"}, "", "", "", None),
@@ -694,9 +705,16 @@ def test_intune_macos_script_validates_before_graph_calls(
     template = (ROOT / "packaging/mdm/macos/defenseclaw-enterprise.sh").read_text(encoding="ascii")
     args = argparse.Namespace(file=str(script), name="test", frequency="PT1H", retries=3, group=None, apply=False)
 
+    calls: list[tuple] = []
+
     class Graph:
-        def get_all(self, _path: str) -> list[dict]:
+        def get_all(self, path: str) -> list[dict]:
+            calls.append(("GET", path))
             return []
+
+        def request(self, method: str, path: str, body: dict) -> dict:
+            calls.append((method, path, body))
+            return {"id": "created-script"}
 
     content = template
     for name, value in settings.items():
@@ -709,9 +727,18 @@ def test_intune_macos_script_validates_before_graph_calls(
         with pytest.raises(SystemExit, match=re.escape(error)):
             intune.cmd_macos_script(Graph(), args)
         assert capsys.readouterr().out == ""
+        assert calls == []
     else:
+        args.apply = True
         assert intune.cmd_macos_script(Graph(), args) == 0
-        assert "would create macOS shell script" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        uploaded = base64.b64decode(calls[-1][2]["scriptContent"])
+        assert calls[-1][:2] == ("POST", f"{intune.BETA}/deviceManagement/deviceShellScripts")
+        assert uploaded == script.read_bytes().replace(b"\r\n", b"\n")
+        assert b"\r" not in uploaded
+        assert f"sha256 {hashlib.sha256(uploaded).hexdigest()[:16]}" in output
+        assert output.count("Converted CRLF line endings to LF for upload") == (newline == "\r\n")
+        assert "created macOS shell script" in output
 
 
 def test_okta_assign_posix_rejects_taken_name_before_writes(monkeypatch: pytest.MonkeyPatch) -> None:
