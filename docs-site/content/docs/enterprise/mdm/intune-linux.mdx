@@ -41,7 +41,9 @@ while they remain open.
 - **Devices**: a distribution and version on Microsoft's list of Intune-supported
   Linux platforms, enrolled with the Microsoft Intune app, running systemd 239
   or later. The package depends on systemd 239. On a host where systemd is not
-  running, the package installs but the deployment stays inactive.
+  running, the package installs but the deployment stays inactive. A base
+  config delivered with a signed bundle also needs `tar` on the device; see
+  [Install order with a signed bundle](#install-order-with-a-signed-bundle).
 - **Release**: verify `checksums.txt` and read the pin of the artifact you
   deploy, as in [What you deliver](/docs/enterprise/mdm#what-you-deliver).
   Ubuntu needs the `.deb`, RHEL the `.rpm`. The payload archive
@@ -134,7 +136,7 @@ hooks answer under is the bundle's.
 The bundle-only script leaves the device unprotected if the first bundle does
 not apply (for example an expired trust anchor). To protect agents in that
 case, also fill in `dc_inline_config` (or `DC_CONFIG_FILE`) with a **base
-config** that carries the bundle's guardrail policy:
+config** that matches the bundle's guardrail block and hook modes:
 
 - Its `guardrail:` block must match the bundle's `config.yaml` line for line,
   apart from `custom_packs.<pack>.path`. The bundle names
@@ -142,14 +144,28 @@ config** that carries the bundle's guardrail policy:
   absolute folder where a separate root script installed the same pack before
   this one runs. Only root may be able to change that folder, and it must be
   outside `/etc/defenseclaw`, which an uninstall with purge removes.
-- Before it installs anything, the wrapper compares the two blocks. It
-  refuses a different threshold, mode, connector list or digest, a missing
-  rule pack, or a relative pack path with `mdm_base_config_mismatch` (exit
-  `2`).
+- Its `claude_code:`, `codex:`, `connector_hooks:` and
+  `application_protection:` blocks must match the bundle's, or be left out of
+  both. A `mode` in `claude_code`, `codex` or `connector_hooks.<connector>`
+  overrides the guardrail mode for that agent, so a base config that sets
+  `mode: observe` there only reports calls that the bundle blocks. Comments and
+  blank lines don't count.
+- The wrapper compares only these blocks. Keep the other settings the same as
+  the bundle's too: the base config applies until the bundle does.
+- Before it installs anything, the wrapper compares these blocks. It refuses
+  a different threshold, mode, connector list or digest, a missing rule pack,
+  a relative pack path or a different hook mode block with
+  `mdm_base_config_mismatch` (exit `2`).
+- The comparison reads the bundle with `tar`. Minimal RHEL 9 and Rocky Linux
+  9 images don't include it, so install the `tar` package first (for example
+  `dnf install tar`). Without `tar` the wrapper installs nothing and exits `1`
+  with `mdm_tar_missing`. A bundle-only script with the `.rpm` or `.deb`
+  doesn't need `tar`.
 - On a device that is not yet in bundle mode, the wrapper applies the base
-  config first, then the trust anchors, then the bundle. Once the trust
-  anchors are installed, only bundles apply and the base config is no longer
-  used.
+  config first, then the trust anchors, then the bundle. With a matching base
+  config the bundle usually applies in the running gateway, without a
+  restart. Once the trust anchors are installed, only bundles apply and the
+  base config is no longer used.
 
 Don't deploy a base config in an earlier, separate script whose guardrail
 block differs from the bundle's. Until the bundle applies, the agents run

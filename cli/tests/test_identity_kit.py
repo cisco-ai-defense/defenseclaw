@@ -135,6 +135,16 @@ def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
          "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n", "must define custom_packs.b"),
         ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n", ("a",),
          "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: packs/a\n", "absolute, preinstalled path"),
+        # GAP-0090: the hook modes the hooks take before the guardrail mode,
+        # and application_protection, must be the bundle's or absent from both.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra, f"base CONFIG= {key}: block differs")
+          for key, extra in (("claude_code", "claude_code: {mode: observe}\n"), ("codex", "codex:\n  mode: observe\n"),
+                             ("connector_hooks", "connector_hooks:\n  claudecode:\n    mode: observe\n"),
+                             ("application_protection", "application_protection:\n  guardrail:\n    mode: observe\n"))],
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (), "guardrail:\n  block_at: HIGH\n",
+         "base CONFIG= claude_code: block differs"),
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (),
+         "# base\nclaude_code:\n\n  mode: action\nguardrail:\n  block_at: HIGH\n", ""),
     ],
 )
 def test_intune_bundle_package_compares_every_pack(

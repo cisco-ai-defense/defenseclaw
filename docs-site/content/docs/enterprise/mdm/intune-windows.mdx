@@ -102,7 +102,7 @@ script:
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of the signer certificates you accept, comma-separated or repeated. |
 | `-ConfigPath` | The base config. It must select the same guardrail pack and rules as the signed bundle. Without a config the first install fails with `1639`. |
-| `-BaseConfigPath` | Required for a bundle package: the exact base app config. Packaging refuses a missing or weaker guardrail policy. |
+| `-BaseConfigPath` | Required for a bundle package: the exact base app config. Packaging refuses a missing base config, a `guardrail:` block that differs from the bundle's in more than the pack path, and a `claude_code:`, `codex:`, `connector_hooks:` or `application_protection:` block that differs from the bundle's. |
 | `-BundlePath`, `-TrustAnchorPath`, `-RequireBundle` | For a bundle app: signed bundle, optional public anchors and required bundle version for detection. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
 | `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |

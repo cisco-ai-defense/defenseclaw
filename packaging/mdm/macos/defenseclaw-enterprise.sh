@@ -53,13 +53,18 @@
 # the trust anchor file this run replaced is put back. Script-only MDMs can
 # paste the anchor file and the base64 of the bundle into the settings below.
 # A bundle carries its own config. A config given with it (--config-file,
-# --config-stdin or the inline config) is the base config: its guardrail
+# --config-stdin or the inline config) is the base config. Its guardrail:
 # block must be the bundle's, apart from custom_packs.<pack>.path, which
-# names the pack's folder installed before this run; otherwise nothing is
-# installed (mdm_base_config_mismatch, exit 2). On a device that is not yet
-# in bundle mode the base config is applied before the trust anchors and the
-# bundle, so the agents never run under a weaker policy while the bundle is
-# pending or after it fails to apply (GAP-0090).
+# names the pack's folder installed before this run. Its claude_code:,
+# codex:, connector_hooks: and application_protection: blocks must be the
+# bundle's, or absent from both: their hook modes override the guardrail
+# mode. Otherwise nothing is installed (mdm_base_config_mismatch, exit 2).
+# The check reads the bundle with tar; without tar nothing is installed
+# (mdm_tar_missing, exit 1). No other config key is compared. On a device
+# that is not yet in bundle mode the base config is applied before the trust
+# anchors and the bundle, so while the bundle is pending, or after it fails
+# to apply, the agents run under a base config whose guardrail block and hook
+# modes are the bundle's (GAP-0090).
 # Bundle config should omit data_dir: the gateway uses its managed data
 # directory; enterprise lifecycle state stays separate and root-only.
 
@@ -983,16 +988,36 @@ dc_custom_pack_path() {
     ' "$1"
 }
 
+# dc_top_block <config> <key>: every top-level <key>: block of the config
+# (the key plain or quoted), with LF line ends and without blank or
+# full-line comment lines; nothing when the config has none.
+dc_top_block() {
+    awk -v key="$2" -v bom="$(printf '\357\273\277')" '
+        { sub(/\r$/, "") }
+        NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
+        /^[ \t]*#/ || /^[ \t]*$/ { next }
+        substr($0, 1, 1) != " " {
+            inside = ($0 ~ ("^(" key "|\"" key "\"|\047" key "\047)[ \t]*:([ \t]|$)"))
+        }
+        inside { print }
+    ' "$1"
+}
+
 # dc_check_base_config <config> <bundle>: a base config delivered with a
-# signed bundle is the policy the agents run under until the bundle applies,
-# and after a bundle that does not apply, so it must carry the bundle's
-# guardrail policy (GAP-0090; the Intune Windows packager checks the same,
-# GAP-0105). The two guardrail blocks must be identical apart from where each
-# custom rule pack the bundle ships is installed: the bundle names
-# policies/guardrail/<pack> inside itself, the base config an absolute folder
-# the administrator installed before this run. Prints why and fails when they
-# differ. The bundle apply verifies the signature later; the config compared
-# here must match the manifest's files[] pin.
+# signed bundle is the config the agents run under until the bundle applies,
+# and after a bundle that does not apply (GAP-0090; the Intune Windows
+# packager checks the same, GAP-0105). The two guardrail: blocks must be
+# identical apart from where each custom rule pack the bundle ships is
+# installed: the bundle names policies/guardrail/<pack> inside itself, the
+# base config an absolute folder the administrator installed before this
+# run. The claude_code:, codex:, connector_hooks: and application_protection:
+# blocks must be identical too, or absent from both: the hooks take
+# claude_code.mode, codex.mode and connector_hooks.<connector>.mode before
+# the guardrail mode, and application_protection sets the guardrail policy
+# of automatically protected agents. No other key is compared. Prints why
+# and fails when they differ. Needs tar (dc_main checks for it). The bundle
+# apply verifies the signature later; the config compared here must match
+# the manifest's files[] pin.
 dc_check_base_config() {
     parity="$DC_STAGE/parity"
     rm -rf "$parity"
@@ -1000,8 +1025,12 @@ dc_check_base_config() {
     for member in manifest.json config.yaml; do
         tar -xzOf "$2" "$member" 2>/dev/null | head -c 262145 >"$parity/$member" || true
         size=$(wc -c <"$parity/$member" | tr -d ' ')
-        if [ "$size" = 0 ] || [ "$size" -gt 262144 ]; then
-            echo "the bundle has no $member of at most 262144 bytes"
+        if [ "$size" = 0 ]; then
+            echo "the bundle has no readable $member"
+            return 1
+        fi
+        if [ "$size" -gt 262144 ]; then
+            echo "the bundle $member is larger than 262144 bytes"
             return 1
         fi
     done
@@ -1047,9 +1076,22 @@ dc_check_base_config() {
         mv -f "$parity/base.next" "$parity/base"
     done
     if ! cmp -s "$parity/base" "$parity/bundle"; then
-        echo "the base config guardrail policy differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
+        echo "the base config guardrail: block differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
         return 1
     fi
+    for key in claude_code codex connector_hooks application_protection; do
+        dc_top_block "$1" "$key" >"$parity/base.$key"
+        dc_top_block "$parity/config.yaml" "$key" >"$parity/bundle.$key"
+        cmp -s "$parity/base.$key" "$parity/bundle.$key" && continue
+        case "$key" in
+            claude_code) why="claude_code.mode overrides the guardrail mode for Claude Code" ;;
+            codex) why="codex.mode overrides the guardrail mode for Codex" ;;
+            connector_hooks) why="connector_hooks.<connector>.mode overrides the guardrail mode for that connector" ;;
+            *) why="it sets the guardrail policy of automatically protected agents" ;;
+        esac
+        echo "the base config $key: block differs from the signed bundle's ($why); use the bundle's $key: block, or leave it out of both"
+        return 1
+    done
 }
 
 # dc_put_anchors <src>: atomically replace the trust anchor file with src
@@ -1215,10 +1257,13 @@ dc_main() {
         dc_read_bounded "$bundle" "$DC_MAX_BUNDLE_BYTES" "bundle" <"$DC_STAGE/inline.dcbundle"
     fi
     # A config delivered with a bundle is the base config; it is checked
-    # against the bundle before anything is installed.
+    # against the bundle before anything is installed. The check reads the
+    # bundle with tar, which minimal Linux images may lack.
     if [ -n "$bundle" ] && [ -n "$config" ]; then
+        command -v tar >/dev/null 2>&1 ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_tar_missing "tar is not installed; the wrapper needs it to compare the base config with the signed bundle, so nothing was installed (install tar, or deliver the bundle without a base config)"
         reason=$(dc_check_base_config "$config" "$bundle") ||
-            dc_fail_result "$DC_EXIT_INVALID" mdm_base_config_mismatch "the base config does not carry the signed bundle's guardrail policy, so nothing was installed: $reason"
+            dc_fail_result "$DC_EXIT_INVALID" mdm_base_config_mismatch "the base config does not match the signed bundle's guardrail block and hook modes, so nothing was installed: $reason"
     fi
     anchors=""
     if [ -n "$DC_TRUST_ANCHOR_FILE" ]; then
@@ -1295,8 +1340,9 @@ dc_main() {
     # A bundle apply runs the ensure transaction itself, so with a bundle
     # ensure runs first only to install the payload channel (the package
     # channel's postinstall already applied the deployment) or to apply the
-    # base config. The base config goes in before the trust anchors, so the
-    # hooks never answer under a weaker policy than the bundle's (GAP-0090).
+    # base config. The base config goes in before the trust anchors, so
+    # until the bundle applies the hooks answer under the base config that
+    # dc_check_base_config compared with the bundle (GAP-0090).
     # In bundle mode (trust anchors installed) only the current bundle's
     # config applies, so the base config is not used.
     ensure_config=$config

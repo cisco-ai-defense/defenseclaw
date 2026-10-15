@@ -75,6 +75,23 @@ if ($TrustAnchorPath) {
     if ($null -eq $anchorJson -or $anchorJson -isnot [pscustomobject] -or $null -eq $anchorJson.PSObject.Properties['schema_version'] -or $anchorJson.schema_version -isnot [long] -or $anchorJson.schema_version -ne 1) { throw '-TrustAnchorPath must contain a JSON object with schema_version 1' }
 }
 
+function Get-TopLevelBlock {
+    # Every top-level <Key>: block of a config (the key plain or quoted),
+    # without blank and full-line comment lines; '' when there is none.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Key)
+    $inside = $false
+    $found = @()
+    foreach ($line in ($Text.TrimStart([char]0xFEFF) -split "`n")) {
+        $line = $line.TrimEnd([char]13)
+        if ($line -match '^[ \t]*(#|$)') { continue }
+        if (-not $line.StartsWith(' ')) {
+            $inside = $line -cmatch ('^(' + $Key + '|"' + $Key + '"|''' + $Key + ''')[ \t]*:([ \t]|$)')
+        }
+        if ($inside) { $found += $line }
+    }
+    return ($found -join "`n")
+}
+
 function Get-GuardrailBlock {
     param([Parameter(Mandatory)][string]$Text)
     $lines = ($Text -replace "`r`n", "`n") -split "`n"
@@ -175,6 +192,17 @@ if ($BundlePath) {
     }
     if (($baseLines -join "`n") -cne $bundleBlock) {
         throw "base CONFIG= guardrail policy differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
+    }
+    # The hooks take claude_code.mode, codex.mode and
+    # connector_hooks.<connector>.mode before the guardrail mode, and
+    # application_protection sets the guardrail policy of automatically
+    # protected agents, so these blocks must be the bundle's too, or absent
+    # from both (GAP-0090). No other key is compared.
+    $bundleText = [Text.Encoding]::UTF8.GetString($entries['config.yaml'])
+    foreach ($key in 'claude_code', 'codex', 'connector_hooks', 'application_protection') {
+        if ((Get-TopLevelBlock -Text $baseText -Key $key) -cne (Get-TopLevelBlock -Text $bundleText -Key $key)) {
+            throw "base CONFIG= ${key}: block differs from the signed bundle's (it sets hook modes or the guardrail policy the hooks answer under); use the bundle's ${key}: block, or leave it out of both"
+        }
     }
 }
 
