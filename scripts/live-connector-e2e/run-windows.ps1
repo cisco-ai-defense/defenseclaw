@@ -9476,10 +9476,10 @@ function Invoke-ContractRun {
     Invoke-Setup observe
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
-        # Observe keeps an unpinned plugin open outside Secure Client. Explicit
-        # delivery policy still wins in observe mode; verify both values and
-        # leave the response-integrity boundary closed before the corpus.
-        # Config resolver tests separately pin the fresh action-mode default.
+        # Observe keeps a plugin without a connector override open outside
+        # Secure Client, even when the global delivery policy is closed.
+        # Round-trip the global policy and restore closed for the action phase,
+        # where the Windows registration assertion below verifies it takes effect.
         Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
         # A failed restore must not mask the open-mode failure that caused
         # it: keep the primary error, warn about the restore, rethrow primary.
@@ -9499,8 +9499,7 @@ function Invoke-ContractRun {
             Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
         }
         if ($null -ne $ampFailModeError) { throw $ampFailModeError }
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
-        Write-Result 'amp:delivery-mode-contract' pass 'observe compatibility and explicit open/closed plugins rendered and verified'
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
     }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
@@ -9515,7 +9514,10 @@ function Invoke-ContractRun {
     } finally {
         Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     }
-    Assert-DoctorWindowsHookRegistration
+    Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+    if ($Connector -eq 'amp') {
+        Write-Result 'amp:delivery-mode-contract' pass 'global policy updates preserve observe compatibility; restored closed policy renders in action mode'
+    }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }
     if (Test-Path -LiteralPath $session) { Invoke-Hook $sessionEvent $session allow }
