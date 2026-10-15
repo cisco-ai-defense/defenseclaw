@@ -23,9 +23,40 @@ platform script) has not been run against a live tenant yet, so run a pilot grou
 
 | Platform | Install | Detect | Keep healthy | Remove |
 | --- | --- | --- | --- | --- |
-| Windows 10/11 x64 | Win32 app | Registry rule on the marker version (`ProductVersion` >= the app version) | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`) | Win32 uninstall command |
+| Windows 10/11 x64 | Base Win32 app with config; one dependent Win32 app per signed bundle version | Registry rule for base; generated `detect-bundle.ps1` for bundles | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`) | Base app uninstall; bundle app no-op uninstall |
 | macOS 13+ (Apple silicon) | Shell script (recommended) or unmanaged PKG app | `detect.sh` custom attribute; pkg receipt | Script frequency | `uninstall.sh` shell script |
 | Ubuntu, RHEL (the releases Intune supports) | Linux platform script | `detect.sh` as a second platform script; package database | Script frequency (default every 15 minutes) | `uninstall.sh` platform script |
+
+## Signed policy bundles on Windows
+
+Build the base Win32 app with `-ConfigPath` and assign it first. Setup cannot
+apply a bundle on the first install. After the base app is installed, build one
+Win32 app per signed bundle version:
+
+```powershell
+./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<setup sha256>' -BundlePath .\policy.dcbundle `
+  -TrustAnchorPath .\bundle-anchors.json -RequireBundle 7 `
+  -ProductVersion 9.9.9 -OutputDirectory .\bundle-app
+```
+
+Verify the bundle offline with `defenseclaw-gateway enterprise bundle verify
+--anchors .\bundle-anchors.json --platform windows` before packaging. The
+packager pins the copied bundle and anchors and writes `detect-bundle.ps1`
+beside `content`; upload that file as the bundle app's custom detection script.
+Use a numeric `-RequireBundle` version so a later bundle remains detected.
+Set the base app as a dependency with **Automatically install: Yes**. Each new
+bundle app supersedes the previous bundle app with **Uninstall previous
+version: No**. The bundle app's uninstall command is a no-op; remove the
+product through the base app.
+
+Build upgrade packages without `-ConfigPath` after a device enters bundle
+mode; Setup otherwise refuses `bundle_required`. A bundle package must carry
+the Setup for the release installed on the device: an older Setup is refused
+as `downgrade_refused`. Bundles are limited to 4 MiB and anchors to 64 KiB.
+Setup installs anchors only from an administrator-only path and verifies the
+bundle signature on its own copy. Uninstall does not yet purge bundle state.
 
 Intune's execution contexts shape the design:
 
