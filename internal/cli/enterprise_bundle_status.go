@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -206,6 +207,10 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			digestComparable = currentReceipt.DigestComparable
 		}
 	}
+	// On a device whose managed layout changed its digest, verify proved
+	// the signed digest against the standard layout and the gateway enforces
+	// this device's own digest, so the signed one never matches it there.
+	gatewayComparable := digestComparable && (currentReceipt == nil || !slices.Contains(currentReceipt.WarningCodes, enterprisebundle.WarnDigestLayoutUnverifiable))
 	addReceiptWarning := func(code string) {
 		if code == "" {
 			return
@@ -239,7 +244,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	}
 	res.GatewayChecked, res.GatewayDigest = true, policy.GatewayReportedDigest
 	if st.Current != nil {
-		addReceiptWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, digestComparable))
+		addReceiptWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, gatewayComparable))
 	}
 	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
@@ -257,7 +262,7 @@ func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt)
 	case enterprisebundle.WarnDigestUnverifiable:
 		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
 	case enterprisebundle.WarnDigestLayoutUnverifiable:
-		return "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
+		return "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
 	case "capability_disabled":
 		if receipt == nil {
 			return "the bundle disabled a capability"
