@@ -18,13 +18,15 @@ were removed):
 
 Validation status: a live test tenant delivered a rule-pack app and the Windows
 base and signed bundle Win32 apps, checked bundle detection and hook
-enforcement, and ran uninstall. With the pack installed first and the base
-config naming the bundle's pack, no test call the bundle blocks was allowed
-between hook start and bundle confirmation. Intune retried a bundle app that
-met a busy lifecycle (`1618`) by itself. The reference rule-pack scripts here
-are newer than that run and have not yet run in a tenant. Tenant setup and
-Windows/Linux enrollment and compliance were also tested. Pilot other channels
-and upgrades before fleet assignment.
+enforcement, and ran uninstall. That run's own lab rule-pack app did not let
+the gateway service read the pack folder, so Setup refused the base app with
+`1639` until the folder permissions were fixed by hand. With the pack installed
+first and the base config naming the bundle's pack, no test call the bundle
+blocks was allowed between hook start and bundle confirmation. Intune retried a
+bundle app that met a busy lifecycle (`1618`) by itself. The reference
+rule-pack scripts here are newer than that run and have not yet run in a
+tenant. Tenant setup and Windows/Linux enrollment and compliance were also
+tested. Pilot other channels and upgrades before fleet assignment.
 
 | Platform | Install | Detect | Keep healthy | Remove |
 | --- | --- | --- | --- | --- |

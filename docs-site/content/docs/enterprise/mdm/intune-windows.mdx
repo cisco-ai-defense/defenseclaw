@@ -10,7 +10,7 @@ keywords:
   - PowerShell 7 dependency
 ---
 
-<Callout title="Pilot evidence">A live test tenant delivered a rule-pack app, the base Win32 app, signed bundle apps and the uninstall to an enrolled Windows device. With the pack installed first and the base config naming the bundle's pack, no test call that the bundle blocks was allowed between hook start and bundle confirmation. A bundle app that met a busy lifecycle (`1618`) was retried by Intune after five minutes without help. The kit's reference rule-pack scripts below are newer than that run and have not yet run in a tenant. Supersedence of the base app is unsupported because Intune rejected the app graph.</Callout>
+<Callout title="Pilot evidence">A live test tenant delivered a rule-pack app, the base Win32 app, signed bundle apps and the uninstall to an enrolled Windows device. That run's own lab rule-pack app did not let the gateway service read the pack folder, so Setup refused the base app with `1639` until the folder permissions were fixed by hand. With the pack installed first and the base config naming the bundle's pack, no test call that the bundle blocks was allowed between hook start and bundle confirmation. A bundle app that met a busy lifecycle (`1618`) was retried by Intune after five minutes without help. The kit's reference rule-pack scripts below are newer than that run and have not yet run in a tenant. Supersedence of the base app is unsupported because Intune rejected the app graph.</Callout>
 
 <Callout title="At a glance">
 - **You upload:** a base Win32 app, `Install-DefenseClawIntune.intunewin`, that
@@ -171,6 +171,12 @@ what Setup checks:
   `NT SERVICE\DefenseClawGateway`, no `Users` or `Authenticated Users` entry;
 - on the pack and everything in it: the same entries, owner Administrators.
 
+`-PacksRoot` must be a folder of its own, because the install replaces its
+owner and permissions: the script refuses (`1639`) a drive root, a Windows,
+program, profile or DefenseClaw folder such as `C:\ProgramData` or
+`C:\Windows`, and an existing folder that holds anything other than rule pack
+folders.
+
 It then checks the copy and the permissions of the pack, its parent and every
 folder above, and exits `0`. Run again, it changes nothing when everything is
 in place and repairs only what differs. A changed pack is copied beside the
@@ -198,7 +204,7 @@ when a check fails, and `1639` for invalid arguments.
 | Uninstall command | The same with `-Remove` instead of `-ExpectedTreeSha256 <tree sha256>` |
 | Install behavior | **System** |
 | Return codes | Keep the defaults; `1603` and `1639` report Failed |
-| Detection rules | **Use a custom detection script**: your `Detect-DefenseClawRulePack.ps1`, *Run script as 32-bit process on 64-bit clients*: **No** |
+| Detection rules | **Use a custom detection script**: your `Detect-DefenseClawRulePack.ps1`, *Run script as 32-bit process on 64-bit clients*: **No**, *Enforce script signature check and run script silently*: **No** (or **Yes** after you sign the script) |
 | Assignments | The same device groups as the base app; the base app's dependency installs it first |
 
 The detection script reports the pack installed only when the folder has the

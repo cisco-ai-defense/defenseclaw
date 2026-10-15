@@ -32,6 +32,9 @@ REGION_BEGIN = "# region DefenseClaw rule pack helpers"
 REGION_END = "# endregion DefenseClaw rule pack helpers"
 PACKS = r"C:\ProgramData\DefenseClaw-RulePacks"
 
+# Exit code 1639 (invalid arguments); a POSIX shell keeps its low 8 bits.
+INVALID_ARGUMENTS = 1639 if os.name == "nt" else 1639 & 0xFF
+
 needs_pwsh = pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is required for the Intune kit scripts")
 
 
@@ -102,6 +105,64 @@ def test_install_refuses_bad_arguments_and_a_changed_pack(tmp_path: Path, args: 
     assert "icacls" not in run.stdout
 
 
+# The install replaces the owner and permissions of -PacksRoot; a typo that
+# names a system, profile or DefenseClaw folder must change nothing.
+REFUSED_ROOTS = [
+    r"C:\ProgramData",
+    r"c:\programdata",
+    r"C:\Windows",
+    r"D:\Windows\Temp\packs",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)\Packs",
+    r"C:\Users",
+    r"C:\Users\alice\packs",
+    r"C:\ProgramData\Microsoft\packs",
+    r"C:\ProgramData\Cisco",
+    r"C:\ProgramData\Cisco\DefenseClaw",
+    r"C:\ProgramData\Cisco\DefenseClaw\policies",
+    r"C:\ProgramData\DefenseClaw",
+    r"C:\PROGRA~3\packs",
+    r"C:\ProgramData.\packs",
+    r"C:\Windows \packs",
+]
+
+
+@needs_pwsh
+@pytest.mark.parametrize("packs_root", REFUSED_ROOTS)
+def test_install_refuses_a_system_profile_or_install_folder(tmp_path: Path, packs_root: str) -> None:
+    pack = _pack(tmp_path, {"rules/r.yaml": "rules: []\n"})
+    for extra in ([], ["-Remove"]):
+        run = _pwsh(
+            "-File",
+            str(INSTALL),
+            "-PackName",
+            "p2int",
+            "-SourcePath",
+            str(pack),
+            "-PacksRoot",
+            packs_root,
+            "-PlanOnly",
+            *extra,
+        )
+        assert run.returncode == INVALID_ARGUMENTS, (extra, run.returncode, run.stdout)
+        assert run.stdout.startswith("invalid_arguments: -PacksRoot"), (extra, run.stdout)
+        assert "icacls" not in run.stdout
+    detect = _pwsh(
+        "-File", str(DETECT), "-PackName", "p2int", "-PacksRoot", packs_root, "-ExpectedTreeSha256", "a" * 64
+    )
+    assert detect.returncode == 1 and "set $PackName, $PacksRoot" in detect.stderr, detect.stderr
+
+
+@needs_pwsh
+@pytest.mark.parametrize("packs_root", [PACKS, r"D:\Policy\Packs", r"C:\ProgramData\Cisco\RulePacks", r"C:\Packs"])
+def test_install_plans_for_a_folder_of_its_own(tmp_path: Path, packs_root: str) -> None:
+    pack = _pack(tmp_path, {"rules/r.yaml": "rules: []\n"})
+    run = _pwsh(
+        "-File", str(INSTALL), "-PackName", "p2int", "-SourcePath", str(pack), "-PacksRoot", packs_root, "-PlanOnly"
+    )
+    assert run.returncode == 0 and f'icacls "{packs_root}" /inheritance:r' in run.stdout, run.stdout
+
+
 # Dot-sources a kit script, replaces what touches Windows (icacls, Get-Acl,
 # the elevation and drive-path checks), runs the scenario and prints JSON.
 HARNESS = r"""
@@ -140,6 +201,39 @@ switch ($Scenario) {
         $result.removed = Invoke-DcRulePackInstall -PackName 'p2int' -SourcePath '' -PacksRoot $root -ExpectedTreeSha256 '' -Remove
         $result.removedExists = Test-Path -LiteralPath (Join-Path $root 'p2int')
         $result.leftovers = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
+    }
+    'strangers' {
+        # An existing PacksRoot that holds more than packs is refused before
+        # any icacls; other packs and this script's leftovers are not.
+        # A PacksRoot that is a file or a link is not a folder of its own.
+        Set-Content -LiteralPath $root -Value 'x'
+        $result.rootFile = Install
+        Remove-Item -LiteralPath $root
+        $elsewhere = Join-Path $Work 'elsewhere'
+        New-Item -ItemType Directory -Path $elsewhere | Out-Null
+        New-Item -ItemType SymbolicLink -Path $root -Target $elsewhere | Out-Null
+        $result.rootLink = Install; $result.linkCalls = @($global:Calls)
+        Remove-Item -LiteralPath $root
+        New-Item -ItemType Directory -Path $root | Out-Null
+        # A file named like a pack is still not a pack folder.
+        Set-Content -LiteralPath (Join-Path $root 'readme') -Value 'x'
+        $result.file = Install; $result.fileCalls = @($global:Calls)
+        Remove-Item -LiteralPath (Join-Path $root 'readme')
+        New-Item -ItemType Directory -Path (Join-Path $root 'Microsoft Edge') | Out-Null
+        $result.folder = Install; $result.folderCalls = @($global:Calls)
+        Remove-Item -LiteralPath (Join-Path $root 'Microsoft Edge')
+        New-Item -ItemType Directory -Path (Join-Path $root 'other-pack') | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $root '.p2int.old-0123abcd') | Out-Null
+        $result.packs = Install
+        $result.left = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name } | Sort-Object)
+    }
+    'ancestor' {
+        # A folder above PacksRoot does not let the gateway list it.
+        $null = Install
+        $sha = (Get-DcRulePackTree -Path (Join-Path $root 'p2int')).Sha256
+        $global:Acl[$Work] = [pscustomobject]@{ Owner = 'S-1-5-18'; Entries = @($global:Good.Entries[0], $global:Good.Entries[1]) }
+        $result.detected = Invoke-DcRulePackDetect -PackName 'p2int' -PacksRoot $root -ExpectedTreeSha256 $sha
+        $result.code = Install
     }
     'unreadable' {
         # The parent stays without the gateway entry after icacls ran.
@@ -231,6 +325,31 @@ def test_install_fails_when_the_gateway_still_cannot_read_the_parent(tmp_path: P
 
 
 @needs_pwsh
+def test_install_refuses_a_packs_root_that_holds_more_than_packs(tmp_path: Path) -> None:
+    result, out = _harness(tmp_path, "strangers")
+    root = tmp_path / "packs"
+    assert result["rootFile"] == 1639 and result["rootLink"] == 1639 and result["linkCalls"] == [], out
+    assert result["file"] == 1639 and result["fileCalls"] == [], out
+    assert (
+        f"invalid_arguments: -PacksRoot {root} must hold only rule pack folders, and {root / 'readme'} is not one"
+        in out
+    )
+    assert result["folder"] == 1639 and result["folderCalls"] == [], out
+    assert result["packs"] == 0, out
+    assert result["left"] == ["other-pack", "p2int"]
+
+
+@needs_pwsh
+def test_install_and_detect_check_every_folder_above_the_packs_root(tmp_path: Path) -> None:
+    result, out = _harness(tmp_path, "ancestor")
+    assert result["detected"] == 1 and result["code"] == 1603, out
+    assert (
+        f"rule_pack_not_ready: the gateway service account NT SERVICE\\DefenseClawGateway cannot read {tmp_path}" in out
+    )
+    assert f"cannot read {tmp_path / 'packs'}" not in out
+
+
+@needs_pwsh
 def test_detect_requires_the_tree_and_private_permissions(tmp_path: Path) -> None:
     result, out = _harness(tmp_path, "detect")
     assert result["detected"] == 0 and "DefenseClaw rule pack p2int installed in" in out
@@ -251,6 +370,7 @@ $cases = [ordered]@{
     inheritOnly   = @{ Owner = 'S-1-5-32-544'; Entries = $admins + (E $gw 0x1200A9 $true $true); Role = 'pack' }
     denied        = @{ Owner = 'S-1-5-32-544'; Entries = $admins + (E $gw 0x1200A9) + (E 'S-1-1-0' 0x20000 $false); Role = 'pack' }
     usersRead     = @{ Owner = 'S-1-5-32-544'; Entries = $admins + (E $gw 0x1200A9) + (E 'S-1-5-32-545' 0x1200A9); Role = 'pack' }
+    domainUsers   = @{ Owner = 'S-1-5-32-544'; Entries = $admins + (E $gw 0x1200A9) + (E 'S-1-5-21-1-2-3-513' 0x1200A9); Role = 'pack' }
     userWrite     = @{ Owner = 'S-1-5-32-544'; Entries = $admins + (E $gw 0x1200A9) + (E 'S-1-5-21-1-2-3-1001' 0x2); Role = 'pack' }
     userOwner     = @{ Owner = 'S-1-5-21-1-2-3-1001'; Entries = $admins + (E $gw 0x1200A9); Role = 'pack' }
     ancestorUsers = @{ Owner = 'S-1-5-21-1-2-3-1001'; Entries = @((E 'S-1-5-32-545' 0x1200A9), (E 'S-1-5-11' 0x6)); Role = 'ancestor' }
@@ -278,6 +398,7 @@ def test_permission_check_matches_what_setup_requires(tmp_path: Path) -> None:
     for name in ("noGateway", "inheritOnly", "denied", "ancestorNone"):
         assert problems[name] == [unreadable], (name, problems[name])
     assert problems["usersRead"] == ["X can be read by standard users (S-1-5-32-545)"]
+    assert problems["domainUsers"] == ["X can be read by standard users (S-1-5-21-1-2-3-513)"]
     assert problems["userWrite"] == ["X can be changed by S-1-5-21-1-2-3-1001, which is not SYSTEM or Administrators"]
     assert problems["userOwner"] == ["X is owned by S-1-5-21-1-2-3-1001, not by SYSTEM or Administrators"]
 

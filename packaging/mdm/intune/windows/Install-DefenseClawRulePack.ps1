@@ -32,6 +32,10 @@
     -PlanOnly prints the tree SHA-256 and the icacls commands without changing
     anything, on any computer; use it on the administrator workstation.
 
+    -PacksRoot must be a folder of its own: the install refuses (1639) a drive
+    root, a Windows, program, profile or DefenseClaw folder, and an existing
+    folder that holds anything other than rule pack folders.
+
     Exit codes: 0 installed or already installed, 1603 failed (the message
     names the problem and the icacls fix), 1639 invalid arguments.
 
@@ -74,8 +78,18 @@ $script:DcAdminSids = @(
 # The SIDs an NT SERVICE virtual account's token carries: its own, NT
 # SERVICE\ALL SERVICES, SERVICE, Authenticated Users, Users, Everyone, LOCAL.
 $script:DcGatewayTokenSids = @($script:DcGatewaySid, 'S-1-5-80-0', 'S-1-5-6', 'S-1-5-11', 'S-1-5-32-545', 'S-1-1-0', 'S-1-2-0')
-# Standard users may not read a pack: a pack is one profile's policy.
+# Standard users may not read a pack: a pack is one profile's policy. Domain
+# Users (S-1-5-21-<domain>-513) counts too, as in Setup's check.
 $script:DcStandardUserSids = @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0', 'S-1-5-4')
+# The install replaces the owner and permissions of <PacksRoot>, so it may
+# not be one of these folders (relative to the drive root) or below them...
+$script:DcRefusedPackTrees = @(
+    'windows', 'program files', 'program files (x86)', 'users', 'documents and settings',
+    'recovery', 'system volume information', '$recycle.bin', 'boot', 'efi', 'perflogs', 'config.msi',
+    'programdata\microsoft', 'programdata\package cache', 'programdata\cisco\defenseclaw', 'programdata\defenseclaw'
+)
+# ...or one of these folders, which hold more than rule packs.
+$script:DcRefusedPackRoots = @('programdata', 'programdata\cisco')
 # The gateway walks at most this many entries of a pack.
 $script:DcMaxPackEntries = 4096
 # FILE_READ_DATA (FILE_LIST_DIRECTORY on a folder) and READ_CONTROL: the
@@ -93,10 +107,22 @@ function Test-DcRulePackName {
 }
 
 function Test-DcPacksRoot {
-    # An absolute local folder below a drive root, without . or .. segments.
+    # An absolute local folder below a drive root, without . or .. segments,
+    # short (8.3) names or segments Windows trims, that is not a Windows,
+    # program, profile or DefenseClaw folder.
     param([AllowEmptyString()][string]$Path)
-    if ($Path -notmatch '^[A-Za-z]:\\[^<>:"/|?*]*[^<>:"/|?*\\. ]$') { return $false }
-    return ($Path -notmatch '\\\\' -and $Path -notmatch '\\\.{1,2}(\\|$)')
+    if ($Path -notmatch '^[A-Za-z]:\\[^<>:"/|?*~]*[^<>:"/|?*~\\. ]$') { return $false }
+    if ($Path -match '\\\\' -or $Path -match '[. ]\\') { return $false }
+    $relative = $Path.Substring(3).ToLowerInvariant()
+    foreach ($tree in $script:DcRefusedPackTrees) {
+        if ($relative -eq $tree -or $relative.StartsWith($tree + '\', [StringComparison]::Ordinal)) { return $false }
+    }
+    return ($script:DcRefusedPackRoots -notcontains $relative)
+}
+
+function Test-DcStandardUserSid {
+    param([AllowEmptyString()][string]$Sid)
+    return ($script:DcStandardUserSids -contains $Sid -or $Sid -match '^S-1-5-21-[0-9-]+-513$')
 }
 
 function ConvertTo-DcSpecificRights {
@@ -196,7 +222,7 @@ function Get-DcAclProblems {
         if ($script:DcAdminSids -notcontains $entry.Sid -and ($rights -band $script:DcWriteRights)) {
             $problems += "$Path can be changed by $($entry.Sid), which is not SYSTEM or Administrators"
         }
-        if ($script:DcStandardUserSids -contains $entry.Sid -and ($rights -band $script:DcReadData)) {
+        if ((Test-DcStandardUserSid -Sid $entry.Sid) -and ($rights -band $script:DcReadData)) {
             $problems += "$Path can be read by standard users ($($entry.Sid))"
         }
     }
@@ -303,6 +329,23 @@ function Remove-DcRulePackFolder {
     Remove-Item -LiteralPath $Path -Recurse -Force
 }
 
+function Get-DcPacksRootStranger {
+    # The install gives <PacksRoot> its own owner and permissions, so an
+    # existing one may hold only rule pack folders and the .<pack>.new- and
+    # .<pack>.old- folders an interrupted run leaves. Returns what else it
+    # holds, or nothing.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    $root = Get-Item -LiteralPath $Path -Force
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $Path }
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force)) {
+        $folder = $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        $packLike = (Test-DcRulePackName -Name $item.Name) -or ($item.Name -cmatch '^\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(new|old)-[0-9a-f]{8}$')
+        if (-not ($folder -and $packLike)) { return $item.FullName }
+    }
+    return ''
+}
+
 function Invoke-DcRulePackInstall {
     param(
         [AllowEmptyString()][string]$PackName,
@@ -317,7 +360,7 @@ function Invoke-DcRulePackInstall {
         return 1639
     }
     if (-not (Test-DcPacksRoot -Path $PacksRoot)) {
-        Write-DcLine 'invalid_arguments: -PacksRoot must be an absolute local folder below a drive root, for example C:\ProgramData\DefenseClaw-RulePacks'
+        Write-DcLine 'invalid_arguments: -PacksRoot must be an absolute local folder below a drive root that is not a Windows, program, profile or DefenseClaw folder, for example C:\ProgramData\DefenseClaw-RulePacks'
         return 1639
     }
     if ($ExpectedTreeSha256 -and $ExpectedTreeSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
@@ -344,6 +387,11 @@ function Invoke-DcRulePackInstall {
             Write-DcLine "rule pack $PackName is not installed in $target; nothing changed"
         }
         return 0
+    }
+    $stranger = Get-DcPacksRootStranger -Path $PacksRoot
+    if ($stranger) {
+        Write-DcLine "invalid_arguments: -PacksRoot $PacksRoot must hold only rule pack folders, and $stranger is not one; the install would replace its permissions. Use a folder of its own, for example C:\ProgramData\DefenseClaw-RulePacks"
+        return 1639
     }
     if (-not $SourcePath) { $SourcePath = Join-Path $PSScriptRoot $PackName }
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {

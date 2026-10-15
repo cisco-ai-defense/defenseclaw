@@ -51,8 +51,18 @@ $script:DcAdminSids = @(
 # The SIDs an NT SERVICE virtual account's token carries: its own, NT
 # SERVICE\ALL SERVICES, SERVICE, Authenticated Users, Users, Everyone, LOCAL.
 $script:DcGatewayTokenSids = @($script:DcGatewaySid, 'S-1-5-80-0', 'S-1-5-6', 'S-1-5-11', 'S-1-5-32-545', 'S-1-1-0', 'S-1-2-0')
-# Standard users may not read a pack: a pack is one profile's policy.
+# Standard users may not read a pack: a pack is one profile's policy. Domain
+# Users (S-1-5-21-<domain>-513) counts too, as in Setup's check.
 $script:DcStandardUserSids = @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0', 'S-1-5-4')
+# The install replaces the owner and permissions of <PacksRoot>, so it may
+# not be one of these folders (relative to the drive root) or below them...
+$script:DcRefusedPackTrees = @(
+    'windows', 'program files', 'program files (x86)', 'users', 'documents and settings',
+    'recovery', 'system volume information', '$recycle.bin', 'boot', 'efi', 'perflogs', 'config.msi',
+    'programdata\microsoft', 'programdata\package cache', 'programdata\cisco\defenseclaw', 'programdata\defenseclaw'
+)
+# ...or one of these folders, which hold more than rule packs.
+$script:DcRefusedPackRoots = @('programdata', 'programdata\cisco')
 # The gateway walks at most this many entries of a pack.
 $script:DcMaxPackEntries = 4096
 # FILE_READ_DATA (FILE_LIST_DIRECTORY on a folder) and READ_CONTROL: the
@@ -70,10 +80,22 @@ function Test-DcRulePackName {
 }
 
 function Test-DcPacksRoot {
-    # An absolute local folder below a drive root, without . or .. segments.
+    # An absolute local folder below a drive root, without . or .. segments,
+    # short (8.3) names or segments Windows trims, that is not a Windows,
+    # program, profile or DefenseClaw folder.
     param([AllowEmptyString()][string]$Path)
-    if ($Path -notmatch '^[A-Za-z]:\\[^<>:"/|?*]*[^<>:"/|?*\\. ]$') { return $false }
-    return ($Path -notmatch '\\\\' -and $Path -notmatch '\\\.{1,2}(\\|$)')
+    if ($Path -notmatch '^[A-Za-z]:\\[^<>:"/|?*~]*[^<>:"/|?*~\\. ]$') { return $false }
+    if ($Path -match '\\\\' -or $Path -match '[. ]\\') { return $false }
+    $relative = $Path.Substring(3).ToLowerInvariant()
+    foreach ($tree in $script:DcRefusedPackTrees) {
+        if ($relative -eq $tree -or $relative.StartsWith($tree + '\', [StringComparison]::Ordinal)) { return $false }
+    }
+    return ($script:DcRefusedPackRoots -notcontains $relative)
+}
+
+function Test-DcStandardUserSid {
+    param([AllowEmptyString()][string]$Sid)
+    return ($script:DcStandardUserSids -contains $Sid -or $Sid -match '^S-1-5-21-[0-9-]+-513$')
 }
 
 function ConvertTo-DcSpecificRights {
@@ -173,7 +195,7 @@ function Get-DcAclProblems {
         if ($script:DcAdminSids -notcontains $entry.Sid -and ($rights -band $script:DcWriteRights)) {
             $problems += "$Path can be changed by $($entry.Sid), which is not SYSTEM or Administrators"
         }
-        if ($script:DcStandardUserSids -contains $entry.Sid -and ($rights -band $script:DcReadData)) {
+        if ((Test-DcStandardUserSid -Sid $entry.Sid) -and ($rights -band $script:DcReadData)) {
             $problems += "$Path can be read by standard users ($($entry.Sid))"
         }
     }
