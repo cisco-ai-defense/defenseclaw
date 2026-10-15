@@ -37,6 +37,10 @@ import (
 // result of a bundle-mode device fails with bundle_not_applied unless the
 // gateway enforces the confirmed bundle.
 
+// windowsBundleRestoreGatewayRunning reports a running gateway service, which
+// the restore asks to reload the re-applied config. A seam for tests.
+var windowsBundleRestoreGatewayRunning = func() bool { return windowsStandaloneGatewayPID() != 0 }
+
 // readWindowsBundleEnforcement reads the confirmed bundle and the installed
 // config. ok is false when the device is not in bundle mode or this account
 // cannot read the bundle store (a standard user's status).
@@ -113,14 +117,23 @@ func windowsBundleRestoreRequested(action string, opts *windowsEnterpriseLifecyc
 }
 
 // restoreWindowsBundleConfig puts the confirmed bundle's config back over a
-// config.yaml changed outside the lifecycle, with the lifecycle writer and
-// the bundle's principal, so config.generation.json and /health name the
-// bundle again. It takes nothing from the network: the config is rendered
-// from the verified, immutable version directory in the bundle store. The
-// edited file is kept as rejected-config.yaml. A running gateway is asked to
-// reload (and restarted when it does not adopt the policy); a stopped one
-// starts on the restored config in the ensure that follows. Any failure is
-// an error and the caller stops before it starts a service on the edit.
+// config.yaml changed outside the lifecycle, or deleted, with the lifecycle
+// writer and the bundle's principal, so config.generation.json and /health
+// name the bundle again. It takes nothing from the network: the config is
+// rendered from the verified, immutable version directory in the bundle
+// store. An edited file is kept as rejected-config.yaml. A running gateway is
+// asked to reload (and restarted when it does not adopt the policy); a
+// stopped one starts on the restored config in the ensure that follows. Any
+// failure is an error and the caller stops before it starts a service on the
+// edit.
+//
+// It writes nothing while an install transaction is pending: that
+// transaction's recovery, which the run performs next, puts back the config
+// it recorded, and the next ensure re-applies the bundle over it. It does not
+// validate the config again after the write: these are the confirmed bundle's
+// bytes, which validated at their first apply, and undoing the write would
+// put the unsigned edit back in force; a gateway that cannot take them fails
+// the run with bundle_not_applied.
 func restoreWindowsBundleConfig(ctx context.Context) windowsBundleRestore {
 	var out windowsBundleRestore
 	fail := func(code, message string) windowsBundleRestore {
@@ -166,30 +179,47 @@ func restoreWindowsBundleConfig(ctx context.Context) windowsBundleRestore {
 		return fail("bundle_restore_failed", "cannot open lifecycle.lock to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	defer release()
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_restore_deferred",
+			Message: "an install transaction is pending; its recovery restores the config it recorded first, and the next ensure re-applies " + label})
+		return out
+	}
 	previous, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
+	plan, err := e.planRestore(previous, err)
 	if err != nil {
 		return fail("bundle_restore_failed", "cannot read the installed config.yaml to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
-	e.InstalledConfig = previous
-	if !e.ConfigReplaced() {
+	if !plan.Write {
 		return out
 	}
-	kept := keepWindowsEnterpriseRejectedConfig(layout, previous)
+	missing := plan.Missing
+	kept, was := "", "missing"
+	if !missing {
+		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
+	}
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig,
-		windowsBundleRestoreWriteOptions(driver.Store, e.Current, configwrite.SHA256Hex(previous))); err != nil {
-		return fail("bundle_restore_failed", "config.yaml is not the config of "+label+" and re-applying it from the bundle store failed: "+
+		windowsBundleRestoreWriteOptions(driver.Store, e.Current, plan.ExpectSHA256)); err != nil {
+		return fail("bundle_restore_failed", "config.yaml is "+was+" and re-applying "+label+" from the bundle store failed: "+
 			windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	change := "config.yaml had been changed outside the lifecycle; re-applied " + label + " from the bundle store"
+	if missing {
+		change = "config.yaml was missing; re-applied " + label + " from the bundle store"
+	}
 	if kept != "" {
 		change += " and kept the edited file at " + kept
 	}
 	out.changes = append(out.changes, change)
-	out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_config_restored",
-		Message: "config.yaml was not the config of " + label + "; ensure re-applied the bundle from the bundle store"})
-	if windowsStandaloneGatewayPID() == 0 {
+	if missing {
+		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_config_restored",
+			Message: "config.yaml was missing; ensure re-applied " + label + " from the bundle store"})
+	} else {
+		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_config_restored",
+			Message: "config.yaml was not the config of " + label + "; ensure re-applied the bundle from the bundle store"})
+	}
+	if !windowsBundleRestoreGatewayRunning() {
 		// The ensure that follows starts the gateway on the restored config.
 		return out
 	}

@@ -8,9 +8,12 @@ package cli
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -75,6 +78,41 @@ func TestBundleEnforcementDecision(t *testing.T) {
 			}
 			if !strings.Contains(got, tc.problem) {
 				t.Fatalf("Problem() = %q, want it to contain %q", got, tc.problem)
+			}
+		})
+	}
+}
+
+// A deleted config.yaml is the same tamper as an edited one: ensure and
+// repair write the bundle config in its place, with nothing to keep and no
+// file expected. It used to fail the run with bundle_restore_failed, so the
+// remediation could never repair it (GAP-0114).
+func TestBundleEnforcementRestorePlan(t *testing.T) {
+	current := &enterprisebundle.Ref{BundleID: "b-01M4XRVFSG2C3VST7D5FYX95E9", Version: 3}
+	bundleConfig := []byte("config_version: 9\n")
+	edited := append(append([]byte(nil), bundleConfig...), []byte("# appended by hand\n")...)
+	confirmed := bundleEnforcement{Current: current, CurrentConfig: bundleConfig}
+	denied := fmt.Errorf("open config.yaml: %w", fs.ErrPermission)
+	for _, tc := range []struct {
+		name      string
+		in        bundleEnforcement
+		installed []byte
+		readErr   error
+		want      bundleConfigRestore
+		wantErr   bool
+	}{
+		{name: "edited", in: confirmed, installed: edited, want: bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(edited)}},
+		{name: "deleted", in: confirmed, readErr: fmt.Errorf("open config.yaml: %w", fs.ErrNotExist), want: bundleConfigRestore{Write: true, Missing: true}},
+		{name: "untampered", in: confirmed, installed: bundleConfig},
+		{name: "unreadable", in: confirmed, readErr: denied, wantErr: true},
+		{name: "deleted, bundle store unreadable", in: bundleEnforcement{Current: current, CurrentErr: errors.New("file_hash_mismatch")},
+			readErr: fs.ErrNotExist},
+		{name: "deleted, no bundle confirmed", readErr: fs.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.in.planRestore(tc.installed, tc.readErr)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("planRestore = %+v, %v; want %+v (error %v)", got, err, tc.want, tc.wantErr)
 			}
 		})
 	}

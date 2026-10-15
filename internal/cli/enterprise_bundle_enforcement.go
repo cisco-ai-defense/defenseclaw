@@ -8,9 +8,12 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -55,6 +58,38 @@ func bundleLabel(ref *enterprisebundle.Ref) string {
 func (e bundleEnforcement) ConfigReplaced() bool {
 	return e.Current != nil && e.CurrentErr == nil && e.CurrentConfig != nil &&
 		!bytes.Equal(e.CurrentConfig, e.InstalledConfig)
+}
+
+// bundleConfigRestore is how ensure and repair put the confirmed bundle's
+// config back over the installed config.yaml.
+type bundleConfigRestore struct {
+	// Write is set when config.yaml is not the bundle config.
+	Write bool
+	// Missing is set when there is no config.yaml: nothing is kept as
+	// rejected-config.yaml and the write expects no file.
+	Missing bool
+	// ExpectSHA256 is the hash of the installed bytes the write replaces
+	// ("" when Missing), so a concurrent change is not overwritten.
+	ExpectSHA256 string
+}
+
+// planRestore decides the restore from the installed config.yaml as read
+// under lifecycle.lock (installed, readErr). A deleted config.yaml is the
+// same tamper as an edited one and is restored too (GAP-0114); any other
+// read error is returned, and the restore fails.
+func (e bundleEnforcement) planRestore(installed []byte, readErr error) (bundleConfigRestore, error) {
+	renderable := e.Current != nil && e.CurrentErr == nil && e.CurrentConfig != nil
+	if readErr != nil {
+		if !errors.Is(readErr, fs.ErrNotExist) {
+			return bundleConfigRestore{}, readErr
+		}
+		return bundleConfigRestore{Write: renderable, Missing: renderable}, nil
+	}
+	e.InstalledConfig = installed
+	if !e.ConfigReplaced() {
+		return bundleConfigRestore{}, nil
+	}
+	return bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(installed)}, nil
 }
 
 // Problem is why the confirmed bundle does not enforce, or "" when it does or

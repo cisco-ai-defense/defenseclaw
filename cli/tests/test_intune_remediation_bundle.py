@@ -37,6 +37,8 @@ FAILED = 1603 if os.name == "nt" else 1603 & 0xFF
 _STUBS = r"""
 $script:DefenseClawMarkerKey = 'SOFTWARE\Cisco\DefenseClaw\Enterprise'
 $script:Device = $env:DC_TEST_DEVICE
+# The fast path waits for started services; the stand-in needs no wait.
+function Start-Sleep { param([int]$Seconds) }
 function Read-TestDevice { Get-Content -Raw -LiteralPath $script:Device | ConvertFrom-Json }
 function Save-TestDevice($State) { $State | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:Device }
 function Get-DefenseClawInstalledDeployment {
@@ -61,16 +63,30 @@ function Invoke-DefenseClawNative {
     $verb = ($ArgumentList | Select-Object -First 3) -join ' '
     $state.calls += @($verb)
     $applied = [bool]$state.applied
+    $id = $state.marker.PSObject.Properties['BundleId']
+    $label = if ($null -ne $id) { "signed policy bundle $($id.Value) version 3" } else { '' }
     $exit = 0
     switch -Wildcard ($verb) {
         'enterprise windows verify' {
             $errors = @()
             if (-not $applied -and $state.verify_checks_bundle) {
-                $errors = @(@{ code = 'bundle_not_applied'; message = 'config.yaml is not the config of signed policy bundle' })
+                $errors = @(@{ code = 'bundle_not_applied'; message = "config.yaml is not the config of $label" })
+            }
+            $guardian = 'running'
+            if ($state.side_stopped) {
+                $guardian = 'stopped'
+                $errors += @(@{ code = 'not_ready'; message = 'DefenseClawHookGuardian is not running' })
             }
             if ($errors.Count -gt 0) { $exit = 1603 }
             $out = @{ ok = ($errors.Count -eq 0); errors = $errors; services = @(
-                @{ name = 'DefenseClawGateway'; kind = 'gateway'; state = 'running'; required = $true }) } | ConvertTo-Json -Depth 6
+                @{ name = 'DefenseClawGateway'; kind = 'gateway'; state = 'running'; required = $true }
+                @{ name = 'DefenseClawSensorHelper'; kind = 'sensor_helper'; state = 'running'; required = $true }
+                @{ name = 'DefenseClawHookGuardian'; kind = 'guardian'; state = $guardian; required = $true }) } | ConvertTo-Json -Depth 6
+        }
+        'config DefenseClaw* start=' { $out = '' }
+        'start DefenseClaw*' {
+            $state.side_stopped = $false
+            $out = ''
         }
         'enterprise windows ensure' {
             switch ($state.ensure) {
@@ -78,15 +94,19 @@ function Invoke-DefenseClawNative {
                     # Older results could also carry noop: the warning decides.
                     $state.applied = $true
                     $out = @{ ok = $true; noop = $true; errors = @(); warnings = @(@{ code = 'bundle_config_restored'
-                        message = 'config.yaml was not the config of signed policy bundle; ensure re-applied the bundle from the bundle store' }) } | ConvertTo-Json -Depth 6
+                        message = "config.yaml was not the config of $label; ensure re-applied the bundle from the bundle store" }) } | ConvertTo-Json -Depth 6
                 }
                 'noop' {
                     $out = @{ ok = $true; noop = $true; errors = @(); warnings = @() } | ConvertTo-Json -Depth 6
                 }
                 'cannot_restore' {
+                    # What the CLI reports: the restore error, then the health
+                    # check's bundle_not_applied with the same reason.
                     $exit = 1603
+                    $why = "$label is confirmed, but its config cannot be read from the bundle store (file_hash_mismatch), so the device cannot prove it enforces it; deliver the bundle again or a newer one"
                     $out = @{ ok = $false; noop = $false; warnings = @(); errors = @(
-                        @{ code = 'bundle_restore_failed'; message = 'its config cannot be read from the bundle store (file_hash_mismatch)' }) } | ConvertTo-Json -Depth 6
+                        @{ code = 'bundle_restore_failed'; message = $why }
+                        @{ code = 'bundle_not_applied'; message = $why }) } | ConvertTo-Json -Depth 6
                 }
                 'ok_without_restore' {
                     $out = @{ ok = $true; noop = $false; errors = @(); warnings = @(@{ code = 'config_edited_outside_lifecycle'; message = 'hand edit' }) } | ConvertTo-Json -Depth 6
@@ -135,6 +155,7 @@ def _device(tmp_path: Path, **overrides) -> Path:
         "applied": True,
         "verify_checks_bundle": True,
         "ensure": "noop",
+        "side_stopped": False,
         "bundle_digest": BUNDLE_DIGEST,
         "edited_digest": EDITED_DIGEST,
         "calls": [],
@@ -183,8 +204,10 @@ def test_tampered_config_is_not_compliant_until_the_remediation_restores_the_bun
     assert "verify failed (bundle_not_applied)" in out, out
     code, out = _run(engine, fix, device)
     assert code == 0, out
-    assert "repaired: config.yaml was not the config of signed policy bundle" in out, out
-    assert f"; signed policy bundle {BUNDLE_ID} version 3 is applied" in out, out
+    assert out == (
+        f"DefenseClaw 9.9.9: repaired: config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3; "
+        f"ensure re-applied the bundle from the bundle store; signed policy bundle {BUNDLE_ID} version 3 is applied"
+    ), out
     code, out = _run(engine, detect, device)
     assert code == 0, out
     assert f"healthy; signed policy bundle {BUNDLE_ID} version 3 is applied (the gateway enforces it)" in out, out
@@ -206,7 +229,10 @@ def test_remediation_that_cannot_restore_the_bundle_fails(engine, scripts, tmp_p
     device = _device(tmp_path, applied=False, ensure="cannot_restore")
     code, out = _run(engine, fix, device)
     assert code == FAILED, out
-    assert "still failing (bundle_restore_failed)" in out, out
+    assert out.startswith(
+        f"DefenseClaw 9.9.9: still failing (bundle_restore_failed,bundle_not_applied): signed policy bundle {BUNDLE_ID} "
+        "version 3 is confirmed, but its config cannot be read from the bundle store (file_hash_mismatch)"
+    ), out
 
 
 def test_remediation_whose_ensure_succeeds_without_restoring_fails(engine, scripts, tmp_path):
@@ -218,6 +244,31 @@ def test_remediation_whose_ensure_succeeds_without_restoring_fails(engine, scrip
     code, out = _run(engine, fix, device)
     assert code == FAILED, out
     assert f"not repaired: signed policy bundle {BUNDLE_ID} version 3 is confirmed but not applied" in out, out
+
+
+def test_side_service_fast_path_still_runs_ensure_while_the_bundle_is_not_applied(engine, scripts, tmp_path):
+    # A stopped guardian sends Remediate-Fix down its fast path: start the
+    # side service, verify again. Verify then passes (a CLI whose verify
+    # does not check the bundle), but the gateway still enforces the edit, so
+    # the fast path must not report success: ensure runs and restores.
+    _, fix = scripts
+    device = _device(tmp_path, applied=False, verify_checks_bundle=False, side_stopped=True, ensure="restores")
+    code, out = _run(engine, fix, device)
+    assert code == 0, out
+    assert "repaired (started" not in out, out
+    assert f"repaired: config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3" in out, out
+    calls = _calls(device)
+    assert "start DefenseClawHookGuardian" in calls, calls
+    assert "enterprise windows ensure" in calls, calls
+
+
+def test_side_service_fast_path_repairs_a_device_whose_bundle_is_applied(engine, scripts, tmp_path):
+    _, fix = scripts
+    device = _device(tmp_path, side_stopped=True)
+    code, out = _run(engine, fix, device)
+    assert code == 0, out
+    assert out == "DefenseClaw 9.9.9: repaired (started DefenseClawHookGuardian)", out
+    assert "enterprise windows ensure" not in _calls(device)
 
 
 def test_untampered_bundle_device_is_compliant_and_remediation_is_a_noop(engine, scripts, tmp_path):
