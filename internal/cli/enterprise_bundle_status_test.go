@@ -66,6 +66,33 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	}
 }
 
+// A Windows receipt that recorded an unfinished session scan must not be
+// reported as a digest mismatch (GAP-0104).
+func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
+	got := bundleReceiptWarningMessage("sessions_scan_unknown", &enterprisebundle.Receipt{})
+	if strings.Contains(got, "digest") || !strings.Contains(got, "sessions could not be checked") {
+		t.Fatalf("sessions_scan_unknown message = %q", got)
+	}
+	if got := bundleReceiptWarningMessage(string(enterprisebundle.CodeDigestMismatch), nil); !strings.Contains(got, "differs from the signed expected digest") {
+		t.Fatalf("digest mismatch message = %q", got)
+	}
+}
+
+func TestConfirmedSignerRevocationIsReported(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	bundleDevice(t, e)
+	raw, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBundleTestFile(t, e.anchors, bytes.Replace(raw, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1))
+	warning := bundleCurrentSignerWarning(e.anchors, "k1")
+	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) {
+		t.Fatalf("revoked confirmed signer warning = %+v", warning)
+	}
+}
+
 func TestBundleStatusSettlesBeforeReadingCurrent(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	store := bundleDevice(t, e)

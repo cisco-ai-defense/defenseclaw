@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -520,6 +521,51 @@ func TestWindowsEnterpriseHotEnrollmentWarnsOpenSessions(t *testing.T) {
 		if len(warnings) != 1 || !strings.Contains(warnings[0], `user DCFC\alice runs claudecode (pid 41), started before the account was enrolled`) {
 			t.Fatalf("%s session warnings = %q", result.Action, warnings)
 		}
+	}
+}
+
+// GAP-0104: a bundle the hot path cannot take names the reason, and a held
+// lifecycle lock is retried (1618) instead of failing as 1603.
+func TestWindowsBundleHotApplyRefusalNamesItsCause(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: HIGH\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
+	for _, tc := range []struct {
+		name, code, detail string
+		status             *windowsEnterpriseInstallerReport
+		lock               error
+	}{
+		{"gateway not ready", "bundle_hot_apply_unavailable", "the gateway is not ready",
+			&windowsEnterpriseInstallerReport{OK: true, Installed: true}, nil},
+		{"lock held", "lifecycle_busy", "holds lifecycle.lock",
+			&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, windows.ERROR_SHARING_VIOLATION},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, previous, next)
+			opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+			if tc.lock != nil {
+				windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, tc.lock }
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			if applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "", tc.status, result); applied {
+				t.Fatal("refused bundle applied")
+			}
+			if len(result.Errors) != 1 || result.Errors[0].Code != tc.code || !strings.Contains(result.Errors[0].Message, tc.detail) {
+				t.Fatalf("errors = %+v, want %s naming %q", result.Errors, tc.code, tc.detail)
+			}
+			if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy && tc.code == "lifecycle_busy" {
+				t.Fatalf("exit = %d, want retryable %d", got, enterprisestatus.WindowsExitBusy)
+			}
+			if raw, err := os.ReadFile(host.configPath); err != nil || string(raw) != previous {
+				t.Fatalf("installed config changed: %q, %v", raw, err)
+			}
+		})
+	}
+	// An ordinary CONFIG= change keeps its silent fallback to the transaction.
+	_, opts := newHotConfigHost(t, previous, next)
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	if applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true}, result); applied || len(result.Errors) != 0 {
+		t.Fatalf("config fallback applied=%t errors=%+v", applied, result.Errors)
 	}
 }
 

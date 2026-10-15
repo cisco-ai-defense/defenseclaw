@@ -313,6 +313,62 @@ func TestVerifyTamperMatrix(t *testing.T) {
 	}
 }
 
+func TestWindowsDigestSignedOnLinuxComparesOnlyWhenEqual(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.Platforms = []string{enterprisebundle.PlatformWindows}
+		in.HostPlatform = enterprisebundle.PlatformLinux
+	})
+	anchor := anchors(t, "acme", []string{"eng"}, 0, activeKey("k1", f.key.Public()))
+	in := f.input(t, f.bundle, anchor)
+	in.Platform, in.HostPlatform = enterprisebundle.PlatformWindows, enterprisebundle.PlatformWindows
+	matched, err := enterprisebundle.Verify(context.Background(), in)
+	if err != nil || !matched.DigestVerified || matched.DigestUnverifiable {
+		t.Fatalf("cross-host equal digest = %+v, %v", matched, err)
+	}
+	manifest, err := enterprisebundle.DecodeManifest(f.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.EffectivePolicy.Digests[enterprisebundle.PlatformWindows] = gatewayDigest
+	raw, err := manifest.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Bundle = f.signed(t, raw)
+	differed, err := enterprisebundle.Verify(context.Background(), in)
+	if err != nil || differed.DigestVerified || !differed.DigestUnverifiable ||
+		len(differed.Warnings) == 0 || differed.Warnings[0].Code != enterprisebundle.WarnDigestUnverifiable ||
+		!strings.Contains(differed.Warnings[0].Message, "computed the windows digest on linux") {
+		t.Fatalf("cross-host differing digest = %+v, %v", differed, err)
+	}
+}
+
+// GAP-0107: a cross-host digest that differs names the signed component the
+// device computes differently, so the live pass can trace the input.
+func TestCrossHostDigestDifferenceNamesComponent(t *testing.T) {
+	const signed = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const device = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.Platforms = []string{enterprisebundle.PlatformWindows}
+		in.HostPlatform = enterprisebundle.PlatformLinux
+		in.Digester = func(ctx context.Context, _ *config.Config, _ []byte, _, _ string) (string, error) {
+			enterprisebundle.ReportPolicyComponents(ctx, map[string]string{"builtin": signed, "config": signed})
+			return signed, nil
+		}
+	})
+	in := f.input(t, f.bundle, anchors(t, "acme", []string{"eng"}, 0, activeKey("k1", f.key.Public())))
+	in.Platform, in.HostPlatform = enterprisebundle.PlatformWindows, enterprisebundle.PlatformWindows
+	in.Digester = func(ctx context.Context, _ *config.Config, _ []byte, _, _ string) (string, error) {
+		enterprisebundle.ReportPolicyComponents(ctx, map[string]string{"builtin": device, "config": signed})
+		return device, nil
+	}
+	res, err := enterprisebundle.Verify(context.Background(), in)
+	if err != nil || !res.DigestUnverifiable || len(res.Warnings) == 0 ||
+		!strings.Contains(res.Warnings[0].Message, "differs from this windows device's digest in component builtin,") {
+		t.Fatalf("cross-host component = %+v, %v", res, err)
+	}
+}
+
 // A signer and verifier stage the same files in different directories. Path
 // defaults derived from those directories must not change the signed digest.
 func TestVerifyBundleWithDefaultedPaths(t *testing.T) {

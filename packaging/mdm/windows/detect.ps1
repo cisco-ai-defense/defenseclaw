@@ -393,6 +393,11 @@ if ($RequireBundle) {
     if (-not $byVersion -and $bundleId -ne $wanted) {
         Exit-NotDetected -Reason "the confirmed policy bundle is $bundleId, not $wanted"
     }
+    # A revoked signer is reported, not hidden: the bundle still enforces,
+    # but detection fails until a bundle signed by an active key applies.
+    if (@($status.warnings | Where-Object { [string]$_.code -eq 'key_revoked' }).Count -gt 0) {
+        Exit-NotDetected -Reason "the signer of policy bundle $bundleId is revoked in the installed trust anchors; deliver a newer bundle signed by an active key"
+    }
     if ($null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
         Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"
     }

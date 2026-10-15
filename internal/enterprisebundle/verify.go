@@ -267,7 +267,7 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	res.EffectivePolicyDigest = digest
 	res.ExpectedDigest = m.EffectivePolicy.Digests[in.Platform]
 	standardLayout := layout.IsStandard(in.Platform)
-	if DigestComparable(m, in.ProductVersion, in.HostPlatform) {
+	if DigestComparableWithLocal(m, in.ProductVersion, in.HostPlatform, in.Platform, digest) {
 		if digest != res.ExpectedDigest {
 			if !standardLayout {
 				res.DigestLayoutUnverifiable = true
@@ -285,10 +285,20 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		}
 	} else {
 		res.DigestUnverifiable = true
+		message := "the signer used another product version; its signed digest cannot be compared with this build's policy digest; files[] hashes still hold"
+		if m.EffectivePolicy.ProductVersion == in.ProductVersion {
+			message = "the signer computed the " + in.Platform + " digest on " + m.EffectivePolicy.ComputedOn + "; it differs from this " + in.Platform + " device's digest"
+			// The signed components say which input the signing host saw
+			// differently, so the difference can be traced (GAP-0107).
+			if component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details); component != "" {
+				message += " in component " + boundedDetail(component)
+			}
+			message += ", so signed-versus-enforcing comparison is unavailable; files[] hashes still hold"
+		}
 		res.Warnings = append(res.Warnings, Warning{
 			Code:     WarnDigestUnverifiable,
 			Platform: in.Platform,
-			Message:  "the bundle was signed by another product version or on another platform; files[] hashes still hold, and this host reports its own digest",
+			Message:  message,
 		})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
@@ -305,6 +315,15 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 // A receipt from an earlier attempt must never decide comparability.
 func DigestComparable(m *Manifest, productVersion, hostPlatform string) bool {
 	return m != nil && m.EffectivePolicy.ProductVersion == productVersion && m.EffectivePolicy.ComputedOn == hostPlatform
+}
+
+// A target digest computed on a different signing host is comparable when
+// its signed value equals the digest computed on this device. A difference
+// remains informational: host-specific inputs cannot safely be ruled out.
+func DigestComparableWithLocal(m *Manifest, productVersion, hostPlatform, targetPlatform, localDigest string) bool {
+	return DigestComparable(m, productVersion, hostPlatform) ||
+		(m != nil && m.EffectivePolicy.ProductVersion == productVersion &&
+			digestPattern.MatchString(localDigest) && m.EffectivePolicy.Digests[targetPlatform] == localDigest)
 }
 
 func differingDigestComponent(expected []DigestComponent, actual map[string]string) string {

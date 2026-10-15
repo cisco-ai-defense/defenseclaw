@@ -139,8 +139,12 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		res.Bundle = res.LastReceipt.Status(st.Current)
 		switch last := res.LastReceipt; {
 		case last.State == enterprisebundle.StateFailed:
+			message := "the last bundle received failed (" + string(last.ErrorCode) + "); the device remains on its base policy"
+			if st.Current != nil {
+				message = "the last bundle received failed (" + string(last.ErrorCode) + "); the current bundle keeps enforcing"
+			}
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_failed",
-				Message: fmt.Sprintf("the last bundle received failed (%s); the current bundle keeps enforcing", last.ErrorCode)})
+				Message: message})
 		case !enterprisebundle.Finished(last.State):
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_pending",
 				Message: "the last bundle received is " + last.State + " and not confirmed yet; the next lifecycle run settles it"})
@@ -181,7 +185,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			if manifest, err := enterprisebundle.DecodeManifest(raw); err == nil {
 				manifestKnown = true
 				signedExpected = manifest.EffectivePolicy.Digests[runtime.GOOS]
-				digestComparable = enterprisebundle.DigestComparable(manifest, appVersion, runtime.GOOS)
+				digestComparable = enterprisebundle.DigestComparableWithLocal(manifest, appVersion, runtime.GOOS, runtime.GOOS, st.Current.EffectivePolicyDigest)
 			}
 		}
 	}
@@ -210,17 +214,12 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 				return
 			}
 		}
-		message := "the gateway's effective policy digest differs from the signed expected digest"
-		if code == enterprisebundle.WarnDigestUnverifiable {
-			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
-		} else if code == enterprisebundle.WarnDigestLayoutUnverifiable {
-			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
-		} else if code == "capability_disabled" {
-			message = "the bundle disabled: " + strings.Join(currentReceipt.DisabledByBundle, ", ")
-		}
-		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: bundleReceiptWarningMessage(code, currentReceipt)})
 	}
 	if currentReceipt != nil {
+		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
+			res.Warnings = append(res.Warnings, *warning)
+		}
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
@@ -246,6 +245,45 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if policy.LastReloadError != "" {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "policy_reload_rejected",
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})
+	}
+	return nil
+}
+
+// bundleReceiptWarningMessage explains a warning code the confirmed
+// receipt recorded. Digest mismatch codes keep the generic text.
+func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt) string {
+	switch code {
+	case enterprisebundle.WarnDigestUnverifiable:
+		return "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
+	case enterprisebundle.WarnDigestLayoutUnverifiable:
+		return "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
+	case "capability_disabled":
+		if receipt == nil {
+			return "the bundle disabled a capability"
+		}
+		return "the bundle disabled: " + strings.Join(receipt.DisabledByBundle, ", ")
+	case "sessions_scan_unknown":
+		// Windows records a session scan that did not finish when the
+		// bundle applied (GAP-0104); it says nothing about the digest.
+		return "running agent sessions could not be checked when this bundle applied; restart any agent session opened before it"
+	}
+	return "the gateway's effective policy digest differs from the signed expected digest"
+}
+
+func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebundle.Warning {
+	if anchorsPath == "" || signerKeyID == "" {
+		return nil
+	}
+	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
+	if err != nil {
+		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
+	}
+	key := anchors.Key(signerKeyID)
+	if key == nil {
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyUnknown), Message: "the confirmed bundle signer is absent from the installed trust anchors"}
+	}
+	if key.Status == enterprisebundle.KeyRevoked {
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyRevoked), Message: "the confirmed bundle signer is revoked in the installed trust anchors; review the device policy"}
 	}
 	return nil
 }

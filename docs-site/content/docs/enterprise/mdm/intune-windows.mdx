@@ -10,24 +10,24 @@ keywords:
   - PowerShell 7 dependency
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not delivered DefenseClaw in a live tenant yet. The tenant setup and Windows enrollment it depends on were run on a test tenant: see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).</Callout>
+<Callout title="Pilot evidence">A live test tenant delivered the base Win32 app, signed bundle app and uninstall to an enrolled Windows device. Bundle detection and hook enforcement were observed. A first bundle apply failed and needed a manual Intune retry; upgrades through supersedence remain unverified because Intune rejected the app graph.</Callout>
 
 <Callout title="At a glance">
-- **You upload:** a Win32 app, `Install-DefenseClawIntune.intunewin`, that
+- **You upload:** a base Win32 app, `Install-DefenseClawIntune.intunewin`, that
   `New-DefenseClawIntunePackage.ps1` builds from
   `DefenseClawSetup-Enterprise-Standalone-x64.exe` and your `config.yaml`,
-  plus a PowerShell 7 Win32 app that it depends on.
+  one dependent Win32 app per signed bundle, and a PowerShell 7 Win32 app.
 - **Install:** the app runs `Install-DefenseClawIntune.ps1` as System, which
   runs Setup `/ensure`.
-- **Detection:** the registry value `ProductVersion` under
+- **Base detection:** the registry value `ProductVersion` under
   `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, greater than or
-  equal to the version you deploy. Optional Remediations keep it healthy.
+  equal to the version you deploy. The bundle app uses generated
+  `detect-bundle.ps1` to require a confirmed bundle and enforcing gateway.
 - **Uninstall:** `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1`.
 </Callout>
 
-This recipe creates three things in Intune: a Win32 app that installs
-PowerShell 7, a Win32 app that installs DefenseClaw and depends on it, and an
-optional Remediations package that keeps DefenseClaw healthy. It follows the
+This recipe creates a PowerShell 7 app, a base DefenseClaw app, a dependent
+signed bundle app and optional Remediations. It follows the
 [MDM contract](/docs/enterprise/mdm); read that first for the exit codes,
 detection and logs.
 
@@ -101,7 +101,9 @@ script:
 | `-Sha256` | The Setup's pin. Required with hash-pinned trust; the script refuses a Setup that does not match. |
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of the signer certificates you accept, comma-separated or repeated. |
-| `-ConfigPath` | The config. The script refuses one with an `api_key:` line. Always pass it: without a config the first install fails with `1639`. |
+| `-ConfigPath` | The base config. It must select the same guardrail pack and rules as the signed bundle. Without a config the first install fails with `1639`. |
+| `-BaseConfigPath` | Required for a bundle package: the exact base app config. Packaging refuses a missing or weaker guardrail policy. |
+| `-BundlePath`, `-TrustAnchorPath`, `-RequireBundle` | For a bundle app: signed bundle, optional public anchors and required bundle version for detection. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
 | `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
 | `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
@@ -115,6 +117,32 @@ The script:
    the trust mode and the allowed signers;
 3. wraps `content\` into `Install-DefenseClawIntune.intunewin`;
 4. prints the values to enter in the admin center.
+
+### Signed bundle after the base install
+
+Setup needs `CONFIG=` on first install and accepts `BUNDLE=` only after that
+install. The base config must select the same custom rule pack, digest,
+thresholds and rule settings as the signed bundle. Install the pack files in
+an administrator-owned directory **before** the base app; make that pack app
+a dependency of the base app. The base config names that installed absolute
+path. Build the bundle app with the same base config:
+
+```powershell
+./New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<SHA-256 of Setup>' -BundlePath .\policy.dcbundle `
+  -TrustAnchorPath .\bundle-anchors.json -RequireBundle 1 `
+  -BaseConfigPath .\config.yaml -OutputDirectory .\intune-bundle-1
+```
+
+Verify the bundle signature offline first. The packager compares the base
+config with the manifest-pinned bundle config and refuses a different
+guardrail policy; only the pack path may differ. Set the bundle app's
+dependency to the base app with **Automatically install: Yes**, and upload
+the generated `detect-bundle.ps1` as its custom detection rule. A base-only
+device is installed but has no confirmed signed bundle. It enforces only the
+base config's pack during the interval until the bundle applies; with an
+empty or weaker base pack, that interval can allow calls the bundle denies.
 
 ## 3. Create the Win32 app
 
@@ -135,7 +163,7 @@ Upload the `.intunewin` in **Apps** > **All Apps** > **Create** >
 | Requirements | Minimum operating system | The oldest Windows release your fleet runs. The packaging script prints Windows 10 22H2 as a starting point. DefenseClaw itself does not check the Windows version; it needs x64 and PowerShell 7. |
 | Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `<version>`, *Associated with a 32-bit app on 64-bit clients*: **No** |
 | Dependencies | App | The PowerShell 7 app, **Automatically install**: **Yes** |
-| Supersedence | Previous DefenseClaw app | **Uninstall previous version**: **No** |
+| Supersedence | Previous DefenseClaw app | Do not use with a dependent bundle app; see Upgrade below. |
 | Assignments | Required | Device groups |
 
 Why these values:
@@ -155,8 +183,8 @@ Why these values:
   not expand environment variables in uninstall commands.
 - **Version comparison, greater than or equal to.** A newer installed version
   still counts as installed, so an older app never tries to replace it.
-- **No uninstall on supersedence.** `/ensure` upgrades in place and keeps the
-  config, key and state.
+- **Bundle detection.** The base registry rule proves only that Setup ran.
+  Use the bundle app's generated detector to check signed policy enforcement.
 
 If you prefer a script, `packaging/mdm/windows/detect.ps1` works as a custom
 detection script. Intune runs detection scripts without arguments, so set the
@@ -186,7 +214,10 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   the lock (the next scheduled run checks again). Otherwise it exits `1`,
   which starts the remediation. Its line names the failing check: each
   DefenseClaw service that is not running, with its start mode, or else the
-  first error.
+  first error. A healthy line also names the policy source: the confirmed
+  signed bundle and its version, or that the installed config enforces
+  because no bundle is confirmed. Remediations do not install a missing
+  bundle; the bundle app's detection does.
 - `Remediate-Fix.ps1` first checks the same way. When the only problem is a
   stopped or disabled hook guardian or enumerator while the gateway runs, it
   sets that service back to automatic start, starts it and verifies again,
@@ -274,8 +305,9 @@ and a digest prefix, never the value. The same wrapper options,
 
 ## 6. Change the config, upgrade and roll back
 
-**Custom rule pack before the first install.** If `guardrail.rule_pack_dir`
-names a custom pack, deliver it before assigning the DefenseClaw Win32 app.
+**Custom rule pack before the first install.** If `guardrail.rule_pack`
+selects a `guardrail.custom_packs` entry, deliver its digest-pinned files
+before assigning the DefenseClaw base Win32 app.
 The simplest route is a separate Intune Win32 app containing the pack archive,
 with a detection rule for the unpacked pack and a dependency from the
 DefenseClaw app. Avoid embedding a large encoded pack in a platform script:
@@ -301,11 +333,15 @@ rule-pack directory, set the gateway's read permissions as in
 assignment. Make the pack app a dependency of the install, upgrade and config
 apps.
 
-**Upgrade.** Build a package from the new Setup with
-`New-DefenseClawIntunePackage.ps1`, create it as a new Win32 app, set its
-detection rule to the new version, and make it supersede the previous app with
-**Uninstall previous version**: **No**. Devices below the new version run the
-launcher, and `/ensure` upgrades them in place.
+**Upgrade.** Superseding the base app while a required bundle app depends on
+it failed in the live tenant with Intune error `0x87D300DB`; Intune did not
+run Setup. This supersedence recipe is unsupported. For an interim upgrade,
+keep the existing base and bundle assignments, build a separate Setup-only
+Win32 app from the new release (no `-ConfigPath` and no supersedence), assign
+it to a pilot group and confirm its version detection. Then package and
+assign the next signed bundle with the new Setup, and confirm bundle detection
+and enforcement. Do not remove the old base app while bundle apps depend on
+it. This interim sequence has not yet been verified live.
 After each Intune upgrade, an administrator must verify an enrolled user's
 Claude Code hook policy and run the documented repair with
 `--attest-claude-effective-policy`. Until that attestation, `status` can report
@@ -313,14 +349,16 @@ Claude Code hook policy and run the documented repair with
 supersedence alone cannot perform the attestation; deliver a separate elevated
 script or Remediation for each upgraded build.
 
-**Change the config.** Setup applies a new config when it runs `/ensure` with a
-config that differs from the installed one. The registry rule detects by
-version only, so Intune does not re-run an app for a config-only change. To
-roll out a new config:
+**Change the config.** In bundle mode, deliver a new signed bundle; Setup
+refuses a direct `CONFIG=` change with `bundle_required`. For a base-only
+deployment, Setup applies a new config when it runs `/ensure` with a config
+that differs from the installed one. The registry rule detects by version
+only, so Intune does not re-run an app for a config-only change. To change a
+base-only deployment:
 
 1. Build a package from the same Setup and the new `config.yaml`.
-2. Create it as a new Win32 app that supersedes the previous one with
-   **Uninstall previous version**: **No**.
+2. Create it as a separate Win32 app without supersedence of a base app that
+   bundle apps depend on.
 3. Use this custom detection script instead of the registry rule. Replace the
    two values at the top with the minimum version and the `config_sha256`
    value from the new package's `intune-package.json`:
@@ -357,17 +395,18 @@ Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
 
 ## 7. Remove DefenseClaw
 
-First remove every **Required** assignment of the install, upgrade and config
-apps from the target device group. For each app, preview and apply
+First remove every **Required** assignment of the install, bundle, upgrade and
+config apps from the target device group. For each app, preview and apply
 `intune_tenant.py remove-assignment --app NAME --group GROUP [--apply]`, or
-remove the assignment in Intune admin center. Then assign the uninstall app as
-**Uninstall** to that group. Intune runs the
-uninstall command, `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall
-JSON=1`, which stops and deletes the services, removes DefenseClaw's hooks and
-machine-policy entries (administrator entries stay), and removes the
-Add/Remove Programs entry and the marker, and removes the config, the key and
-the machine state. Add `PURGE=1` to the uninstall command to also remove each
-enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries.
+remove the assignment in Intune admin center. Then assign the base app as
+**Uninstall** to that group. Intune runs its uninstall command,
+`DefenseClawSetup-Enterprise-Standalone-x64.exe
+/uninstall JSON=1`. Standalone uninstall stops and deletes the services,
+removes DefenseClaw's hooks and owned machine-policy entries, the registry
+marker, installed binaries and machine state. That state includes the config,
+secrets, trust anchors, bundles and receipts. It leaves enrolled accounts'
+per-user DefenseClaw data and binaries. Add `PURGE=1` to remove those too.
+The bundle app's no-op uninstall does not remove a bundle.
 
 `packaging/mdm/windows/uninstall.ps1 [-Purge]` does the same from any
 PowerShell, as a platform script for example. Both are idempotent.
@@ -392,11 +431,15 @@ To see the current state on a device, run from an elevated PowerShell:
 | --- | --- |
 | Install fails with `1639` | No config in the package, or its `enterprise.profile` is not `standalone`. |
 | Install fails with `1639` and `invalid_arguments` | The config does not parse, is not UTF-8, does not validate, or sits where a standard user can change it. `errors[].message` names the line or the folder and the fix. |
-| First install fails with `1603`: enumerating the user profiles did not finish within 900 seconds | On a cold device, antivirus scanning the new DefenseClaw binaries can make the first run slow; the lifecycle rolled back. Run the install again (sync the device, or let Intune retry it at a later check-in). |
+| Bundle app reports `1618` with `bundle_apply_failed` | The bundle verified but did not finish applying; it is not confirmed, and the base config (or the last good bundle) keeps enforcing. The error before `bundle_apply_failed` names the cause, for example `bundle_hot_apply_unavailable` with the verify detail, `lifecycle_busy` or `bundle_policy_not_adopted`. Intune retries `1618` three times, five minutes apart. `sessions_scan_unknown` alone is a warning: the running-session scan took longer than 3 seconds. If every retry fails, fix the named cause and force a retry as below. |
+| Failed bundle app stays NotDetected | IME may keep its GRS retry record. After preserving `AppWorkload.log`, have an Intune administrator identify the failed app ID, back up and remove only that app's stale GRS registry value under `HKLM\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\<identity>\GRS\...`, restart the Intune Management Extension service, then sync the device. In the live test this caused IME to retry. |
 | A gateway scan refuses a project inside a user profile | Run the scan as the signed-in user or move the project outside the profile. The gateway still scans readable paths outside profiles; scanner children inherit its write-restricted LocalSystem token. |
 | Upgrade fails with `1603`: a per-user hooks folder has untrusted permissions | Have an administrator inspect the folder named in the error, reset its permissions or remove it, then run Setup /ensure again. |
 | Install fails with `1603`: a named service fails during start or stop | Inspect the Windows service events and that service's log, then run Setup /ensure again. A standalone start has a 30-second SCM request budget and a 60-second running-state budget; each stop wait has a 30-second budget. |
 | Install fails with `1603` and `powershell7_required` | The PowerShell 7 dependency did not install, or is a preview build. |
 | Install fails with `1603` and `mdm_hash_mismatch` | The package content changed after `New-DefenseClawIntunePackage.ps1` pinned it. Rebuild it. |
-| Intune reports `1618` and retries | Another lifecycle run held the lock. Intune retries three times, five minutes apart. |
+| Intune reports `1618` and retries | Another lifecycle run held the lock, or a bundle did not finish applying (see above). Intune retries three times, five minutes apart. |
 | The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |
+| Graph still shows Installed after uninstall | The app install report lagged device detection by more than 15 minutes in the live test. Check local Intune detection or `enterprise windows status` for current device state. |
+| Receipt shows `digest_unverifiable` | The signed Windows digest was computed by another release, or on another OS and differs from this device's. When the release matches, the warning names the first digest component that differs. A Linux-signed bundle whose Windows digest equals the device's is verified. A bundle signed on Windows by the release the devices run is always compared, and a different digest refuses it (`digest_mismatch`). The warning alone does not prove a policy mismatch: `files[]` hashes and the gateway's enforcing digest are still checked. |
+| Rollback receipt has no `rollback_of` | Current Windows receipts omit that field. Correlate the rollback with bundle IDs and versions in status and lifecycle logs. |
