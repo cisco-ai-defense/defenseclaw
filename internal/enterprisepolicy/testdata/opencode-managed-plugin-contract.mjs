@@ -117,11 +117,24 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks), pattern);
 }
 
-// No output and exit 0 while the plugin still exists must block.
+// No output and exit 0 while the plugin still exists must block; once
+// uninstall removed this plugin file, the same empty answer allows.
 {
   const hooks = await load();
   answer("event.json", "", 0);
   await assert.rejects(before(hooks), /failed closed \(empty response\)/);
+  const pluginSource = readFileSync(pluginPath);
+  resetCalls();
+  rmSync(pluginPath);
+  try {
+    assert.equal(await before(hooks), undefined);
+  } finally {
+    writeFileSync(pluginPath, pluginSource);
+  }
+  const [call, ...rest] = eventCalls();
+  assert.equal(rest.length, 0);
+  assert.ok(call && call.args.includes("tool.execute.before"), "the empty answer came from the hook binary");
+  console.log("case ok: empty exit-0 answer after the plugin file is removed allows");
 }
 
 // Action mode needs authoritative arguments: a plugin after this one could
