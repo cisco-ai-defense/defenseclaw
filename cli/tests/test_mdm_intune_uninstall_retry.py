@@ -16,7 +16,6 @@ Start-Sleep are stand-ins.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -276,6 +275,8 @@ def _probe_run(tmp_path: Path, script: Path, *args: str) -> tuple[int, str, list
     ],
 )
 def test_kit_scripts_start_no_cli_while_lifecycle_lock_is_held(tmp_path, script, args, busy_exit, busy_text):
+    import fcntl  # POSIX only: Windows CI collects this module, the test is skipped there
+
     lock = tmp_path / LOCK_NAME
     lock.write_bytes(b"")
     with lock.open("rb") as handle:
