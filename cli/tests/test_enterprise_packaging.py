@@ -340,7 +340,7 @@ def test_enterprise_package_ships_the_managed_opencode_plugin():
 # so a builder under umask 0002 archives the modes CI's umask 0022 gives,
 # and the binaries are root-owned 0755 (a root `tar -x` keeps the owner, and
 # `enterprise <os> install --payload` refuses binaries another uid owns).
-_ARCHIVE_MODE_HOOK = "chmod -R go-w packaging LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md"
+_ARCHIVE_MODE_HOOK = "chmod -R go-w packaging edge-connector LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md"
 
 
 def test_release_archives_do_not_take_the_builders_modes() -> None:
@@ -361,6 +361,7 @@ def test_archive_mode_hook_gives_umask_0002_checkouts_the_ci_modes(tmp_path: Pat
         "packaging/systemd/defenseclaw-gateway.service": 0o664,
         "packaging/systemd/user/defenseclaw-sandbox.socket": 0o664,
         "packaging/linux/postinstall.sh": 0o775,
+        "edge-connector/tools/policy_compiler.py": 0o664,
         "LICENSE": 0o664,
         "NOTICE": 0o664,
         "THIRD_PARTY_LICENSES.txt": 0o664,

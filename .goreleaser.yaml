@@ -13,7 +13,7 @@ project_name: defenseclaw
 before:
   hooks:
     - sh -c 'mkdir -p build/packaging/linux && sed "s|@DC_PKG_VERSION@|{{ .Version }}|" packaging/linux/preinstall.sh >build/packaging/linux/preinstall.sh'
-    - chmod -R go-w packaging LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md
+    - chmod -R go-w packaging edge-connector LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md
 
 builds:
   - id: defenseclaw
@@ -285,6 +285,8 @@ nfpms:
         dst: /opt/defenseclaw/share/fleet/policy_compiler.py
         file_info:
           mode: 0644
+          owner: root
+          group: root
       - src: packaging/systemd/defenseclaw-gateway.service
         dst: /usr/lib/systemd/system/defenseclaw-gateway.service
         file_info:
