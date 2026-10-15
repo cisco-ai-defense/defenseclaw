@@ -25,7 +25,8 @@
     1618 another lifecycle run is active (Intune retries), 1639 invalid
     arguments. One exception: Setup refuses an uninstall with
     uninstall_in_use, before it changes anything, while a program runs from
-    the install folder. That program is often a detection or Remediations
+    the install folder or, with -Purge, has a file in the ProgramData data
+    folder open (GAP-0136). That program is often a detection or Remediations
     script that runs the installed CLI for a few seconds, so the launcher
     runs Setup again, at most 6 times, each time after the programs Setup
     named have exited or 20 seconds have passed. If Setup still refuses, the
@@ -416,9 +417,10 @@ if ($pins.trust_mode -eq 'authenticode') {
     if ($signers -notcontains $thumbprint) { Exit-Launcher 1603 'mdm_signer_not_allowed' "Setup is signed by certificate $thumbprint, which the package does not allow" }
     $arguments += ('ALLOWEDSIGNERS=' + ($signers -join ','))
 }
-# A refused uninstall changed nothing, so run it again once the programs it
-# names have exited, and leave a lasting refusal to Intune's 1618 retry
-# instead of failing it with 1603 (GAP-0126).
+# A refused uninstall changed nothing, or (a purge that met a file opened
+# after its check) left only the data folder that the next run deletes, so
+# run it again once the programs it names have exited, and leave a lasting
+# refusal to Intune's 1618 retry instead of failing it with 1603 (GAP-0126).
 $attempt = 0
 while ($true) {
     $attempt++

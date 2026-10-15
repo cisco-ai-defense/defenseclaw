@@ -2038,6 +2038,139 @@ namespace $nativeNamespace
             }
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RM_UNIQUE_PROCESS
+        {
+            internal uint dwProcessId;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RM_PROCESS_INFO
+        {
+            internal RM_UNIQUE_PROCESS Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            internal string strAppName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            internal string strServiceShortName;
+            internal int ApplicationType;
+            internal uint AppStatus;
+            internal uint TSSessionId;
+            [MarshalAs(UnmanagedType.Bool)]
+            internal bool bRestartable;
+        }
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(
+            out uint sessionHandle,
+            int sessionFlags,
+            StringBuilder sessionKey);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint sessionHandle);
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(
+            uint sessionHandle,
+            uint fileCount,
+            string[] fileNames,
+            uint applicationCount,
+            IntPtr applications,
+            uint serviceCount,
+            string[] serviceNames);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmGetList(
+            uint sessionHandle,
+            out uint processInfoNeeded,
+            ref uint processInfo,
+            [In, Out] RM_PROCESS_INFO[] affectedApps,
+            out uint rebootReasons);
+
+        public sealed class FileHolder
+        {
+            public uint ProcessId { get; private set; }
+            public long StartFileTime { get; private set; }
+            public string AppName { get; private set; }
+            public string ServiceName { get; private set; }
+
+            internal FileHolder(
+                uint processId,
+                long startFileTime,
+                string appName,
+                string serviceName)
+            {
+                ProcessId = processId;
+                StartFileTime = startFileTime;
+                AppName = appName ?? String.Empty;
+                ServiceName = serviceName ?? String.Empty;
+            }
+        }
+
+        // The processes the Windows Restart Manager reports with one of
+        // these files open (GAP-0136). It names every holder, whichever
+        // account or session runs it, without opening the files.
+        public static FileHolder[] GetFileHolders(string[] paths)
+        {
+            if (paths == null || paths.Length == 0)
+                return new FileHolder[0];
+            uint session;
+            int status = RmStartSession(out session, 0, new StringBuilder(64));
+            if (status != 0)
+                throw new Win32Exception(status, "Restart Manager session start failed");
+            try
+            {
+                const int chunk = 1000;
+                for (int offset = 0; offset < paths.Length; offset += chunk)
+                {
+                    int count = Math.Min(chunk, paths.Length - offset);
+                    string[] part = new string[count];
+                    Array.Copy(paths, offset, part, 0, count);
+                    status = RmRegisterResources(
+                        session,
+                        (uint)count,
+                        part,
+                        0,
+                        IntPtr.Zero,
+                        0,
+                        null);
+                    if (status != 0)
+                        throw new Win32Exception(status, "Restart Manager file registration failed");
+                }
+                RM_PROCESS_INFO[] infos = new RM_PROCESS_INFO[16];
+                for (int attempt = 0; ; attempt++)
+                {
+                    uint needed;
+                    uint returned = (uint)infos.Length;
+                    uint reasons;
+                    status = RmGetList(session, out needed, ref returned, infos, out reasons);
+                    if (status == 0)
+                    {
+                        FileHolder[] holders = new FileHolder[returned];
+                        for (int index = 0; index < returned; index++)
+                        {
+                            RM_PROCESS_INFO info = infos[index];
+                            holders[index] = new FileHolder(
+                                info.Process.dwProcessId,
+                                ((long)(uint)info.Process.ProcessStartTime.dwHighDateTime << 32) |
+                                    (long)(uint)info.Process.ProcessStartTime.dwLowDateTime,
+                                info.strAppName,
+                                info.strServiceShortName);
+                        }
+                        return holders;
+                    }
+                    // ERROR_MORE_DATA: the list grew between the two calls.
+                    if (status != 234 || attempt >= 8)
+                        throw new Win32Exception(status, "Restart Manager holder list failed");
+                    infos = new RM_PROCESS_INFO[needed + 16];
+                }
+            }
+            finally
+            {
+                RmEndSession(session);
+            }
+        }
+
     }
 }
 "@ -Language CSharp -PassThru -ErrorAction Stop)
@@ -5109,6 +5242,301 @@ function Get-DefenseClawProcessImages {
     }
 }
 
+function Get-DefenseClawUninstallOwnProcessIds {
+    <#
+        The processes an uninstall in-use check does not count: this
+        lifecycle, the installed CLI that asked for its own removal and the
+        running DefenseClaw services, which the uninstall stops itself.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    if ($SelfUninstallCallerPID -gt 0) {
+        [void]$excluded.Add([int]$SelfUninstallCallerPID)
+    }
+    foreach ($name in @(Get-DefenseClawManagedServiceNames `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)) {
+        try {
+            if (Test-DefenseClawServiceExists -Name $name) {
+                [void]$excluded.Add([int](Get-DefenseClawServiceProcessId -Name $name))
+            }
+        }
+        catch {
+        }
+    }
+    return , $excluded
+}
+
+function Format-DefenseClawProcessInUse {
+    # "name (pid N, account A, started by P)": the Intune launcher reads the
+    # pid of each program an uninstall_in_use refusal names.
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][int]$Id,
+        [string]$UserName,
+        [string]$Parent
+    )
+    $text = '{0} (pid {1}' -f $Name, $Id
+    if (-not [string]::IsNullOrEmpty($UserName)) {
+        $text += ', account ' + $UserName
+    }
+    if (-not [string]::IsNullOrEmpty($Parent)) {
+        $text += ', started by ' + $Parent
+    }
+    return $text + ')'
+}
+
+# A purge deletes every file under StateRoot, and a handle another program
+# opened without delete sharing (a SIEM forwarder or a log tail reading
+# runtime\audit.db) makes that deletion fail. The data-file check asks about
+# at most this many files, the audit database first, and names the file a
+# holder has open by asking about at most the second number one at a time.
+$script:StateFileInUseCheckLimit = 16384
+$script:StateFileInUseNameLimit = 256
+
+function Get-DefenseClawStateRootFiles {
+    <#
+        The regular files under StateRoot that a purge deletes: the audit
+        database and its SQLite companions first, then the rest of the tree
+        without following links (the removal refuses those itself).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $files = [Collections.Generic.List[string]]::new()
+    $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+    if (-not [IO.Directory]::Exists($root)) {
+        return , $files.ToArray()
+    }
+    $first = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $audit = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, 'audit.db')
+    foreach ($suffix in @('', '-wal', '-shm', '-journal')) {
+        $candidate = [IO.Path]::GetFullPath($audit + $suffix)
+        if ([IO.File]::Exists($candidate)) {
+            $files.Add($candidate)
+            [void]$first.Add($candidate)
+        }
+    }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($root)
+    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
+        $directory = $pending.Pop()
+        $entries = @(try {
+                [IO.DirectoryInfo]::new($directory).GetFileSystemInfos()
+            }
+            catch {
+            })
+        foreach ($entry in $entries) {
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                continue
+            }
+            if ($entry -is [IO.DirectoryInfo]) {
+                $pending.Push([string]$entry.FullName)
+                continue
+            }
+            if ($first.Contains([string]$entry.FullName)) {
+                continue
+            }
+            $files.Add([string]$entry.FullName)
+            if ($files.Count -ge $script:StateFileInUseCheckLimit) {
+                break
+            }
+        }
+    }
+    return , $files.ToArray()
+}
+
+function Get-DefenseClawStateFileHolders {
+    <#
+        The programs Restart Manager reports with one of Paths open, keyed
+        by process id and start time (a reused id is another program),
+        without the processes in Excluded, the services in ServiceNames and
+        programs run from the install folder, which the install-folder check
+        names. Restart Manager itself failing returns no holder: the purge
+        then retries the deletion and names what still holds the file.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths,
+        [Parameter(Mandatory)]$Excluded,
+        [AllowEmptyCollection()][string[]]$ServiceNames = @()
+    )
+    $holders = @{}
+    if ($Paths.Count -eq 0) {
+        return $holders
+    }
+    $native = Initialize-DefenseClawNativeSecurity
+    $found = @(try {
+            $native::GetFileHolders($Paths) | Microsoft.PowerShell.Core\Where-Object {
+                -not $Excluded.Contains([int]$_.ProcessId) -and
+                -not ($ServiceNames -contains [string]$_.ServiceName)
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "Restart Manager could not list the programs that hold DefenseClaw data files: $($_.Exception.Message)"
+        })
+    if ($found.Count -eq 0) {
+        return $holders
+    }
+    $images = @{}
+    foreach ($process in @(Get-DefenseClawProcessImages)) {
+        $images[[int]$process.Id] = $process
+    }
+    $install = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\') + '\'
+    foreach ($holder in $found) {
+        $id = [int]$holder.ProcessId
+        $process = $images[$id]
+        $image = ''
+        $account = ''
+        $parent = ''
+        if ($null -ne $process) {
+            $image = [string]$process.Path
+            $account = [string]$process.UserName
+            $parent = [string]$process.Parent
+        }
+        if (-not [string]::IsNullOrEmpty($image) -and
+            ([IO.Path]::GetFullPath($image)).StartsWith($install, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $name = if (-not [string]::IsNullOrEmpty($image)) {
+            [IO.Path]::GetFileName($image)
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$holder.AppName)) {
+            [string]$holder.AppName
+        }
+        else {
+            'a program'
+        }
+        $holders[('{0}/{1}' -f $id, [int64]$holder.StartFileTime)] = [pscustomobject]@{
+            Id = $id
+            Name = $name
+            UserName = $account
+            Parent = $parent
+            File = ''
+        }
+    }
+    return $holders
+}
+
+function Get-DefenseClawStateFileHolderText {
+    <#
+        Names each holder and the file it has open, relative to StateRoot,
+        asking Restart Manager about Paths one at a time in their order (the
+        audit database first) until each holder has a file or the bound is
+        reached.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Holders,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths
+    )
+    $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\') + '\'
+    $native = Initialize-DefenseClawNativeSecurity
+    $unnamed = $Holders.Count
+    $asked = 0
+    foreach ($path in $Paths) {
+        if ($unnamed -eq 0 -or $asked -ge $script:StateFileInUseNameLimit) {
+            break
+        }
+        $asked++
+        $found = @(try { $native::GetFileHolders([string[]]@($path)) } catch { })
+        foreach ($holder in $found) {
+            $key = '{0}/{1}' -f [int]$holder.ProcessId, [int64]$holder.StartFileTime
+            if ($Holders.ContainsKey($key) -and [string]::IsNullOrEmpty([string]$Holders[$key].File)) {
+                $Holders[$key].File = if ($path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                    $path.Substring($root.Length)
+                }
+                else {
+                    $path
+                }
+                $unnamed--
+            }
+        }
+    }
+    $named = @(foreach ($holder in @($Holders.Values | Microsoft.PowerShell.Utility\Sort-Object -Property Id)) {
+            $text = Format-DefenseClawProcessInUse `
+                -Name ([string]$holder.Name) `
+                -Id ([int]$holder.Id) `
+                -UserName ([string]$holder.UserName) `
+                -Parent ([string]$holder.Parent)
+            if ([string]::IsNullOrEmpty([string]$holder.File)) {
+                $text + ' has a file open'
+            }
+            else {
+                $text + ' has ' + [string]$holder.File + ' open'
+            }
+        })
+    return ($named -join '; ')
+}
+
+function Assert-DefenseClawStandaloneStateFilesNotInUse {
+    <#
+        Standalone purge refuses, before it changes anything, while a program
+        other than the DefenseClaw services, this lifecycle and the
+        self-uninstall caller has a file under StateRoot open: a read-only
+        audit reader held runtime\audit.db, and the purge removed the
+        binaries and the Claude Code hook wiring before it failed 1603 on
+        that file, leaving the computer half removed (GAP-0136). A holder
+        seen only once (an anti-virus scan or a detection script) does not
+        block.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $paths = Get-DefenseClawStateRootFiles -Layout $Layout
+    if ($paths.Count -eq 0) {
+        return
+    }
+    $excluded = Get-DefenseClawUninstallOwnProcessIds `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
+    $services = @(Get-DefenseClawManagedServiceNames `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    $first = $null
+    foreach ($pass in 1, 2) {
+        $seen = Get-DefenseClawStateFileHolders `
+            -Layout $Layout `
+            -Paths $paths `
+            -Excluded $excluded `
+            -ServiceNames $services
+        if ($null -eq $first) {
+            $first = $seen
+            if ($first.Count -eq 0) {
+                return
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:InstallTreeUseRecheckMilliseconds
+            continue
+        }
+        $still = @{}
+        foreach ($key in @($first.Keys)) {
+            if ($seen.ContainsKey($key)) {
+                $still[$key] = $seen[$key]
+            }
+        }
+        if ($still.Count -eq 0) {
+            return
+        }
+        $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+        throw (
+            'uninstall_in_use: ' + (Get-DefenseClawStateFileHolderText -Layout $Layout -Holders $still -Paths $paths) +
+            " in $root, which the purge deletes, so DefenseClaw cannot remove its data; nothing was changed. " +
+            'Close it first: stop the program (for example a SIEM forwarder or a log tail that reads runtime\audit.db) ' +
+            "or exclude $root from it; then run the uninstall again"
+        )
+    }
+}
+
 function Assert-DefenseClawStandaloneInstallTreeNotInUse {
     <#
         Standalone uninstall refuses, before it changes anything, while a
@@ -5129,25 +5557,10 @@ function Assert-DefenseClawStandaloneInstallTreeNotInUse {
         return
     }
     $bin = [IO.Path]::GetFullPath([string]$Layout.BinDirectory).TrimEnd('\') + '\'
-    $excluded = [Collections.Generic.HashSet[int]]::new()
-    [void]$excluded.Add([int]$PID)
-    if ($SelfUninstallCallerPID -gt 0) {
-        [void]$excluded.Add([int]$SelfUninstallCallerPID)
-    }
-    foreach ($name in @(
-            $GatewayServiceName,
-            $GuardianServiceName,
-            (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName),
-            (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
-        )) {
-        try {
-            if (Test-DefenseClawServiceExists -Name $name) {
-                [void]$excluded.Add([int](Get-DefenseClawServiceProcessId -Name $name))
-            }
-        }
-        catch {
-        }
-    }
+    $excluded = Get-DefenseClawUninstallOwnProcessIds `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
     $users = $null
     foreach ($pass in 1, 2) {
         $seen = @{}
@@ -5173,14 +5586,11 @@ function Assert-DefenseClawStandaloneInstallTreeNotInUse {
         }
         $named = @(foreach ($id in $still) {
                 $process = $seen[$id]
-                $text = '{0} (pid {1}' -f [IO.Path]::GetFileName([string]$process.Path), $id
-                if (-not [string]::IsNullOrEmpty([string]$process.UserName)) {
-                    $text += ', account ' + [string]$process.UserName
-                }
-                if (-not [string]::IsNullOrEmpty([string]$process.Parent)) {
-                    $text += ', started by ' + [string]$process.Parent
-                }
-                $text + ')'
+                Format-DefenseClawProcessInUse `
+                    -Name ([IO.Path]::GetFileName([string]$process.Path)) `
+                    -Id $id `
+                    -UserName ([string]$process.UserName) `
+                    -Parent ([string]$process.Parent)
             })
         throw (
             'uninstall_in_use: ' + ($named -join '; ') + " runs from $bin, so DefenseClaw cannot remove its files; nothing was changed. " +
@@ -25405,6 +25815,83 @@ function Publish-DefenseClawStatePurgeIntent {
         -Required
 }
 
+# How long a standalone purge retries deleting StateRoot while a file in it
+# is in use (an anti-virus scan of the audit database), and how often.
+$script:StateRootRemovalRetryMilliseconds = 15000
+$script:StateRootRemovalRetryIntervalMilliseconds = 500
+
+function Test-DefenseClawFileInUseError {
+    # Whether a failed deletion failed because another program has the file
+    # or a directory open: a sharing or lock violation, or a directory that
+    # a delete-pending file keeps from being empty.
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [Management.Automation.ActionPreferenceStopException] -and
+        $null -ne $exception.ErrorRecord) {
+        $exception = $exception.ErrorRecord.Exception
+    }
+    while ($null -ne $exception) {
+        # 0x80070020, 0x80070021, 0x80070091
+        if ([int]$exception.HResult -in @(-2147024864, -2147024863, -2147024751)) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Remove-DefenseClawPurgedStateRoot {
+    <#
+        Deletes StateRoot after the services stopped. Standalone retries a
+        deletion that fails because a file is in use for a bounded time,
+        then refuses with uninstall_in_use naming the program that holds it
+        (GAP-0136). The purge intent stays, so running the uninstall with
+        PURGE=1 again finishes the deletion; the Intune launcher does that
+        once the named program exits.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $failure = $null
+    while ($null -eq $failure) {
+        try {
+            Remove-DefenseClawManagedTree `
+                -Path $Layout.StateRoot `
+                -RequiredBase $script:ProgramData `
+                -Label 'StateRoot'
+            return
+        }
+        catch {
+            if (-not (Test-DefenseClawStandaloneProfile) -or
+                -not (Test-DefenseClawFileInUseError -ErrorRecord $_)) {
+                throw
+            }
+            if ($clock.ElapsedMilliseconds -ge $script:StateRootRemovalRetryMilliseconds) {
+                $failure = $_
+                continue
+            }
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:StateRootRemovalRetryIntervalMilliseconds
+    }
+    $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+    $paths = Get-DefenseClawStateRootFiles -Layout $Layout
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    $holders = Get-DefenseClawStateFileHolders -Layout $Layout -Paths $paths -Excluded $excluded
+    $who = if ($holders.Count -gt 0) {
+        Get-DefenseClawStateFileHolderText -Layout $Layout -Holders $holders -Paths $paths
+    }
+    else {
+        'another program has a file open (' +
+            (ConvertTo-DefenseClawBoundedDiagnostic -Value $failure.Exception.Message -MaxLength 512) + ')'
+    }
+    $seconds = [int][Math]::Ceiling($script:StateRootRemovalRetryMilliseconds / 1000)
+    throw (
+        'uninstall_in_use: ' + $who + " in $root, so the purge could not delete that folder within $seconds seconds. " +
+        'DefenseClaw is already uninstalled and only this data folder is left. Close the program (for example a SIEM ' +
+        'forwarder or a log tail that reads runtime\audit.db), then run the uninstall with PURGE=1 again to finish'
+    )
+}
+
 function Complete-DefenseClawStatePurge {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -25526,10 +26013,7 @@ function Complete-DefenseClawStatePurge {
         throw 'refusing StateRoot removal while connector contract cleanup is pending'
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.StateRoot) {
-        Remove-DefenseClawManagedTree `
-            -Path $Layout.StateRoot `
-            -RequiredBase $script:ProgramData `
-            -Label 'StateRoot'
+        Remove-DefenseClawPurgedStateRoot -Layout $Layout
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.StateRoot) {
         throw 'StateRoot survived authenticated purge'
@@ -28027,6 +28511,13 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SelfUninstallCallerPID $SelfUninstallCallerPID
+    if ($Purge) {
+        Assert-DefenseClawStandaloneStateFilesNotInUse `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -SelfUninstallCallerPID $SelfUninstallCallerPID
+    }
     if (Test-DefenseClawStandaloneProfile) {
         Assert-DefenseClawStandaloneUninstallInstallTree -Layout $Layout
     }

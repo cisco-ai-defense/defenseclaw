@@ -103,9 +103,10 @@ bundle signature on its own copy. The base app's uninstall command,
 `/uninstall JSON=1`, which removes machine state, including anchors and
 bundles; `-Purge` (Setup `PURGE=1`) also removes enrolled accounts'
 per-user DefenseClaw data and binaries. When Setup refuses with
-`uninstall_in_use` (a program runs from the install folder, nothing was
-changed), the launcher runs it again up to 6 times and then exits `1618`,
-which Intune retries, instead of `1603`.
+`uninstall_in_use` (a program runs from the install folder or, with
+`-Purge`, has a file in `C:\ProgramData\Cisco\DefenseClaw` open, such as a
+SIEM forwarder reading `runtime\audit.db`), the launcher runs it again up to 6
+times and then exits `1618`, which Intune retries, instead of `1603`.
 
 Intune's execution contexts shape the design:
 

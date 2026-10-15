@@ -26,7 +26,7 @@ keywords:
   `detect-bundle.ps1` to require a confirmed bundle and enforcing gateway.
 - **Uninstall:** `Install-DefenseClawIntune.ps1 -Uninstall`, which runs Setup
   `/uninstall JSON=1` and exits `1618` (Intune retries) while a program keeps
-  the install folder in use.
+  the install folder in use, or, with `-Purge`, a DefenseClaw data file open.
 </Callout>
 
 This recipe creates a PowerShell 7 app, a base DefenseClaw app, a dependent
@@ -300,10 +300,16 @@ Why these values:
   `uninstall_in_use`, before it changes anything, while a program runs from
   `C:\Program Files\Cisco\DefenseClaw\bin`. That program is often an Intune
   detection or Remediations script that runs the installed CLI for a few
-  seconds, so the launcher runs Setup again, at most 6 times, each time after
-  the programs Setup named have exited or 20 seconds have passed. If Setup
-  still refuses, the launcher exits `1618`, which Intune retries, and its
-  result names each program, its process id and account. An app whose
+  seconds. With `-Purge`, Setup also refuses while a program has a file in
+  `C:\ProgramData\Cisco\DefenseClaw` open, for example a SIEM forwarder or a
+  log tail that reads the audit database `runtime\audit.db`; if such a
+  program opens a file only after Setup checked, the purge removes everything
+  else and returns `uninstall_in_use` saying that only the data folder is
+  left, and the next Setup run deletes it. In each case the launcher runs
+  Setup again, at most 6 times, each time after the programs Setup named
+  have exited or 20 seconds have passed. If Setup still refuses, the
+  launcher exits `1618`, which Intune retries, and its result names each
+  program, its process id and account. An app whose
   uninstall command is Setup itself still works, but fails such an
   uninstall with `1603` and is not retried. The kit's detection and
   Remediations scripts start no installed CLI while a lifecycle run holds
@@ -599,7 +605,7 @@ To see the current state on a device, run from an elevated PowerShell:
 | Install fails with `1603` and `powershell7_required` | The PowerShell 7 dependency did not install, or is a preview build. |
 | Install fails with `1603` and `mdm_hash_mismatch` | The package content changed after `New-DefenseClawIntunePackage.ps1` pinned it. Rebuild it. |
 | Intune reports `1618` and retries | Another lifecycle run held the lock, or a bundle did not finish applying (see above). Intune retries three times, five minutes apart. |
-| Uninstall reports `1618` with `uninstall_in_use` | A program kept running from `C:\Program Files\Cisco\DefenseClaw\bin` through every Setup run of the launcher. Nothing was changed. The message names each program, its process id, account and parent. Intune retries; if the program stays, close it (for example an editor's DefenseClaw ACP thread) or sign the account out. |
+| Uninstall reports `1618` with `uninstall_in_use` | A program kept running from `C:\Program Files\Cisco\DefenseClaw\bin`, or, for the `-Purge` app, kept a file in `C:\ProgramData\Cisco\DefenseClaw` open, through every Setup run of the launcher. Nothing was changed, unless the message says that only the data folder is left: then DefenseClaw is removed and the next run deletes that folder. The message names each program, its process id, account and parent, and the file it has open. Intune retries; if the program stays, close it (for example an editor's DefenseClaw ACP thread, or a SIEM forwarder or log tail that reads `runtime\audit.db`) or sign the account out. |
 | The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |
 | Graph still shows Installed after uninstall | The app install report lagged device detection by more than 15 minutes in the live test. Check local Intune detection or `enterprise windows status` for current device state. |
 | Receipt shows `digest_unverifiable` | The bundle was signed by another product version than the device runs. The built-in policy differs by version, so the device cannot compare the signed Windows digest with its own; `files[]` hashes and the gateway's enforcing digest are still checked. Investigate the warning, and do not count it as a digest pass: re-sign the bundle with the release the devices run and deliver it again. |

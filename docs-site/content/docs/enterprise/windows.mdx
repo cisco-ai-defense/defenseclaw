@@ -1463,8 +1463,24 @@ While a program runs a DefenseClaw executable from
 `C:\Program Files\Cisco\DefenseClaw\bin`, `/uninstall` (with or without
 `PURGE=1`) fails with `uninstall_in_use` before it stops any service, and
 names the program, its process id, the account and the program that started
-it. Close it (or sign the account out) and run the uninstall again. The
-Intune launcher's uninstall (`Install-DefenseClawIntune.ps1 -Uninstall`)
+it. Close it (or sign the account out) and run the uninstall again.
+
+With `PURGE=1`, a program that has a file in `C:\ProgramData\Cisco\DefenseClaw`
+open blocks the uninstall the same way, because the purge deletes that
+folder: for example a SIEM forwarder or a log tail that reads the audit
+database `runtime\audit.db`. `/uninstall` fails with `uninstall_in_use`
+before it stops any service and names the program, its process id, the
+account and the file it has open. Stop that program, or exclude the folder
+from it, and run the uninstall again. A program that opens a file only for
+a moment, such as an anti-virus scan, does not block it: Setup looks twice,
+two seconds apart, and after the services stop it retries the deletion for
+up to 15 seconds. If a program opens a file only after that first look and
+keeps it open, the uninstall removes everything else and fails with
+`uninstall_in_use`, naming the program and saying that only the data folder
+is left; close the program and run `/uninstall PURGE=1` again, which
+deletes the rest of the folder.
+
+The Intune launcher's uninstall (`Install-DefenseClawIntune.ps1 -Uninstall`)
 runs Setup again a few times once the named programs exit, then exits
 `1618` so that Intune retries; see
 [Intune on Windows](/docs/enterprise/mdm/intune-windows).
