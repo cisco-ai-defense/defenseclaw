@@ -119,8 +119,10 @@ jobs:
           test_log="$(mktemp)"
           trap 'rm -f "$test_log"' EXIT
           set +e
+          # This Edge/Fleet job checks the integration tests for this feature.
+          # The main Go Gateway and remaining-package shards run the full suites.
           go test ./internal/gateway/... ./internal/config/... ./internal/enterpriseunix/... \
-            -count=1 -timeout 15m 2>&1 | tee "$test_log"
+            -count=1 -timeout 15m -run 'Fleet|Compiler' 2>&1 | tee "$test_log"
           test_status=${PIPESTATUS[0]}
           set -e
           if (( test_status != 0 )); then
