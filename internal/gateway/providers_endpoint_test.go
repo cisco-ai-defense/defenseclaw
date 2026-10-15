@@ -239,12 +239,16 @@ func TestProviderManagementHookOnlyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		t.Fatalf("list status = %d", resp.StatusCode)
 	}
 	var registry providersListResponse
 	if err := json.NewDecoder(resp.Body).Decode(&registry); err != nil {
+		_ = resp.Body.Close()
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
 	found := false
