@@ -287,7 +287,13 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		res.DigestUnverifiable = true
 		message := "the signer used another product version; its signed digest cannot be compared with this build's policy digest; files[] hashes still hold"
 		if m.EffectivePolicy.ProductVersion == in.ProductVersion {
-			message = "the signer computed the " + in.Platform + " digest on " + m.EffectivePolicy.ComputedOn + "; it differs from this " + in.Platform + " device's digest, so signed-versus-enforcing comparison is unavailable; files[] hashes still hold"
+			message = "the signer computed the " + in.Platform + " digest on " + m.EffectivePolicy.ComputedOn + "; it differs from this " + in.Platform + " device's digest"
+			// The signed components say which input the signing host saw
+			// differently, so the difference can be traced (GAP-0107).
+			if component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details); component != "" {
+				message += " in component " + boundedDetail(component)
+			}
+			message += ", so signed-versus-enforcing comparison is unavailable; files[] hashes still hold"
 		}
 		res.Warnings = append(res.Warnings, Warning{
 			Code:     WarnDigestUnverifiable,
