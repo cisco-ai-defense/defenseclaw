@@ -542,6 +542,57 @@ class TestProxyConstruction:
         assert isinstance(proxy._upstream, _HttpUpstream)
 
 
+@pytest.mark.parametrize("command,error_type", [
+    (["secret-marker-unavailable"], FileNotFoundError),
+    ([sys.executable, "secret-marker;"], ValueError),
+    ([sys.executable, 42], ValueError),
+])
+def test_stdio_command_validation_does_not_echo_arguments(command, error_type):
+    with pytest.raises(error_type) as excinfo:
+        _StdioUpstream(command)
+    assert "secret-marker" not in str(excinfo.value)
+
+
+def test_stdio_command_accepts_empty_non_executable_argument():
+    upstream = _StdioUpstream([sys.executable, ""])
+    assert upstream._command == [sys.executable, ""]
+
+
+@pytest.mark.parametrize("check,error_type", [
+    ("isfile", ValueError),
+    ("access", PermissionError),
+])
+def test_stdio_command_file_errors_do_not_echo_executable(check, error_type):
+    target = "mcp_proxy.os.path.isfile" if check == "isfile" else "mcp_proxy.os.access"
+    with patch("shutil.which", return_value=sys.executable), patch(target, return_value=False):
+        with pytest.raises(error_type) as excinfo:
+            _StdioUpstream([sys.executable])
+    assert sys.executable not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_start_log_does_not_echo_arguments(caplog):
+    upstream = _StdioUpstream([sys.executable, "-c", "pass", "secret-marker"])
+    with caplog.at_level(logging.INFO, logger="defenseclaw.mcp_proxy"):
+        await upstream.start()
+        try:
+            assert "Upstream started (pid=" in caplog.text
+            assert "secret-marker" not in caplog.text
+        finally:
+            await upstream.stop()
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_error_log_does_not_echo_payload(caplog):
+    proxy = _make_proxy()
+    proxy._upstream.send.side_effect = OSError("secret-marker")
+    with caplog.at_level(logging.ERROR, logger="defenseclaw.mcp_proxy"):
+        response = await proxy._forward({"id": 1})
+    assert response["error"]["message"] == "Upstream unavailable"
+    assert "Upstream stdio error: OSError" in caplog.text
+    assert "secret-marker" not in caplog.text
+
+
 @pytest.mark.parametrize("url", [
     "http://localhost:8088/mcp",
     "http://localhost.:8088/mcp",

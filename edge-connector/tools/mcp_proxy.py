@@ -235,30 +235,28 @@ class _StdioUpstream:
     def __init__(self, command: list[str]):
         # DCLAW_MCP_UPSTREAM is attacker-controlled if env-write is compromised,
         # so verify the executable exists and reject shell metacharacters.
-        if not command:
-            raise ValueError("upstream command is empty")
+        if not isinstance(command, list) or not command:
+            raise ValueError("upstream command must be a non-empty list")
         # Validate ALL arguments for shell metacharacters, not just command[0]
         for i, arg in enumerate(command):
+            if not isinstance(arg, str):
+                raise ValueError(f"Upstream command argument {i} must be a string")
+            if i == 0 and not arg:
+                raise ValueError("upstream executable must be non-empty")
             if any(c in arg for c in _SHELL_METACHARACTERS):
                 raise ValueError(
-                    f"Upstream command argument {i} contains shell metacharacter: {arg!r}"
+                    f"Upstream command argument {i} contains shell metacharacter"
                 )
         cmd_path = command[0]
         # Resolve via PATH for bare command names (e.g. "python3")
         import shutil
         resolved = shutil.which(cmd_path)
         if resolved is None:
-            raise FileNotFoundError(
-                f"upstream command not found: {cmd_path!r}"
-            )
+            raise FileNotFoundError("upstream command not found")
         if not os.path.isfile(resolved):
-            raise ValueError(
-                f"upstream command is not a file: {resolved!r}"
-            )
+            raise ValueError("upstream command is not a file")
         if not os.access(resolved, os.X_OK):
-            raise PermissionError(
-                f"upstream command is not executable: {resolved!r}"
-            )
+            raise PermissionError("upstream command is not executable")
 
         self._command = command
         self._proc: asyncio.subprocess.Process | None = None
@@ -271,7 +269,7 @@ class _StdioUpstream:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        logger.info("Upstream started: %s (pid=%s)", self._command, self._proc.pid)
+        logger.info("Upstream started (pid=%s)", self._proc.pid)
 
     async def send(self, msg: dict) -> dict:
         """Send a JSON-RPC message and wait for the response."""
@@ -602,12 +600,10 @@ class MCPProxy:
         try:
             resp = await self._upstream.send(msg)
         except Exception as exc:
-            if isinstance(self._upstream, _HttpUpstream):
-                # aiohttp exceptions can embed the configured URL, including
-                # bearer tokens in its query string.
-                logger.error("Upstream HTTP error: %s", type(exc).__name__)
-            else:
-                logger.error("Upstream error: %s", exc)
+            # Transport exceptions may embed configured URLs, command paths,
+            # or upstream payloads. Their type is enough for diagnostics.
+            transport = "HTTP" if isinstance(self._upstream, _HttpUpstream) else "stdio"
+            logger.error("Upstream %s error: %s", transport, type(exc).__name__)
             return _make_error(
                 msg.get("id"),
                 code=-32603,
