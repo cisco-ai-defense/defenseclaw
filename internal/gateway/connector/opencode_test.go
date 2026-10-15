@@ -602,7 +602,28 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	harness := filepath.Join("testdata", "opencode-plugin-contract.mjs")
-	output, err := exec.CommandContext(ctx, node, harness, openPlugin, closedPlugin).CombinedOutput()
+	args := []string{harness, openPlugin, closedPlugin}
+	if runtime.GOOS != "windows" {
+		// The loaded plugin remains callable after its managed file is removed.
+		// The guard binary exits successfully with no stdout; the absent
+		// deployment marker turns that stale callback into an allow.
+		guard := filepath.Join(dir, "empty-foreign-check")
+		if err := os.WriteFile(guard, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		removedPlugin := filepath.Join(dir, "opencode-removed-managed.mjs")
+		body := renderOpenCodePluginTemplate(t, templateData{
+			APIAddr: "127.0.0.1:18970", TokenFileJS: javaScriptStringContent(tokenPath),
+			FailMode: "closed", Managed: true,
+			ForeignHookGuardJS: javaScriptStringContent(guard),
+			InstallMarkerJS:    javaScriptStringContent(removedPlugin),
+		})
+		if err := os.WriteFile(removedPlugin, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, removedPlugin)
+	}
+	output, err := exec.CommandContext(ctx, node, args...).CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("executable OpenCode plugin contract timed out: %v\n%s", ctx.Err(), output)
 	}
