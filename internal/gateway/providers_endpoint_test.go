@@ -190,7 +190,7 @@ func TestProviderManagementHookOnlyIntegration(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- api.Run(ctx) }()
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	baseURL := "http://" + addr
 	deadline := time.Now().Add(5 * time.Second)
 	for {
