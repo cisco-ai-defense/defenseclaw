@@ -3217,7 +3217,7 @@ class NotificationSourceFilter:
 
 
 def _default_notifications_enabled() -> bool:
-    """Mirror Go's ``config.DefaultNotificationsEnabled``.
+    """Mirror Go's ``config.DefaultNotificationsEnabledFor`` for this host.
 
     macOS and native Windows both have an attended consumer desktop
     notification surface, so fresh installs opt in by default. Every other OS
@@ -3235,7 +3235,7 @@ class NotificationsConfig:
 
     Master switch ``enabled`` defaults to ``True`` on macOS and Windows and
     ``False`` elsewhere — same matrix as Go's
-    ``DefaultNotificationsEnabled``. ``defenseclaw setup
+    ``DefaultNotificationsEnabledFor``. ``defenseclaw setup
     notifications`` (the single-prompt onboarding wizard) is still
     the canonical opt-in path; operators dialing noise back down can
     flip individual category / source / throttle fields.

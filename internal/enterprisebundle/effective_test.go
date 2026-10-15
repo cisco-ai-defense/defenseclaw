@@ -457,6 +457,37 @@ func TestBundleDeviceLayoutDigestParity(t *testing.T) {
 	}
 }
 
+// A signer computes each target platform's digest with that platform's
+// defaults, never its own host's. notifications.enabled defaulted from the
+// signing host: a Linux signer digested every Windows bundle with false while
+// the Windows device resolves true, so no Windows receipt ever verified its
+// signed digest (GAP-0107). An omitted default digests like the target's
+// explicit default, and the opposite explicit value is another policy.
+func TestBundleDigestUsesTargetPlatformDefaults(t *testing.T) {
+	targetDefault := map[string]bool{"linux": false, "darwin": true, "windows": true}
+	for _, platform := range enterprisebundle.Platforms {
+		t.Run(platform, func(t *testing.T) {
+			digest := func(extra string) string {
+				t.Helper()
+				root, bundle := writeBundle(t, bundleConfigBase+extra)
+				got, err := enterprisebundle.EffectivePolicyDigests(context.Background(), bundle, root, []string{platform}, digester)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got[platform]
+			}
+			want := targetDefault[platform]
+			omitted := digest("")
+			if same := digest(fmt.Sprintf("notifications:\n  enabled: %t\n", want)); omitted != same {
+				t.Fatalf("omitted notifications.enabled digests %s, the %s default (%t) digests %s", omitted, platform, want, same)
+			}
+			if other := digest(fmt.Sprintf("notifications:\n  enabled: %t\n", !want)); omitted == other {
+				t.Fatalf("notifications.enabled %t digests like the %s default", !want, platform)
+			}
+		})
+	}
+}
+
 func TestWindowsDeviceLayoutPathSeparators(t *testing.T) {
 	standard, err := enterprisebundle.StandardDeviceLayout(enterprisebundle.PlatformWindows)
 	if err != nil {
