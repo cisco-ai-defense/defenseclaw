@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 func testEmergencyRecord(seq, previous uint32, command EmergencyCommand) []byte {
@@ -22,7 +24,11 @@ func testEmergencyRecord(seq, previous uint32, command EmergencyCommand) []byte 
 }
 
 func TestSQLiteEmergencyReplaySurvivesRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "policies.db")
+	dir := filepath.Join(t.TempDir(), "fleet-state")
+	if err := safefile.ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "policies.db")
 	store, err := NewSQLitePolicyStore(path)
 	if err != nil {
 		t.Fatal(err)

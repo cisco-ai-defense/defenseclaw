@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type failingCredentialAudit struct{ calls int }
@@ -64,6 +65,17 @@ func securityTestCache() *verdict.Cache {
 	return verdict.NewCache(10, func(_, _ uint16, _ [32]byte) (verdict.Action, uint8) {
 		return verdict.ActionAllow, 0
 	})
+}
+
+func securitySQLiteDir(t *testing.T) string {
+	t.Helper()
+	// A native Windows elevated token can make TempDir Administrators-owned.
+	// A newly created child gets the current user's private DACL and owner.
+	dir := filepath.Join(t.TempDir(), "fleet-state")
+	if err := safefile.ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func securityTestRequest(api *API, method, path, token, body string, tlsEnabled bool) *httptest.ResponseRecorder {
@@ -238,7 +250,7 @@ func TestFleetRegistrationRollsBackCredentialAndMetadataFaults(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dbPath := filepath.Join(t.TempDir(), "fleet.db")
+			dbPath := filepath.Join(securitySQLiteDir(t), "fleet.db")
 			store, err := NewSQLiteStore(dbPath)
 			if err != nil {
 				t.Fatal(err)
@@ -351,7 +363,7 @@ func TestFleetCredentialAuditFailureBlocksRegistrationAndDecommission(t *testing
 	t.Setenv("DCLAW_FLEET_API_TOKEN", "admin-review")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "fleet.db"))
+	store, err := NewSQLiteStore(filepath.Join(securitySQLiteDir(t), "fleet.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +428,7 @@ func TestFleetDecommissionRejectsSplitStoresBeforeDeletingKey(t *testing.T) {
 	t.Setenv("DCLAW_FLEET_API_TOKEN", "admin-review")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := securitySQLiteDir(t)
 	deviceStore, err := NewSQLiteStore(filepath.Join(root, "devices.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -624,7 +636,7 @@ func TestFleetDecommissionSQLiteRollsBackOnFault(t *testing.T) {
 			t.Setenv("DCLAW_FLEET_API_TOKEN", "admin-review")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "devices.db"))
+			store, err := NewSQLiteStore(filepath.Join(securitySQLiteDir(t), "devices.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -686,7 +698,7 @@ func TestFleetDecommissionSQLiteRollsBackOnFault(t *testing.T) {
 func TestFleetSQLiteReopenRestrictsExistingJournals(t *testing.T) {
 	for _, kind := range []string{"fleet", "policy"} {
 		t.Run(kind, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := securitySQLiteDir(t)
 			if err := widenSQLiteParentAccess(dir); err != nil {
 				t.Fatal(err)
 			}
@@ -744,7 +756,7 @@ func TestFleetSQLiteReopenRestrictsExistingJournals(t *testing.T) {
 }
 
 func TestFleetSignedBootCounterRejectsReplayAcrossRestartAndStoreFault(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "fleet.db")
+	path := filepath.Join(securitySQLiteDir(t), "fleet.db")
 	store, err := NewSQLiteStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -812,7 +824,7 @@ func TestFleetSignedBootCounterRejectsReplayAcrossRestartAndStoreFault(t *testin
 }
 
 func TestFleetSQLiteAddsBootCounterToExistingDeviceDatabase(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "fleet.db")
+	path := filepath.Join(securitySQLiteDir(t), "fleet.db")
 	store, err := NewSQLiteStore(path)
 	if err != nil {
 		t.Fatal(err)

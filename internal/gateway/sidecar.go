@@ -66,6 +66,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -7958,8 +7959,17 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// and boot replay baselines are security state: Fleet cannot start if
 		// they cannot be loaded durably.
 		fleetDataDir := filepath.Join(s.currentConfig().DataDir, "fleet")
-		if err := os.MkdirAll(fleetDataDir, 0o700); err != nil {
-			return fmt.Errorf("fleet data dir: %w", err)
+		var fleetDirErr error
+		if runtime.GOOS == "windows" {
+			// Create with a private DACL before SQLite can create device-key
+			// WAL/SHM files, even under an elevated token whose inherited ACL
+			// would otherwise grant Users read access.
+			fleetDirErr = safefile.ProtectDirectory(fleetDataDir)
+		} else {
+			fleetDirErr = os.MkdirAll(fleetDataDir, 0o700)
+		}
+		if fleetDirErr != nil {
+			return fmt.Errorf("fleet data dir: %w", fleetDirErr)
 		}
 		deviceStore, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db"))
 		if err != nil {
