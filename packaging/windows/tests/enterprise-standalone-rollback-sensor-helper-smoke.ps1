@@ -280,15 +280,14 @@ $failures = & $module {
             }
         }
 
-        # A committed standalone uninstall retires bin with the ACP bridge and
-        # the sensor helper still present; Secure Client keeps its allowlist.
+        # A committed uninstall retires bin with the ACP bridge and the sensor
+        # helper still present, on both profiles; only the standalone policy
+        # compiler is standalone-only.
         $retired = 'C:\\RetiredRoot'
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $standaloneAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
         $standaloneFiles = @($standaloneAllowlist.files)
         $standaloneOnly = @(
-            'bin\defenseclaw-acp.exe',
-            'bin\defenseclaw-sensor-helper.exe',
             'lib\defenseclaw\policy_compiler.py'
         ) | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $retired $_)) }
         foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'lib\defenseclaw\policy_compiler.py')) {
@@ -303,6 +302,11 @@ $failures = & $module {
         if ($secureClientFiles.Count -ne $expectedSecureClientFiles.Count -or
             (@($secureClientFiles | Sort-Object) -join '|') -cne ($expectedSecureClientFiles -join '|')) {
             $failures.Add('Secure Client retired-tree allowlist changed')
+        }
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe')) {
+            if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $secureClientFiles) {
+                $failures.Add("Secure Client retired-tree allowlist lacks $leaf")
+            }
         }
         $standaloneOnlyDirectories = @(
             [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),

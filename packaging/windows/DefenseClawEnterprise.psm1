@@ -23994,10 +23994,16 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         # the canonical validator was tripping on pre-fix.
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc')
     )
+    # Both profiles' payloads install the ACP bridge and the sensor helper
+    # under bin. Without them a committed uninstall could never retire its
+    # InstallRoot ("committed InstallRoot contains unexpected content:
+    # ...\bin\defenseclaw-acp.exe"), and every retry failed the same way.
     $files = @(
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-acp.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-gateway.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook.exe'),
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents\codex.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\install-enterprise.ps1'),
@@ -24014,15 +24020,6 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
             (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
         )
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
-        # The standalone payload also installs the ACP bridge and the sensor
-        # helper under bin. Without them a committed standalone uninstall
-        # could never retire its InstallRoot ("committed InstallRoot contains
-        # unexpected content: ...\bin\defenseclaw-acp.exe"), and every retry
-        # failed the same way.
-        $files += @(
-            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-acp.exe'),
-            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe')
-        )
     }
     return @{
         directories = @(
