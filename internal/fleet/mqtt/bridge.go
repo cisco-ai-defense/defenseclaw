@@ -305,8 +305,26 @@ func (b *Bridge) Start(ctx context.Context) error {
 	b.cancel = cancel
 	b.cancelMu.Unlock()
 
-	if err := b.client.Connect(ctx); err != nil {
-		return fmt.Errorf("mqtt connect: %w", err)
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		err := b.client.Connect(ctx)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		b.logger.Printf("[mqtt-bridge] connect failed: %v — retrying in %v", err, backoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
 	}
 
 	// Subscribe to heartbeat topic

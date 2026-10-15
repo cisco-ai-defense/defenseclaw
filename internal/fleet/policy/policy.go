@@ -237,9 +237,11 @@ func isUnderAllowedDir(abs string) bool {
 		"/usr/local/lib/defenseclaw/",
 	}
 
-	// Add $HOME/.defenseclaw/
 	if home, err := os.UserHomeDir(); err == nil {
 		allowed = append(allowed, filepath.Join(home, ".defenseclaw")+string(filepath.Separator))
+	}
+	if dclawHome := os.Getenv("DEFENSECLAW_HOME"); dclawHome != "" {
+		allowed = append(allowed, dclawHome+string(filepath.Separator))
 	}
 
 	for _, d := range allowed {
@@ -318,12 +320,13 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "python3", s.compilerPath,
-		"--input", inputPath,
+		"--input", filepath.Base(inputPath),
 		"--profile", profile,
 		"--version", fmt.Sprintf("%d", version),
-		"--output-binary", outputPath,
-		"--output-header", filepath.Join(tmpDir, "policy_tables.h"),
+		"--output-binary", filepath.Base(outputPath),
+		"--output-header", "policy_tables.h",
 	)
+	cmd.Dir = tmpDir
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
@@ -335,7 +338,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("policy compiler failed: %w\noutput: %s", err, output)
 	}
 
-	blob, err := readFile(outputPath)
+	blob, err := readFile(filepath.Join(tmpDir, filepath.Base(outputPath)))
 	if err != nil {
 		return nil, fmt.Errorf("read compiled policy: %w", err)
 	}

@@ -565,7 +565,9 @@ func TestBridgeConnectError(t *testing.T) {
 
 	bridge := NewBridge(mc, fm, cache)
 
-	err := bridge.Start(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := bridge.Start(ctx)
 	if err == nil {
 		t.Fatal("expected error from Start when connect fails")
 	}
