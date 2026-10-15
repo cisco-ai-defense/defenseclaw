@@ -35,13 +35,14 @@ func validateFreshIdentityFilePlatform(string) error { return nil }
 func syncFreshIdentityDirectory(string) error { return nil }
 
 // validateFreshIdentityManagedServiceDirectory validates the device identity
-// directory of the standalone managed gateway service. Its runtime tree is
+// directory of the managed gateway service. Its runtime tree is
 // Administrators-owned with a writer ACE for the exact NT SERVICE account, so
 // the per-user private-directory contract (sole ownership by the caller) can
 // never hold there; the managed service trust model is the equivalent check.
-// Only the standalone profile pin selects it.
+// The standalone profile pin, or the Secure Client gateway service process
+// itself, selects it.
 func validateFreshIdentityManagedServiceDirectory(path string) (bool, error) {
-	account, ok := standaloneManagedServiceAccount()
+	account, ok := managedGatewayServiceAccount()
 	if !ok {
 		return false, nil
 	}
@@ -52,14 +53,14 @@ func validateFreshIdentityManagedServiceDirectory(path string) (bool, error) {
 }
 
 // writeFreshIdentityManagedServiceFile publishes a device identity artifact
-// for the standalone managed gateway service. A private DACL (the service SID
+// for the managed gateway service. A private DACL (the service SID
 // and SYSTEM only) would lock Administrators out of the runtime tree that the
 // lifecycle snapshots, restores and re-ACLs during upgrade and repair, so the
 // file is created exclusively under the inherited runtime DACL of its
 // directory (SYSTEM and Administrators full, the service SID read and write,
 // nobody else) and then validated with the managed service trust model.
 func writeFreshIdentityManagedServiceFile(path string, data []byte) (bool, error) {
-	account, ok := standaloneManagedServiceAccount()
+	account, ok := managedGatewayServiceAccount()
 	if !ok {
 		return false, nil
 	}
@@ -86,6 +87,31 @@ func writeFreshIdentityManagedServiceFile(path string, data []byte) (bool, error
 	}
 	return true, nil
 }
+
+// managedGatewayServiceAccount returns the gateway service account when this
+// process is the managed gateway service. The standalone profile pin selects
+// it as before. A Secure Client gateway has the same runtime tree (Setup
+// writes it Administrators-owned with the service SID as its only extra
+// writer) and logs on as LocalSystem carrying that service SID, so it is
+// selected only when its own token proves it is that service; any other
+// process with the same environment keeps the private-directory check.
+func managedGatewayServiceAccount() (string, bool) {
+	if account, ok := standaloneManagedServiceAccount(); ok {
+		return account, true
+	}
+	if !managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) {
+		return "", false
+	}
+	account := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
+	if account == "" || !currentProcessIsGatewayService() {
+		return "", false
+	}
+	return account, true
+}
+
+// currentProcessIsGatewayService is managed.WindowsCurrentProcessIsGatewayService;
+// tests substitute it to model the Secure Client gateway service token.
+var currentProcessIsGatewayService = managed.WindowsCurrentProcessIsGatewayService
 
 // standaloneManagedServiceAccount returns the standalone gateway service
 // account when this process runs under the standalone managed pins.
