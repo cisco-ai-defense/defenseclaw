@@ -13627,22 +13627,19 @@ function Start-DefenseClawTransactionServices {
     }
 }
 
-function Start-DefenseClawRestoredStandaloneSensorHelper {
+function Start-DefenseClawRestoredSensorHelper {
     <#
-        Standalone transaction snapshots do not record the sensor helper, and
-        Restore-DefenseClawTransaction quiesces it (disabled and stopped) with
-        the other services. The restored gateway depends on it, so a rollback
-        that restarts a pre-existing gateway must first make the helper
-        startable and start it. Returns the helper's service name when it was
-        started, '' when there is nothing to start.
+        Transaction snapshots do not record the sensor helper, which both
+        profiles register, and Restore-DefenseClawTransaction quiesces it
+        (disabled and stopped) with the other services. The restored gateway
+        depends on it, so a rollback that restarts a pre-existing gateway must
+        first make the helper startable and start it. Returns the helper's
+        service name when it was started, '' when there is nothing to start.
     #>
     param(
         [Parameter(Mandatory)]$Snapshot,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return ''
-    }
     $gatewayRestored = @(
         $Snapshot.services |
             Microsoft.PowerShell.Core\Where-Object {
@@ -13848,12 +13845,12 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -State $snapshot `
                 -Path $SnapshotPath `
                 -Phase activating
-            # The deferred restart must bring back the standalone sensor
-            # helper the restore quiesced, like the non-deferred restart in
+            # The deferred restart must bring back the sensor helper the
+            # restore quiesced, like the non-deferred restart in
             # Restore-DefenseClawTransaction: the gateway depends on it and
-            # otherwise cannot start, which failed every standalone
-            # managed-hook rollback and left the deployment down.
-            $restoredSensorHelper = Start-DefenseClawRestoredStandaloneSensorHelper `
+            # otherwise cannot start, which failed every managed-hook
+            # rollback and left the deployment down.
+            $restoredSensorHelper = Start-DefenseClawRestoredSensorHelper `
                 -Snapshot $snapshot `
                 -Layout $Layout
             Start-DefenseClawTransactionServices `
@@ -29456,23 +29453,20 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     return $result
 }
 
-function Suspend-DefenseClawStandaloneSensorHelperForServicing {
+function Suspend-DefenseClawSensorHelperForServicing {
     <#
-        Standalone uninstall: New-DefenseClawTransaction disables and stops
-        the services it records (gateway, guardian, enumerator), not the
-        sensor helper, which a healthy deployment keeps automatic. The
-        servicing assertion before the services are deleted requires every
-        managed service disabled, so a standalone uninstall of a running
-        deployment failed there ("service DefenseClawSensorHelper startup
-        mode drift: 2, expected 4") and rolled back. Disable and stop the
-        helper once the gateway that depends on it is stopped. A rollback
-        brings it back with the restored gateway.
+        Uninstall: New-DefenseClawTransaction disables and stops the services
+        it records (gateway, guardian, enumerator, broker), not the sensor
+        helper, which a healthy deployment keeps automatic. The servicing
+        assertion before the services are deleted requires every managed
+        service disabled, so an uninstall of a running deployment failed
+        there ("service DefenseClawSensorHelper startup mode drift: 2,
+        expected 4") and rolled back. Both profiles register the helper.
+        Disable and stop it once the gateway that depends on it is stopped.
+        A rollback brings it back with the restored gateway.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return $false
-    }
-    $name = [string]$Layout.SensorHelperServiceName
+    $name = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name SensorHelperServiceName)
     if ([string]::IsNullOrWhiteSpace($name) -or
         -not (Test-DefenseClawServiceExists -Name $name)) {
         return $false
@@ -30348,7 +30342,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -PreserveManagedHooksTeardownJournal `
             -SkipRedactionKeySnapshot
-        [void](Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $Layout)
+        [void](Suspend-DefenseClawSensorHelperForServicing -Layout $Layout)
         if ($useNativeInstallCleanup) {
             Assert-DefenseClawDescendant `
                 -Path $snapshot `

@@ -3,11 +3,12 @@
 
 #Requires -Version 5.1
 
-# Function-level regression for the standalone sensor helper around uninstall.
+# Function-level regression for the sensor helper around uninstall, which
+# both profiles register.
 # Uninstall quiesces it for the servicing boundary (it failed every uninstall
 # of a running deployment with "startup mode drift: 2, expected 4"), and the
 # managed-hook rollback restart brings it back.
-# Restore-DefenseClawTransaction quiesces the standalone sensor helper, which
+# Restore-DefenseClawTransaction quiesces the sensor helper, which
 # transaction snapshots do not record. When the managed-hook teardown had to
 # be rolled back, Restore-DefenseClawTransactionWithManagedHooksRollback
 # restarted the restored services without it; the gateway depends on the
@@ -78,7 +79,7 @@ $failures = & $module {
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $script:TestServices[$helper] = $true
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $snapshot -Name $started
         $expected = @("owned:$helper", "mode:$helper=3", "start:$helper", "mode:$helper=2")
         if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
@@ -92,7 +93,7 @@ $failures = & $module {
             guardian_service = 'DefenseClawHookGuardian'
             services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
         }
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $fresh -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $fresh -Layout $layout
         Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy -Snapshot $fresh -Name $started
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a fresh-install rollback touched the sensor helper')
@@ -101,21 +102,23 @@ $failures = & $module {
         # No helper service registered: nothing to start.
         $script:TestCalls.Clear()
         $script:TestServices.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
         if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
             $failures.Add('a missing sensor helper was touched')
         }
 
-        # Secure Client has no standalone sensor helper to restore.
+        # Secure Client registers the helper too; its gateway depends on it
+        # the same way, so the rollback brings it back.
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
-        $started = Start-DefenseClawRestoredStandaloneSensorHelper -Snapshot $snapshot -Layout $layout
-        if (-not [string]::IsNullOrEmpty($started) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client rollback touched the standalone sensor helper')
+        $started = Start-DefenseClawRestoredSensorHelper -Snapshot $snapshot -Layout $layout
+        $expected = @("owned:$helper", "mode:$helper=3", "start:$helper")
+        if ($started -cne $helper -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
+            $failures.Add("Secure Client restored gateway: expected $($expected -join ', '), got $(@($script:TestCalls) -join ', ')")
         }
 
-        # Uninstall quiesces the helper for the servicing boundary (standalone only).
+        # Uninstall quiesces the helper for the servicing boundary (both profiles).
         $layout['SensorHelperServiceName'] = $helper
         $script:TestServices[$helper] = $true
         $script:TestCalls.Clear()
@@ -124,14 +127,20 @@ $failures = & $module {
             param([string]$Name)
             $script:TestCalls.Add("stop:$Name")
         }
-        if (-not (Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
             (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
             $failures.Add("uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
         }
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
         $script:TestCalls.Clear()
-        if ((Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $layout) -or $script:TestCalls.Count -ne 0) {
-            $failures.Add('Secure Client uninstall quiesced the standalone sensor helper')
+        if (-not (Suspend-DefenseClawSensorHelperForServicing -Layout $layout) -or
+            (@($script:TestCalls) -join '|') -cne ("owned:$helper|mode:$helper=4|stop:$helper")) {
+            $failures.Add("Secure Client uninstall quiesce: got $(@($script:TestCalls) -join ', ')")
+        }
+        # A layout without the helper has nothing to quiesce.
+        $script:TestCalls.Clear()
+        if ((Suspend-DefenseClawSensorHelperForServicing -Layout @{}) -or $script:TestCalls.Count -ne 0) {
+            $failures.Add('uninstall quiesced a sensor helper the layout does not name')
         }
         $uninstall = $ast.Find({
             param($node)
@@ -139,7 +148,7 @@ $failures = & $module {
                 $node.Name -ceq 'Invoke-DefenseClawUninstallLifecycle'
         }, $true).Body.Extent.Text
         $open = $uninstall.IndexOf('$snapshot = New-DefenseClawTransaction')
-        $suspend = $uninstall.IndexOf('Suspend-DefenseClawStandaloneSensorHelperForServicing')
+        $suspend = $uninstall.IndexOf('Suspend-DefenseClawSensorHelperForServicing')
         $servicing = $uninstall.IndexOf('-ServicingTransaction')
         if ($open -lt 0 -or $suspend -lt 0 -or $servicing -lt 0 -or
             -not ($open -lt $suspend -and $suspend -lt $servicing)) {
@@ -312,7 +321,7 @@ $failures = & $module {
                 $node.Name -ceq 'Restore-DefenseClawTransactionWithManagedHooksRollback'
         }, $true)
         $body = $definition.Body.Extent.Text
-        $start = $body.IndexOf('Start-DefenseClawRestoredStandaloneSensorHelper')
+        $start = $body.IndexOf('Start-DefenseClawRestoredSensorHelper')
         $services = $body.LastIndexOf('Start-DefenseClawTransactionServices')
         $policy = $body.IndexOf('Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy')
         if ($start -lt 0 -or $services -lt 0 -or $policy -lt 0 -or
