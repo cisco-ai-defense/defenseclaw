@@ -18,6 +18,7 @@ package verdict
 
 import (
 	"testing"
+	"time"
 )
 
 func testPipeline(tenantID, fleetID uint16, hash [32]byte) (Action, uint8) {
@@ -107,6 +108,29 @@ func TestCacheLRUEviction(t *testing.T) {
 
 	if _, found := c.Lookup(testTenant, testFleet, makeHash(0x01)); found {
 		t.Fatal("expected 0x01 to be evicted")
+	}
+}
+
+// Windows can report the same clock tick for consecutive stores. Eviction
+// must still choose the oldest insert rather than the first map iteration.
+func TestCacheLRUEvictionWithEqualTimestamps(t *testing.T) {
+	for trial := 0; trial < 32; trial++ {
+		c := NewCache(3, testPipeline)
+		for seed := byte(1); seed <= 3; seed++ {
+			c.Store(testTenant, testFleet, makeHash(seed), ActionAllow, 0)
+		}
+
+		c.mu.Lock()
+		clockTick := time.Now()
+		for _, entry := range c.entries {
+			entry.LastAccess = clockTick
+		}
+		c.mu.Unlock()
+
+		c.Store(testTenant, testFleet, makeHash(4), ActionAllow, 0)
+		if _, found := c.Lookup(testTenant, testFleet, makeHash(1)); found {
+			t.Fatalf("trial %d: oldest insert survived an equal-timestamp eviction", trial)
+		}
 	}
 }
 

@@ -37,11 +37,12 @@ const (
 
 // CacheEntry stores a verdict with TTL metadata.
 type CacheEntry struct {
-	Action     Action
-	Severity   uint8
-	CachedAt   time.Time
-	TTL        time.Duration
-	LastAccess time.Time // tracks last read for LRU eviction
+	Action      Action
+	Severity    uint8
+	CachedAt    time.Time
+	TTL         time.Duration
+	LastAccess  time.Time // tracks last read for LRU eviction
+	accessOrder uint64    // breaks clock-tick ties in eviction order
 }
 
 // CacheKey includes tenant and fleet identity so that verdicts for the
@@ -67,12 +68,13 @@ type PipelineFunc func(tenantID, fleetID uint16, toolHash [32]byte) (Action, uin
 
 // Cache is the cloud-side verdict cache.
 type Cache struct {
-	mu       sync.RWMutex
-	entries  map[CacheKey]*CacheEntry
-	maxSize  int
-	pipeline PipelineFunc
-	hits     atomic.Uint64
-	misses   atomic.Uint64
+	mu              sync.RWMutex
+	entries         map[CacheKey]*CacheEntry
+	maxSize         int
+	pipeline        PipelineFunc
+	nextAccessOrder uint64 // guarded by mu
+	hits            atomic.Uint64
+	misses          atomic.Uint64
 
 	// Metrics hooks (set externally to avoid circular imports)
 	onHit   func()
@@ -145,7 +147,9 @@ func (c *Cache) Lookup(tenantID, fleetID uint16, toolHash [32]byte) (CacheEntry,
 	if time.Since(entryCopy.LastAccess) > entryCopy.TTL/8 {
 		c.mu.Lock()
 		if e, still := c.entries[key]; still {
+			c.nextAccessOrder++
 			e.LastAccess = time.Now()
+			e.accessOrder = c.nextAccessOrder
 		}
 		c.mu.Unlock()
 	}
@@ -187,12 +191,14 @@ func (c *Cache) Store(tenantID, fleetID uint16, toolHash [32]byte, action Action
 	}
 
 	now := time.Now()
+	c.nextAccessOrder++
 	c.entries[key] = &CacheEntry{
-		Action:     action,
-		Severity:   severity,
-		CachedAt:   now,
-		TTL:        ttl,
-		LastAccess: now,
+		Action:      action,
+		Severity:    severity,
+		CachedAt:    now,
+		TTL:         ttl,
+		LastAccess:  now,
+		accessOrder: c.nextAccessOrder,
 	}
 	onStore := c.onStore
 	if !replacing && onStore != nil {
@@ -266,13 +272,16 @@ func (c *Cache) Stats() (hits, misses uint64, size int) {
 func (c *Cache) evictLRU() {
 	var oldestKey CacheKey
 	var oldestTime time.Time
+	var oldestOrder uint64
 	first := true
 
 	samples := 0
 	for key, entry := range c.entries {
-		if first || entry.LastAccess.Before(oldestTime) {
+		if first || entry.LastAccess.Before(oldestTime) ||
+			(entry.LastAccess.Equal(oldestTime) && entry.accessOrder < oldestOrder) {
 			oldestKey = key
 			oldestTime = entry.LastAccess
+			oldestOrder = entry.accessOrder
 			first = false
 		}
 		samples++
