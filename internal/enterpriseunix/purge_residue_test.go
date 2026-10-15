@@ -71,6 +71,17 @@ type stuckServices struct {
 	stuck string
 }
 
+// Stop is the stop of one unit, as launchd does it on macOS.
+func (s stuckServices) Stop(ctx context.Context, unit Unit) error {
+	err := s.fakeServices.Stop(ctx, unit)
+	if unit.Name == s.stuck {
+		s.fakeServices.mu.Lock()
+		s.fakeServices.active[unit.Name] = true
+		s.fakeServices.mu.Unlock()
+	}
+	return err
+}
+
 func (s stuckServices) StopTogether(ctx context.Context, units []Unit) error {
 	err := s.fakeServices.StopTogether(ctx, units)
 	s.fakeServices.mu.Lock()
@@ -83,20 +94,45 @@ func (s stuckServices) StopTogether(ctx context.Context, units []Unit) error {
 	return err
 }
 
+// The error names the command that stops the unit on the platform:
+// systemctl stop on Linux, launchctl bootout system/<label> on macOS, where
+// launchd stops each job on its own.
 func TestUninstallReportsAUnitItCouldNotStop(t *testing.T) {
-	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.env.Services = stuckServices{fakeServices: h.services, stuck: unitAPISocket}
-	r := h.run(Options{Action: ActionUninstall})
-	requireError(t, r, codeUninstall)
-	if got := messagesOf(r.Errors, codeUninstall); !strings.Contains(got, "could not stop "+unitAPISocket) {
-		t.Fatalf("the error does not name the running unit: %s", got)
+	for _, tc := range []struct{ goos, stuck, command, foreign string }{
+		{"linux", unitAPISocket, "`systemctl stop " + unitAPISocket + "`", "launchctl"},
+		{"darwin", labelGateway, "`launchctl bootout system/" + labelGateway + "`", "systemctl"},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			h := newTestHost(t, tc.goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.Services = stuckServices{fakeServices: h.services, stuck: tc.stuck}
+			r := h.run(Options{Action: ActionUninstall})
+			requireError(t, r, codeUninstall)
+			got := messagesOf(r.Errors, codeUninstall)
+			if !strings.Contains(got, "could not stop "+tc.stuck+"; stop them with "+tc.command+" and rerun `") {
+				t.Fatalf("the error does not name the running unit and %s: %s", tc.command, got)
+			}
+			if strings.Contains(got, tc.foreign) {
+				t.Fatalf("the %s error names %s: %s", tc.goos, tc.foreign, got)
+			}
+			if got := countCalls(h.services.calls, "stop "+tc.stuck); got < 3 {
+				t.Fatalf("the stuck unit was stopped %d times, want 3", got)
+			}
+			if !exists(h.env.deploymentPath()) {
+				t.Fatal("the failed uninstall removed the deployment record")
+			}
+		})
 	}
-	if got := countCalls(h.services.calls, "stop "+unitAPISocket); got < 3 {
-		t.Fatalf("the stuck unit was stopped %d times, want 3", got)
+}
+
+// Several units on macOS: one bootout each.
+func TestStopCommandsFollowThePlatform(t *testing.T) {
+	units := []string{"a.socket", "b.service"}
+	if got := (&Env{GOOS: "linux"}).stopCommands(units); got != "`systemctl stop a.socket b.service`" {
+		t.Fatalf("linux: %s", got)
 	}
-	if !exists(h.env.deploymentPath()) {
-		t.Fatal("the failed uninstall removed the deployment record")
+	if got := (&Env{GOOS: "darwin"}).stopCommands(units); got != "`launchctl bootout system/a.socket`, `launchctl bootout system/b.service`" {
+		t.Fatalf("darwin: %s", got)
 	}
 }
 

@@ -2987,8 +2987,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	stillRunning = append(stillRunning, stopGroup(false)...)
 	if len(stillRunning) > 0 {
-		errs = append(errs, fmt.Errorf("could not stop %s; stop them with `systemctl stop %s` and rerun `%s`",
-			strings.Join(stillRunning, ", "), strings.Join(stillRunning, " "), l.uninstallCommand()))
+		errs = append(errs, fmt.Errorf("could not stop %s; stop them with %s and rerun `%s`",
+			strings.Join(stillRunning, ", "), env.stopCommands(stillRunning), l.uninstallCommand()))
 	}
 	// The sensor helper is stopped. The Tetragon policies it loaded outlive
 	// it and would keep enforcing with frozen anchors: remove them with the
@@ -3591,6 +3591,20 @@ func purgedUserChange(user string, detail *purgedUserDetail) string {
 }
 
 // uninstallCommand is this run's uninstall command line, for a rerun.
+// stopCommands is what an administrator runs to stop the named units by
+// hand: one systemctl stop for all of them, or on macOS one launchctl
+// bootout per launchd job.
+func (e *Env) stopCommands(units []string) string {
+	if e.GOOS != "darwin" {
+		return "`systemctl stop " + strings.Join(units, " ") + "`"
+	}
+	commands := make([]string, 0, len(units))
+	for _, unit := range units {
+		commands = append(commands, "`launchctl bootout system/"+unit+"`")
+	}
+	return strings.Join(commands, ", ")
+}
+
 func (l *lifecycle) uninstallCommand() string {
 	command := l.env.lifecycleCommand(ActionUninstall)
 	if l.opts.Purge {
