@@ -174,7 +174,7 @@ func TestLockWaiterStopsWhenTheUninstallRemovedTheLock(t *testing.T) {
 	}
 }
 
-// When the directory stays (another run created a new lock file), the
+// When the directory stays and another run created a new lock file, the
 // waiter takes the new file, so two runs never hold different inodes.
 func TestLockWaiterMovesToTheNewLockFile(t *testing.T) {
 	h := newTestHost(t, "linux")
@@ -197,6 +197,9 @@ func TestLockWaiterMovesToTheNewLockFile(t *testing.T) {
 	}()
 	time.Sleep(50 * time.Millisecond)
 	if err := os.Remove(filepath.Join(dir, lockFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, lockFileName), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	held.release()
