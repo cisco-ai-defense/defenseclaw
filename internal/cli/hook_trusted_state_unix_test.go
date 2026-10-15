@@ -67,7 +67,19 @@ func testDescriptor() *managed.RuntimeDescriptor {
 func noMarkers(string) (enterprisepolicy.Options, bool) { return enterprisepolicy.Options{}, false }
 
 func TestForeignHookSessionPreparesUnixManagedTransport(t *testing.T) {
-	dir := t.TempDir()
+	// The transport refuses a socket directory that group or others can
+	// write, so the mode must not come from the umask (t.TempDir is
+	// group-writable under umask 0002). The short /tmp path keeps the socket
+	// within the 104-byte macOS sun_path limit, which a t.TempDir path named
+	// after this test exceeds.
+	dir, err := os.MkdirTemp("/tmp", "dch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "hook.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
