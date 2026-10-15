@@ -629,10 +629,17 @@ func (l *lifecycle) backFromRestart(ctx context.Context, unit Unit) bool {
 // which the digest check cannot see: an installed binary another account
 // could replace, a loosened config.yaml, or any recorded file that became
 // group- or other-writable. Repair restores the modes of the files it
-// writes; it refuses to adopt a replaceable binary, so that problem names
-// the command that restores it.
+// writes; it refuses to adopt a replaceable binary, and it never writes the
+// unit files the Linux package installs, so those problems name the command
+// that restores them.
 func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip string) []string {
-	var problems []string
+	packageUnits := map[string]bool{}
+	if record.Channel == ChannelPackage && e.GOOS == "linux" {
+		for _, unit := range e.Services.Units() {
+			packageUnits[e.Services.DefinitionPath(unit, ChannelPackage)] = true
+		}
+	}
+	var problems, loosenedUnits []string
 	for _, path := range sortedKeys(record.Files) {
 		if (skipConfig && path == e.Layout.ConfigPath) || path == skip {
 			continue
@@ -657,9 +664,19 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 			if perm != 0o640 || uid != 0 || gid != record.ServiceGID {
 				problems = append(problems, fmt.Sprintf("%s is %04o %d:%d, want 0640 0:%d; run `%s` to restore it", path, perm, uid, gid, record.ServiceGID, e.lifecycleCommand("repair")))
 			}
+		case packageUnits[path] && perm&0o022 != 0:
+			loosenedUnits = append(loosenedUnits, fmt.Sprintf("%s (%04o)", path, perm))
 		case perm&0o022 != 0:
 			problems = append(problems, fmt.Sprintf("%s is writable by group or other (%04o); run `%s` to restore it", path, perm, e.lifecycleCommand("repair")))
 		}
+	}
+	if len(loosenedUnits) > 0 {
+		// One problem for all of them: repair never writes the units the
+		// package installed. A package built from a checkout made under
+		// umask 0002 shipped every unit 0664, and its first install rolled
+		// back with no deployment for repair to work on (GAP-0108).
+		problems = append(problems, fmt.Sprintf("unit files the package installed are writable by group or other: %s; repair does not rewrite package files: run `chmod 0644` on them, then `%s --from-package`",
+			strings.Join(loosenedUnits, ", "), e.lifecycleCommand(ActionEnsure)))
 	}
 	return problems
 }

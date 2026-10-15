@@ -26,6 +26,9 @@
 # asset names with goreleaser.
 
 set -euo pipefail
+# The archives keep the mode go build gives the binaries, which follows the
+# umask: a shared build host with umask 0002 archived them 0775 (GAP-0108).
+umask 022
 
 VERSION="${1:?usage: $0 VERSION OUTDIR [os/arch ...]}"
 OUT="${2:?usage: $0 VERSION OUTDIR [os/arch ...]}"
