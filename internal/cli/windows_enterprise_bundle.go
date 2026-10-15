@@ -56,8 +56,13 @@ const (
 	windowsBundleConfigName   = "bundle-config.yaml"
 	windowsBundleRollbackName = "bundle-rollback-config.yaml"
 	windowsBundleLockName     = "bundle.lock"
-	windowsBundleMaxConfig    = 4 << 20
-	windowsBundleMaxAnchors   = 256 << 10
+	// windowsBundleStagedAnchorsName is the private stage, under the
+	// lifecycle directory, of the TRUSTANCHORS= of a BUNDLE= run: the bundle
+	// is verified against it, and finish commits it over the installed
+	// anchor file only once the bundle is confirmed (GAP-0106).
+	windowsBundleStagedAnchorsName = "bundle-staged-anchors.json"
+	windowsBundleMaxConfig         = 4 << 20
+	windowsBundleMaxAnchors        = 256 << 10
 	// windowsBundlePolicyWaits bounds how often the confirm re-reads the
 	// gateway policy after a successful transaction (a hot reload lags).
 	windowsBundlePolicyWaits = 4
@@ -587,8 +592,10 @@ func publishWindowsBundleVersion(root string) error {
 
 // prepareWindowsEnterpriseBundle runs before the lifecycle reads --config.
 // With --bundle it prepares the bundle and makes its rendered config the
-// --config of the run; with --trust-anchors it installs the anchor file
-// first. In bundle mode (anchors installed) a --config that is not the
+// --config of the run. --trust-anchors with --bundle stages the anchor
+// file and verifies the bundle against the stage; finish commits it once
+// the bundle is confirmed. --trust-anchors alone installs the anchor file.
+// In bundle mode (anchors installed) a --config that is not the
 // current bundle config is refused with bundle_required. done is set when
 // the run ended here with err as its outcome.
 func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions) (done bool, err error) {
@@ -653,7 +660,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		anchorPath := driver.AnchorsPath
 		if opts.bundlePath != "" {
 			run.anchorPath = anchorPath
-			run.anchorStage = filepath.Join(layout.LifecycleDir, "bundle-staged-anchors.json")
+			run.anchorStage = filepath.Join(layout.LifecycleDir, windowsBundleStagedAnchorsName)
 			previous, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
 			if readErr == nil {
 				run.anchorPrevious, run.anchorExisted = previous, true

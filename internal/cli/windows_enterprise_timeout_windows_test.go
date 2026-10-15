@@ -56,10 +56,20 @@ func TestWindowsEnterprisePowerShellChildBoundsInheritedPipe(t *testing.T) {
 	}
 }
 
+// The child runs through the same engine and runner as the standalone
+// installer (runWindowsEnterprisePowerShell7): the engine builds it with
+// exec.CommandContext, so the runner may set Cancel, and only the clean
+// Wait releases the kill-on-close job that would end the grandchild. The
+// runner only swaps PowerShell's arguments for this test's helper role.
 func TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait(t *testing.T) {
+	const run = "-test.run=^TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait$"
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	switch os.Getenv("DC_ENTERPRISE_DETACHED_HELPER") {
 	case "parent":
-		grandchild := exec.Command(os.Args[0], "-test.run=^TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait$")
+		grandchild := exec.Command(self, run)
 		grandchild.Env = append(os.Environ(), "DC_ENTERPRISE_DETACHED_HELPER=grandchild")
 		grandchild.SysProcAttr = &syscall.SysProcAttr{
 			CreationFlags:    windows.DETACHED_PROCESS,
@@ -74,14 +84,25 @@ func TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWa
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}
-	child := exec.Command(os.Args[0], "-test.run=^TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWait$")
-	child.Env = append(os.Environ(), "DC_ENTERPRISE_DETACHED_HELPER=parent")
-	var output bytes.Buffer
-	child.Stdout = &output
-	err := runWindowsEnterprisePowerShellChild(child)
-	match := regexp.MustCompile(`grandchild_pid=(\d+)`).FindStringSubmatch(output.String())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	capture, err := runWindowsEnterprisePowerShellEngineWithRunner(ctx, command, self,
+		func(string) ([]string, error) { return os.Environ(), nil }, "unused-installer.ps1", nil,
+		&stdout, &stderr, true, func(child *exec.Cmd) error {
+			// exec.CommandContext installs a default Cancel; exec.Command
+			// leaves it nil, and the runner's Cancel would then fail Start.
+			if child.Cancel == nil {
+				t.Error("the engine did not build the child with exec.CommandContext")
+			}
+			child.Args = []string{self, run}
+			child.Env = append(child.Env, "DC_ENTERPRISE_DETACHED_HELPER=parent")
+			return runWindowsEnterprisePowerShellChild(child)
+		})
+	match := regexp.MustCompile(`grandchild_pid=(\d+)`).FindStringSubmatch(stdout.String())
 	if len(match) != 2 {
-		t.Fatalf("grandchild PID missing after child wait %v from %q", err, output.String())
+		t.Fatalf("grandchild PID missing after child wait %v from %q (stderr %q)", err, stdout.String(), stderr.String())
 	}
 	pid, _ := strconv.ParseUint(match[1], 10, 32)
 	handle, openErr := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(pid))
@@ -95,6 +116,9 @@ func TestWindowsEnterprisePowerShellChildPreservesDetachedGrandchildAfterCleanWa
 	})
 	if err != nil {
 		t.Fatalf("clean child wait: %v", err)
+	}
+	if capture == nil || capture.pipeWaitDelayed {
+		t.Fatal("the clean child wait was reported as a delayed pipe")
 	}
 	state, waitErr := windows.WaitForSingleObject(handle, 0)
 	if waitErr != nil || state != uint32(windows.WAIT_TIMEOUT) {
