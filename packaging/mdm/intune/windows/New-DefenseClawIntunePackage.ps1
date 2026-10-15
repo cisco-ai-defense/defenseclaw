@@ -89,6 +89,25 @@ function Get-GuardrailBlock {
     return ($lines[$start..($end - 1)] -join "`n").TrimEnd([char]10)
 }
 
+function Get-CustomPackPath {
+    # guardrail.custom_packs.<Pack>.path of a Get-GuardrailBlock block, as
+    # its line index and unquoted value, or $null.
+    param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Lines, [Parameter(Mandatory)][string]$Pack)
+    $inPacks = $false
+    $inPack = $false
+    for ($i = 0; $i -lt $Lines.Length; $i++) {
+        $line = $Lines[$i]
+        if ($line -ceq '  custom_packs:') { $inPacks = $true; $inPack = $false; continue }
+        if ($inPacks -and $line -match '^ {0,3}\S') { $inPacks = $false }
+        if (-not $inPacks) { continue }
+        if ($line -cmatch '^    ([^\s:]+):\s*$') { $inPack = ($Matches[1] -ceq $Pack); continue }
+        if ($inPack -and $line -cmatch '^      path:\s*(?<value>\S.*?)\s*$') {
+            return @{ Index = $i; Value = $Matches['value'].Trim([char[]]@('"', "'")) }
+        }
+    }
+    return $null
+}
+
 if ($BundlePath) {
     $baseText = Get-Content -LiteralPath $BaseConfigPath -Raw
     if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
@@ -130,32 +149,32 @@ if ($BundlePath) {
     }
     $packs = @($manifest.files | Where-Object { $_.path -match '^policies/guardrail/([^/]+)/' } |
         ForEach-Object { [regex]::Match($_.path, '^policies/guardrail/([^/]+)/').Groups[1].Value } | Sort-Object -Unique)
-    if ($packs.Count -ne 1) { throw 'bundle must carry exactly one guardrail rule pack for a base CONFIG= package' }
-    $packName = $packs[0]
     $bundleBlock = Get-GuardrailBlock -Text ([Text.Encoding]::UTF8.GetString($entries['config.yaml']))
     $baseBlock = Get-GuardrailBlock -Text $baseText
-    $packLine = "  rule_pack: $packName"
-    if (($bundleBlock -split "`n") -cnotcontains $packLine -or ($baseBlock -split "`n") -cnotcontains $packLine) {
-        throw "base CONFIG= must select the bundle rule pack $packName"
+    $bundleLines = @($bundleBlock -split "`n")
+    $baseLines = @($baseBlock -split "`n")
+    $selected = @($bundleLines | Where-Object { $_ -cmatch '^  rule_pack: ' })
+    if ($selected.Count -eq 1 -and $baseLines -cnotcontains $selected[0]) {
+        throw "base CONFIG= must select the bundle rule pack $($selected[0].Substring(13).Trim())"
     }
-    $customLine = '    ' + $packName + ':'
-    if (($bundleBlock -split "`n") -cnotcontains '  custom_packs:' -or
-        ($baseBlock -split "`n") -cnotcontains '  custom_packs:' -or
-        ($bundleBlock -split "`n") -cnotcontains $customLine -or
-        ($baseBlock -split "`n") -cnotcontains $customLine) {
-        throw "base CONFIG= must define custom_packs.$packName"
+    # The base block may differ from the bundle's only where each custom pack
+    # is installed: the bundle names policies/guardrail/<pack> inside itself,
+    # the base an absolute, preinstalled directory. A bundle without custom
+    # packs needs an identical block.
+    foreach ($packName in $packs) {
+        $bundlePack = Get-CustomPackPath -Lines $bundleLines -Pack $packName
+        $basePack = Get-CustomPackPath -Lines $baseLines -Pack $packName
+        if ($null -eq $bundlePack -or $bundlePack.Value -cne "policies/guardrail/$packName") {
+            throw "bundle config.yaml must name policies/guardrail/$packName as custom_packs.$packName.path"
+        }
+        if ($null -eq $basePack) { throw "base CONFIG= must define custom_packs.$packName" }
+        if ($basePack.Value -notmatch '^[A-Za-z]:\\') {
+            throw "base CONFIG= must name an absolute, preinstalled path for bundle rule pack $packName"
+        }
+        $baseLines[$basePack.Index] = $bundleLines[$bundlePack.Index]
     }
-    $pathPattern = '(?m)^      path: (?<value>.+)$'
-    $bundlePaths = [regex]::Matches($bundleBlock, $pathPattern)
-    $basePaths = [regex]::Matches($baseBlock, $pathPattern)
-    if ($bundlePaths.Count -ne 1 -or $basePaths.Count -ne 1 -or
-        $bundlePaths[0].Groups['value'].Value.Trim([char[]]@('"', "'")) -cne "policies/guardrail/$packName" -or
-        $basePaths[0].Groups['value'].Value.Trim([char[]]@('"', "'")) -notmatch '^[A-Za-z]:\\') {
-        throw "base CONFIG= must name an absolute, preinstalled path for bundle rule pack $packName"
-    }
-    $basePolicy = $baseBlock.Replace($basePaths[0].Value, $bundlePaths[0].Value)
-    if ($basePolicy -cne $bundleBlock) {
-        throw "base CONFIG= guardrail policy differs from signed bundle rule pack $packName; use the same policy source and change only custom_packs.$packName.path"
+    if (($baseLines -join "`n") -cne $bundleBlock) {
+        throw "base CONFIG= guardrail policy differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
     }
 }
 
@@ -242,7 +261,8 @@ Install behavior:  System
 Return codes:      0 Success, 1707 Success, 3010 Soft reboot, 1641 Hard reboot, 1618 Retry (defaults; 1603 and 1639 report Failed)
 Requirements:      x64 only; Windows 10 22H2 or later
 Dependency:        the DefenseClaw base app (built with -ConfigPath), Automatically install: Yes. Setup cannot take a bundle on the first install.
-Base policy:       -BaseConfigPath $BaseConfigPath (use this exact file for the base app; its custom rule pack must already be installed on the device)
+Base policy:       -BaseConfigPath $BaseConfigPath, sha256 $((Get-FileHash -LiteralPath $BaseConfigPath -Algorithm SHA256).Hash.ToLowerInvariant())
+                   (it must equal config_sha256 in the base app's intune-package.json; its custom rule packs must already be installed on the device)
 Supersedence:      supersede the previous bundle app; Uninstall previous version: No
 Detection rule:    Custom script $(Join-Path $OutputDirectory 'detect-bundle.ps1'), Run script as 32-bit process on 64-bit clients: No
 Pins:              policy.dcbundle sha256 $bundlePin; bundle-anchors.json sha256 $(if ($anchorPin) { $anchorPin } else { 'none' })

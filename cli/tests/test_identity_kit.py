@@ -45,8 +45,9 @@ REGION_END = "# endregion graph client"
 def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
     script = (ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1").read_text()
     assert "if ($BundlePath -and -not $BaseConfigPath)" in script
-    assert "base CONFIG= guardrail policy differs from signed bundle rule pack" in script
-    assert script.index("$basePolicy -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
+    assert "base CONFIG= guardrail policy differs from the signed bundle's" in script
+    assert script.index("($baseLines -join \"`n\") -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
+    assert "it must equal config_sha256 in the base app's intune-package.json" in script
     detect = (ROOT / "packaging/mdm/intune/windows/Remediate-Detect.ps1").read_text()
     # A config-only deployment is healthy too; the line names the policy source.
     assert "no signed policy bundle is confirmed; the installed config enforces" in detect
@@ -100,6 +101,63 @@ def test_intune_bundle_package_refuses_weak_base_and_accepts_matching_pack(tmp_p
     accepted = package("matching")
     assert accepted.returncode == 0, accepted.stderr
     assert (tmp_path / "matching/content/policy.dcbundle").exists()
+    assert hashlib.sha256(base.read_bytes()).hexdigest() in accepted.stdout
+
+
+def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
+    data = config.encode()
+    files = [{"path": "config.yaml", "sha256": hashlib.sha256(data).hexdigest()}]
+    files += [{"path": f"policies/guardrail/{pack}/rules.yaml", "sha256": "b" * 64} for pack in packs]
+    bundle = tmp_path / "policy.dcbundle"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, body in (("manifest.json", json.dumps({"files": files}).encode()), ("config.yaml", data)):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(body)
+            archive.addfile(entry, io.BytesIO(body))
+    return bundle
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")
+@pytest.mark.parametrize(
+    ("bundle_config", "packs", "base_config", "refusal"),
+    [
+        # A built-in pack: the base block must be identical.
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (), "guardrail:\n  block_at: HIGH\n  rule_pack: default\n", ""),
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (), "guardrail:\n  block_at: CRITICAL\n  rule_pack: default\n",
+         "guardrail policy differs"),
+        # Two custom packs (one per connector), with a blank line in the block.
+        ("guardrail:\n  rule_pack: a\n\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n"
+         "    b:\n      path: policies/guardrail/b\n  connectors:\n    codex:\n      rule_pack: b\n", ("a", "b"),
+         "guardrail:\n  rule_pack: a\n\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n"
+         "    b:\n      path: 'C:\\Packs\\b'\n  connectors:\n    codex:\n      rule_pack: b\n", ""),
+        ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n"
+         "    b:\n      path: policies/guardrail/b\n", ("a", "b"),
+         "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n", "must define custom_packs.b"),
+        ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n", ("a",),
+         "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: packs/a\n", "absolute, preinstalled path"),
+    ],
+)
+def test_intune_bundle_package_compares_every_pack(
+    tmp_path: Path, bundle_config: str, packs: tuple[str, ...], base_config: str, refusal: str
+) -> None:
+    packager = ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1"
+    setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+    setup.write_bytes(b"packager-only stub")
+    bundle = _intune_bundle(tmp_path, bundle_config, packs)
+    base = tmp_path / "base.yaml"
+    base.write_text(base_config)
+    run = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(packager),
+         "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+         "-BundlePath", str(bundle), "-BaseConfigPath", str(base),
+         "-RequireBundle", "1", "-OutputDirectory", str(tmp_path / "out")],
+        capture_output=True, text=True, timeout=30,
+    )
+    if refusal:
+        assert run.returncode != 0 and refusal in run.stderr, run.stderr
+        assert not (tmp_path / "out/content").exists()
+    else:
+        assert run.returncode == 0, run.stderr
 
 
 def _load(path: Path):
