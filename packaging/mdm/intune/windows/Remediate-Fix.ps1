@@ -12,6 +12,11 @@
     Remediate-Detect.ps1: all lifecycle work happens in the native CLI and
     its trusted PowerShell 7 engine, never in the 32-bit Intune host.
 
+    On a device that takes signed policy bundles, ensure re-applies the
+    confirmed bundle from the bundle store when config.yaml was changed
+    outside the lifecycle, and the script checks again that the gateway
+    enforces it before it reports success.
+
     Exit 0 = repaired or already healthy; non-zero = still failing. Intune
     keeps at most 2,048 characters of output, so this prints a one-line
     summary; the full result is in %WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log.
@@ -269,6 +274,70 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Get-DefenseClawBundleEnforcement {
+    # A bundle-mode device is compliant only while the running gateway
+    # enforces its confirmed signed policy bundle: `enterprise bundle status`
+    # reports the marker's bundle as current with applied true (GAP-0114: a
+    # config.yaml edited outside the lifecycle verified healthy while the
+    # gateway enforced the edit). $null when the marker names no confirmed
+    # bundle: without one the installed config is the policy and
+    # verify covers it. Identical in Remediate-Detect.ps1 and
+    # Remediate-Fix.ps1 (a test enforces it).
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    if ($null -eq $key) { return $null }
+    try {
+        if ([string]$key.GetValue('BundleState') -ne 'confirmed') { return $null }
+        $id = [string]$key.GetValue('BundleId')
+        $version = [string]$key.GetValue('BundleVersion')
+    } finally { $key.Dispose() }
+    $label = "signed policy bundle $id version $version"
+    $verdict = New-Object -TypeName PSObject -Property @{ Applied = $false; Line = '' }
+    $field = {
+        param($Object, [string]$Name)
+        if ($null -eq $Object) { return $null }
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -eq $property) { return $null }
+        return $property.Value
+    }
+    $short = {
+        param([string]$Digest)
+        if (-not $Digest) { return 'none' }
+        if ($Digest.Length -gt 19) { return $Digest.Substring(0, 19) }
+        return $Digest
+    }
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $Cli -TimeoutSeconds 300 -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json')
+        $status = $null
+        if ([string]$run.StdOut) { $status = ([string]$run.StdOut) | ConvertFrom-Json }
+    } catch {
+        $verdict.Line = "$label is confirmed, but bundle status could not be read: $($_.Exception.Message)"
+        return $verdict
+    }
+    if ($run.ExitCode -ne 0 -or $null -eq $status) {
+        $verdict.Line = "$label is confirmed, but bundle status exited $($run.ExitCode)"
+        return $verdict
+    }
+    $current = & $field $status 'current'
+    if ($null -eq $current -or [string](& $field $current 'bundle_id') -ne $id) {
+        $verdict.Line = "$label is confirmed in the enterprise marker but is not the current bundle in the bundle store"
+        return $verdict
+    }
+    if (-not [bool](& $field $status 'applied')) {
+        $detail = 'the running gateway policy could not be checked'
+        if ([bool](& $field $status 'gateway_checked')) {
+            $detail = 'the gateway enforces ' + (& $short ([string](& $field $status 'gateway_digest'))) +
+                ', not ' + (& $short ([string](& $field $current 'effective_policy_digest')))
+        }
+        $verdict.Line = "$label is confirmed but not applied: $detail"
+        return $verdict
+    }
+    $verdict.Applied = $true
+    $verdict.Line = "$label is applied"
+    return $verdict
+}
+
 function Get-DefenseClawStoppedSideServices {
     # From a failed verify result, the guardian and enumerator services that
     # are not running while the gateway and sensor helper run. Starting just
@@ -363,7 +432,9 @@ try {
         Start-Sleep -Seconds 15
         $after = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 180 -ArgumentList @(
             'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
-        if ($after.ExitCode -eq 0) {
+        $bundle = $null
+        if ($after.ExitCode -eq 0) { $bundle = Get-DefenseClawBundleEnforcement -Cli $deployment.Cli }
+        if ($after.ExitCode -eq 0 -and ($null -eq $bundle -or $bundle.Applied)) {
             [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): repaired (started $($stopped -join ', '))")
             exit 0
         }
@@ -419,11 +490,16 @@ try {
     # a power loss) is repaired, but the change itself did not finish: say
     # so and name the next step (GAP-0767).
     $recovered = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'recovered_pending_transaction' } | Select-Object -First 1
+    # A config.yaml changed outside the lifecycle that ensure put back from
+    # the confirmed policy bundle is a repair, even when nothing else was
+    # left to do (GAP-0114).
+    $restored = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'bundle_config_restored' } | Select-Object -First 1
     if ($document.ok -and $null -ne $runtime) {
         $summary = "not repaired (scanner_runtime_unavailable): $($runtime.message)"
         $code = 1603
     }
     elseif ($document.ok -and $null -ne $recovered) { $summary = "repaired: $($recovered.message)" }
+    elseif ($document.ok -and $null -ne $restored) { $summary = "repaired: $($restored.message)" }
     elseif ($document.ok -and $document.noop) { $summary = 'already healthy' }
     elseif ($document.ok) { $summary = 'repaired' }
     else {
@@ -442,6 +518,22 @@ try {
         }
     }
 } catch { $summary = "exit $code, no lifecycle result" }
+if ($code -eq 0) {
+    # Detect again before reporting success: on a bundle-mode device the
+    # remediation succeeded only when the gateway enforces the confirmed
+    # bundle again. Otherwise Intune must show the failure (GAP-0114).
+    try {
+        $bundle = Get-DefenseClawBundleEnforcement -Cli $deployment.Cli
+    } catch {
+        $bundle = New-Object -TypeName PSObject -Property @{ Applied = $false; Line = "the signed policy bundle could not be checked: $($_.Exception.Message)" }
+    }
+    if ($null -ne $bundle -and -not $bundle.Applied) {
+        $summary = "not repaired: $($bundle.Line)"
+        $code = 1603
+    } elseif ($null -ne $bundle) {
+        $summary += "; $($bundle.Line)"
+    }
+}
 if ($restoreFailure) {
     $summary += "; startup-mode restore failed: $restoreFailure"
     $code = 1603

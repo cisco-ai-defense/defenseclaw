@@ -52,7 +52,10 @@ def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
     # A config-only deployment is healthy too; the line names the policy source.
     assert "no signed policy bundle is confirmed; the installed config enforces" in detect
     assert "base-only" not in detect
-    assert "if ($null -ne $key)" in detect
+    # No marker or no confirmed bundle: the bundle check passes over it, and
+    # only a confirmed bundle has to be applied (GAP-0114).
+    assert "if ($null -eq $key) { return $null }" in detect
+    assert "if ($null -ne $bundle) {" in detect
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")

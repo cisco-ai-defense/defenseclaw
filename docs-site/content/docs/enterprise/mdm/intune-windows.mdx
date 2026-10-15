@@ -214,10 +214,18 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   the lock (the next scheduled run checks again). Otherwise it exits `1`,
   which starts the remediation. Its line names the failing check: each
   DefenseClaw service that is not running, with its start mode, or else the
-  first error. A healthy line also names the policy source: the confirmed
-  signed bundle and its version, or that the installed config enforces
-  because no bundle is confirmed. Remediations do not install a missing
-  bundle; the bundle app's detection does.
+  first error. On a computer that takes signed policy bundles, healthy also
+  means the running gateway enforces the confirmed bundle: the script asks
+  `enterprise bundle status --json` and is compliant only when it names the
+  marker's bundle as current with `applied: true`. A `config.yaml` changed
+  outside the lifecycle, or a gateway that enforces another policy, is not
+  compliant: verify fails with `bundle_not_applied`, and the line reads
+  `signed policy bundle <id> version <n> is confirmed but not applied: the
+  gateway enforces sha256:..., not sha256:...`. A healthy line names the policy
+  source: `signed policy bundle <id> version <n> is applied (the gateway
+  enforces it)`, or that the installed config enforces because no bundle is
+  confirmed. Remediations do not install a missing bundle; the bundle app's
+  detection does.
 - `Remediate-Fix.ps1` first checks the same way. When the only problem is a
   stopped or disabled hook guardian or enumerator while the gateway runs, it
   sets that service back to automatic start, starts it and verifies again,
@@ -232,6 +240,23 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   release that runs again, and asks you to run the newer Setup `/ensure` again
   (the Win32 app retries it). Status, verify and the install record then report
   the release that is installed.
+- On a computer that takes signed policy bundles, `ensure` first puts the
+  confirmed bundle's config back when `config.yaml` is not that config. It
+  renders the config from the verified, read-only version directory in the
+  bundle store (nothing comes from the network), writes it with the lifecycle
+  writer as the bundle's principal, keeps the edited file as
+  `C:\ProgramData\Cisco\DefenseClaw\etc\rejected-config.yaml`
+  (administrators only), and reloads the running gateway, or restarts it when
+  it does not adopt the bundle. A stopped gateway starts on the restored
+  config, never on the edit. The result warns `bundle_config_restored`. Then
+  `Remediate-Fix.ps1` checks again that the gateway enforces the bundle. It
+  exits `0` with `repaired; signed policy bundle <id> version <n> is applied`
+  only then, and `1603` otherwise: `still failing (bundle_restore_failed)`
+  when the bundle store cannot give the config back (for example a damaged
+  version directory; deliver the bundle again or a newer one), or
+  `not repaired: ... is confirmed but not applied` when the gateway still
+  enforces another policy. Intune then shows the remediation as failed, not
+  as fixed.
 
 Both print one short line, because Intune keeps 2,048 characters of output.
 The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`.

@@ -14,6 +14,8 @@
 
     Exit 0 = compliant (nothing to do). Exit 1 = run Remediate-Fix.ps1. A host
     without the deployment is compliant here; the Win32 app installs it.
+    On a device that takes signed policy bundles, compliant also means the
+    running gateway enforces the confirmed bundle (bundle status applied).
 #>
 [CmdletBinding()]
 param()
@@ -273,6 +275,70 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Get-DefenseClawBundleEnforcement {
+    # A bundle-mode device is compliant only while the running gateway
+    # enforces its confirmed signed policy bundle: `enterprise bundle status`
+    # reports the marker's bundle as current with applied true (GAP-0114: a
+    # config.yaml edited outside the lifecycle verified healthy while the
+    # gateway enforced the edit). $null when the marker names no confirmed
+    # bundle: without one the installed config is the policy and
+    # verify covers it. Identical in Remediate-Detect.ps1 and
+    # Remediate-Fix.ps1 (a test enforces it).
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    if ($null -eq $key) { return $null }
+    try {
+        if ([string]$key.GetValue('BundleState') -ne 'confirmed') { return $null }
+        $id = [string]$key.GetValue('BundleId')
+        $version = [string]$key.GetValue('BundleVersion')
+    } finally { $key.Dispose() }
+    $label = "signed policy bundle $id version $version"
+    $verdict = New-Object -TypeName PSObject -Property @{ Applied = $false; Line = '' }
+    $field = {
+        param($Object, [string]$Name)
+        if ($null -eq $Object) { return $null }
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -eq $property) { return $null }
+        return $property.Value
+    }
+    $short = {
+        param([string]$Digest)
+        if (-not $Digest) { return 'none' }
+        if ($Digest.Length -gt 19) { return $Digest.Substring(0, 19) }
+        return $Digest
+    }
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $Cli -TimeoutSeconds 300 -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json')
+        $status = $null
+        if ([string]$run.StdOut) { $status = ([string]$run.StdOut) | ConvertFrom-Json }
+    } catch {
+        $verdict.Line = "$label is confirmed, but bundle status could not be read: $($_.Exception.Message)"
+        return $verdict
+    }
+    if ($run.ExitCode -ne 0 -or $null -eq $status) {
+        $verdict.Line = "$label is confirmed, but bundle status exited $($run.ExitCode)"
+        return $verdict
+    }
+    $current = & $field $status 'current'
+    if ($null -eq $current -or [string](& $field $current 'bundle_id') -ne $id) {
+        $verdict.Line = "$label is confirmed in the enterprise marker but is not the current bundle in the bundle store"
+        return $verdict
+    }
+    if (-not [bool](& $field $status 'applied')) {
+        $detail = 'the running gateway policy could not be checked'
+        if ([bool](& $field $status 'gateway_checked')) {
+            $detail = 'the gateway enforces ' + (& $short ([string](& $field $status 'gateway_digest'))) +
+                ', not ' + (& $short ([string](& $field $current 'effective_policy_digest')))
+        }
+        $verdict.Line = "$label is confirmed but not applied: $detail"
+        return $verdict
+    }
+    $verdict.Applied = $true
+    $verdict.Line = "$label is applied"
+    return $verdict
+}
+
 function Format-DefenseClawVerifyFailure {
     # The one line Intune shows for a failed verify: the error codes, then
     # each required service that is not running (with its start mode), or
@@ -323,16 +389,24 @@ try {
     exit 1
 }
 if ($run.ExitCode -eq 0) {
-    # Health covers the deployment. The line also names the policy source;
-    # the bundle app's detection decides whether a signed bundle enforces.
+    # Health covers the deployment, and on a bundle-mode device the policy:
+    # compliant only while the gateway enforces the confirmed bundle
+    # (GAP-0114). The line names the policy source.
     $policy = 'no signed policy bundle is confirmed; the installed config enforces'
-    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
-    if ($null -ne $key) {
-        try {
-            if ([string]$key.GetValue('BundleState') -eq 'confirmed') {
-                $policy = "signed policy bundle $([string]$key.GetValue('BundleId')) version $([string]$key.GetValue('BundleVersion')) is confirmed"
-            }
-        } finally { $key.Dispose() }
+    try {
+        $bundle = Get-DefenseClawBundleEnforcement -Cli $deployment.Cli
+    } catch {
+        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): the signed policy bundle could not be checked: $($_.Exception.Message)")
+        exit 1
+    }
+    if ($null -ne $bundle) {
+        if (-not $bundle.Applied) {
+            $line = "DefenseClaw $($deployment.Version): $($bundle.Line); the remediation re-applies it from the bundle store"
+            if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
+            [Console]::Out.WriteLine($line)
+            exit 1
+        }
+        $policy = "$($bundle.Line) (the gateway enforces it)"
     }
     [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy; $policy")
     exit 0
