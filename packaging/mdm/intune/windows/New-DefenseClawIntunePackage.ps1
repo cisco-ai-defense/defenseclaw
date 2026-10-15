@@ -17,8 +17,11 @@
 
     Never put credentials in config.yaml: the Win32 app content is not secret
     storage. Deliver the AI Defense key separately (see the Intune on Windows page in the docs).
-    A bundle package needs an installed base deployment. Verify the bundle offline
-    with defenseclaw-gateway enterprise bundle verify before packaging it.
+    A bundle package needs an installed base deployment. -BaseConfigPath names
+    the config packaged in that base app; its guardrail policy must match the
+    signed bundle, apart from the custom pack's installed path. Install that
+    pack before the base app. Verify the bundle offline with
+    defenseclaw-gateway enterprise bundle verify before packaging it.
 
 .EXAMPLE
     ./New-DefenseClawIntunePackage.ps1 -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
@@ -32,6 +35,7 @@ param(
     [string[]]$AllowedSigners = @(),
     [string]$ConfigPath = '',
     [string]$BundlePath = '',
+    [string]$BaseConfigPath = '',
     [string]$TrustAnchorPath = '',
     [string]$RequireBundle = '',
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
@@ -47,6 +51,8 @@ if (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 
 if ($BundlePath -and $ConfigPath) { throw '-BundlePath cannot be combined with -ConfigPath: the signed bundle carries the config. Build the first-install (base) package with -ConfigPath, and each bundle package with -BundlePath as an Intune dependency of the base app' }
+if ($BundlePath -and -not $BaseConfigPath) { throw '-BaseConfigPath is required with -BundlePath: the base CONFIG= must enforce the signed bundle rule pack before the bundle app runs' }
+if ($BaseConfigPath -and -not $BundlePath) { throw '-BaseConfigPath needs -BundlePath' }
 if ($TrustAnchorPath -and -not $BundlePath) { throw '-TrustAnchorPath needs -BundlePath: the kit installs trust anchors together with a signed bundle' }
 if ($BundlePath -and -not $RequireBundle) { throw '-RequireBundle is required with -BundlePath for the bundle app detection rule' }
 if ($RequireBundle -and -not $BundlePath) { throw '-RequireBundle needs -BundlePath' }
@@ -67,6 +73,90 @@ if ($TrustAnchorPath) {
     if ($anchorText -match '-----BEGIN [A-Z ]*PRIVATE KEY-----') { throw '-TrustAnchorPath contains a private key' }
     try { $anchorJson = $anchorText | ConvertFrom-Json -ErrorAction Stop } catch { throw '-TrustAnchorPath must contain a JSON object with schema_version 1' }
     if ($null -eq $anchorJson -or $anchorJson -isnot [pscustomobject] -or $null -eq $anchorJson.PSObject.Properties['schema_version'] -or $anchorJson.schema_version -isnot [long] -or $anchorJson.schema_version -ne 1) { throw '-TrustAnchorPath must contain a JSON object with schema_version 1' }
+}
+
+function Get-GuardrailBlock {
+    param([Parameter(Mandatory)][string]$Text)
+    $lines = ($Text -replace "`r`n", "`n") -split "`n"
+    $blocks = @()
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($lines[$i] -ceq 'guardrail:') { $blocks += $i }
+    }
+    if ($blocks.Count -ne 1) { throw 'base and bundle configs must each have one plain guardrail: block' }
+    $start = $blocks[0]
+    $end = $start + 1
+    while ($end -lt $lines.Length -and ($lines[$end] -eq '' -or $lines[$end] -match '^ ')) { $end++ }
+    return ($lines[$start..($end - 1)] -join "`n").TrimEnd([char]10)
+}
+
+if ($BundlePath) {
+    $baseText = Get-Content -LiteralPath $BaseConfigPath -Raw
+    if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
+    $file = [IO.File]::OpenRead($BundlePath)
+    try {
+        $gzip = [IO.Compression.GZipStream]::new($file, [IO.Compression.CompressionMode]::Decompress)
+        try {
+            $tar = [System.Formats.Tar.TarReader]::new($gzip)
+            try {
+                $entries = @{}
+                $entryCount = 0
+                $expandedBytes = [long]0
+                while ($null -ne ($entry = $tar.GetNextEntry())) {
+                    $entryCount++
+                    $expandedBytes += [long]$entry.Length
+                    if ($entryCount -gt 512 -or $expandedBytes -gt 16MB) {
+                        throw 'bundle exceeds the entry or expanded-size limit'
+                    }
+                    if ($entry.Name -notin @('manifest.json', 'config.yaml')) { continue }
+                    if ($entries.ContainsKey($entry.Name) -or $entry.Length -gt 262144 -or $null -eq $entry.DataStream) {
+                        throw "bundle $($entry.Name) is duplicate or invalid"
+                    }
+                    $buffer = [IO.MemoryStream]::new()
+                    $entry.DataStream.CopyTo($buffer)
+                    $entries[$entry.Name] = $buffer.ToArray()
+                    $buffer.Dispose()
+                }
+            } finally { $tar.Dispose() }
+        } finally { $gzip.Dispose() }
+    } finally { $file.Dispose() }
+    if (-not $entries.ContainsKey('manifest.json') -or -not $entries.ContainsKey('config.yaml')) {
+        throw 'bundle must contain manifest.json and config.yaml'
+    }
+    $manifest = [Text.Encoding]::UTF8.GetString($entries['manifest.json']) | ConvertFrom-Json
+    $configEntry = @($manifest.files | Where-Object { $_.path -ceq 'config.yaml' })
+    $configHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($entries['config.yaml'])).ToLowerInvariant()
+    if ($configEntry.Count -ne 1 -or $configEntry[0].sha256 -cne $configHash) {
+        throw 'bundle config.yaml does not match the signed manifest files[] pin'
+    }
+    $packs = @($manifest.files | Where-Object { $_.path -match '^policies/guardrail/([^/]+)/' } |
+        ForEach-Object { [regex]::Match($_.path, '^policies/guardrail/([^/]+)/').Groups[1].Value } | Sort-Object -Unique)
+    if ($packs.Count -ne 1) { throw 'bundle must carry exactly one guardrail rule pack for a base CONFIG= package' }
+    $packName = $packs[0]
+    $bundleBlock = Get-GuardrailBlock -Text ([Text.Encoding]::UTF8.GetString($entries['config.yaml']))
+    $baseBlock = Get-GuardrailBlock -Text $baseText
+    $packLine = "  rule_pack: $packName"
+    if (($bundleBlock -split "`n") -cnotcontains $packLine -or ($baseBlock -split "`n") -cnotcontains $packLine) {
+        throw "base CONFIG= must select the bundle rule pack $packName"
+    }
+    $customLine = '    ' + $packName + ':'
+    if (($bundleBlock -split "`n") -cnotcontains '  custom_packs:' -or
+        ($baseBlock -split "`n") -cnotcontains '  custom_packs:' -or
+        ($bundleBlock -split "`n") -cnotcontains $customLine -or
+        ($baseBlock -split "`n") -cnotcontains $customLine) {
+        throw "base CONFIG= must define custom_packs.$packName"
+    }
+    $pathPattern = '(?m)^      path: (?<value>.+)$'
+    $bundlePaths = [regex]::Matches($bundleBlock, $pathPattern)
+    $basePaths = [regex]::Matches($baseBlock, $pathPattern)
+    if ($bundlePaths.Count -ne 1 -or $basePaths.Count -ne 1 -or
+        $bundlePaths[0].Groups['value'].Value.Trim([char[]]@('"', "'")) -cne "policies/guardrail/$packName" -or
+        $basePaths[0].Groups['value'].Value.Trim([char[]]@('"', "'")) -notmatch '^[A-Za-z]:\\') {
+        throw "base CONFIG= must name an absolute, preinstalled path for bundle rule pack $packName"
+    }
+    $basePolicy = $baseBlock.Replace($basePaths[0].Value, $bundlePaths[0].Value)
+    if ($basePolicy -cne $bundleBlock) {
+        throw "base CONFIG= guardrail policy differs from signed bundle rule pack $packName; use the same policy source and change only custom_packs.$packName.path"
+    }
 }
 
 $setup = (Resolve-Path -LiteralPath $SetupPath).ProviderPath
@@ -152,6 +242,7 @@ Install behavior:  System
 Return codes:      0 Success, 1707 Success, 3010 Soft reboot, 1641 Hard reboot, 1618 Retry (defaults; 1603 and 1639 report Failed)
 Requirements:      x64 only; Windows 10 22H2 or later
 Dependency:        the DefenseClaw base app (built with -ConfigPath), Automatically install: Yes. Setup cannot take a bundle on the first install.
+Base policy:       -BaseConfigPath $BaseConfigPath (use this exact file for the base app; its custom rule pack must already be installed on the device)
 Supersedence:      supersede the previous bundle app; Uninstall previous version: No
 Detection rule:    Custom script $(Join-Path $OutputDirectory 'detect-bundle.ps1'), Run script as 32-bit process on 64-bit clients: No
 Pins:              policy.dcbundle sha256 $bundlePin; bundle-anchors.json sha256 $(if ($anchorPin) { $anchorPin } else { 'none' })

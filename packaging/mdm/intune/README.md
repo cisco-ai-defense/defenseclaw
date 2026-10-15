@@ -16,10 +16,11 @@ were removed):
 | `windows/` | `New-DefenseClawIntunePackage.ps1` (builds the Win32 app content), `Install-DefenseClawIntune.ps1` (the launcher), `Remediate-Detect.ps1` and `Remediate-Fix.ps1` |
 | `tenant/` | `intune_tenant.py`, a Microsoft Graph helper: check the tenant, create device groups, assign the app, create the Remediations package or a macOS shell script, report compliance. Previews by default. See its README |
 
-Validation status: the tenant setup, Windows and Linux enrollment and compliance, and the
-read-only and preview modes of `tenant/intune_tenant.py` were run on a test tenant. Delivering
-DefenseClaw through Intune (the Win32 app, Remediations, the macOS shell script, the Linux
-platform script) has not been run against a live tenant yet, so run a pilot group first.
+Validation status: a live test tenant delivered the Windows base and signed bundle
+Win32 apps, checked bundle detection and hook enforcement, and ran uninstall.
+The first bundle apply failed and needed a manual IME retry. Tenant setup and
+Windows/Linux enrollment and compliance were also tested. Pilot other channels
+and upgrades before fleet assignment.
 
 | Platform | Install | Detect | Keep healthy | Remove |
 | --- | --- | --- | --- | --- |
@@ -29,15 +30,18 @@ platform script) has not been run against a live tenant yet, so run a pilot grou
 
 ## Signed policy bundles on Windows
 
-Build the base Win32 app with `-ConfigPath` and assign it first. Setup cannot
-apply a bundle on the first install. After the base app is installed, build one
-Win32 app per signed bundle version:
+Build the base Win32 app with `-ConfigPath`. Its guardrail block must select
+the same custom rule pack, digest, threshold and rules as the signed bundle.
+Install that pack's files in an administrator-owned directory before the base
+app, as a dependency. Setup cannot apply a bundle on the first install. After
+the base app is installed, build one Win32 app per signed bundle version:
 
 ```powershell
 ./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 '<setup sha256>' -BundlePath .\policy.dcbundle `
   -TrustAnchorPath .\bundle-anchors.json -RequireBundle 7 `
+  -BaseConfigPath .\config.yaml `
   -ProductVersion 9.9.9 -OutputDirectory .\bundle-app
 ```
 
@@ -45,6 +49,11 @@ Verify the bundle offline with `defenseclaw-gateway enterprise bundle verify
 --anchors .\bundle-anchors.json --platform windows` before packaging. The
 packager pins the copied bundle and anchors and writes `detect-bundle.ps1`
 beside `content`; upload that file as the bundle app's custom detection script.
+It reads the bundle's manifest-pinned config and refuses a base config with a
+different guardrail policy; only the installed pack path may differ. Use the
+same `config.yaml` to build the base app and this bundle app. A base-only device
+is installed but has no confirmed signed bundle; its configured pack must
+enforce the same rules during that interval.
 Use a numeric `-RequireBundle` version so a later bundle remains detected.
 Set the base app as a dependency with **Automatically install: Yes**. Each new
 bundle app supersedes the previous bundle app with **Uninstall previous
@@ -56,7 +65,9 @@ mode; Setup otherwise refuses `bundle_required`. A bundle package must carry
 the Setup for the release installed on the device: an older Setup is refused
 as `downgrade_refused`. Bundles are limited to 4 MiB and anchors to 64 KiB.
 Setup installs anchors only from an administrator-only path and verifies the
-bundle signature on its own copy. Uninstall does not yet purge bundle state.
+bundle signature on its own copy. Plain standalone `/uninstall JSON=1` removes
+machine state, including anchors and bundles; `PURGE=1` also removes enrolled
+accounts' per-user DefenseClaw data and binaries.
 
 Intune's execution contexts shape the design:
 

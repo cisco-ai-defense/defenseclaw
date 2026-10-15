@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -97,11 +99,24 @@ def windows_kit(tmp_path: Path) -> dict[str, Path | str]:
     setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
     setup.write_bytes(b"stub Setup for packager checks")
     bundle = tmp_path / "input.dcbundle"
-    bundle.write_bytes(os.urandom(2048))
+    bundle_config = (
+        "guardrail:\n  block_at: HIGH\n  rule_pack: testpack\n  custom_packs:\n"
+        "    testpack:\n      path: policies/guardrail/testpack\n"
+        "      digest: sha256:" + "a" * 64 + "\n"
+    )
+    manifest = {"files": [{"path": "config.yaml", "sha256": hashlib.sha256(bundle_config.encode()).hexdigest()},
+                          {"path": "policies/guardrail/testpack/rules.yaml", "sha256": "b" * 64}]}
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, data in (("manifest.json", json.dumps(manifest).encode()),
+                           ("config.yaml", bundle_config.encode()),
+                           ("policies/guardrail/testpack/rules.yaml", b"rules: []\n")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
     anchors = tmp_path / "anchors.json"
     anchors.write_text('{"schema_version":1,"anchors":[]}', encoding="ascii")
     config = tmp_path / "config.yaml"
-    config.write_text("version: 9\n", encoding="ascii")
+    config.write_text(bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"), encoding="ascii")
     return {
         "pwsh": pwsh,
         "ps51": ps51,
@@ -150,6 +165,8 @@ public class StubSetup {
 
 def _package(kit: dict[str, Path | str], name: str, *options: str) -> tuple[Path, subprocess.CompletedProcess[str]]:
     out = Path(kit["tmp"]) / name
+    if "-BundlePath" in options and "-BaseConfigPath" not in options:
+        options = (*options, "-BaseConfigPath", str(kit["config"]))
     result = _run_ps(
         str(kit["pwsh"]),
         PACKAGER,
