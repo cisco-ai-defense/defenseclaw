@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 <#
 .SYNOPSIS
-    Intune Win32 app install command for the DefenseClaw standalone
-    managed-enterprise deployment.
+    Intune Win32 app install and uninstall command for the DefenseClaw
+    standalone managed-enterprise deployment.
 
 .DESCRIPTION
     Intune's management extension is a 32-bit process and runs install
@@ -17,17 +17,35 @@
     refuses relative or environment-expanded paths). Setup then launches the
     trusted PowerShell 7 engine itself. A bundle requires an installed base deployment.
 
+    -Uninstall runs Setup /uninstall JSON=1 instead (-Purge adds PURGE=1)
+    after the same Setup pin checks. A bundle app is not uninstalled this way:
+    its uninstall command is a no-op.
+
     Exit codes are Setup's: 0 success or no-op, 1603 failure (rolled back),
     1618 another lifecycle run is active (Intune retries), 1639 invalid
-    arguments. The lifecycle result is written to
-    %WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log by the lifecycle and
-    echoed on STDOUT here.
+    arguments. One exception: Setup refuses an uninstall with
+    uninstall_in_use, before it changes anything, while a program runs from
+    the install folder. That program is often a detection or Remediations
+    script that runs the installed CLI for a few seconds, so the launcher
+    runs Setup again, at most 6 times, each time after the programs Setup
+    named have exited or 20 seconds have passed. If Setup still refuses, the
+    launcher exits 1618 so Intune retries the uninstall later (GAP-0126),
+    and its result names each program, its process id and account. The
+    lifecycle result of every Setup run is written to
+    %WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log by the lifecycle;
+    the final one is echoed on STDOUT here, each refused attempt on STDERR.
 
     Install command (Intune > App > Program):
       %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1
+    Uninstall command (Intune does not expand environment variables here):
+      powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1 -Uninstall
+    Purge twin: the same with -Uninstall -Purge.
 #>
 [CmdletBinding()]
-param()
+param(
+    [switch]$Uninstall,
+    [switch]$Purge
+)
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     Write-Output 'DefenseClaw Intune install requires PowerShell FullLanguage. Allow or sign the DefenseClaw kit scripts in WDAC/AppLocker, then retry.'
@@ -284,10 +302,30 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+$script:LauncherAction = $(if ($Uninstall) { 'uninstall' } else { 'ensure' })
+$script:UninstallAttempts = 6
+$script:UninstallRetrySeconds = 20
+
 function Exit-Launcher {
     param([int]$ExitCode, [string]$Code, [string]$Message)
-    [Console]::Out.WriteLine((ConvertTo-DefenseClawResultJson -Action 'ensure' -ExitCode $ExitCode -Code $Code -Message $Message))
+    [Console]::Out.WriteLine((ConvertTo-DefenseClawResultJson -Action $script:LauncherAction -ExitCode $ExitCode -Code $Code -Message $Message))
     exit $ExitCode
+}
+
+function Get-LauncherInUseMessage {
+    # The uninstall_in_use message of a Setup result, or '' for any other result.
+    param([AllowEmptyString()][string]$Text)
+    try { $document = $Text | ConvertFrom-Json } catch { return '' }
+    if ($null -eq $document -or $null -eq $document.PSObject.Properties['errors']) { return '' }
+    foreach ($item in @($document.errors)) {
+        if ($null -eq $item) { continue }
+        $code = $item.PSObject.Properties['code']
+        if ($null -eq $code -or [string]$code.Value -ne 'uninstall_in_use') { continue }
+        $message = $item.PSObject.Properties['message']
+        if ($null -ne $message -and [string]$message.Value) { return [string]$message.Value }
+        return 'uninstall_in_use'
+    }
+    return ''
 }
 
 function Get-LauncherPin {
@@ -299,6 +337,7 @@ function Get-LauncherPin {
 
 $root = $PSScriptRoot
 if (-not $root) { Exit-Launcher 1639 'mdm_invalid_arguments' 'run this launcher with -File from the Win32 app content folder' }
+if ($Purge -and -not $Uninstall) { Exit-Launcher 1639 'mdm_invalid_arguments' '-Purge is valid only with -Uninstall' }
 $setup = Join-Path $root 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
 $config = Join-Path $root 'config.yaml'
 $pinsPath = Join-Path $root 'intune-package.json'
@@ -323,6 +362,9 @@ if ($pins.config_sha256 -and $bundlePin) {
 }
 if ($anchorPin -and -not $bundlePin) {
     Exit-Launcher 1639 'mdm_invalid_arguments' 'the package pins trust anchors without a policy bundle; rebuild it with -BundlePath'
+}
+if ($Uninstall -and $bundlePin) {
+    Exit-Launcher 1639 'mdm_invalid_arguments' 'a policy bundle app is not uninstalled: its uninstall command is cmd.exe /c exit 0; remove DefenseClaw with the base app''s uninstall'
 }
 $bundle = Join-Path $root 'policy.dcbundle'
 $anchors = Join-Path $root 'bundle-anchors.json'
@@ -358,6 +400,11 @@ if ($bundlePin) {
         $arguments += ('TRUSTANCHORS=' + [System.IO.Path]::GetFullPath($anchors))
     }
 }
+if ($Uninstall) {
+    # The pins above prove the package intact; an uninstall takes no policy input.
+    $arguments = @('/uninstall', 'JSON=1')
+    if ($Purge) { $arguments += 'PURGE=1' }
+}
 if ($pins.trust_mode -eq 'authenticode') {
     $signature = Get-AuthenticodeSignature -LiteralPath $setup
     if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
@@ -369,10 +416,29 @@ if ($pins.trust_mode -eq 'authenticode') {
     if ($signers -notcontains $thumbprint) { Exit-Launcher 1603 'mdm_signer_not_allowed' "Setup is signed by certificate $thumbprint, which the package does not allow" }
     $arguments += ('ALLOWEDSIGNERS=' + ($signers -join ','))
 }
-try {
-    $run = Invoke-DefenseClawNative -FilePath $setup -ArgumentList $arguments
-} catch {
-    Exit-Launcher 1603 'mdm_lifecycle_launch_failed' $_.Exception.Message
+# A refused uninstall changed nothing, so run it again once the programs it
+# names have exited, and leave a lasting refusal to Intune's 1618 retry
+# instead of failing it with 1603 (GAP-0126).
+$attempt = 0
+while ($true) {
+    $attempt++
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $setup -ArgumentList $arguments
+    } catch {
+        Exit-Launcher 1603 'mdm_lifecycle_launch_failed' $_.Exception.Message
+    }
+    $inUse = ''
+    if ($Uninstall -and $run.ExitCode -eq 1603) { $inUse = Get-LauncherInUseMessage -Text ([string]$run.StdOut) }
+    if (-not $inUse) { break }
+    if ($attempt -ge $script:UninstallAttempts) {
+        Exit-Launcher 1618 'uninstall_in_use' "$inUse (Setup refused the uninstall $attempt times; Intune retries it later)"
+    }
+    [Console]::Error.WriteLine("DefenseClaw uninstall attempt $attempt of $($script:UninstallAttempts) refused, retrying: $inUse")
+    $blockers = @([regex]::Matches($inUse, '\(pid (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+    for ($second = 0; $second -lt $script:UninstallRetrySeconds; $second++) {
+        if (@($blockers | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) }).Count -eq 0) { break }
+        Start-Sleep -Seconds 1
+    }
 }
 $code = $run.ExitCode
 if (@(0, 1603, 1618, 1639, 3010) -notcontains $code) { $code = 1603 }

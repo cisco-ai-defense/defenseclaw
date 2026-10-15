@@ -98,9 +98,14 @@ mode; Setup otherwise refuses `bundle_required`. A bundle package must carry
 the Setup for the release installed on the device: an older Setup is refused
 as `downgrade_refused`. Bundles are limited to 4 MiB and anchors to 64 KiB.
 Setup installs anchors only from an administrator-only path and verifies the
-bundle signature on its own copy. Plain standalone `/uninstall JSON=1` removes
-machine state, including anchors and bundles; `PURGE=1` also removes enrolled
-accounts' per-user DefenseClaw data and binaries.
+bundle signature on its own copy. The base app's uninstall command,
+`Install-DefenseClawIntune.ps1 -Uninstall`, runs plain standalone
+`/uninstall JSON=1`, which removes machine state, including anchors and
+bundles; `-Purge` (Setup `PURGE=1`) also removes enrolled accounts'
+per-user DefenseClaw data and binaries. When Setup refuses with
+`uninstall_in_use` (a program runs from the install folder, nothing was
+changed), the launcher runs it again up to 6 times and then exits `1618`,
+which Intune retries, instead of `1603`.
 
 Intune's execution contexts shape the design:
 
