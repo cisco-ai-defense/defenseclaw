@@ -741,7 +741,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       # "|" falls back to direct on any proxy error; the default "," only
       # falls back on 404/410, so a proxy.golang.org stream reset
@@ -783,13 +783,13 @@ jobs:
           name: install-smoke-assets
           path: ${{ runner.temp }}/assets/
           retention-days: 3
-      - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh upgrade-0.8.10 handoff drills"
+      - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh fleet-opt-in upgrade-0.8.10 handoff drills"
 
   install-smoke-windows:
     name: Install and Upgrade Smoke (Windows)
     needs: install-smoke
     runs-on: windows-latest
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -801,7 +801,7 @@ jobs:
           path: assets
       - shell: pwsh
         run: |
-          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes 'fresh setup-import files-in-use failure-drill policy'
+          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes 'fresh fleet-opt-in setup-import files-in-use failure-drill policy'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:
@@ -1017,6 +1017,37 @@ jobs:
           path: ${{ runner.temp }}/enterprise-install-windows/
           if-no-files-found: error
           retention-days: 3
+
+  enterprise-fleet-compiler-payload:
+    # Fleet is opt-in. Inspect and execute its inert package payload in a
+    # separate gate so RPM/DEB core install and upgrade do not acquire an
+    # optional Python/PyYAML dependency or change host package repositories.
+    name: Enterprise Fleet Compiler Payload
+    needs: enterprise-install-assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install RPM archive reader on the disposable runner
+        shell: bash
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm2cpio cpio
+      - name: Check opt-in compiler source and compile a policy from each package
+        shell: bash
+        env:
+          LANE_VERSION: ${{ needs.enterprise-install-assets.outputs.linux-version }}
+        run: |
+          set -euo pipefail
+          for kind in deb rpm; do
+            uv run --no-project --with pyyaml==6.0.3 bash scripts/test-enterprise-fleet-compiler-package.sh \
+              "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.${kind}"
+          done
 
   enterprise-linux-install:
     # The deb installs on the Ubuntu 24.04 runner itself (systemd 255 is PID
@@ -1301,6 +1332,7 @@ jobs:
     needs:
       - changes
       - enterprise-install-assets
+      - enterprise-fleet-compiler-payload
       - enterprise-linux-install
       - enterprise-macos-install
       - enterprise-windows-install
@@ -1313,6 +1345,7 @@ jobs:
       - name: Require every enterprise gate
         env:
           INSTALL_ASSETS: ${{ needs.enterprise-install-assets.result }}
+          FLEET_COMPILER: ${{ needs.enterprise-fleet-compiler-payload.result }}
           LINUX_INSTALL: ${{ needs.enterprise-linux-install.result }}
           MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
           WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
@@ -1323,7 +1356,7 @@ jobs:
         shell: bash
         run: |
           status=0
-          for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UNIX_LIFECYCLE; do
+          for gate in INSTALL_ASSETS FLEET_COMPILER LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UNIX_LIFECYCLE; do
             result=${!gate}
             echo "$gate: $result"
             if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then

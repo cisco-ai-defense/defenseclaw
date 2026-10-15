@@ -40,7 +40,7 @@ set -euo pipefail
 
 readonly PKG_ID="com.cisco.defenseclaw.enterprise"
 readonly INSTALL_BIN="opt/cisco/defenseclaw/bin"
-readonly INSTALL_COMPILER="opt/cisco/defenseclaw/lib/defenseclaw/policy_compiler.py"
+readonly BUNDLED_COMPILER="opt/cisco/defenseclaw/share/fleet/policy_compiler.py"
 readonly LAUNCHER_DIR="usr/local/bin"
 readonly LAUNCH_AGENTS_DIR="Library/LaunchAgents"
 
@@ -110,9 +110,8 @@ else
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
 fi
 
-# The gateway loads this Python compiler from its own trusted installation
-# prefix when Fleet is enabled. Keep it in the same signed package as the
-# binaries so upgrades and package rollbacks move them together.
+# Carry the Fleet compiler as an inert package source. The lifecycle copies it
+# into the trusted runtime prefix only when the validated config enables Fleet.
 compiler_src="$REPO_ROOT/edge-connector/tools/policy_compiler.py"
 if [ -n "$PAYLOAD" ]; then
     compiler_src="$PAYLOAD/edge-connector/tools/policy_compiler.py"
@@ -121,8 +120,8 @@ if [ ! -f "$compiler_src" ] || [ -L "$compiler_src" ]; then
     echo "payload lacks a regular policy compiler at $compiler_src" >&2
     exit 1
 fi
-install -d -m 0755 "$ROOT/opt/cisco/defenseclaw/lib" "$ROOT/opt/cisco/defenseclaw/lib/defenseclaw"
-install -m 0644 "$compiler_src" "$ROOT/$INSTALL_COMPILER"
+install -d -m 0755 "$ROOT/opt/cisco/defenseclaw/share" "$ROOT/opt/cisco/defenseclaw/share/fleet"
+install -m 0644 "$compiler_src" "$ROOT/$BUNDLED_COMPILER"
 
 # The standard user's sandbox launcher: the gateway under the name defenseclaw
 # (internal/cli/launcher.go). A package-owned symlink, so only an installer or

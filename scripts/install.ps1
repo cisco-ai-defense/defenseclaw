@@ -1003,6 +1003,14 @@ function Test-GuardrailOff {
     return $false
 }
 
+function Test-FleetEnabled {
+    $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $python = Join-Path $Venv "Scripts\python.exe"
+    $code = 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); sys.exit(0 if isinstance(c,dict) and isinstance(c.get(''fleet''),dict) and c[''fleet''].get(''enabled'') is True else 1)'
+    return ((Invoke-Native $python @("-I", "-c", $code, $path) -Quiet) -eq 0)
+}
+
 function Test-ConnectorConfigured {
     $state = Read-Json (Join-Path $DataDir "active_connector.json")
     return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" }).Count -gt 0
@@ -1303,10 +1311,17 @@ function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
     Write-Info "Building the final Python environment in $Venv (the checked packages come from the uv cache)"
     if (-not (New-Venv $Venv "the final environment")) { return $false }
-    # installer/ is part of the rollback snapshot, so its compiler always
-    # matches the gateway version being installed or restored.
-    New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
-    Install-File (Join-Path $Staging "bin\edge-connector\tools\policy_compiler.py") (Join-Path $InstallerDir "policy_compiler.py")
+    # The core install does not require Fleet. An enabled Fleet receives the
+    # matching compiler inside installer/, which rollback snapshots preserve.
+    if (Test-FleetEnabled) {
+        $compiler = Join-Path $Staging "bin\edge-connector\tools\policy_compiler.py"
+        if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            Write-Warn "Fleet is enabled but this release has no Fleet policy compiler"
+            return $false
+        }
+        New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
+        Install-File $compiler (Join-Path $InstallerDir "policy_compiler.py")
+    }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
@@ -2139,9 +2154,6 @@ function Invoke-Install {
     }
     $stagedGateway = Join-Path $Staging "bin\defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $stagedGateway)) { Die "$Archive has no defenseclaw-gateway.exe" }
-    if (-not (Test-Path -LiteralPath (Join-Path $Staging "bin\edge-connector\tools\policy_compiler.py") -PathType Leaf)) {
-        Die "$Archive has no Fleet policy compiler"
-    }
     if (-not (Get-NativeOutput $stagedGateway @("--version")).Contains($Ver)) { Die "The gateway in $Archive does not report version $Ver" }
 
     # A first install with an empty uv cache downloads Python and every

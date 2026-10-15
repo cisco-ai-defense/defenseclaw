@@ -869,7 +869,7 @@ func TestBridgeUnsignedHeartbeatNoKeyChecker(t *testing.T) {
 func TestBridgeUnsignedHeartbeatRejectedWhenKeyed(t *testing.T) {
 	// P1-06: When the device has a per-device key provisioned, unsigned
 	// heartbeats MUST be rejected. An attacker could otherwise bypass the
-	// HMAC check by sending a shorter (32-byte, unsigned) payload.
+	// HMAC check by sending a shorter (40-byte, unsigned) payload.
 	mc := newMockClient()
 	fm := manager.New(nil)
 	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
@@ -895,7 +895,7 @@ func TestBridgeUnsignedHeartbeatRejectedWhenKeyed(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Send an unsigned 32-byte heartbeat — must be REJECTED because device is keyed
+	// Send an unsigned 40-byte heartbeat — must be REJECTED because device is keyed
 	payload := makeHeartbeatPayload(42, 7, 15, 0)
 	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
 
@@ -1002,6 +1002,21 @@ func TestBridgeSignedRegistrationAccepted(t *testing.T) {
 
 	cancel()
 	<-errCh
+}
+
+func TestProductionRejectsAutoRegistrationEvenWhenRequested(t *testing.T) {
+	fleet := manager.New(nil)
+	key := []byte("test-device-key-32-bytes-long!!!")
+	bridge := newTestBridge(t, newMockClient(), fleet, verdict.NewCache(10, nil))
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&fixedKeyProvider{key: key})
+	t.Setenv("DCLAW_DEV_MODE", "")
+	t.Setenv("DCLAW_PRODUCTION", "true")
+	topic := "defenseclaw/1/2/42/register"
+	bridge.handleRegistration(Message{Topic: topic, Payload: makeSignedHeartbeatPayload(42, 0, 0, 0, key, topic)})
+	if _, exists := fleet.GetDevice(manager.ComposeID(1, 2, 42)); exists {
+		t.Fatal("production broker auto-registered arbitrary ID with fleet-wide key")
+	}
 }
 
 func TestBridgeSignedRegistrationReplayDoesNotRollbackInventory(t *testing.T) {

@@ -42,13 +42,14 @@ def test_edge_setup_generates_distinct_keys_and_reuses_them(tmp_path, monkeypatc
     assert all(len(bytes.fromhex(value)) == 32 for value in first.values())
 
 
-def test_edge_setup_config_failure_does_not_persist_secrets(tmp_path, monkeypatch) -> None:
+def test_edge_setup_config_failure_leaves_fleet_disabled(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
 
     def denied(_path):
         raise click.ClickException("managed config is locked")
 
     monkeypatch.setattr(cmd_setup_edge_connector, "_enable_fleet_config", denied)
+    monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: True)
     result = CliRunner().invoke(
         cmd_setup_edge_connector.edge_connector,
         ["--non-interactive", "--token", "test-token"],
@@ -56,7 +57,7 @@ def test_edge_setup_config_failure_does_not_persist_secrets(tmp_path, monkeypatc
     )
     assert result.exit_code != 0
     assert "managed config is locked" in result.output
-    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_edge_setup_rejects_bad_key_before_config_write(tmp_path, monkeypatch) -> None:
@@ -75,9 +76,41 @@ def test_edge_setup_rejects_bad_key_before_config_write(tmp_path, monkeypatch) -
     assert not (tmp_path / ".env").exists()
 
 
+def test_fleet_compiler_installs_only_during_opt_in(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "source"
+    compiler = source_root / "tools" / "policy_compiler.py"
+    compiler.parent.mkdir(parents=True)
+    compiler.write_bytes(b"# trusted compiler\n")
+    from defenseclaw.commands import cmd_edge_install
+
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: source_root)
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    assert not (home / "installer").exists()
+    installed = cmd_setup_edge_connector._install_fleet_compiler(str(home))
+    assert installed.read_bytes() == compiler.read_bytes()
+    assert installed.stat().st_mode & 0o777 == 0o600
+    compiler.write_bytes(b"# updated compiler\n")
+    assert cmd_setup_edge_connector._install_fleet_compiler(str(home)).read_bytes() == compiler.read_bytes()
+
+
+def test_fleet_compiler_rejects_symlink_without_mutating_destination(tmp_path, monkeypatch) -> None:
+    from defenseclaw.commands import cmd_edge_install
+
+    source_root = tmp_path / "source"
+    compiler = source_root / "tools" / "policy_compiler.py"
+    compiler.parent.mkdir(parents=True)
+    compiler.symlink_to(tmp_path / "untrusted.py")
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: source_root)
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    with pytest.raises(click.ClickException, match="no Fleet policy compiler"):
+        cmd_setup_edge_connector._install_fleet_compiler(str(home))
+    assert not (home / "installer").exists()
+
+
 def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
-    monkeypatch.setattr(cmd_setup_edge_connector, "_enable_fleet_config", lambda _path: None)
     monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: False)
     result = CliRunner().invoke(
         cmd_setup_edge_connector.edge_connector,
@@ -86,6 +119,7 @@ def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> N
     )
     assert result.exit_code != 0
     assert "setup is incomplete" in result.output
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_dotenv_failed_replace_preserves_existing_secret(tmp_path, monkeypatch) -> None:
@@ -202,7 +236,7 @@ def test_mqtt_setup_failure_does_not_persist_broker_url(tmp_path, monkeypatch) -
     assert not (tmp_path / ".env").exists()
 
 
-def test_mqtt_config_failure_does_not_persist_broker_url(tmp_path, monkeypatch) -> None:
+def test_mqtt_config_failure_leaves_fleet_disabled(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     monkeypatch.setattr(
         cmd_setup_mqtt, "_setup_docker", lambda _port: {"mqtt_user": "dclaw", "mqtt_pass": "secret"},
@@ -216,7 +250,23 @@ def test_mqtt_config_failure_does_not_persist_broker_url(tmp_path, monkeypatch) 
     )
     assert result.exit_code != 0
     assert "MQTT setup is incomplete" in result.output
-    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_mqtt_env_failure_leaves_fleet_disabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.setattr(cmd_setup_mqtt, "_setup_docker", lambda _port: {})
+    monkeypatch.setattr(cmd_setup_mqtt, "_wait_for_broker", lambda *_args: True)
+    monkeypatch.setattr(
+        cmd_setup_mqtt, "_persist_env_var",
+        lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    result = CliRunner().invoke(
+        cmd_setup_mqtt.mqtt_broker, ["--docker", "--port", "21883"], obj=AppContext(),
+    )
+    assert result.exit_code != 0
+    assert "Could not persist MQTT environment" in result.output
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_systemd_broker_setup_probes_existing_credentials_and_scopes_claims(tmp_path, monkeypatch) -> None:

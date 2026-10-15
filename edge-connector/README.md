@@ -35,8 +35,8 @@ From the `edge-connector/` directory, with Python 3 and PyYAML installed:
 python3 tools/policy_compiler.py \
   --input policies/strict.yaml \
   --profile standard --version 1 \
-  --output-header generated/policy_tables.h \
-  --output-binary dist/policy.bin
+  --output-header policy_tables.h \
+  --output-binary policy.bin
 ```
 
 The compiler accepts the supported `iot_extensions` fields `capability_sequences`, `destination_allowlist`, and `canary`. Its content DFA is built from fixed compiler constants, not YAML content patterns. It rejects unsupported IoT settings such as `rate_limits`, `escalation_mode`, `content_inspection`, `ssrf_protection`, `destination_denylist`, `trust_boundaries`, `cloud_escalation`, and `broker_fallback`. The compiled rate limits are 60 tool calls, 30 network requests, and 10 actuations per minute; OTA cannot change them. Production uses synchronous escalation by default. Without a signing key, `policy.bin` has a development stub signature and production C devices reject it. For production OTA, use the Fleet policy-push API with matching HMAC secrets.

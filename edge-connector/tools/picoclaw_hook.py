@@ -211,7 +211,7 @@ class DclawEngine:
             tenant_id=int(os.environ.get("DCLAW_TENANT_ID", "1")),
             fleet_id=int(os.environ.get("DCLAW_FLEET_ID", "1")),
             device_id=int(os.environ.get("DCLAW_DEVICE_ID", "42")),
-            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "1")),
+            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "0")),
             fw_version=int(os.environ.get("DCLAW_FW_VERSION", "1")),
             hw_profile=int(os.environ.get("DCLAW_HW_PROFILE", "2")),
             capabilities=int(os.environ.get("DCLAW_CAPABILITIES", "0xFF"), 0),
@@ -481,7 +481,7 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
             f"• Reason: {reason_name}\n"
             f"• Detail: {explanation}\n"
             f"• Capability: 0x{cap_flags:02x}\n"
-            f"• Enforcement: local (<3μs), no cloud round-trip\n\n"
+            f"• Enforcement: local decision, no cloud round-trip for this block\n\n"
             f"This event has been logged to the tamper-evident audit ring."
         )
         log(f"DENY: {raw_tool} — {reason_name}")

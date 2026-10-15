@@ -68,6 +68,7 @@ jobs:
           repository: Mbed-TLS/mbedtls
           ref: e185d7fd85499c8ce5ca2a54f5cf8fe7dbe3f8df # mbedtls-3.6.5
           path: .deps/mbedtls
+          submodules: recursive
           persist-credentials: false
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential

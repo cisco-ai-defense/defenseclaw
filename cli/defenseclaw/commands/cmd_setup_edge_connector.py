@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import click
@@ -70,8 +73,51 @@ def _hmac_key(env_path: Path, name: str) -> str:
     return value
 
 
+def _install_fleet_compiler(data_dir: str) -> Path:
+    """Install the bundled compiler only when the operator enables Fleet."""
+    from defenseclaw.commands.cmd_edge_install import _find_edge_connector_source
+
+    source_root = _find_edge_connector_source()
+    source = source_root / "tools" / "policy_compiler.py" if source_root else None
+    if source is None or source.is_symlink() or not source.is_file():
+        raise click.ClickException("This release has no Fleet policy compiler")
+    if source.stat().st_size > 1 << 20:
+        raise click.ClickException("The Fleet policy compiler is unexpectedly large")
+
+    home = Path(data_dir).absolute()
+    if home.is_symlink() or not home.is_dir():
+        raise click.ClickException(f"Fleet data directory is not a real directory: {home}")
+    target_dir = home / "installer"
+    if target_dir.exists() or target_dir.is_symlink():
+        if target_dir.is_symlink() or not target_dir.is_dir():
+            raise click.ClickException(f"Fleet compiler directory is not a real directory: {target_dir}")
+    else:
+        target_dir.mkdir(mode=0o700)
+    if os.name != "nt":
+        for directory in (home, target_dir):
+            if directory.stat().st_mode & 0o022:
+                raise click.ClickException(f"Fleet compiler directory is writable by another account: {directory}")
+    destination = target_dir / "policy_compiler.py"
+    if destination.is_symlink():
+        raise click.ClickException(f"Fleet compiler path is a symlink: {destination}")
+    fd, temporary = tempfile.mkstemp(prefix=".policy_compiler.py.", dir=target_dir)
+    try:
+        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary, destination)
+    except OSError as exc:
+        raise click.ClickException(f"Could not install Fleet policy compiler: {exc}") from exc
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return destination
+
+
 def _enable_fleet_config(data_dir: str) -> None:
-    """Commit Fleet configuration before provisioning credentials or reporting success."""
+    """Activate Fleet after its credentials and compiler are provisioned."""
     cfg_path = str(config_path_for_data_dir(data_dir))
     try:
         with locked_config_yaml(cfg_path):
@@ -221,9 +267,9 @@ def edge_connector(
     audit_key = _hmac_key(env_path, "DCLAW_AUDIT_KEY")
     ota_key = _hmac_key(env_path, "DCLAW_OTA_HMAC_KEY")
     emergency_key = _hmac_key(env_path, "DCLAW_EMERGENCY_KEY")
-    # A managed host can refuse config writes. Check before persisting any
-    # token or key, after validating operator-supplied keys.
-    _enable_fleet_config(ctx.obj.cfg.data_dir)
+    # Fleet remains disabled if credential provisioning fails. The compiler
+    # copy is inert until the validated Fleet config is committed below.
+    _install_fleet_compiler(ctx.obj.cfg.data_dir)
     try:
         for name, value in (
             (_TOKEN_ENV, token),
@@ -244,6 +290,7 @@ def edge_connector(
                 )
     except OSError as exc:
         raise click.ClickException(f"Could not persist Fleet credentials; setup is incomplete: {exc}") from exc
+    _enable_fleet_config(ctx.obj.cfg.data_dir)
 
     # --- 3. Fleet API endpoint -------------------------------------------
     if endpoint is None:

@@ -22,17 +22,9 @@
 #include <string.h>
 #include <assert.h>
 
-extern dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash);
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
 extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
 extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
-
-static void test_hash_miss_allows(void) {
-    uint8_t hash[32];
-    memset(hash, 0xDE, 32);
-    assert(dclaw_policy_check_hash(hash) == DCLAW_ACTION_ALLOW);
-    printf("  PASS: unknown hash returns ALLOW\n");
-}
 
 static void test_dest_exact_match(void) {
     assert(dclaw_policy_check_destination("8.8.8.8") == DCLAW_ACTION_ALLOW);
@@ -52,6 +44,16 @@ static void test_dest_not_in_list_blocks(void) {
 static void test_tool_capability_mapping(void) {
     assert(dclaw_policy_lookup_capability("web_search") == DCLAW_CAP_NET_FETCH);
     assert(dclaw_policy_lookup_capability("read_file") == DCLAW_CAP_READ_FS);
+    assert(dclaw_policy_lookup_capability("unlock") == DCLAW_CAP_ACTUATE);
+    assert(dclaw_policy_lookup_capability("servo_set_angle") == DCLAW_CAP_ACTUATE);
+    assert(dclaw_policy_lookup_capability("gpio_write") == DCLAW_CAP_ACTUATE);
+    assert(dclaw_policy_lookup_capability("camera_capture") == DCLAW_CAP_SENSOR_READ);
+    assert(dclaw_policy_lookup_capability("config_set") == DCLAW_CAP_WRITE_FS);
+    assert(dclaw_policy_lookup_capability("mqtt_publish") == DCLAW_CAP_NET_FETCH);
+    assert(dclaw_policy_lookup_capability("tts_speak") == DCLAW_CAP_ACTUATE);
+    assert(dclaw_policy_lookup_capability("wifi_scan") == DCLAW_CAP_SENSOR_READ);
+    assert(dclaw_policy_lookup_capability("get_integrations_manifest") == DCLAW_CAP_SENSOR_READ);
+    assert(dclaw_policy_lookup_capability("reboot") == DCLAW_CAP_EXEC_SHELL);
     assert(dclaw_policy_lookup_capability("custom_network_tool") == DCLAW_CAP_UNKNOWN);
     printf("  PASS: known tools keep mappings, unknown tool has no capability\n");
 }
@@ -77,7 +79,6 @@ int main(void) {
     dclaw_init(&info);
 
     printf("test_policy_table:\n");
-    test_hash_miss_allows();
     test_dest_exact_match();
     test_dest_url_match();
     test_dest_not_in_list_blocks();

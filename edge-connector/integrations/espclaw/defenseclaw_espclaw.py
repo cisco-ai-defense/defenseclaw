@@ -42,7 +42,7 @@ if _tools_dir not in sys.path:
 from generic_hook import (
     CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH,
     CAP_READ_FS, CAP_SENSOR_READ, CAP_WRITE_FS,
-    EdgeConnector,
+    EdgeConnector, Verdict, reviewed_adapter_destination,
 )
 
 logger = logging.getLogger("defenseclaw.espclaw")
@@ -56,13 +56,15 @@ ESPCLAW_TOOL_CAP_MAP: Dict[str, int] = {
     "get_status": CAP_SENSOR_READ, "ble_scan": CAP_SENSOR_READ,
     "gpio_write": CAP_ACTUATE, "pwm_set": CAP_ACTUATE,
     "i2c_write": CAP_ACTUATE, "spi_transfer": CAP_ACTUATE,
-    "wifi_scan": CAP_NET_FETCH, "http_request": CAP_NET_FETCH,
+    "wifi_scan": CAP_SENSOR_READ, "http_request": CAP_NET_FETCH,
     "mqtt_publish": CAP_NET_FETCH,
     "fs_read": CAP_READ_FS, "fs_list": CAP_READ_FS, "config_get": CAP_READ_FS,
     "fs_write": CAP_WRITE_FS, "config_set": CAP_WRITE_FS,
     "lua_eval": CAP_EXEC_SHELL, "lua_load": CAP_EXEC_SHELL,
     "reboot": CAP_EXEC_SHELL, "ota_update": CAP_EXEC_SHELL,
 }
+
+_HTTP_URL_FIELDS = {"http_request": "url"}
 
 
 class ESPClawAdapter:
@@ -102,9 +104,15 @@ class ESPClawAdapter:
                   arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Evaluate then forward. Returns {allowed, verdict, result}."""
         arguments = arguments or {}
-        verdict = self._connector.evaluate(
-            tool_name=tool_name, arguments=arguments, destination=self.host,
-        )
+        try:
+            destination = reviewed_adapter_destination(
+                tool_name, arguments, ESPCLAW_TOOL_CAP_MAP, _HTTP_URL_FIELDS)
+        except ValueError as exc:
+            verdict = Verdict.error(str(exc))
+        else:
+            verdict = self._connector.evaluate(
+                tool_name=tool_name, arguments=arguments, destination=destination,
+            )
         if verdict.blocked:
             logger.warning("ESP-Claw tool %s blocked: %s", tool_name, verdict.reason)
             return {"allowed": False,

@@ -100,7 +100,11 @@ Content patterns, rate limits (60 tool calls, 30 network requests, 10 actuations
 
 Only needed when you change the policy. Pre-built binaries include the default policy.
 
-The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup includes the compiler and an admitted Python/PyYAML scanner runtime.
+The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup carries a signed inert compiler payload and activates it only for authenticated Fleet-enabled config, using the admitted Python/PyYAML scanner runtime. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes a previous active script.
+
+Fleet is an optional gateway subsystem. Managed Linux/macOS packages carry the compiler as inert source under `<InstallRoot>/share/fleet/`; validated Fleet-enabled install/ensure copies it into the protected `<InstallRoot>/lib/defenseclaw/` path. Fleet-off install/upgrade does not activate the compiler or need Python/PyYAML. A Fleet-off raw payload install discards its optional compiler source; provide the staged release `--payload` to enable Fleet later. The local observability bundle includes an empty Fleet dashboard, but no Fleet scrape job runs by default.
+
+Standard per-user `install.sh`/`install.ps1` leave Fleet off and copy the matching compiler only when the existing config explicitly enables it. `defenseclaw setup edge-connector` installs the optional compiler and enables `fleet.enabled` only after credential setup succeeds. The core gateway installer does not install or start the separate C Edge Connector service.
 
 ```bash
 cd edge-connector
@@ -322,7 +326,7 @@ Each tool must map to a capability that determines how the Edge Connector handle
 
 ## MQTT broker setup
 
-The Edge Connector uses MQTT 3.1.1 for cloud escalation (device to gateway) and command dispatch (gateway to device). Any standards-compliant broker works; Eclipse Mosquitto is recommended for simplicity.
+The Edge Connector uses MQTT 3.1.1 for verdict escalation (device to gateway) and signed policy/emergency distribution (gateway to device). Any standards-compliant broker works; Eclipse Mosquitto is recommended for simplicity.
 
 **Quick start with Docker:**
 
@@ -413,6 +417,8 @@ The gateway publishes policy updates; devices publish heartbeats and escalation 
 
 **Upgrade together:** Heartbeat and registration messages now carry a durable 4-byte boot counter and 4-byte last-applied emergency sequence. Keyed C devices send a 40-byte payload plus a 32-byte HMAC (72 bytes total); the gateway rejects older 64- and 68-byte signed frames. Upgrade the Edge Connector on each device with the Fleet gateway, and confirm heartbeats resume before relying on device status or policy distribution. The gateway replays missed emergency commands in signed predecessor order from durable history, up to 32 per signed registration or heartbeat; later heartbeats request the next page. A history gap or unavailable durable store fails closed. Broker publication alone does not prove device application.
 
+Legacy flash partitions with unsigned policy payloads are preserved but refused at boot, including in a development build. Back up the device state and use a trusted re-sign/reprovisioning procedure before starting the new connector. An in-place metadata migration alone does not make the old policy executable; verify the signed flash policy and authenticated heartbeat after upgrade.
+
 The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the authenticated Fleet API; MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
 
 ## Environment variables
@@ -497,6 +503,7 @@ Measure latency and throughput on your own target hardware and selected build pr
 | --- | --- |
 | `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
 | All tools blocked | Check the C capability table (`src/decision/policy_table.c`). Unknown tool names fail closed before cache or Fleet escalation. A custom name needs a reviewed C mapping; a Python adapter mapping alone cannot authorize it. |
+| Shipped adapter network/message tool blocked | Bubbaloop `http_fetch`/`model_download` and ESP-Claw `http_request` require one unambiguous HTTP(S) public numeric `url` and a matching C allowlist entry. Home Assistant webhook/integration and broker/Zenoh tools remain blocked until their target schemas are reviewed. A downstream MCP server must also constrain redirects and actual egress. |
 | `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
 | `DEST_DENY` on a public IP | Add that public IP to `destination_allowlist` |
 | `CONTENT_BLOCK` false positives | Review or disable the offending built-in category; custom exception patterns are not implemented |

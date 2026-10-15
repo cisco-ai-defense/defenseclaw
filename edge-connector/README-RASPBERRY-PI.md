@@ -1,469 +1,57 @@
-# Edge Connector on Raspberry Pi — Installation & Demo Guide
+# Edge Connector on Raspberry Pi
 
-Deploy a sub-microsecond AI agent security enforcement engine on a Raspberry Pi, protecting any MCP-based AI agent from prompt injection, tool abuse, and lateral movement attacks.
+This guide checks the Linux C engine and PicoClaw hook on a Raspberry Pi using an explicitly local development build. For a production Fleet deployment, follow [INSTALL.md](INSTALL.md) for mbedTLS 3.x, MQTT TLS, per-device keys, broker ACLs, signed OTA, audit and flash storage, and the service unit. A development build must not be used as a production gateway or device.
 
-**What you'll have at the end:** An AI agent (PicoClaw) controlling a robot, with Edge Connector intercepting every tool call, blocking dangerous operations in <3μs, and allowing safe ones through — all locally, no cloud required.
+## Build and test locally
 
----
-
-## Prerequisites
-
-| Item | Requirement |
-|------|-------------|
-| Hardware | Raspberry Pi 4 (2GB+ RAM) or Pi 5 |
-| OS | Raspberry Pi OS (64-bit) or Debian 12+/13 (aarch64) |
-| Network | SSH access from your workstation |
-| AI Agent | Any MCP-compatible agent (this guide uses PicoClaw) |
-| Time | ~10 minutes |
-
----
-
-## Step 1: Install Build Tools
+On a 64-bit Raspberry Pi OS or Debian host:
 
 ```bash
-sudo apt update && sudo apt install -y build-essential cmake git python3
-```
-
-## Step 2: Clone and Build Edge Connector
-
-```bash
+sudo apt update
+sudo apt install -y build-essential cmake python3 python3-venv git
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw/edge-connector
-mkdir build && cd build
-cmake .. -DDCLAW_PROFILE=STANDARD
-make -j4
+cd defenseclaw
+cmake -S edge-connector -B edge-connector/build-rpi-dev \
+  -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=ON -DDCLAW_BUILD_TESTS=ON
+cmake --build edge-connector/build-rpi-dev -j4
+ctest --test-dir edge-connector/build-rpi-dev --output-on-failure
 ```
 
-Verify the build:
+The test count and latency depend on the checkout and Pi model. Run `edge-connector/build-rpi-dev/tests/bench_latency` if you need measurements on your own hardware; the benchmark is not a production latency guarantee.
+
+## Check the hook without a broker
+
+The hook loads the C shared library in process. Give the development build a writable, disposable flash file and an audit key. A fresh device starts at `DCLAW_POLICY_VERSION=0`; the engine rejects a claimed nonzero accepted policy without a verified on-flash OTA blob.
 
 ```bash
-# Run all tests (should be 10/10 pass)
-ctest --output-on-failure
-
-# Check binary size (target: <80KB)
-ls -la edge-connector
-
-# Run performance benchmark
-./tests/bench_latency
+export DCLAW_LIB_PATH="$PWD/edge-connector/build-rpi-dev/libdclaw_core.so"
+export DCLAW_FLASH_PATH="$(mktemp -d)/flash.bin"
+export DCLAW_AUDIT_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export DCLAW_LOG_PATH="${DCLAW_FLASH_PATH%.bin}.log"
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"hook.before_tool","params":{"tool":"unreviewed_tool","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"hook.before_tool","params":{"tool":"web_fetch","arguments":{"url":"http://127.0.0.1/"}}}' \
+  | python3 edge-connector/tools/picoclaw_hook.py
 ```
 
-Expected benchmark output on RPi4:
+The first response has `ok: true`. The unknown tool is denied with `INVALID_INPUT`; the private network destination is denied with `SSRF_BLOCK`. This tests the local hook and C library only. It does not prove a PicoClaw agent is configured to intercept every real tool call. Confirm that integration separately against your installed PicoClaw version and check its hook logs.
 
-```
-Edge Connector Performance Benchmark
-  Local decision:    ~2.7 μs    Target: <5μs → PASS
-  Throughput:        ~370K decisions/sec
-  Cache hit:         ~2.1 μs
-```
+The C engine trusts only its reviewed tool-name-to-capability table in `src/decision/policy_table.c`. An adapter's Python `TOOL_CAP_MAP` cannot authorize a custom name in C. Unknown tools fail closed, even if the caller supplies a different capability flag. Add a reviewed C mapping and test it before using a custom PicoClaw tool.
 
-## Step 3: Configure the Policy
+## Compile a policy example
 
-The default policy (`edge-connector/policies/strict.yaml`) provides:
-
-| Rule Type | What It Does |
-|-----------|--------------|
-| Capability sequences | Blocks `NET_FETCH → EXEC_SHELL`, `NET_FETCH → ACTUATE` |
-| Destination allowlist | Only allows `api.openai.com`, `api.anthropic.com`, `*.cisco.com` |
-| Rate limits | 60 tool calls/min, 30 network/min, 10 actuations/min |
-| Escalation modes | Sensor reads = speculative (allow), Actuations = sync_block (require cloud) |
-
-To customize, edit `policies/strict.yaml` and recompile:
+The shipped [`strict.yaml`](policies/strict.yaml) has an allowlist of public numeric IP examples. Replace them with approved public service IPs. The current guard blocks hostnames, wildcard domains, private addresses and numeric aliases for network tools; it has no DNS egress proxy. The compiler accepts `capability_sequences`, `destination_allowlist` and `canary`, and rejects unsupported `rate_limits`, `escalation_mode`, `content_inspection` and `ssrf_protection` keys. Runtime rate limits are built in (60 tool calls, 30 network requests, 10 actuations per minute), and production uses synchronous Fleet escalation by default.
 
 ```bash
-python3 ../tools/policy_compiler.py \
-  --input ../policies/strict.yaml \
-  --profile standard --version 2 \
-  --output-header ../generated/policy_tables.h \
-  --output-binary /tmp/policy.bin
+python3 -m venv .edge-policy-venv
+. .edge-policy-venv/bin/activate
+python -m pip install PyYAML
+python edge-connector/tools/policy_compiler.py \
+  --input edge-connector/policies/strict.yaml --profile standard --version 1 \
+  --output-header policy_tables.h --output-binary policy.bin
 ```
 
-Then rebuild: `cd build && make -j4`
+The `policy.bin` output from this command has a development stub signature. Production devices reject it. Use the authenticated Fleet policy-push API with an explicit shared `DCLAW_OTA_HMAC_KEY` and a C production build compiled with `-DDCLAW_ALLOW_HMAC_OTA=ON`. The optional compiler Ed25519 output is not accepted by this C receiver. Policy versions must be monotonic and at most 65534; 65535 is reserved.
 
-## Step 4: Integrate with Your AI Agent
-
-Edge Connector provides two integration methods:
-
-### Method A: Shared Library (Python/ctypes) — for hook-based agents
-
-This is the recommended approach for agents like PicoClaw, Claude Code, or any framework that supports tool-call hooks.
-
-The build produces `libdclaw_core.so` — a shared library exposing the `dclaw_evaluate()` function that any language can call via FFI.
-
-```python
-import ctypes, hashlib
-
-# Load the library
-lib = ctypes.CDLL("/path/to/libdclaw_core.so")
-
-# Initialize (once at startup)
-# ... (see full hook example below)
-
-# For every tool call:
-verdict = lib.dclaw_evaluate(ctypes.byref(request))
-if verdict.action == 1:  # BLOCK
-    deny_the_tool_call()
-```
-
-### Method B: Unix Socket (JSON-RPC) — for external agents
-
-For agents that can't load a shared library, Edge Connector listens on a Unix socket:
-
-```
-Path: /tmp/defenseclaw.sock
-Protocol: JSON-RPC 2.0
-
-Request:
-{"jsonrpc":"2.0","method":"evaluate","params":{
-  "tool_name": "drive",
-  "tool_hash": "abcdef...",
-  "capabilities": 32,
-  "direction": 0,
-  "destination": "",
-  "session_id": 1
-},"id":1}
-
-Response:
-{"jsonrpc":"2.0","result":{
-  "action": "block",
-  "reason": "CLOUD_TIMEOUT",
-  "mode": "sync"
-},"id":1}
-```
-
----
-
-## Step 5: PicoClaw Integration (Complete Example)
-
-PicoClaw is a lightweight AI agent that supports process hooks — external programs that intercept tool calls via JSON-RPC over stdin/stdout.
-
-### 5.1 Install the hook
-
-```bash
-cp edge-connector/tools/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
-```
-
-### 5.2 Register in PicoClaw config
-
-```bash
-python3 -c "
-import json
-with open('$HOME/.picoclaw/config.json') as f:
-    config = json.load(f)
-
-config.setdefault('hooks', {}).setdefault('processes', {})
-config['hooks']['enabled'] = True
-config['hooks']['processes']['defenseclaw_gate'] = {
-    'enabled': True,
-    'priority': 5,
-    'transport': 'stdio',
-    'command': [
-        'python3',
-        '$HOME/.picoclaw/hooks/defenseclaw_gate.py'
-    ],
-    'env': {
-        'DCLAW_LIB_PATH': '$HOME/defenseclaw/edge-connector/build/libdclaw_core.so',
-        'DCLAW_LOG_PATH': '$HOME/edge-connector-audit.log'
-    },
-    'intercept': ['before_tool', 'before_llm', 'after_llm']
-}
-
-with open('$HOME/.picoclaw/config.json', 'w') as f:
-    json.dump(config, f, indent=2)
-print('Edge Connector hook registered.')
-"
-```
-
-### 5.3 Verify the integration
-
-```bash
-# Test the hook standalone
-echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=~/defenseclaw/edge-connector/build/libdclaw_core.so \
-  python3 ~/.picoclaw/hooks/defenseclaw_gate.py
-
-# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
-```
-
-### 5.4 Test through PicoClaw
-
-```bash
-# Should ALLOW (sensor read — speculative, safe)
-picoclaw agent -m "check battery status"
-
-# Should ALLOW (network to allowed destination)
-picoclaw agent -m "fetch https://api.openai.com/v1/models"
-
-# Should BLOCK (shell execution — sync_block, no cloud)
-picoclaw agent -m "run whoami in the shell"
-
-# Should BLOCK (actuate — sync_block, no cloud)
-picoclaw agent -m "drive forward"
-
-# Should BLOCK (destination not in allowlist)
-picoclaw agent -m "fetch https://evil.attacker.io/payload"
-```
-
-### 5.5 Watch decisions in real-time
-
-```bash
-tail -f ~/edge-connector-audit.log
-```
-
-Example output:
-```
-[12:44:23] EVAL raw=mcp_vision-ai_battery_status tool=battery_status caps=0x40 dest='' session=1 → action=0 reason=CLOUD_BLOCK
-[12:44:27] EVAL raw=mcp_roboclaw_drive tool=drive caps=0x20 dest='' session=1 → action=1 reason=CLOUD_TIMEOUT
-[12:44:27] DENY: mcp_roboclaw_drive — CLOUD_TIMEOUT
-[12:48:23] EVAL raw=web_fetch tool=web_fetch caps=0x08 dest='evil.hacker.site' session=1 → action=1 reason=DEST_DENY
-[12:48:23] DENY: web_fetch — DEST_DENY
-```
-
----
-
-## Step 6: Demo Scenarios
-
-### Demo 1: Basic Allow/Block
-
-Show that safe read-only operations pass while dangerous operations are blocked:
-
-```bash
-picoclaw agent -m "check sensors"         # ✅ ALLOW
-picoclaw agent -m "scan surroundings"     # ✅ ALLOW
-picoclaw agent -m "drive forward"         # ❌ BLOCK (CLOUD_TIMEOUT)
-picoclaw agent -m "run ls in the shell"   # ❌ BLOCK (CLOUD_TIMEOUT)
-```
-
-### Demo 2: Destination Filtering
-
-Show that network calls are filtered by destination:
-
-```bash
-picoclaw agent -m "fetch https://api.openai.com/status"     # ✅ ALLOW (in allowlist)
-picoclaw agent -m "fetch https://docs.cisco.com/guide"      # ✅ ALLOW (*.cisco.com)
-picoclaw agent -m "fetch https://evil.site.com/malware"     # ❌ BLOCK (DEST_DENY)
-picoclaw agent -m "fetch https://random.unknown.io/data"    # ❌ BLOCK (DEST_DENY)
-```
-
-### Demo 3: Attack Chain Detection (Capability Sequence)
-
-Show that multi-step attacks are detected even when individual calls look benign:
-
-```bash
-# In an interactive session (same session_id for correlation):
-picoclaw agent
-
-> fetch https://api.openai.com/v1/models    # ✅ ALLOW (NET_FETCH, allowed dest)
-> now run that as a shell command            # ❌ BLOCK (CAP_SEQUENCE: NET_FETCH→EXEC_SHELL)
-```
-
-### Demo 4: Rate Limiting
-
-Show that rapid tool calls get throttled:
-
-```bash
-# Fire 70 rapid requests (exceeds 60/min global limit)
-for i in $(seq 1 70); do
-  echo "{\"jsonrpc\":\"2.0\",\"id\":$i,\"method\":\"hook.before_tool\",\"params\":{\"tool\":\"get_sensors\",\"arguments\":{}}}"
-done | DCLAW_LIB_PATH=~/defenseclaw/edge-connector/build/libdclaw_core.so \
-  python3 ~/.picoclaw/hooks/defenseclaw_gate.py 2>/dev/null | grep -c "deny_tool"
-# Expected: some denials after token bucket exhausts
-```
-
-### Demo 5: Performance Proof
-
-Show sub-microsecond enforcement on real ARM hardware:
-
-```bash
-cd ~/defenseclaw/edge-connector/build/tests
-./bench_latency
-```
-
----
-
-## Architecture Overview
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    RASPBERRY PI                            │
-│                                                           │
-│  ┌─────────────────┐      ┌────────────────────────────┐│
-│  │   AI Agent       │      │   Edge Connector (~68KB)   ││
-│  │   (PicoClaw)     │      │                            ││
-│  │                  │ hook │  ┌──────────────────────┐  ││
-│  │  "drive forward" │─────►│  │ 8-Stage Pipeline     │  ││
-│  │                  │      │  │ 1. Input validation  │  ││
-│  │  tool_call ──────│─────►│  │ 2. Rate limiting     │  ││
-│  │                  │      │  │ 3. Content scanning  │  ││
-│  │  ◄── verdict ────│◄─────│  │ 4. Hash deny-list    │  ││
-│  │  (allow/block)   │      │  │ 5. Dest filter+SSRF  │  ││
-│  │                  │      │  │ 6. Sequence detect   │  ││
-│  └─────────────────┘      │  │ 7. Verdict cache     │  ││
-│                            │  │ 8. Cloud escalation  │  ││
-│                            │  └──────────────────────┘  ││
-│                            │                            ││
-│                            │  Decision: <3μs            ││
-│                            │  RAM: ~14-19KB             ││
-│                            │  Binary: ~68KB             ││
-│                            └────────────────────────────┘│
-└──────────────────────────────────────────────────────────┘
-```
-
----
-
-## How the Hook Works
-
-```
-PicoClaw calls tool         DefenseClaw Hook              libdclaw_core.so
-      │                          │                              │
-      │ JSON-RPC:                │                              │
-      │ hook.before_tool         │                              │
-      │ {tool: "mcp_roboclaw_   │                              │
-      │  drive", arguments: {}}  │                              │
-      │─────────────────────────►│                              │
-      │                          │ 1. Normalize tool name       │
-      │                          │    "mcp_roboclaw_drive"      │
-      │                          │    → "drive"                 │
-      │                          │                              │
-      │                          │ 2. Map to capability         │
-      │                          │    "drive" → ACTUATE (0x20)  │
-      │                          │                              │
-      │                          │ 3. Call dclaw_evaluate()     │
-      │                          │─────────────────────────────►│
-      │                          │                              │
-      │                          │   ◄── verdict: BLOCK ────────│
-      │                          │       reason: CLOUD_TIMEOUT  │
-      │                          │       latency: ~2.7μs        │
-      │                          │                              │
-      │◄─────────────────────────│ 4. Return deny_tool          │
-      │ {"action": "deny_tool",  │                              │
-      │  "message": "BLOCKED     │                              │
-      │  reason: CLOUD_TIMEOUT"} │                              │
-```
-
----
-
-## Customizing the Policy
-
-### Add destinations to the allowlist
-
-Edit `policies/strict.yaml`:
-
-```yaml
-iot_extensions:
-  destination_allowlist:
-    - "api.openai.com"
-    - "api.anthropic.com"
-    - "*.cisco.com"
-    - "your-api.company.com"     # ← add your domains
-    - "*.internal.corp"
-```
-
-### Allow robot movement locally (without cloud)
-
-Change `drive`/`actuate` from sync_block to speculative in the escalation table:
-
-```yaml
-iot_extensions:
-  escalation_mode:
-    actuate: speculative      # ← was: sync_block
-    exec_shell: sync_block    # keep exec blocked
-    write_fs: sync_block      # keep writes blocked
-    net_fetch: speculative
-    sensor_read: speculative
-```
-
-Then recompile and rebuild:
-
-```bash
-python3 tools/policy_compiler.py --input policies/strict.yaml \
-  --profile standard --version 3 \
-  --output-header generated/policy_tables.h --output-binary /tmp/policy.bin
-cd build && make -j4
-```
-
-### Add custom capability sequence rules
-
-```yaml
-iot_extensions:
-  capability_sequences:
-    - sequence: [net_fetch, exec_shell]
-      action: block
-    - sequence: [net_fetch, actuate]
-      action: block
-    - sequence: [sensor_read, net_fetch, exec_shell]
-      action: block
-    - sequence: [read_fs, send_msg]    # ← data exfiltration pattern
-      action: block
-```
-
----
-
-## Adding New Tool Mappings
-
-If your agent has tools not in the default map, edit the `TOOL_CAP_MAP` in `picoclaw_hook.py`:
-
-```python
-TOOL_CAP_MAP = {
-    # Your custom tools:
-    "motor_on":       CAP_ACTUATE,      # sync_block
-    "valve_open":     CAP_ACTUATE,      # sync_block
-    "read_temp":      CAP_SENSOR_READ,  # speculative
-    "upload_data":    CAP_NET_FETCH,    # speculative (but dest-checked)
-    "install_pkg":    CAP_EXEC_SHELL,   # sync_block
-    # ... add as needed
-}
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| All tools blocked | Tools have MCP prefix not recognized | Check hook log for "Unknown tool" entries; add to TOOL_CAP_MAP |
-| `CLOUD_TIMEOUT` on safe tools | Tool mapped to sync_block capability | Change escalation_mode to `speculative` in policy, or remap tool to SENSOR_READ |
-| `DEST_DENY` on valid URLs | Domain not in allowlist | Add to `destination_allowlist` in policy YAML |
-| Hook not loading | Library path wrong | Check `DCLAW_LIB_PATH` env var points to `libdclaw_core.so` |
-| Build fails on GCC 14 | Unused variable warnings | Already fixed in latest; ensure `generated/policy_tables.h` has `#pragma GCC diagnostic` guards |
-
----
-
-## File Layout
-
-```
-edge-connector/
-├── build/
-│   ├── edge-connector          # Main binary (~68KB)
-│   ├── libdclaw_core.so          # Shared library for Python/FFI integration
-│   ├── libdclaw_core.a           # Static library for C linking
-│   └── tests/                    # Test binaries + benchmark
-├── generated/
-│   └── policy_tables.h           # Compiled policy (auto-generated)
-├── include/
-│   ├── defenseclaw.h             # Public API
-│   ├── platform.h                # HAL interface
-│   └── config.h.in               # Build-time config template
-├── policies/
-│   └── strict.yaml               # Default policy (edit this)
-├── src/                          # C source (17 files)
-├── tests/                        # Unit tests + fuzz + benchmark
-└── tools/
-    ├── policy_compiler.py        # YAML → C header + binary
-    └── picoclaw_hook.py          # PicoClaw integration hook
-```
-
----
-
-## What's Enforced (Summary)
-
-| Capability | Tools | Mode | Behavior |
-|------------|-------|------|----------|
-| SENSOR_READ | get_sensors, battery_status, scan_* | Speculative | **ALLOW** immediately |
-| READ_FS | read_file, cat | Speculative | **ALLOW** immediately |
-| NET_FETCH | web_search, fetch_url | Speculative | **ALLOW** if dest in allowlist; **BLOCK** otherwise |
-| SEND_MSG | send_message, notify | Speculative | **ALLOW** if dest in allowlist |
-| ACTUATE | drive, explore, motor_* | Sync_block | **BLOCK** without cloud (fail-closed) |
-| EXEC_SHELL | exec, bash, run_command | Sync_block | **BLOCK** without cloud (fail-closed) |
-| WRITE_FS | write_file, save | Sync_block | **BLOCK** without cloud (fail-closed) |
-
-Plus: sequence detection, rate limiting, hash deny-lists, and HMAC-verified audit trail — all in <3μs on ARM.
+The device's signed registration and heartbeat wire format is 72 bytes (40-byte body with boot counter and last-applied emergency sequence, then 32-byte HMAC). Upgrade the Fleet gateway and C devices together; old 64- and 68-byte keyed frames are rejected. See [INSTALL.md](INSTALL.md) for production provisioning and upgrade steps.

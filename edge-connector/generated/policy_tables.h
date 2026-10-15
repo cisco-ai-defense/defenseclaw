@@ -63,25 +63,6 @@ static const char *dest_allowlist[] = {
 };
 DCLAW_UNUSED static const size_t dest_allowlist_count = 2;
 
-/* === Deny Hash List (sorted for binary search) === */
-
-/* no deny hashes configured */
-DCLAW_UNUSED
-static const uint8_t deny_hashes[1][32] = {{0}};
-DCLAW_UNUSED static const size_t deny_hashes_count = 0;
-
-/* === Escalation Mode Table === */
-
-DCLAW_UNUSED
-static const dclaw_escalation_entry_t escalation_table[] = {
-};
-DCLAW_UNUSED static const size_t escalation_table_count = 0;
-
-/* === Rate Limit Defaults === */
-DCLAW_UNUSED static const uint16_t policy_rate_tool_calls_per_min = 60;
-DCLAW_UNUSED static const uint16_t policy_rate_network_per_min = 30;
-DCLAW_UNUSED static const uint16_t policy_rate_actuations_per_min = 10;
-
 /* === Aho-Corasick Content Scanner DFA === */
 
 #define DCLAW_AC_NUM_STATES 324

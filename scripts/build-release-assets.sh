@@ -45,10 +45,27 @@ OUT="$(cd "${OUT}" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-rsync -a --delete \
-    --exclude .git --exclude .claude --exclude docs-site --exclude benchmarks --exclude .venv \
-    --exclude dist --exclude build --exclude output --exclude '__pycache__' --exclude '*.egg-info' \
-    "${ROOT}/" "${WORK}/src/"
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+        --exclude .git --exclude .claude --exclude docs-site --exclude benchmarks --exclude .venv \
+        --exclude dist --exclude build --exclude output --exclude '__pycache__' --exclude '*.egg-info' \
+        "${ROOT}/" "${WORK}/src/"
+else
+    # Release smoke builds also run in minimal POSIX environments with no
+    # rsync. The target is a new scratch directory, so no delete is needed.
+    python3 - "${ROOT}" "${WORK}/src" <<'PY'
+import shutil
+import sys
+
+shutil.copytree(
+    sys.argv[1], sys.argv[2], symlinks=True,
+    ignore=shutil.ignore_patterns(
+        ".git", ".claude", "docs-site", "benchmarks", ".venv",
+        "dist", "build", "output", "__pycache__", "*.egg-info",
+    ),
+)
+PY
+fi
 cd "${WORK}/src"
 scripts/stamp-version.sh "${VERSION}" >/dev/null
 make --no-print-directory dist-cli dist-installers dist-requirements DIST_DIR="${OUT}" >/dev/null

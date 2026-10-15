@@ -18,7 +18,6 @@
 
 #include "defenseclaw.h"
 #include "platform.h"
-#include "hmac_sha256.h"
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -130,6 +129,165 @@ static const dclaw_tool_cap_entry_t tool_cap_map[] = {
     { "follow_start",     DCLAW_CAP_ACTUATE },
     { "follow_stop",      DCLAW_CAP_ACTUATE },
     { "stop",             DCLAW_CAP_ACTUATE },
+    /* Reviewed names from shipped Home Assistant, Bubbaloop and ESP-Claw adapters. */
+    /* ACTUATE */
+    { "activate_scene", DCLAW_CAP_ACTUATE },
+    { "arm_alarm", DCLAW_CAP_ACTUATE },
+    { "arm_move_to", DCLAW_CAP_ACTUATE },
+    { "call_service", DCLAW_CAP_ACTUATE },
+    { "close_cover", DCLAW_CAP_ACTUATE },
+    { "disarm_alarm", DCLAW_CAP_ACTUATE },
+    { "emergency_stop", DCLAW_CAP_ACTUATE },
+    { "fire_event", DCLAW_CAP_ACTUATE },
+    { "follow_path", DCLAW_CAP_ACTUATE },
+    { "gpio_write", DCLAW_CAP_ACTUATE },
+    { "gripper_close", DCLAW_CAP_ACTUATE },
+    { "gripper_open", DCLAW_CAP_ACTUATE },
+    { "i2c_write", DCLAW_CAP_ACTUATE },
+    { "led_set", DCLAW_CAP_ACTUATE },
+    { "lock", DCLAW_CAP_ACTUATE },
+    { "media_next", DCLAW_CAP_ACTUATE },
+    { "media_pause", DCLAW_CAP_ACTUATE },
+    { "media_play", DCLAW_CAP_ACTUATE },
+    { "media_previous", DCLAW_CAP_ACTUATE },
+    { "media_stop", DCLAW_CAP_ACTUATE },
+    { "motor_set_speed", DCLAW_CAP_ACTUATE },
+    { "motor_stop", DCLAW_CAP_ACTUATE },
+    { "navigate_to", DCLAW_CAP_ACTUATE },
+    { "open_cover", DCLAW_CAP_ACTUATE },
+    { "play_media", DCLAW_CAP_ACTUATE },
+    { "press_button", DCLAW_CAP_ACTUATE },
+    { "pwm_set", DCLAW_CAP_ACTUATE },
+    { "select_option", DCLAW_CAP_ACTUATE },
+    { "servo_set_angle", DCLAW_CAP_ACTUATE },
+    { "set_brightness", DCLAW_CAP_ACTUATE },
+    { "set_color", DCLAW_CAP_ACTUATE },
+    { "set_cover_position", DCLAW_CAP_ACTUATE },
+    { "set_fan_mode", DCLAW_CAP_ACTUATE },
+    { "set_humidity", DCLAW_CAP_ACTUATE },
+    { "set_hvac_mode", DCLAW_CAP_ACTUATE },
+    { "set_value", DCLAW_CAP_ACTUATE },
+    { "set_volume", DCLAW_CAP_ACTUATE },
+    { "spi_transfer", DCLAW_CAP_ACTUATE },
+    { "toggle", DCLAW_CAP_ACTUATE },
+    { "trigger_alarm", DCLAW_CAP_ACTUATE },
+    { "tts_speak", DCLAW_CAP_ACTUATE },
+    { "unlock", DCLAW_CAP_ACTUATE },
+    { "vacuum_return_home", DCLAW_CAP_ACTUATE },
+    { "vacuum_start", DCLAW_CAP_ACTUATE },
+    { "vacuum_stop", DCLAW_CAP_ACTUATE },
+    /* EXEC_SHELL */
+    { "firmware_update", DCLAW_CAP_EXEC_SHELL },
+    { "install_addon", DCLAW_CAP_EXEC_SHELL },
+    { "lua_eval", DCLAW_CAP_EXEC_SHELL },
+    { "lua_load", DCLAW_CAP_EXEC_SHELL },
+    { "ota_update", DCLAW_CAP_EXEC_SHELL },
+    { "pipeline_deploy", DCLAW_CAP_EXEC_SHELL },
+    { "plugin_install", DCLAW_CAP_EXEC_SHELL },
+    { "reboot", DCLAW_CAP_EXEC_SHELL },
+    { "reload_automations", DCLAW_CAP_EXEC_SHELL },
+    { "reload_config", DCLAW_CAP_EXEC_SHELL },
+    { "reload_scenes", DCLAW_CAP_EXEC_SHELL },
+    { "reload_scripts", DCLAW_CAP_EXEC_SHELL },
+    { "restart_ha", DCLAW_CAP_EXEC_SHELL },
+    { "run_script", DCLAW_CAP_EXEC_SHELL },
+    { "start_addon", DCLAW_CAP_EXEC_SHELL },
+    { "stop_addon", DCLAW_CAP_EXEC_SHELL },
+    { "system_restart", DCLAW_CAP_EXEC_SHELL },
+    { "trigger_automation", DCLAW_CAP_EXEC_SHELL },
+    { "update_addon", DCLAW_CAP_EXEC_SHELL },
+    /* NET_FETCH */
+    { "call_webhook", DCLAW_CAP_NET_FETCH },
+    { "cloud_sync", DCLAW_CAP_NET_FETCH },
+    { "http_fetch", DCLAW_CAP_NET_FETCH },
+    { "model_download", DCLAW_CAP_NET_FETCH },
+    { "mqtt_publish", DCLAW_CAP_NET_FETCH },
+    { "register_webhook", DCLAW_CAP_NET_FETCH },
+    { "remove_integration", DCLAW_CAP_NET_FETCH },
+    { "setup_integration", DCLAW_CAP_NET_FETCH },
+    { "zenoh_publish", DCLAW_CAP_NET_FETCH },
+    /* READ_FS */
+    { "config_get", DCLAW_CAP_READ_FS },
+    { "file_list", DCLAW_CAP_READ_FS },
+    { "file_read", DCLAW_CAP_READ_FS },
+    { "fs_list", DCLAW_CAP_READ_FS },
+    { "fs_read", DCLAW_CAP_READ_FS },
+    { "model_load", DCLAW_CAP_READ_FS },
+    /* SEND_MSG */
+    { "send_notification", DCLAW_CAP_SEND_MSG },
+    /* SENSOR_READ */
+    { "adc_read", DCLAW_CAP_SENSOR_READ },
+    { "aruco_detect", DCLAW_CAP_SENSOR_READ },
+    { "battery_level", DCLAW_CAP_SENSOR_READ },
+    { "ble_scan", DCLAW_CAP_SENSOR_READ },
+    { "camera_capture", DCLAW_CAP_SENSOR_READ },
+    { "camera_list", DCLAW_CAP_SENSOR_READ },
+    { "camera_stream_start", DCLAW_CAP_SENSOR_READ },
+    { "camera_stream_stop", DCLAW_CAP_SENSOR_READ },
+    { "face_detect", DCLAW_CAP_SENSOR_READ },
+    { "get_addon_info", DCLAW_CAP_SENSOR_READ },
+    { "get_addons", DCLAW_CAP_SENSOR_READ },
+    { "get_all_states", DCLAW_CAP_SENSOR_READ },
+    { "get_integrations_manifest", DCLAW_CAP_SENSOR_READ },
+    { "get_area_registry", DCLAW_CAP_SENSOR_READ },
+    { "get_areas", DCLAW_CAP_SENSOR_READ },
+    { "get_automations", DCLAW_CAP_SENSOR_READ },
+    { "get_blueprints", DCLAW_CAP_SENSOR_READ },
+    { "get_calendar_events", DCLAW_CAP_SENSOR_READ },
+    { "get_calendars", DCLAW_CAP_SENSOR_READ },
+    { "get_camera_image", DCLAW_CAP_SENSOR_READ },
+    { "get_config", DCLAW_CAP_SENSOR_READ },
+    { "get_device_registry", DCLAW_CAP_SENSOR_READ },
+    { "get_devices", DCLAW_CAP_SENSOR_READ },
+    { "get_energy_data", DCLAW_CAP_SENSOR_READ },
+    { "get_entities", DCLAW_CAP_SENSOR_READ },
+    { "get_entity_history", DCLAW_CAP_SENSOR_READ },
+    { "get_entity_registry", DCLAW_CAP_SENSOR_READ },
+    { "get_entity_state", DCLAW_CAP_SENSOR_READ },
+    { "get_error_log", DCLAW_CAP_SENSOR_READ },
+    { "get_integrations", DCLAW_CAP_SENSOR_READ },
+    { "get_logbook", DCLAW_CAP_SENSOR_READ },
+    { "get_media_players", DCLAW_CAP_SENSOR_READ },
+    { "get_notifications", DCLAW_CAP_SENSOR_READ },
+    { "get_persons", DCLAW_CAP_SENSOR_READ },
+    { "get_scenes", DCLAW_CAP_SENSOR_READ },
+    { "get_scripts", DCLAW_CAP_SENSOR_READ },
+    { "get_sensor_data", DCLAW_CAP_SENSOR_READ },
+    { "get_services", DCLAW_CAP_SENSOR_READ },
+    { "get_shopping_list", DCLAW_CAP_SENSOR_READ },
+    { "get_statistics", DCLAW_CAP_SENSOR_READ },
+    { "get_status", DCLAW_CAP_SENSOR_READ },
+    { "get_todo_items", DCLAW_CAP_SENSOR_READ },
+    { "get_zones", DCLAW_CAP_SENSOR_READ },
+    { "gpio_read", DCLAW_CAP_SENSOR_READ },
+    { "gps_position", DCLAW_CAP_SENSOR_READ },
+    { "humidity_read", DCLAW_CAP_SENSOR_READ },
+    { "i2c_read", DCLAW_CAP_SENSOR_READ },
+    { "image_classify", DCLAW_CAP_SENSOR_READ },
+    { "image_depth_estimate", DCLAW_CAP_SENSOR_READ },
+    { "image_detect_objects", DCLAW_CAP_SENSOR_READ },
+    { "image_feature_match", DCLAW_CAP_SENSOR_READ },
+    { "image_segment", DCLAW_CAP_SENSOR_READ },
+    { "imu_read", DCLAW_CAP_SENSOR_READ },
+    { "lidar_scan", DCLAW_CAP_SENSOR_READ },
+    { "optical_flow", DCLAW_CAP_SENSOR_READ },
+    { "pose_estimate", DCLAW_CAP_SENSOR_READ },
+    { "pressure_read", DCLAW_CAP_SENSOR_READ },
+    { "search_entities", DCLAW_CAP_SENSOR_READ },
+    { "stereo_depth", DCLAW_CAP_SENSOR_READ },
+    { "system_metrics", DCLAW_CAP_SENSOR_READ },
+    { "temperature_read", DCLAW_CAP_SENSOR_READ },
+    { "wifi_scan", DCLAW_CAP_SENSOR_READ },
+    { "video_record_start", DCLAW_CAP_SENSOR_READ },
+    { "video_record_stop", DCLAW_CAP_SENSOR_READ },
+    /* WRITE_FS */
+    { "config_set", DCLAW_CAP_WRITE_FS },
+    { "create_automation", DCLAW_CAP_WRITE_FS },
+    { "delete_automation", DCLAW_CAP_WRITE_FS },
+    { "file_write", DCLAW_CAP_WRITE_FS },
+    { "fs_write", DCLAW_CAP_WRITE_FS },
+    { "model_save", DCLAW_CAP_WRITE_FS },
+    { "update_automation", DCLAW_CAP_WRITE_FS },
 };
 static const size_t tool_cap_map_count = sizeof(tool_cap_map) / sizeof(tool_cap_map[0]);
 
@@ -145,16 +303,6 @@ uint8_t dclaw_policy_lookup_capability(const char *tool_name) {
     return DCLAW_CAP_UNKNOWN;
 }
 
-static int compare_hash(const uint8_t *a, const uint8_t *b) {
-    return memcmp(a, b, 32);
-}
-
-/* ct_compare() from hmac_sha256.h provides constant-time comparison
- * for the final equality check in deny-list lookups. The binary search uses
- * compare_hash (memcmp) for ordering, but the final match must be
- * constant-time to avoid timing side-channels that could reveal which
- * hashes are on the deny list. */
-
 /*
  * dclaw_policy_tables_init — populate runtime tables from compiled-in defaults.
  * Called once during dclaw_init(). After OTA, dclaw_policy_reload_from_flash()
@@ -164,14 +312,6 @@ void dclaw_policy_tables_init(void) {
     dclaw_state_t *s = dclaw_get_state();
     dclaw_policy_table_t *rt = &s->rt_policy;
     memset(rt, 0, sizeof(*rt));
-
-    /* Copy compiled-in deny hashes */
-    rt->deny_hashes_count = deny_hashes_count;
-    if (rt->deny_hashes_count > DCLAW_RT_MAX_DENY_HASHES)
-        rt->deny_hashes_count = DCLAW_RT_MAX_DENY_HASHES;
-    for (size_t i = 0; i < rt->deny_hashes_count; i++) {
-        memcpy(rt->deny_hashes[i], deny_hashes[i], 32);
-    }
 
     /* Copy compiled-in destination allowlist */
     rt->dest_allowlist_count = dest_allowlist_count;
@@ -202,32 +342,6 @@ void dclaw_policy_tables_init(void) {
     }
 
     rt->loaded = false; /* compiled-in defaults, not from flash */
-}
-
-dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash) {
-    dclaw_state_t *s = dclaw_get_state();
-    dclaw_policy_table_t *rt = &s->rt_policy;
-
-    /* Binary search over sorted deny_hashes table (runtime copy).
-     * The binary search uses memcmp for ordering; the final equality
-     * check uses constant-time comparison. */
-    int lo = 0, hi = (int)rt->deny_hashes_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int cmp = compare_hash(tool_hash, rt->deny_hashes[mid]);
-        if (cmp == 0) {
-            /* Final match: use constant-time comparison to avoid
-             * leaking which hash matched via timing. */
-            if (ct_compare(tool_hash, rt->deny_hashes[mid], 32))
-                return DCLAW_ACTION_BLOCK;
-            /* Should not happen (memcmp==0 implies equality), but
-             * fall through to ALLOW if ct disagrees. */
-            return DCLAW_ACTION_ALLOW;
-        }
-        if (cmp < 0) hi = mid - 1;
-        else lo = mid + 1;
-    }
-    return DCLAW_ACTION_ALLOW;
 }
 
 /*

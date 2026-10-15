@@ -20,7 +20,7 @@
 
 .DESCRIPTION
       powershell -File scripts\test-install-lifecycle.ps1 -Assets DIR [-PreviousAssets DIR]
-          [-Lanes "fresh setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
+          [-Lanes "fresh fleet-opt-in setup-import files-in-use failure-drill policy upgrade-previous shim upgrade-0.8.3"]
           [-CodexExe PATH] [-Root DIR] [-Keep]
 
     upgrade-previous and shim need -PreviousAssets (an older 1.x release); the
@@ -202,8 +202,23 @@ function Assert-Versions([string]$Want) {
     $gateway = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw-gateway.exe") @("--version"))
     Check ($cli -eq $Want -and $gateway -eq $Want) "expected $Want, got cli=$cli gateway=$gateway"
     if ($Want -eq $Target) {
-        Check (Test-Path -LiteralPath (Join-Path $DcHome "installer\policy_compiler.py") -PathType Leaf) "Fleet policy compiler was not installed"
+        $compiler = Join-Path $DcHome "installer\policy_compiler.py"
+        if (Test-FleetEnabled) {
+            Check (Test-Path -LiteralPath $compiler -PathType Leaf) "Fleet-on upgrade did not install its compiler"
+            if (Test-Path -LiteralPath $compiler -PathType Leaf) {
+                Check ((Get-Sha256 $compiler) -eq (Get-AssetCompilerSha256)) "Fleet-on compiler differs from the release archive"
+            }
+        } else {
+            Check (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) "Fleet-off core install unexpectedly activated the Fleet compiler"
+        }
     }
+}
+
+function Test-FleetEnabled {
+    $configPath = Join-Path $DcHome "config.yaml"
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return $false }
+    $enabled = Invoke-Python "import sys,yaml; c=yaml.safe_load(open(sys.argv[1], encoding='utf-8')); print(int(isinstance(c,dict) and isinstance(c.get('fleet'),dict) and c['fleet'].get('enabled') is True))" @($configPath)
+    return ($enabled.Trim() -eq "1")
 }
 
 function Get-GatewayPort {
@@ -231,6 +246,24 @@ function Assert-DataKept {
 }
 
 function Get-Sha256([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }
+
+function Get-AssetCompilerSha256 {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = Join-Path $Assets "defenseclaw-$Target-windows-amd64.zip"
+    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        $entries = @($zip.Entries | Where-Object {
+            ($_.FullName -replace '\\', '/') -match '(^|/)edge-connector/tools/policy_compiler[.]py$'
+        })
+        if ($entries.Count -ne 1) { throw "Fleet compiler is missing or duplicated in $archive" }
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = $entries[0].Open()
+            try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '') }
+            finally { $stream.Dispose() }
+        } finally { $hash.Dispose() }
+    } finally { $zip.Dispose() }
+}
 
 # Move-File FROM TO: a rename that waits out a sharing violation, as
 # install.ps1's Move-Path does. Right after gateway stop, Windows (or a
@@ -387,6 +420,43 @@ print(json.dumps(client.scan_skill(target=sys.argv[1], name='lifecycle')))
     Check ((Invoke-Installer $unstamped @("-Version", "0.8.10", "-Yes")) -eq 1) "-Version 0.8.10 must be refused"
     Assert-Versions $Target
     Assert-Healthy
+}
+
+function Test-FleetOptIn {
+    Enter-Lane fleet-opt-in
+    Write-Log "fleet-opt-in: core install leaves Fleet compiler inactive"
+    Check ((Install-Candidate $Assets) -eq 0) "Fleet-off fresh install failed"
+    Assert-Versions $Target
+    if (-not (Initialize-Gateway)) { return }
+    Stop-Lane
+    Invoke-Python @'
+import sys, yaml
+path = sys.argv[1]
+with open(path, encoding='utf-8') as stream:
+    config = yaml.safe_load(stream)
+config.setdefault('fleet', {})['enabled'] = True
+with open(path, 'w', encoding='utf-8') as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+'@ @((Join-Path $DcHome "config.yaml")) | Out-Null
+    Write-Log "fleet-opt-in: same-version reinstall provisions the matching compiler"
+    Check ((Install-Candidate $Assets) -eq 0) "Fleet-on same-version reinstall failed"
+    Assert-Versions $Target
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome "previous"))) "Fleet-on same-version repair created a rollback slot"
+    Stop-Lane
+    Invoke-Python @'
+import sys, yaml
+path = sys.argv[1]
+with open(path, encoding='utf-8') as stream:
+    config = yaml.safe_load(stream)
+config['fleet']['enabled'] = False
+with open(path, 'w', encoding='utf-8') as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+'@ @((Join-Path $DcHome "config.yaml")) | Out-Null
+    Write-Log "fleet-opt-in: disabling Fleet removes its active compiler"
+    Check ((Install-Candidate $Assets) -eq 0) "Fleet-off same-version reinstall failed"
+    Assert-Versions $Target
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome "previous"))) "Fleet-off same-version repair created a rollback slot"
+    Stop-Lane
 }
 
 # Removes the Everyone deny ACE of a drill and proves the file reads again.
@@ -818,6 +888,7 @@ try {
         if ($lane -in @("upgrade-previous", "shim") -and -not $PreviousAssets) { throw "lane $lane needs -PreviousAssets" }
         switch ($lane) {
             "fresh" { Invoke-Lane $lane { Test-Fresh } }
+            "fleet-opt-in" { Invoke-Lane $lane { Test-FleetOptIn } }
             "upgrade-previous" { Invoke-Lane $lane { Test-UpgradePrevious } }
             "shim" { Invoke-Lane $lane { Test-Shim } }
             "files-in-use" { Invoke-Lane $lane { Test-FilesInUse } }

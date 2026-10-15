@@ -290,16 +290,20 @@ The `not_found` field is only present when one or more devices could not be foun
 POST /api/v1/fleet/policy/push
 ```
 
-Compiles a policy YAML, signs it with the explicit `DCLAW_OTA_HMAC_KEY` secret, stores the version, and publishes the signed binary to the target fleet's MQTT topic. A `200` response confirms broker publication, not device receipt or application. After an authenticated signed registration or heartbeat, the gateway can republish the latest stored policy to a device reporting an older version. Confirm application from a later signed heartbeat; MQTT publication alone is not an acknowledgment. Devices need the same secret and a production build with `-DDCLAW_ALLOW_HMAC_OTA=ON`. `DCLAW_OTA_KEY` is a public Ed25519 key name; the current C build has no Ed25519 verifier and does not use it as an HMAC secret. Emergency commands use the separate `DCLAW_EMERGENCY_KEY`.
+Compiles a policy YAML, signs it with the explicit `DCLAW_OTA_HMAC_KEY` secret, stores the version, and publishes the signed binary to the target fleet's MQTT topic. The gateway assigns the wire version from stored fleet history, starting at 1 and increasing to 65534; a YAML `version` field does not select it. At 65534, a further push returns `409` and requires a new device policy lineage. A `200` response confirms broker publication, not device receipt or application. After an authenticated signed registration or heartbeat, the gateway can republish the latest stored policy to a device reporting an older version. Confirm application from a later signed heartbeat; MQTT publication alone is not an acknowledgment. Devices need the same secret and a production build with `-DDCLAW_ALLOW_HMAC_OTA=ON`. `DCLAW_OTA_KEY` is a public Ed25519 key name; the current C build has no Ed25519 verifier and does not use it as an HMAC secret. Emergency commands use the separate `DCLAW_EMERGENCY_KEY`.
 
-Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar installs must provision them; Linux enterprise RPM/DEB installs require an operator-provisioned, trusted `/usr/bin/python3` and PyYAML only when Fleet is enabled. Fleet-enabled managed install/ensure checks this prerequisite before changing the service. Per-user installers use bundled Python dependencies. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** in a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if no candidate passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected. The managed Windows standalone Setup installs `policy_compiler.py` under `%ProgramFiles%\Cisco\DefenseClaw\lib\defenseclaw\` and uses its admitted scanner runtime Python/PyYAML under `%ProgramData%\Cisco\DefenseClaw-ScannerRuntime\python\`. Secure Client managed profiles on Windows and macOS currently reject Fleet-enabled configuration because they do not carry the compiler/runtime.
+Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar installs must provision them; Linux enterprise RPM/DEB installs require an operator-provisioned, trusted `/usr/bin/python3` and PyYAML only when Fleet is enabled. Fleet-enabled managed install/ensure checks this prerequisite before changing the service. Per-user installers use bundled Python dependencies. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** in a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if no candidate passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected. Managed Windows standalone Setup carries a signed inert compiler payload; only authenticated Fleet-enabled config installs its active copy under `%ProgramFiles%\Cisco\DefenseClaw\lib\defenseclaw\` and uses the admitted scanner runtime Python/PyYAML under `%ProgramData%\Cisco\DefenseClaw-ScannerRuntime\python\`. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes it. Secure Client managed profiles on Windows and macOS currently reject Fleet-enabled configuration because they do not carry the compiler/runtime.
+
+Managed Linux/macOS packages carry the compiler as inert source in `<InstallRoot>/share/fleet/`. Only validated Fleet-enabled install/ensure activates a protected copy in `<InstallRoot>/lib/defenseclaw/`; Fleet-off install/upgrade needs no Python/PyYAML and activates no compiler. A Fleet-off raw payload install discards its optional compiler source, so later Fleet activation requires the staged release `--payload` again. Fleet API routes and their metrics exist only when `fleet.enabled: true`; the bundled local Prometheus stack has no Fleet scrape job until an operator configures one.
+
+Standard per-user `install.sh`/`install.ps1` copy the matching compiler only when Fleet is already enabled in the existing config. The interactive `defenseclaw setup edge-connector` flow installs the optional compiler and enables Fleet after credential setup succeeds. A core gateway install alone does not start a C Edge Connector device service.
 
 **Request body**
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tenant_id` | uint64 | yes | Tenant identifier |
-| `fleet_id` | uint64 | yes | Fleet identifier |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
 | `policy_yaml` | string | yes | Raw YAML policy content |
 | `profile` | string | no | Build profile (defaults to `standard`) |
 
@@ -307,7 +311,7 @@ Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar ins
 {
   "tenant_id": 1,
   "fleet_id": 2,
-  "policy_yaml": "name: factory-east\nversion: 4\nskill_actions:\n  critical:\n    runtime: disable\n  high:\n    runtime: disable\n",
+  "policy_yaml": "name: factory-east\nskill_actions:\n  critical:\n    runtime: disable\n  high:\n    runtime: disable\n",
   "profile": "standard"
 }
 ```
@@ -316,7 +320,7 @@ Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar ins
 
 ```json
 {
-  "version": 4,
+  "version": 1,
   "blob_size": 2048,
   "tenant_id": 1,
   "fleet_id": 2,
@@ -331,6 +335,7 @@ Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar ins
 | --- | --- |
 | `200` | Policy compiled, signed, stored, and published to the broker; device application is unconfirmed |
 | `400` | Missing required fields, invalid policy, or unsupported profile |
+| `409` | The fleet policy version reached 65534; provision a new device policy lineage |
 | `413` | Request body or compiled policy exceeds its size limit |
 | `422` | Policy YAML cannot be compiled |
 | `500` | Signing or distribution failed |
@@ -348,8 +353,8 @@ Returns all stored policy versions for a tenant/fleet pair, ordered newest first
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tenant_id` | uint64 | yes | Tenant identifier |
-| `fleet_id` | uint64 | yes | Fleet identifier |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
 
 **Response** `200 OK`
 
@@ -444,8 +449,8 @@ Publishes a signed emergency command to the fleet MQTT topic. A `200` response c
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tenant_id` | uint64 | yes | Tenant identifier |
-| `fleet_id` | uint64 | yes | Fleet identifier |
+| `tenant_id` | uint16 | yes | Tenant identifier |
+| `fleet_id` | uint16 | yes | Fleet identifier |
 | `command` | string | yes | One of: `BLOCK_ALL`, `ENTER_LOCKDOWN`, `RELEASE_LOCKDOWN`, `REVOKE_SESSIONS`, `FORCE_SYNC` |
 
 ```json
@@ -633,9 +638,11 @@ defenseclaw_fleet_ota_rollbacks_total 0
 | `defenseclaw_fleet_verdict_cache_hits_total` | counter | Server-side verdict cache hits |
 | `defenseclaw_fleet_verdict_cache_misses_total` | counter | Server-side verdict cache misses |
 | `defenseclaw_fleet_verdict_cache_size` | gauge | Current number of entries in the verdict cache |
-| `defenseclaw_fleet_policy_rollback_total` | counter | Policy canary rollbacks triggered |
+| `defenseclaw_fleet_policy_rollback_total` | counter | Policy canary rollback transitions reported by devices |
 | `defenseclaw_fleet_alerts_total` | counter | Fleet alerts emitted |
-| `defenseclaw_fleet_ota_rollbacks_total` | counter | OTA canary rollbacks reported by devices |
+| `defenseclaw_fleet_ota_rollbacks_total` | counter | OTA canary rollback transitions reported by devices |
+
+Both rollback counters increment when a device's authenticated heartbeat first changes from no `CANARY_ROLLBACK` flag to a flagged state. Repeated heartbeats carrying the persistent flag do not increment them again. The device's `policy_version` remains the accepted high-water version and does not prove that version is still active after rollback.
 
 ---
 

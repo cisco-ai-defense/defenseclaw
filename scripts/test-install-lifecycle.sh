@@ -187,6 +187,17 @@ installer_copies() {
         | wc -l | tr -d ' '
 }
 
+fleet_enabled_in_lane() {
+    [[ -f "${DC_HOME}/config.yaml" ]] || return 1
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+sys.exit(0 if isinstance(config, dict) and isinstance(config.get("fleet"), dict) and config["fleet"].get("enabled") is True else 1)
+PY
+}
+
 assert_versions() {
     local want="$1" cli gateway archive entry arch
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
@@ -194,13 +205,17 @@ assert_versions() {
     [[ "${cli}" == "${want}" && "${gateway}" == "${want}" ]] \
         || fail "expected ${want}, got cli=${cli:-none} gateway=${gateway:-none}"
     if [[ "${want}" == "${TARGET}" ]]; then
-        [[ -f "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet policy compiler was not installed"
-        case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
-        archive="${ASSETS}/defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
-        entry="$(tar -tzf "${archive}" | awk '/(^|\/)edge-connector\/tools\/policy_compiler.py$/ {print; exit}')"
-        [[ -n "${entry}" ]] || fail "release archive has no Fleet policy compiler"
-        tar -xOzf "${archive}" "${entry}" | cmp - "${DC_HOME}/installer/policy_compiler.py" \
-            || fail "installed Fleet policy compiler differs from the release archive"
+        if fleet_enabled_in_lane; then
+            [[ -f "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet-on upgrade did not install its compiler"
+            case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
+            archive="${ASSETS}/defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
+            entry="$(tar -tzf "${archive}" | awk '/(^|\/)edge-connector\/tools\/policy_compiler.py$/ {print; exit}')"
+            [[ -n "${entry}" ]] || fail "Fleet-on archive has no policy compiler"
+            tar -xOzf "${archive}" "${entry}" | cmp - "${DC_HOME}/installer/policy_compiler.py" \
+                || fail "Fleet-on compiler differs from the release archive"
+        else
+            [[ ! -e "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet-off core install unexpectedly activated the Fleet compiler"
+        fi
     fi
 }
 
@@ -241,6 +256,42 @@ lane_fresh() {
     assert_data_kept
     [[ "$(shasum -a 256 "${DC_HOME}/config.yaml" | awk '{print $1}')" == "${before}" ]] || fail "re-run changed config.yaml"
     [[ ! -e "${DC_HOME}/previous" ]] || fail "a same-version re-run must not create a rollback slot"
+    stop_lane
+}
+
+lane_fleet_opt_in() {
+    enter_lane fleet-opt-in
+    log "fleet-opt-in: core install leaves Fleet compiler inactive"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    must init_and_start || return 1
+    stop_lane
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys
+import yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config.setdefault("fleet", {})["enabled"] = True
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    log "fleet-opt-in: re-install provisions the version-matched compiler"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys
+import yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config["fleet"]["enabled"] = False
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    log "fleet-opt-in: disabling Fleet removes its active compiler"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
     stop_lane
 }
 
@@ -485,6 +536,7 @@ trap cleanup EXIT
 for lane in ${LANES}; do
     case "${lane}" in
         fresh) lane_fresh || true ;;
+        fleet-opt-in) lane_fleet_opt_in || true ;;
         upgrade-previous)
             [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "upgrade-previous needs --previous-assets" >&2; exit 2; }
             prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"

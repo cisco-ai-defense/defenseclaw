@@ -546,7 +546,22 @@ def mqtt_broker(app, port: int, mode: str) -> None:
     go_broker_url = f"localhost:{port}"
     c_broker_url = f"mqtt://localhost:{port}"
     env_path = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
-    # Write fleet section to config.yaml (Source of Truth)
+    # The broker wizard explicitly opts into Fleet. Provision its optional
+    # compiler and credentials before making Fleet active in config.yaml.
+    from defenseclaw.commands.cmd_setup_edge_connector import _install_fleet_compiler
+    _install_fleet_compiler(str(env_path.parent))
+    try:
+        _persist_env_var(env_path, _ENV_KEY, go_broker_url)
+        ux.ok(f"Wrote {_ENV_KEY}={go_broker_url} to {env_path}")
+        _persist_env_var(env_path, "DCLAW_BROKER_URL", c_broker_url)
+        ux.ok(f"Wrote DCLAW_BROKER_URL={c_broker_url} to {env_path}")
+        if creds:
+            _persist_env_var(env_path, "DCLAW_MQTT_USER", creds["mqtt_user"])
+            _persist_env_var(env_path, "DCLAW_MQTT_PASS", creds["mqtt_pass"])
+            ux.ok(f"Wrote DCLAW_MQTT_USER and DCLAW_MQTT_PASS to {env_path}")
+    except OSError as exc:
+        raise click.ClickException(f"Could not persist MQTT environment; setup is incomplete: {exc}") from exc
+
     try:
         import yaml as _yaml
 
@@ -556,8 +571,7 @@ def mqtt_broker(app, port: int, mode: str) -> None:
             write_config_yaml_secure,
         )
 
-        cfg_path = str(config_path_for_data_dir(
-            os.environ.get("DEFENSECLAW_HOME", str(Path.home() / ".defenseclaw"))))
+        cfg_path = str(config_path_for_data_dir(str(env_path.parent)))
         with locked_config_yaml(cfg_path):
             raw: dict = {}
             if os.path.exists(cfg_path):
@@ -573,18 +587,6 @@ def mqtt_broker(app, port: int, mode: str) -> None:
         ux.ok("Updated fleet.mqtt_broker_url in config.yaml")
     except Exception as exc:
         raise click.ClickException(f"Could not update config.yaml; MQTT setup is incomplete: {exc}") from exc
-
-    try:
-        _persist_env_var(env_path, _ENV_KEY, go_broker_url)
-        ux.ok(f"Wrote {_ENV_KEY}={go_broker_url} to {env_path}")
-        _persist_env_var(env_path, "DCLAW_BROKER_URL", c_broker_url)
-        ux.ok(f"Wrote DCLAW_BROKER_URL={c_broker_url} to {env_path}")
-        if creds:
-            _persist_env_var(env_path, "DCLAW_MQTT_USER", creds["mqtt_user"])
-            _persist_env_var(env_path, "DCLAW_MQTT_PASS", creds["mqtt_pass"])
-            ux.ok(f"Wrote DCLAW_MQTT_USER and DCLAW_MQTT_PASS to {env_path}")
-    except OSError as exc:
-        raise click.ClickException(f"Could not persist MQTT environment; setup is incomplete: {exc}") from exc
 
     # Summary
     ux.echo()

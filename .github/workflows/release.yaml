@@ -533,7 +533,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          lanes="fresh upgrade-0.8.10 upgrade-0.8.4 handoff"
+          lanes="fresh fleet-opt-in upgrade-0.8.10 upgrade-0.8.4 handoff"
           args=()
           if [[ -n "$PREVIOUS" ]]; then
             lanes="$lanes upgrade-previous"; args+=(--previous-assets previous)
@@ -545,7 +545,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $lanes = @('fresh', 'setup-import', 'files-in-use', 'failure-drill', 'policy')
+          $lanes = @('fresh', 'fleet-opt-in', 'setup-import', 'files-in-use', 'failure-drill', 'policy')
           $extra = @{}
           if ($env:PREVIOUS) { $lanes += 'upgrade-previous', 'shim'; $extra['PreviousAssets'] = 'previous' }
           & scripts/test-install-lifecycle.ps1 -Assets release -Lanes ($lanes -join ' ') @extra

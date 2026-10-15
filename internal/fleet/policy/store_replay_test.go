@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func testEmergencyRecord(seq, previous uint32, command EmergencyCommand) []byte {
@@ -100,5 +101,111 @@ func TestServiceReplaysLatestPolicyAndEmergencyOnce(t *testing.T) {
 	seq, err = svc.ReplayLatestForDevice(context.Background(), 1, 2, 2, 1)
 	if err != nil || seq != 1 || len(client.getPublished()) != 3 {
 		t.Fatalf("up-to-date device received duplicate replay: seq=%d err=%v messages=%d", seq, err, len(client.getPublished()))
+	}
+}
+
+func TestEmergencyHistoryPreservesBlockBeforeLaterForceAndCrossFleetGap(t *testing.T) {
+	svc, client, store := newTestService()
+	ctx := context.Background()
+	if err := svc.DistributeEmergency(ctx, 1, 2, EmergencyBlockAll); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DistributeEmergency(ctx, 1, 2, EmergencyForceSync); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 11; i++ {
+		if err := svc.DistributeEmergency(ctx, 1, 3, EmergencyForceSync); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.DistributeEmergency(ctx, 1, 2, EmergencyRevokeSessions); err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.GetEmergenciesAfter(1, 2, 0, 32)
+	if err != nil || len(history) != 3 {
+		t.Fatalf("fleet-scoped history=%+v err=%v", history, err)
+	}
+	for i, want := range []struct {
+		seq, previous uint32
+		command       EmergencyCommand
+	}{
+		{1, 0, EmergencyBlockAll}, {2, 1, EmergencyForceSync}, {14, 2, EmergencyRevokeSessions},
+	} {
+		record := history[i]
+		if record.Sequence != want.seq || record.Message[8] != byte(want.command) ||
+			binary.BigEndian.Uint32(record.Message[44:48]) != want.previous {
+			t.Fatalf("history[%d] breaks signed predecessor chain: %+v", i, record)
+		}
+		if err := svc.emergencySigner.Verify(record.Message[:48], record.Message[48:80]); err != nil {
+			t.Fatalf("history[%d] HMAC invalid: %v", i, err)
+		}
+	}
+	before := len(client.getPublished())
+	last, err := svc.ReplayLatestForDevice(ctx, 1, 2, 0, 0)
+	if err != nil || last != 14 {
+		t.Fatalf("replay last sequence=%d err=%v", last, err)
+	}
+	messages := client.getPublished()[before:]
+	if len(messages) != 3 {
+		t.Fatalf("replay sent %d messages instead of 3", len(messages))
+	}
+	for i, msg := range messages {
+		if !bytes.Equal(msg.Payload, history[i].Message) || msg.Topic != "defenseclaw/1/2/ota/emergency" {
+			t.Fatalf("replay[%d] changed signed bytes or tenant/fleet topic", i)
+		}
+	}
+	if last, err := svc.ReplayLatestForDevice(ctx, 1, 2, 0, 14); err != nil || last != 14 || len(client.getPublished()) != before+3 {
+		t.Fatalf("up-to-date device got duplicate history: last=%d err=%v", last, err)
+	}
+}
+
+func TestEmergencyHistoryReplayPagesAt32(t *testing.T) {
+	svc, _, store := newTestService()
+	for i := 0; i < 33; i++ {
+		if err := svc.DistributeEmergency(context.Background(), 1, 2, EmergencyForceSync); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := store.GetEmergenciesAfter(1, 2, 0, 32)
+	if err != nil || len(first) != 32 || first[31].Sequence != 32 {
+		t.Fatalf("first replay page=%d err=%v", len(first), err)
+	}
+	second, err := store.GetEmergenciesAfter(1, 2, 32, 32)
+	if err != nil || len(second) != 1 || second[0].Sequence != 33 {
+		t.Fatalf("second replay page=%+v err=%v", second, err)
+	}
+}
+
+func TestPolicyReplayCooldownBoundsFleetBroadcasts(t *testing.T) {
+	svc, client, store := newTestService()
+	for _, version := range []uint16{2, 3} {
+		blob := BuildPolicyBlob(version, 0, []byte{1, 2, 3})
+		signed, err := svc.Sign(blob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SavePolicy(1, 2, uint32(version), blob, signed[len(blob):], "edge"); err != nil {
+			t.Fatal(err)
+		}
+		if version == 2 {
+			ctx := context.Background()
+			for i := 0; i < 20; i++ {
+				if _, err := svc.ReplayLatestForDevice(ctx, 1, 2, 1, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := len(client.getPublished()); got != 1 {
+				t.Fatalf("repeated stale registrations amplified policy: %d broadcasts", got)
+			}
+			svc.policyReplayMu.Lock()
+			svc.policyReplays[fleetKey(1, 2)] = policyReplayAttempt{version: 2, at: time.Now().Add(-31 * time.Second)}
+			svc.policyReplayMu.Unlock()
+			if _, err := svc.ReplayLatestForDevice(ctx, 1, 2, 1, 0); err != nil || len(client.getPublished()) != 2 {
+				t.Fatalf("expired cooldown did not retry: %v", err)
+			}
+		}
+	}
+	if _, err := svc.ReplayLatestForDevice(context.Background(), 1, 2, 1, 0); err != nil || len(client.getPublished()) != 3 {
+		t.Fatalf("new version did not bypass cooldown: %v", err)
 	}
 }

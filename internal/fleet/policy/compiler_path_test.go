@@ -22,7 +22,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -152,6 +154,9 @@ func TestPolicyVersionRejectsErasedFlashSentinel(t *testing.T) {
 	if _, err := svc.Compile([]byte("default_action: block\n"), "standard", 65535); !errors.Is(err, ErrPolicyVersionExhausted) {
 		t.Fatalf("compiler accepted reserved version 65535: %v", err)
 	}
+	if _, err := svc.Compile([]byte("default_action: block\n"), "standard", 0); errors.Is(err, ErrPolicyVersionExhausted) {
+		t.Fatalf("simulation version zero was rejected: %v", err)
+	}
 	if _, err := svc.Compile([]byte("default_action: block\n"), "standard", 65534); errors.Is(err, ErrPolicyVersionExhausted) {
 		t.Fatalf("compiler prematurely exhausted version 65534: %v", err)
 	}
@@ -160,5 +165,85 @@ func TestPolicyVersionRejectsErasedFlashSentinel(t *testing.T) {
 	}
 	if _, _, err := svc.CompileSignAndStore([]byte("default_action: block\n"), "standard", 1, 2); !errors.Is(err, ErrPolicyVersionExhausted) {
 		t.Fatalf("automatic allocator issued reserved version 65535: %v", err)
+	}
+}
+
+func TestConcurrentPolicyPushAllocatesDistinctVersions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test needs Unix venv symlinks")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	python, err = filepath.EvalSymlinks(python)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately widen the race between GetLatestPolicy and SavePolicy.
+	// This compiler writes a valid minimal policy header without PyYAML.
+	const compilerSource = `import argparse, pathlib, struct, time
+p = argparse.ArgumentParser()
+p.add_argument('--input')
+p.add_argument('--profile')
+p.add_argument('--version', type=int)
+p.add_argument('--output-binary')
+p.add_argument('--output-header')
+a = p.parse_args()
+time.sleep(0.03)
+pathlib.Path(a.output_binary).write_bytes(struct.pack('>HHHH', a.version, 0, 0, 0))
+`
+	home, compiler := testHomeCompiler(t, compilerSource)
+	venvBin := filepath.Join(home, ".venv", "bin")
+	if err := os.MkdirAll(venvBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(python, filepath.Join(venvBin, "python")); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewHMACSigner([]byte("test-key-for-unit-tests-32bytes!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryPolicyStore()
+	svc := NewService(store, signer, nil, &Config{CompilerPath: compiler})
+	const pushes = 12
+	var wg sync.WaitGroup
+	versions := make(chan uint32, pushes)
+	errors := make(chan error, pushes)
+	for i := 0; i < pushes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, version, err := svc.CompileSignAndStore([]byte("default_action: block\n"), "edge", 1, 2)
+			if err != nil {
+				errors <- err
+				return
+			}
+			versions <- version
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	close(versions)
+	for err := range errors {
+		t.Errorf("concurrent policy push failed: %v", err)
+	}
+	var got []int
+	for version := range versions {
+		got = append(got, int(version))
+	}
+	sort.Ints(got)
+	if len(got) != pushes {
+		t.Fatalf("successful versions = %v, want %d", got, pushes)
+	}
+	for i, version := range got {
+		if version != i+1 {
+			t.Fatalf("versions = %v, want contiguous 1..%d", got, pushes)
+		}
+	}
+	latest, err := store.GetLatestPolicy(1, 2)
+	if err != nil || latest == nil || latest.Version != pushes {
+		t.Fatalf("latest policy = %+v, %v; want version %d", latest, err, pushes)
 	}
 }

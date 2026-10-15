@@ -42,7 +42,7 @@ if _tools_dir not in sys.path:
 from generic_hook import (
     CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH,
     CAP_READ_FS, CAP_SEND_MSG, CAP_SENSOR_READ, CAP_WRITE_FS,
-    EdgeConnector,
+    EdgeConnector, Verdict, reviewed_adapter_destination,
 )
 
 logger = logging.getLogger("defenseclaw.homeassistant")
@@ -97,14 +97,18 @@ HAMCP_TOOL_CAP_MAP: Dict[str, int] = {
     "delete_automation": CAP_WRITE_FS,
     # Notifications (SEND_MSG)
     "send_notification": CAP_SEND_MSG, "notify": CAP_SEND_MSG,
-    "tts_speak": CAP_SEND_MSG,
+    "tts_speak": CAP_ACTUATE,
     # Network / webhooks (NET_FETCH)
     "register_webhook": CAP_NET_FETCH, "call_webhook": CAP_NET_FETCH,
-    "get_integrations_manifest": CAP_NET_FETCH,
+    "get_integrations_manifest": CAP_SENSOR_READ,
     "setup_integration": CAP_NET_FETCH, "remove_integration": CAP_NET_FETCH,
 }
 
 _READ_ONLY_TOOLS = {n for n, c in HAMCP_TOOL_CAP_MAP.items() if c == CAP_SENSOR_READ}
+
+# HA-MCP's webhook/integration schemas do not bind a reviewed delegated URL.
+# They remain blocked until the target and redirect behavior are specified.
+_HTTP_URL_FIELDS: Dict[str, str] = {}
 
 
 class HomeAssistantAdapter:
@@ -149,9 +153,15 @@ class HomeAssistantAdapter:
             return {"allowed": False,
                     "verdict": {"action": 1, "reason": "READ_ONLY_MODE"},
                     "result": None}
-        verdict = self._connector.evaluate(
-            tool_name=tool_name, arguments=arguments, destination=self.host,
-        )
+        try:
+            destination = reviewed_adapter_destination(
+                tool_name, arguments, HAMCP_TOOL_CAP_MAP, _HTTP_URL_FIELDS)
+        except ValueError as exc:
+            verdict = Verdict.error(str(exc))
+        else:
+            verdict = self._connector.evaluate(
+                tool_name=tool_name, arguments=arguments, destination=destination,
+            )
         if verdict.blocked:
             logger.warning("HA tool %s blocked: %s", tool_name, verdict.reason)
             return {"allowed": False,

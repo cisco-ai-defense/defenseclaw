@@ -48,8 +48,8 @@ extern bool dclaw_verdict_is_key_provisioned(void);
  * MQTT client context.
  *
  * Paho manages protocol state (connect, subscribe, publish, keepalive)
- * internally. We keep our application-level state here: broker fallback,
- * reconnect backoff, heartbeat timing, pending verdict ring, and the
+ * internally. We keep our application-level state here: reconnect backoff,
+ * heartbeat timing, pending verdict ring, and the
  * reconnect grace period.
  */
 
@@ -65,7 +65,6 @@ typedef struct {
     uint8_t         sendbuf[MQTT_SEND_BUF_SIZE];
     uint8_t         readbuf[MQTT_RECV_BUF_SIZE];
     bool            connected;
-    uint8_t         broker_index;
     uint64_t        backoff_ms;
     uint64_t        last_attempt_tick;
     uint64_t        last_heartbeat_tick;
@@ -526,7 +525,7 @@ int dclaw_mqtt_connect(void) {
     if (mqtt_ctx.connected) return 0;
     mqtt_frame_reset();
 
-    const char *broker_url = dclaw_config_get_broker(mqtt_ctx.broker_index);
+    const char *broker_url = dclaw_config_get_broker(0);
     if (!broker_url) {
         dclaw_get_state()->online = false;
         return -1;
@@ -738,15 +737,10 @@ int dclaw_mqtt_reconnect(void) {
 
     int rc = dclaw_mqtt_connect();
     if (rc != 0) {
-        mqtt_ctx.broker_index++;
-        if (!dclaw_config_get_broker(mqtt_ctx.broker_index)) {
-            mqtt_ctx.broker_index = 0;
-            mqtt_ctx.backoff_ms *= 2;
-            if (mqtt_ctx.backoff_ms > 300000) mqtt_ctx.backoff_ms = 300000;
-        }
+        mqtt_ctx.backoff_ms *= 2;
+        if (mqtt_ctx.backoff_ms > 300000) mqtt_ctx.backoff_ms = 300000;
     } else {
         mqtt_ctx.backoff_ms = 1000;
-        mqtt_ctx.broker_index = 0;
 
         dclaw_state_t *rs = dclaw_get_state();
         if (rs->emergency.initialized && rs->emergency.last_was_lockdown) {

@@ -978,26 +978,6 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		p.payload = pay
 	}
 	compilerPath := compilerInstallPath(env.Layout)
-	if p.channel == ChannelPackage || l.opts.PayloadDir == "" {
-		// Packages own their compiler. A repair without --payload reads the
-		// installed compiler beside the gateway; a staged archive has its
-		// own copy, validated by loadPayload above.
-		installed := env.P(compilerPath)
-		digest, err := loadCompilerFile(env.P(env.Layout.InstallRoot), filepath.Join("lib", "defenseclaw"), installed)
-		if err != nil {
-			return nil, &codedError{code: codePayload, err: err}
-		}
-		if digest != "" {
-			if err := env.checkInstalledCompiler(compilerPath); err != nil {
-				return nil, &codedError{code: codePayload, err: err}
-			}
-			p.payload.CompilerSource, p.payload.CompilerSHA = installed, digest
-		}
-		if record != nil && record.Files[compilerPath] != "" && record.Files[compilerPath] != digest &&
-			l.opts.Reason != "package" && p.payload.Version == record.ProductVersion {
-			return nil, &codedError{code: codePayload, err: fmt.Errorf("installed %s does not match the deployment record; restore it from the same release", compilerPath)}
-		}
-	}
 	p.version = p.payload.Version
 	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
 		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
@@ -1080,8 +1060,50 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		validated = v9
 	}
 	if validated.Loaded.Fleet.Enabled {
+		var compiler, marker, base string
+		switch {
+		case p.channel == ChannelPackage:
+			// The package carries an inert source file. Materialize the active
+			// compiler only when the validated config enables Fleet.
+			base = env.P(env.Layout.InstallRoot)
+			marker = compilerPackageDir
+			compiler = env.P(packageCompilerSourcePath(env.Layout))
+		case l.opts.PayloadDir != "":
+			base = p.payload.Dir
+			marker = compilerArchiveDir
+			compiler = filepath.Join(base, marker, "tools", compilerFileName)
+		default:
+			// A Fleet-off payload install discards its archive. Enabling Fleet
+			// later requires --payload; a Fleet-on repair can use its admitted
+			// installed copy.
+			base = env.P(env.Layout.InstallRoot)
+			marker = filepath.Join("lib", "defenseclaw")
+			compiler = env.P(compilerPath)
+		}
+		digest, err := loadCompilerFile(base, marker, compiler)
+		if err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
+		if digest != "" && compiler == env.P(compilerPath) {
+			if err := env.checkInstalledCompiler(compilerPath); err != nil {
+				return nil, &codedError{code: codePayload, err: err}
+			}
+		}
+		p.payload.CompilerSource, p.payload.CompilerSHA = compiler, digest
 		if p.payload.CompilerSHA == "" {
-			return nil, &codedError{code: codePayload, err: fmt.Errorf("Fleet is enabled but the managed payload has no %s; reinstall from a release that includes it", compilerFileName)}
+			return nil, &codedError{code: codePayload, err: fmt.Errorf("Fleet is enabled but the managed payload has no %s; provide a release payload or package with the Fleet compiler", compilerFileName)}
+		}
+		if record != nil && record.Files[compilerPath] != "" && record.Files[compilerPath] != digest &&
+			l.opts.Reason != "package" && p.payload.Version == record.ProductVersion {
+			return nil, &codedError{code: codePayload, err: fmt.Errorf("installed %s does not match the deployment record; restore it from the same release", compilerPath)}
+		}
+		if record != nil && record.Files[compilerPath] != "" &&
+			(p.channel == ChannelPackage || l.opts.PayloadDir == "") &&
+			l.opts.Reason != "package" && p.payload.Version == record.ProductVersion {
+			activeSHA, err := sha256File(env.P(compilerPath))
+			if err != nil || activeSHA != record.Files[compilerPath] {
+				return nil, &codedError{code: codePayload, err: fmt.Errorf("installed %s does not match the deployment record; restore it from the same release", compilerPath)}
+			}
 		}
 		switch env.GOOS {
 		case "darwin":
@@ -1120,7 +1142,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	}
 
 	p.dirs = env.managedDirs(account, loadCredential)
-	if p.channel == ChannelPayload && p.payload.CompilerSHA != "" {
+	if p.payload.CompilerSHA != "" {
 		p.dirs = append(p.dirs,
 			desiredDir{Path: filepath.Join(env.Layout.InstallRoot, "lib"), Mode: 0o755, Owner: rootOwner()},
 			desiredDir{Path: filepath.Dir(compilerPath), Mode: 0o755, Owner: rootOwner()})
@@ -1156,13 +1178,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	serviceGroup := fileOwner{UID: 0, GID: account.GID}
 	p.files = append(p.files, desiredFile{Path: env.Layout.ConfigPath, Data: validated.Raw, SHA: validated.SHA, Mode: 0o640, Owner: serviceGroup, Kind: "config", KeepContent: fromInstalled})
 
+	if p.payload.CompilerSHA != "" {
+		p.files = append(p.files, desiredFile{
+			Path: compilerPath, Src: p.payload.CompilerSource, SHA: p.payload.CompilerSHA,
+			Mode: 0o644, Owner: rootOwner(), Kind: "compiler",
+		})
+	}
 	if p.channel == ChannelPayload {
-		if p.payload.CompilerSHA != "" {
-			p.files = append(p.files, desiredFile{
-				Path: compilerPath, Src: p.payload.CompilerSource, SHA: p.payload.CompilerSHA,
-				Mode: 0o644, Owner: rootOwner(), Kind: "compiler",
-			})
-		}
 		for _, name := range sortedKeys(p.payload.Digests) {
 			p.binaries = append(p.binaries, desiredFile{
 				Path: filepath.Join(env.Layout.BinDir, name), Src: filepath.Join(p.payload.Dir, name),
@@ -1833,9 +1855,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		newRecord.Files[file.Path] = file.SHA
 	}
 	if p.channel == ChannelPackage {
-		if p.payload.CompilerSHA != "" {
-			newRecord.Files[compilerInstallPath(env.Layout)] = p.payload.CompilerSHA
-		}
 		for name, digest := range p.payload.Digests {
 			newRecord.Files[filepath.Join(env.Layout.BinDir, name)] = digest
 		}
@@ -2223,7 +2242,6 @@ const packageUserUnitDir = "/usr/lib/systemd/user"
 func (e *Env) packageOwns(path string) bool {
 	return strings.HasPrefix(path, e.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
 		(e.GOOS == "linux" && strings.HasPrefix(path, packageUserUnitDir+"/")) ||
-		path == compilerInstallPath(e.Layout) ||
 		path == enterprisepolicy.OpenCodeManagedPluginPath(e.Layout)
 }
 
@@ -2748,9 +2766,6 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		if record.Files[file.Path] != file.SHA {
 			return false, ""
 		}
-	}
-	if p.channel == ChannelPackage && record.Files[compilerInstallPath(env.Layout)] != p.payload.CompilerSHA {
-		return false, ""
 	}
 	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
 		return false, ""

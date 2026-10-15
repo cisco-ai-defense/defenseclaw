@@ -31,6 +31,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -124,7 +125,7 @@ func (p *storeBackedKeyProvider) HasDeviceKey(deviceID uint64) (bool, error) {
 }
 
 // envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
-// Falls back to a 32-byte zero key when the env var is unset (dev mode).
+// Falls back to a 32-byte zero key only in explicit unmanaged dev mode.
 // Deprecated: Use storeBackedKeyProvider for per-device key support.
 type envDeviceKeyProvider struct {
 	key []byte
@@ -168,7 +169,7 @@ func isProductionMode() bool {
 	if v == "true" || v == "1" {
 		return true
 	}
-	return !strings.EqualFold(os.Getenv("DCLAW_DEV_MODE"), "ON")
+	return !strings.EqualFold(envvars.Getenv("DCLAW_DEV_MODE"), "ON")
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -261,7 +262,7 @@ func (b *Bridge) SetOnBlock(fn func()) {
 }
 
 // SetReplayForDevice supplies the durable policy/emergency catch-up callback.
-// Configure it before Start. It is called only after signed 68-byte frames
+// Configure it before Start. It is called only after signed 72-byte frames
 // pass HMAC and freshness checks; unsigned development frames cannot trigger
 // a fleet-wide OTA broadcast.
 func (b *Bridge) SetReplayForDevice(fn func(context.Context, uint64, uint64, uint16, uint32) (uint32, error)) {

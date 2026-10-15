@@ -65,9 +65,6 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 		}
 	}
 	if p.channel == ChannelPackage {
-		if record.Files[compilerInstallPath(env.Layout)] != p.payload.CompilerSHA {
-			return false
-		}
 		for name, digest := range p.payload.Digests {
 			if record.Files[filepath.Join(env.Layout.BinDir, name)] != digest {
 				return false

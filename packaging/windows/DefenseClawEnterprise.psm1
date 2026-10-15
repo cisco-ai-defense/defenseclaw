@@ -177,7 +177,7 @@ $script:DefenseClawTrustMode = 'Authenticode'
 # Signed standalone modules authenticate the Python source even though a .py
 # file cannot carry embedded Authenticode. Keep this digest aligned with the
 # release checkout's edge-connector/tools/policy_compiler.py.
-$script:DefenseClawPolicyCompilerSHA256 = '29d8a4006a3c22fd55a48748fb7bae8cedee2594a5307d4663a5e533cb51d1b1'
+$script:DefenseClawPolicyCompilerSHA256 = 'b2c3766d4ba51bb37bd57158d510f251ea2532bf6f8a5e7a44a98a724826ac39'
 # Standalone roots a standard user created and Install moved aside.
 $script:DefenseClawQuarantinedRoots = @()
 # Standalone pending-transaction recovery: the gateway of the running Setup
@@ -19124,8 +19124,7 @@ function Assert-DefenseClawInstalledConfig {
 function Assert-DefenseClawSecureClientFleetSourcePreflight {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][hashtable]$Sources,
-        [switch]$AllowUnsigned
+        [Parameter(Mandatory)][hashtable]$Sources
     )
     if (Test-DefenseClawStandaloneProfile) {
         return
@@ -19144,16 +19143,10 @@ function Assert-DefenseClawSecureClientFleetSourcePreflight {
     else {
         return
     }
-    $gatewaySource = if ($Sources.ContainsKey('gateway')) {
-        [hashtable]$Sources['gateway']
-    }
-    else {
-        Get-DefenseClawSourceDescriptor `
-            -Path $Layout.GatewayPath `
-            -Label 'installed gateway executable' `
-            -Authenticode `
-            -AllowUnsigned:$AllowUnsigned
-    }
+    # This gate uses the gateway from the new release. A Repair with no new
+    # gateway can service an older installed release whose binary does not
+    # have this helper; its own config validation remains transactional.
+    $gatewaySource = [hashtable]$Sources['gateway']
     [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
     [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
     $probe = Invoke-DefenseClawProcess `
@@ -19168,6 +19161,67 @@ function Assert-DefenseClawSecureClientFleetSourcePreflight {
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
         throw "Secure Client config preflight failed before service changes: $detail"
     }
+}
+
+function Test-DefenseClawStandaloneFleetSourceEnabled {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    if (-not $Sources.ContainsKey('gateway')) {
+        throw 'standalone Fleet source inspection needs the authenticated replacement gateway'
+    }
+    $configSource = if ($Sources.ContainsKey('config')) {
+        [hashtable]$Sources['config']
+    }
+    elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        Get-DefenseClawSourceDescriptor `
+            -Path $Layout.ConfigPath `
+            -Label 'installed standalone config'
+    }
+    else {
+        throw 'standalone Fleet source inspection needs a managed config'
+    }
+    $gatewaySource = [hashtable]$Sources['gateway']
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    $probe = Invoke-DefenseClawProcess `
+        -File ([string]$gatewaySource.path) `
+        -Arguments @(
+            'enterprise', 'windows', 'inspect-standalone-fleet',
+            '--config', ([string]$configSource.path)
+        )
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    if ([int]$probe.exit_code -ne 0) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
+        throw "standalone Fleet source inspection failed before service changes: $detail"
+    }
+    $answer = ([string]$probe.output).Trim()
+    if ($answer -cnotin @('true', 'false')) {
+        throw 'standalone Fleet source inspection returned an invalid result'
+    }
+    return ($answer -ceq 'true')
+}
+
+function Add-DefenseClawStandaloneFleetCompilerSource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$PolicyCompiler,
+        [switch]$AllowUnsigned
+    )
+    $descriptor = Get-DefenseClawSourceDescriptor `
+        -Path $PolicyCompiler `
+        -Label 'Fleet policy compiler' `
+        -AllowUnsigned:$AllowUnsigned
+    if (-not [string]::Equals(
+        [string]$descriptor.sha256,
+        $script:DefenseClawPolicyCompilerSHA256,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Fleet policy compiler does not match the release source authenticated by this installer module'
+    }
+    $Sources['compiler'] = $descriptor
 }
 
 function Test-DefenseClawGatewayReady {
@@ -21148,7 +21202,6 @@ function Get-DefenseClawLifecycleSources {
         @('acp', $ACPBinary, 'ACP guard executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
         @('sensor_helper', $SensorHelperBinary, 'privileged sensor helper executable', $true),
-        @('compiler', $PolicyCompiler, 'Fleet policy compiler', $false),
         @('cli', $CLIBinary, 'CLI executable', $true),
         @('config', $Config, 'managed config', $false),
         @('manifest', $Manifest, 'guardian manifest', $false),
@@ -21163,14 +21216,6 @@ function Get-DefenseClawLifecycleSources {
             -Label ([string]$entry[2]) `
             -Authenticode:([bool]$entry[3]) `
             -AllowUnsigned:$AllowUnsigned
-        if ([string]$entry[0] -ceq 'compiler' -and
-            -not [string]::Equals(
-                [string]$descriptor.sha256,
-                $script:DefenseClawPolicyCompilerSHA256,
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
-            throw 'Fleet policy compiler does not match the release source authenticated by this installer module'
-        }
         $sources[[string]$entry[0]] = $descriptor
     }
     return $sources
@@ -26645,6 +26690,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][hashtable]$Sources,
+        [switch]$StandaloneFleetStateKnown,
+        [switch]$StandaloneFleetEnabled,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$RefreshApplicationControlAttestation,
@@ -26970,6 +27017,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -Path $destination `
                     -Kind AdminFile `
                     -GatewayServiceSID $script:AdministratorsSID
+            }
+        }
+        if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
+            $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
+            if (-not [string]::IsNullOrWhiteSpace($compilerPath)) {
+                Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+                    [IO.File]::Delete($compilerPath)
+                }
             }
         }
         foreach ($requiredPath in @(
@@ -29293,11 +29349,34 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
-    if ($Action -in @('Install', 'Upgrade', 'Repair')) {
-        Assert-DefenseClawSecureClientFleetSourcePreflight `
-            -Layout $layout `
-            -Sources $sources `
-            -AllowUnsigned:$AllowUnsigned
+    $standaloneFleetStateKnown = $false
+    $standaloneFleetEnabled = $false
+    if ($Action -in @('Install', 'Upgrade', 'Repair') -and
+        $sources.ContainsKey('gateway')) {
+        if (Test-DefenseClawStandaloneProfile) {
+            # Deferred Install publishes placeholders with services stopped;
+            # Repair later supplies the real config and performs Fleet opt-in.
+            if (-not $DeferredConfig) {
+                $standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `
+                    -Layout $layout `
+                    -Sources $sources
+                $standaloneFleetStateKnown = $true
+                if ($standaloneFleetEnabled) {
+                    if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {
+                        throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'
+                    }
+                    Add-DefenseClawStandaloneFleetCompilerSource `
+                        -Sources $sources `
+                        -PolicyCompiler $PolicyCompiler `
+                        -AllowUnsigned:$AllowUnsigned
+                }
+            }
+        }
+        else {
+            Assert-DefenseClawSecureClientFleetSourcePreflight `
+                -Layout $layout `
+                -Sources $sources
+        }
     }
     Initialize-DefenseClawManagedRoot `
         -Path $layout.LifecycleLockDirectory `
@@ -29313,6 +29392,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
+        if ($standaloneFleetStateKnown) {
+            $recheckedFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `
+                -Layout $layout `
+                -Sources $sources
+            if ($recheckedFleetEnabled -ne $standaloneFleetEnabled) {
+                throw 'standalone Fleet enablement changed while waiting for the lifecycle lock'
+            }
+        }
         # The profiles share SCM service names but keep separate lifecycle
         # locks. While holding this profile's lock, refuse if the other
         # profile's lifecycle is mid-mutation, and repeat the deployment
@@ -29564,6 +29651,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Action $Action `
             -Layout $layout `
             -Sources $sources `
+            -StandaloneFleetStateKnown:$standaloneFleetStateKnown `
+            -StandaloneFleetEnabled:$standaloneFleetEnabled `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RefreshApplicationControlAttestation:(

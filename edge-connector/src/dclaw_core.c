@@ -40,8 +40,12 @@ static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
 
 static bool g_strict_mode = false;
 
+/* OTA cannot change these fixed local rate ceilings. */
+#define DCLAW_RATE_TOOL_CALLS_PER_MIN 60
+#define DCLAW_RATE_NETWORK_PER_MIN 30
+#define DCLAW_RATE_ACTUATIONS_PER_MIN 10
+
 /* External module functions */
-extern dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash);
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
 extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
 extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
@@ -134,17 +138,17 @@ int dclaw_init(const dclaw_device_info_t *info) {
     uint64_t now = hal_tick_ms();
     g_state.audit_writer.last_flush_tick = now;
 
-    g_state.rate_limiters[0].bucket_size = policy_rate_tool_calls_per_min;
-    g_state.rate_limiters[0].refill_rate = policy_rate_tool_calls_per_min;
-    g_state.rate_limiters[0].tokens = policy_rate_tool_calls_per_min;
+    g_state.rate_limiters[0].bucket_size = DCLAW_RATE_TOOL_CALLS_PER_MIN;
+    g_state.rate_limiters[0].refill_rate = DCLAW_RATE_TOOL_CALLS_PER_MIN;
+    g_state.rate_limiters[0].tokens = DCLAW_RATE_TOOL_CALLS_PER_MIN;
     g_state.rate_limiters[0].last_refill_tick = now;
-    g_state.rate_limiters[1].bucket_size = policy_rate_network_per_min;
-    g_state.rate_limiters[1].refill_rate = policy_rate_network_per_min;
-    g_state.rate_limiters[1].tokens = policy_rate_network_per_min;
+    g_state.rate_limiters[1].bucket_size = DCLAW_RATE_NETWORK_PER_MIN;
+    g_state.rate_limiters[1].refill_rate = DCLAW_RATE_NETWORK_PER_MIN;
+    g_state.rate_limiters[1].tokens = DCLAW_RATE_NETWORK_PER_MIN;
     g_state.rate_limiters[1].last_refill_tick = now;
-    g_state.rate_limiters[2].bucket_size = policy_rate_actuations_per_min;
-    g_state.rate_limiters[2].refill_rate = policy_rate_actuations_per_min;
-    g_state.rate_limiters[2].tokens = policy_rate_actuations_per_min;
+    g_state.rate_limiters[2].bucket_size = DCLAW_RATE_ACTUATIONS_PER_MIN;
+    g_state.rate_limiters[2].refill_rate = DCLAW_RATE_ACTUATIONS_PER_MIN;
+    g_state.rate_limiters[2].tokens = DCLAW_RATE_ACTUATIONS_PER_MIN;
     g_state.rate_limiters[2].last_refill_tick = now;
 
 #if !DCLAW_DEV_MODE
@@ -232,12 +236,10 @@ static uint32_t compute_target_hash(const uint8_t *tool_hash) {
 
 #if DCLAW_SPECULATIVE_EXECUTION
 static bool is_sync_block_required(uint8_t cap_flags) {
-    for (size_t i = 0; i < escalation_table_count; i++) {
-        if ((cap_flags & escalation_table[i].cap_flag) && escalation_table[i].mode == 0) {
-            return true;
-        }
-    }
-    return false;
+    /* Safety-critical operations must never become speculative, including
+     * after an OTA that cannot carry escalation mode settings. */
+    return (cap_flags & (DCLAW_CAP_ACTUATE | DCLAW_CAP_EXEC_SHELL |
+                         DCLAW_CAP_WRITE_FS)) != 0;
 }
 #endif
 
@@ -396,17 +398,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
 #endif
     }
 
-    /* Step 4: Deny-list hash check */
-    if (dclaw_policy_check_hash(req->tool_hash) == DCLAW_ACTION_BLOCK) {
-        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY,
-                          target_hash, req->session_id);
-        g_state.eval_denied_count++;
-        dclaw_canary_record_block();
-        in_eval = false;
-        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY, DCLAW_VERDICT_SYNC);
-    }
-
-    /* Step 5: Destination allow/deny + SSRF check (if network capability) */
+    /* Step 4: Destination allow/deny + SSRF check (if network capability) */
     if (req->cap_flags & (DCLAW_CAP_NET_FETCH | DCLAW_CAP_SEND_MSG)) {
         if (req->destination[0] == '\0') {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
@@ -436,7 +428,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         }
     }
 
-    /* Step 6: Capability sequence correlation */
+    /* Step 5: Capability sequence correlation */
     dclaw_action_t seq_result = dclaw_correlator_evaluate(req->session_id, req->cap_flags);
     if (seq_result == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
@@ -447,7 +439,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 7: Verdict cache lookup */
+    /* Step 6: Verdict cache lookup */
     dclaw_verdict_t cached;
     if (dclaw_cache_lookup(req->tool_hash, &cached)) {
         g_state.eval_cache_hit_count++;
@@ -462,7 +454,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         return cached;
     }
 
-    /* Step 8: No local decision — need cloud escalation */
+    /* Step 7: No local decision — need cloud escalation */
 #if DCLAW_MQTT_ENABLED
     {
         if (++g_state.next_request_id == 0) g_state.next_request_id = 1;

@@ -38,6 +38,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
@@ -45,16 +46,16 @@ import (
 )
 
 const (
-	auditDeviceRegistered   = "fleet.device.registered"
-	auditDeviceReregistered = "fleet.device.reregistered"
-	auditPolicyPush         = "fleet.policy.push"
-	auditPolicyEmergency    = "fleet.policy.emergency"
-	auditThreatIntel        = "fleet.threat_intel.push"
-	auditDecommission       = "fleet.device.decommission"
-	auditDecommissionAllow  = "fleet.device.decommission_authorized"
-	auditCredentialAllow    = "fleet.device.credential_provision_authorized"
-	auditTokenRotated       = "fleet.token.rotated"
-	auditKeyRotated         = "fleet.device.key_rotated"
+	auditDeviceRegistered   = string(audit.ActionFleetDeviceRegistered)
+	auditDeviceReregistered = string(audit.ActionFleetDeviceReregistered)
+	auditPolicyPush         = string(audit.ActionFleetPolicyPush)
+	auditPolicyEmergency    = string(audit.ActionFleetPolicyEmergency)
+	auditThreatIntel        = string(audit.ActionFleetThreatIntel)
+	auditDecommission       = string(audit.ActionFleetDeviceDecommission)
+	auditDecommissionAllow  = string(audit.ActionFleetDeviceDecommissionAuthorized)
+	auditCredentialAllow    = string(audit.ActionFleetDeviceCredentialProvisionAuthorized)
+	auditTokenRotated       = string(audit.ActionFleetTokenRotated)
+	auditKeyRotated         = string(audit.ActionFleetDeviceKeyRotated)
 )
 
 // FleetSettings carries fleet configuration values resolved from

@@ -128,6 +128,32 @@ func TestSecureClientFleetSourcePreflight(t *testing.T) {
 	}
 }
 
+func TestFleetEnabledFromSourceForOptionalInstallerPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, wantError string
+		wantEnabled          bool
+	}{
+		{"omitted", "config_version: 9\n", "", false},
+		{"disabled", "config_version: 8\nfleet:\n  enabled: false\n", "", false},
+		{"enabled", "config_version: 9\nfleet:\n  enabled: true\n", "", true},
+		{"wrong type", "config_version: 9\nfleet:\n  enabled: 'true'\n", "must be a boolean", false},
+		{"duplicate", "config_version: 9\nfleet:\n  enabled: false\n  enabled: true\n", "duplicate", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, err := FleetEnabledFromSource("fleet.yaml", []byte(tc.raw))
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil || enabled != tc.wantEnabled {
+				t.Fatalf("enabled = %t, error = %v; want %t", enabled, err, tc.wantEnabled)
+			}
+		})
+	}
+}
+
 func TestEnterprisePredicates(t *testing.T) {
 	secureClient := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}}
 	standalone := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}

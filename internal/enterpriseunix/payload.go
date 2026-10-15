@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // payload is a validated set of files to install.
@@ -35,8 +37,13 @@ type payload struct {
 const (
 	compilerFileName     = "policy_compiler.py"
 	compilerArchiveDir   = "edge-connector"
+	compilerPackageDir   = "share/fleet"
 	maxCompilerFileBytes = 1 << 20
 )
+
+func packageCompilerSourcePath(layout managed.StandaloneLayout) string {
+	return filepath.Join(layout.InstallRoot, compilerPackageDir, compilerFileName)
+}
 
 var versionPattern = regexp.MustCompile(`^(dev|[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)$`)
 
@@ -78,15 +85,6 @@ func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 			return nil, fmt.Errorf("payload %s is empty (0 bytes)", path)
 		}
 		p.Digests[name] = digest
-	}
-	compiler := filepath.Join(clean, compilerArchiveDir, "tools", compilerFileName)
-	compilerSHA, err := loadCompilerFile(clean, compilerArchiveDir, compiler)
-	if err != nil {
-		return nil, err
-	}
-	p.CompilerSHA = compilerSHA
-	if compilerSHA != "" {
-		p.CompilerSource = compiler
 	}
 	version, err := e.binaryVersion(ctx, filepath.Join(clean, binGateway))
 	if err != nil {

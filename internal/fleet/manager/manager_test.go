@@ -186,43 +186,6 @@ func TestRegisterDeviceDuplicate(t *testing.T) {
 	}
 }
 
-func TestParseHeartbeat(t *testing.T) {
-	data := make([]byte, 36)
-	// device_id = 42
-	data[3] = 42
-	// policy_version = 5
-	data[9] = 5
-	// denied_count = 3
-	data[13] = 3
-	// flags = 0 (online)
-	data[30] = 0
-	data[35] = 7 // persistent boot counter
-
-	hb, err := ParseHeartbeat(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hb.DeviceID != 42 {
-		t.Fatalf("device_id = %d, want 42", hb.DeviceID)
-	}
-	if hb.PolicyVersion != 5 {
-		t.Fatalf("policy_version = %d, want 5", hb.PolicyVersion)
-	}
-	if hb.DeniedCount != 3 {
-		t.Fatalf("denied_count = %d, want 3", hb.DeniedCount)
-	}
-	if hb.BootCounter != 7 {
-		t.Fatalf("boot_counter = %d, want 7", hb.BootCounter)
-	}
-}
-
-func TestParseHeartbeatInvalidSize(t *testing.T) {
-	_, err := ParseHeartbeat(make([]byte, 16))
-	if err != ErrInvalidHeartbeat {
-		t.Fatalf("expected ErrInvalidHeartbeat, got %v", err)
-	}
-}
-
 func TestProcessHeartbeatUpdatesState(t *testing.T) {
 	fm := New(nil)
 	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
@@ -267,6 +230,49 @@ func TestProcessHeartbeatUpdatesState(t *testing.T) {
 	// Delta: 600 - 500 = 100, total = 500 + 100 = 600
 	if dev.AllowedTotal != 600 {
 		t.Fatalf("allowed_total after second hb = %d, want 600", dev.AllowedTotal)
+	}
+}
+
+func TestCanaryRollbackAlertOnlyOnNewTransition(t *testing.T) {
+	fm := New(nil)
+	if _, err := fm.RegisterDevice(1, 1, 42, "sbc", "1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	rollbacks := 0
+	fm.SetAlertHandler(func(alert Alert) {
+		if alert.Type == AlertCanaryRollback {
+			rollbacks++
+		}
+	})
+	for i, flags := range []uint8{0, 0x08, 0x08, 0x08, 0, 0x08} {
+		if !fm.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+			DeviceID: 42, UptimeSec: uint32(100 + i), BootCounter: 1,
+			PolicyVersion: 2, Flags: flags,
+		}) {
+			t.Fatalf("heartbeat %d rejected", i)
+		}
+	}
+	if rollbacks != 2 {
+		t.Fatalf("rollback alerts=%d, want one per 0-to-1 transition", rollbacks)
+	}
+	// Reloading persisted device flags must not emit another alert for a
+	// rollback that happened before the gateway restarted.
+	dev, ok := fm.GetDevice(ComposeID(1, 1, 42))
+	if !ok || dev.Flags&0x08 == 0 {
+		t.Fatal("rollback flag did not persist in device state")
+	}
+	fm2 := New(nil)
+	fm2.devices[ComposeID(1, 1, 42)] = &dev
+	restartAlerts := 0
+	fm2.SetAlertHandler(func(alert Alert) {
+		if alert.Type == AlertCanaryRollback {
+			restartAlerts++
+		}
+	})
+	if !fm2.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+		DeviceID: 42, UptimeSec: 106, BootCounter: 1, PolicyVersion: 2, Flags: 0x08,
+	}) || restartAlerts != 0 {
+		t.Fatalf("persistent rollback generated %d repeat alerts after gateway reload", restartAlerts)
 	}
 }
 

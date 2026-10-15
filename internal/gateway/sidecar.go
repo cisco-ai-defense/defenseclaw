@@ -269,6 +269,12 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
 		return nil, fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
+	// Fleet credential provisioning and decommission authorization require a
+	// durable audit emitter. Reject a partially functional Fleet API before
+	// opening its stores or starting the MQTT subscriber.
+	if cfg.Fleet.Enabled && (store == nil || logger == nil) {
+		return nil, fmt.Errorf("sidecar: fleet.enabled requires a durable audit store and emitter")
+	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.

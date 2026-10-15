@@ -137,6 +137,10 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME policy_compiler
              COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_policy_compiler.py")
+    add_test(NAME adapter_capability_parity
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_adapter_capability_parity.py")
+    add_test(NAME adapter_destinations
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_adapter_destinations.py")
 endif()
 
 # Fuzz harness (requires sanitizer support for libFuzzer)

@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-static char broker_urls[DCLAW_BROKER_FALLBACK_LIST_SIZE][DCLAW_BROKER_URL_MAX];
+static char broker_url[DCLAW_BROKER_URL_MAX];
 static uint8_t active_policy_partition = 0; /* 0 = A, 1 = B */
 static uint16_t persisted_policy_version = 0;
 static bool partition_rolled_back = false;
@@ -406,21 +406,19 @@ apply_version:
 }
 
 int dclaw_config_load_brokers(void) {
-    /* In Phase 1, broker URLs are loaded from /etc/edge-connector/brokers.conf
-     * Each line is one URL, up to DCLAW_BROKER_FALLBACK_LIST_SIZE */
-    memset(broker_urls, 0, sizeof(broker_urls));
+    /* One broker URL is configured through DCLAW_BROKER_URL. */
+    memset(broker_url, 0, sizeof(broker_url));
     const char *env_broker = getenv("DCLAW_BROKER_URL");
     const char *url = (env_broker && env_broker[0] != '\0') ? env_broker : "mqtt://localhost:1883";
-    strncpy(broker_urls[0], url, DCLAW_BROKER_URL_MAX - 1);
-    broker_urls[0][DCLAW_BROKER_URL_MAX - 1] = '\0'; /* explicit NUL after strncpy */
+    strncpy(broker_url, url, DCLAW_BROKER_URL_MAX - 1);
+    broker_url[DCLAW_BROKER_URL_MAX - 1] = '\0'; /* explicit NUL after strncpy */
 
     return load_active_partition_from_flash();
 }
 
 const char *dclaw_config_get_broker(uint8_t index) {
-    if (index >= DCLAW_BROKER_FALLBACK_LIST_SIZE) return NULL;
-    if (broker_urls[index][0] == '\0') return NULL;
-    return broker_urls[index];
+    if (index != 0 || broker_url[0] == '\0') return NULL;
+    return broker_url;
 }
 
 uint8_t dclaw_config_active_policy_partition(void) {

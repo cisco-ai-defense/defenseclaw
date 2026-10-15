@@ -176,8 +176,11 @@ type Service struct {
 	// emergencySeq tracks the next emergency broadcast sequence number.
 	// Must be strictly increasing per the C-side anti-replay (REQ-31).
 	// Persisted in the PolicyStore to survive gateway restarts.
-	mu           sync.Mutex
 	emergencySeq uint32
+	// policyMu serializes version allocation through durable SavePolicy. A
+	// concurrent push must not read the same latest version and return a
+	// spurious duplicate-version storage error after compilation.
+	policyMu sync.Mutex
 
 	emergencyMu  sync.Mutex
 	emergencyErr error
@@ -278,7 +281,7 @@ func validateCompilerPath(path string) error {
 	}
 
 	if !isUnderAllowedDir(abs) {
-		return fmt.Errorf("compiler path %q is not under an allowed directory (/usr/local/lib/defenseclaw/, $HOME/.defenseclaw/, $DEFENSECLAW_HOME/, or the running source checkout)", abs)
+		return fmt.Errorf("compiler path %q is not an approved installed, private-home, or source-checkout compiler", abs)
 	}
 
 	return nil
@@ -519,7 +522,9 @@ func isUnderAllowedDir(abs string) bool {
 //
 // Returns the raw binary blob (header + payload, no signature).
 func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]byte, error) {
-	if version == 0 || version > maxPolicyVersion {
+	// Version zero is a dry-run compiler input used by /policy/simulate; it
+	// is never signed or stored as an OTA policy.
+	if version > maxPolicyVersion {
 		return nil, ErrPolicyVersionExhausted
 	}
 	if s.compilerPath == "" {
@@ -553,7 +558,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("compiler path is not a regular file: %s", absPath)
 	}
 	if !isUnderAllowedDir(absPath) {
-		return nil, fmt.Errorf("compiler path %q is not under an allowed directory", absPath)
+		return nil, fmt.Errorf("compiler path %q is not an approved installed, private-home, or source-checkout compiler", absPath)
 	}
 	python, err := pythonForCompiler(absPath)
 	if err != nil {
@@ -887,6 +892,9 @@ func (s *Service) completePolicyReplay(tenantID, fleetID uint64, version uint32,
 // CompileSignAndStore is a convenience method that compiles a YAML policy,
 // signs it, stores the result, and returns the signed blob ready for distribution.
 func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID, fleetID uint64) ([]byte, uint32, error) {
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+
 	if s.signer == nil {
 		return nil, 0, errors.New("policy signer not configured — set DCLAW_OTA_HMAC_KEY")
 	}

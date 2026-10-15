@@ -25,14 +25,22 @@ import (
 func TestGeneratedProducerGroupsAreExactPublicClassificationAuthority(t *testing.T) {
 	t.Parallel()
 
-	if got, want := len(generatedProducerGroups), 248; got != want {
+	if got, want := len(generatedProducerGroups), 250; got != want {
 		t.Fatalf("generated producer groups = %d, want %d", got, want)
 	}
 	if got, want := len(gatewayEventClassifications), 16; got != want {
 		t.Fatalf("gateway classifications = %d, want %d", got, want)
 	}
-	if got, want := len(auditActionClassifications), 232; got != want {
+	if got, want := len(auditActionClassifications), 234; got != want {
 		t.Fatalf("audit classifications = %d, want %d", got, want)
+	}
+	for _, action := range []ProducerKey{
+		"fleet.device.credential_provision_authorized",
+		"fleet.device.decommission_authorized",
+	} {
+		if _, found := AuditActionClassification(action); !found {
+			t.Errorf("missing fleet audit classification for %s", action)
+		}
 	}
 
 	generatedKeys := map[ProducerKind][]ProducerKey{

@@ -234,8 +234,9 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     ):
         assert _mode(directory) & 0o755 == 0o755, directory
     assert _mode(root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway") == 0o755
-    compiler = root / "opt" / "cisco" / "defenseclaw" / "lib" / "defenseclaw" / "policy_compiler.py"
+    compiler = root / "opt" / "cisco" / "defenseclaw" / "share" / "fleet" / "policy_compiler.py"
     assert compiler.read_bytes() == (ROOT / "edge-connector" / "tools" / "policy_compiler.py").read_bytes()
+    assert not (root / "opt" / "cisco" / "defenseclaw" / "lib" / "defenseclaw" / "policy_compiler.py").exists()
     assert _mode(compiler) == 0o644
     assert _mode(compiler.parent) == 0o755
 

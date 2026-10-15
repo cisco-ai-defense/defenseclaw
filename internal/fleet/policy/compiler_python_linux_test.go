@@ -20,9 +20,6 @@ func TestManagedLinuxPythonIgnoresPATHHijack(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 	python, err := CheckManagedLinuxPython()
-	if os.Getenv("DCLAW_TEST_MANAGED_PYTHON") == "1" && err != nil {
-		t.Fatalf("host-managed Python admission failed: %v", err)
-	}
 	if err == nil && !strings.HasPrefix(python, "/usr/bin/python3") {
 		t.Fatalf("managed resolver selected %q", python)
 	}

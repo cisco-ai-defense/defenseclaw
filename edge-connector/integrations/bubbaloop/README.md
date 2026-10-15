@@ -76,7 +76,8 @@ Default topics: `bubbaloop/telemetry/system`, `bubbaloop/telemetry/camera`, `bub
 | Sensors | `imu_read`, `lidar_scan`, `gps_position`, `battery_status` | `SENSOR_READ` | Allow |
 | Movement | `motor_set_speed`, `servo_set_angle`, `navigate_to` | `ACTUATE` | Sync-block |
 | Gripper | `gripper_open`, `gripper_close`, `arm_move_to` | `ACTUATE` | Sync-block |
-| Network | `http_fetch`, `mqtt_publish`, `zenoh_publish` | `NET_FETCH` | Allow if dest approved |
+| HTTP fetch/download | `http_fetch`, `model_download` | `NET_FETCH` | Reviewed public numeric `url` only |
+| Other network | `mqtt_publish`, `zenoh_publish` | `NET_FETCH` | Blocked pending reviewed target schema |
 | Filesystem | `file_read`, `model_load`, `config_get` | `READ_FS` | Allow |
 | Filesystem (write) | `file_write`, `model_save`, `config_set` | `WRITE_FS` | Sync-block |
 | System | `system_restart`, `pipeline_deploy`, `firmware_update` | `EXEC_SHELL` | Sync-block |
@@ -85,7 +86,7 @@ Default topics: `bubbaloop/telemetry/system`, `bubbaloop/telemetry/camera`, `bub
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
-The C engine accepts only reviewed tool names in `src/decision/policy_table.c`; this adapter's Python capability map cannot authorize an unknown C tool name. Review and extend the C table for the tools used here before deployment. Network-capability calls to the local Bubbaloop host are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+The shipped adapter tool names have reviewed mappings in the C engine's `src/decision/policy_table.c`. Custom names still need a reviewed C mapping; a Python capability map alone cannot authorize them. `http_fetch` and `model_download` take one unambiguous `url` argument with an HTTP(S) public numeric IP and pass that URL to the C SSRF/allowlist check. Missing, ambiguous, hostname, and private targets fail before forwarding. MQTT, Zenoh, and other network tools fail with `UNSUPPORTED_NETWORK_DESTINATION` until their target schemas are reviewed. The downstream MCP server must also pin DNS/redirect egress; adapter validation alone cannot constrain where that server ultimately connects. OTA cannot change the built-in rate limits.
 
 ```yaml
 iot_extensions:

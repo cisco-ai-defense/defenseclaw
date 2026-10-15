@@ -818,30 +818,41 @@ const secureClientFleetUnsupported = "fleet.enabled is unsupported for the Secur
 // gateway, but needs no installed rule packs or runtime state. The gateway's
 // normal profile resolution repeats the check against the decoded config.
 func CheckSecureClientFleetSource(source string, raw []byte) error {
-	document, err := ParseV8YAML(source, raw)
+	enabled, err := FleetEnabledFromSource(source, raw)
 	if err != nil {
 		return err
-	}
-	rawFleet, exists := document.Plain["fleet"]
-	if !exists {
-		return nil
-	}
-	fleet, ok := rawFleet.(map[string]any)
-	if !ok {
-		return fmt.Errorf("config: fleet must be a mapping")
-	}
-	rawEnabled, exists := fleet["enabled"]
-	if !exists {
-		return nil
-	}
-	enabled, ok := rawEnabled.(bool)
-	if !ok {
-		return fmt.Errorf("config: fleet.enabled must be a boolean")
 	}
 	if enabled {
 		return fmt.Errorf("config: %s", secureClientFleetUnsupported)
 	}
 	return nil
+}
+
+// FleetEnabledFromSource inspects only the Fleet opt-in bit with the bounded,
+// duplicate-key rejecting parser used for gateway config. Managed installers
+// use it before deciding whether to materialize the optional compiler.
+func FleetEnabledFromSource(source string, raw []byte) (bool, error) {
+	document, err := ParseV8YAML(source, raw)
+	if err != nil {
+		return false, err
+	}
+	rawFleet, exists := document.Plain["fleet"]
+	if !exists {
+		return false, nil
+	}
+	fleet, ok := rawFleet.(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("config: fleet must be a mapping")
+	}
+	rawEnabled, exists := fleet["enabled"]
+	if !exists {
+		return false, nil
+	}
+	enabled, ok := rawEnabled.(bool)
+	if !ok {
+		return false, fmt.Errorf("config: fleet.enabled must be a boolean")
+	}
+	return enabled, nil
 }
 
 // ValidEnterpriseCredentialName reports whether name is a safe protected

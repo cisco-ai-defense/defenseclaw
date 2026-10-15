@@ -254,6 +254,7 @@ func init() {
 	}
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsSecureClientFleetPreflightCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
@@ -1694,6 +1695,36 @@ func newWindowsSecureClientFleetPreflightCommand() *cobra.Command {
 				return err
 			}
 			return config.CheckSecureClientFleetSource(configPath, raw)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")
+	_ = cmd.MarkFlagRequired("config")
+	return cmd
+}
+
+// The signed standalone installer asks its authenticated gateway whether the
+// candidate config opts into Fleet before admitting or copying the compiler.
+// The answer is one exact boolean line, with any parser error on stderr.
+func newWindowsStandaloneFleetInspectCommand() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "inspect-standalone-fleet",
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := managed.ValidateTrustedFilePath(configPath, "standalone config"); err != nil {
+				return fmt.Errorf("standalone config source is untrusted: %w", err)
+			}
+			raw, err := readConfigV8Source(configPath)
+			if err != nil {
+				return err
+			}
+			enabled, err := config.FleetEnabledFromSource(configPath, raw)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), enabled)
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")

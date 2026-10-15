@@ -56,7 +56,9 @@ export ESPCLAW_HOST=192.168.1.42
 |---------------|---------------------------|----------------|
 | `gpio_read`, `adc_read`, `temperature_read`, `imu_read` | `SENSOR_READ` | Allow |
 | `gpio_write`, `pwm_set`, `i2c_write`, `spi_transfer` | `ACTUATE` | Sync-block |
-| `wifi_scan`, `http_request`, `mqtt_publish` | `NET_FETCH` | Allow if dest approved |
+| `wifi_scan` | `SENSOR_READ` | Allow |
+| `http_request` | `NET_FETCH` | Reviewed public numeric `url` only |
+| `mqtt_publish` | `NET_FETCH` | Blocked pending reviewed target schema |
 | `fs_read`, `fs_list`, `config_get` | `READ_FS` | Allow |
 | `fs_write`, `config_set` | `WRITE_FS` | Sync-block |
 | `lua_eval`, `lua_load`, `reboot`, `ota_update` | `EXEC_SHELL` | Sync-block |
@@ -65,7 +67,7 @@ export ESPCLAW_HOST=192.168.1.42
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
-The C engine accepts only reviewed tool names in `src/decision/policy_table.c`; this adapter's Python capability map cannot authorize an unknown C tool name. Review and extend the C table for the tools used here before deployment. Network-capability calls to a private ESP32 address are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+The shipped adapter tool names have reviewed mappings in the C engine's `src/decision/policy_table.c`. Custom names still need a reviewed C mapping; a Python capability map alone cannot authorize them. `http_request` takes one unambiguous `url` argument with an HTTP(S) public numeric IP and passes that URL to the C SSRF/allowlist check. Missing, ambiguous, hostname, and private targets fail before forwarding. MQTT and other network tools fail with `UNSUPPORTED_NETWORK_DESTINATION` until their target schemas are reviewed. The downstream MCP server must also pin DNS/redirect egress; adapter validation alone cannot constrain where that server ultimately connects. OTA cannot change the built-in rate limits.
 
 ```yaml
 iot_extensions:

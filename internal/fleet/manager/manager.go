@@ -75,7 +75,7 @@ type Device struct {
 	BootEpoch uint32 `json:"boot_epoch"`
 }
 
-// Heartbeat represents a parsed 32-byte device heartbeat.
+// Heartbeat represents a parsed 40-byte device heartbeat.
 type Heartbeat struct {
 	DeviceID       uint32
 	UptimeSec      uint32
@@ -886,30 +886,6 @@ func ComposeID(tenantID, fleetID uint16, deviceID uint32) uint64 {
 	return (uint64(tenantID) << 48) | (uint64(fleetID) << 32) | uint64(deviceID)
 }
 
-// ParseHeartbeat decodes the 36-byte heartbeat with a device-persisted boot counter.
-func ParseHeartbeat(data []byte) (*Heartbeat, error) {
-	if len(data) != 36 {
-		return nil, ErrInvalidHeartbeat
-	}
-	hb := &Heartbeat{
-		DeviceID:       binary.BigEndian.Uint32(data[0:4]),
-		UptimeSec:      binary.BigEndian.Uint32(data[4:8]),
-		PolicyVersion:  binary.BigEndian.Uint16(data[8:10]),
-		FWVersion:      binary.BigEndian.Uint16(data[10:12]),
-		DeniedCount:    uint32(binary.BigEndian.Uint16(data[12:14])),
-		AllowedCount:   uint32(binary.BigEndian.Uint16(data[14:16])),
-		WarnedCount:    uint32(binary.BigEndian.Uint16(data[16:18])),
-		EscalatedCount: uint32(binary.BigEndian.Uint16(data[18:20])),
-		CacheHitPct:    data[20],
-		SessionCount:   data[21],
-		AuditHeadHMAC:  binary.BigEndian.Uint64(data[22:30]),
-		Flags:          data[30],
-		Capabilities:   data[31],
-		BootCounter:    binary.BigEndian.Uint32(data[32:36]),
-	}
-	return hb, nil
-}
-
 func (fm *FleetManager) fireAlert(alert Alert) {
 	fm.hookMu.Lock()
 	h := fm.alertHandler
@@ -958,5 +934,3 @@ func fwVersionToUint32(s string) uint32 {
 type fleetError string
 
 func (e fleetError) Error() string { return string(e) }
-
-const ErrInvalidHeartbeat = fleetError("invalid heartbeat: must be 32 bytes")

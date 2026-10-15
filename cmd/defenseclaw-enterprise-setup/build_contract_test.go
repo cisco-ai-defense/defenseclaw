@@ -117,10 +117,46 @@ func TestSecureClientFleetSourcePreflightRunsBeforeLifecycleMutation(t *testing.
 		}
 	}
 	current := strings.Index(lifecycle, "Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources")
+	newGatewayGuard := -1
+	if current >= 0 {
+		if offset := strings.Index(lifecycle[current:], "$sources.ContainsKey('gateway')) {"); offset >= 0 {
+			newGatewayGuard = current + offset
+		}
+	}
 	preflight := strings.Index(lifecycle, "Assert-DefenseClawSecureClientFleetSourcePreflight `")
 	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
-	if current < 0 || preflight < current || mutation < preflight {
-		t.Fatalf("Secure Client Fleet source preflight must follow authenticated sources and precede managed-root mutation (source %d, preflight %d, mutation %d)", current, preflight, mutation)
+	if current < 0 || newGatewayGuard < current || preflight < newGatewayGuard || mutation < preflight {
+		t.Fatalf("Secure Client Fleet source preflight must use the new gateway after authentication and before managed-root mutation (source %d, gateway guard %d, preflight %d, mutation %d)", current, newGatewayGuard, preflight, mutation)
+	}
+}
+
+func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
+	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
+	if strings.Contains(module, "@('compiler', $PolicyCompiler, 'Fleet policy compiler'") {
+		t.Fatal("unconditional compiler source authentication can fail Fleet-off Setup")
+	}
+	entry := strings.Index(module, "function Invoke-DefenseClawEnterpriseLifecycle {")
+	if entry < 0 {
+		t.Fatal("enterprise lifecycle entry point is missing")
+	}
+	lifecycle := module[entry:]
+	deferredGuard := strings.Index(lifecycle, "if (-not $DeferredConfig) {")
+	inspect := strings.Index(lifecycle, "$standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `")
+	gate := strings.Index(lifecycle, "if ($standaloneFleetEnabled) {")
+	add := strings.Index(lifecycle, "Add-DefenseClawStandaloneFleetCompilerSource `")
+	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
+	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || add < gate || mutation < add {
+		t.Fatalf("Fleet compiler source must follow non-deferred config opt-in before managed-root mutation (deferred guard %d, inspect %d, gate %d, add %d, mutation %d)", deferredGuard, inspect, gate, add, mutation)
+	}
+	for _, required := range []string{
+		"'inspect-standalone-fleet'",
+		"$script:DefenseClawPolicyCompilerSHA256",
+		"if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled)",
+		"Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf",
+	} {
+		if !strings.Contains(module, required) {
+			t.Fatalf("standalone Fleet opt-in lifecycle omits %q", required)
+		}
 	}
 }
 

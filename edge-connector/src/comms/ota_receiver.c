@@ -551,16 +551,6 @@ int dclaw_policy_reload_from_flash(void) {
     dclaw_policy_table_t staged;
     memcpy(&staged, &s->rt_policy, sizeof(staged));
 
-    /* Deny hashes are preserved from the copy above.
-     * NOTE: The OTA binary blob format (policy_compiler.py generate_binary_blob)
-     * does not currently include deny hashes — they are only populated via the
-     * threat-intel push API at runtime. */
-    if (staged.deny_hashes_count > 0) {
-        fprintf(stderr, "[DCLAW] WARNING: %zu deny hashes preserved from previous policy. "
-                "OTA blob does not carry deny hashes — updates require restart or "
-                "threat-intel push.\n", staged.deny_hashes_count);
-    }
-
     const uint8_t *payload = flash_buf + 8;
     size_t remaining = payload_len;
     size_t pos = 0;

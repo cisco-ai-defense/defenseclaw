@@ -239,11 +239,6 @@ typedef struct {
     dclaw_action_t   cloud_verdict;
 } dclaw_speculative_slot_t;
 
-typedef struct {
-    uint8_t cap_flag;
-    uint8_t mode; /* 0=sync_block, 1=speculative */
-} dclaw_escalation_entry_t;
-
 /* === Rate Limiter === */
 
 typedef struct {
@@ -292,17 +287,12 @@ typedef struct {
 /* Maximum counts for runtime policy table entries.
  * Sized to keep dclaw_state_t within the profile RAM budgets
  * (STANDARD < 25KB, EDGE < 40KB). */
-#define DCLAW_RT_MAX_DENY_HASHES    32
 #define DCLAW_RT_MAX_DEST_ALLOWLIST 32
 #define DCLAW_RT_MAX_DEST_LEN       64
 #define DCLAW_RT_MAX_SEVERITY_RULES 8
 #define DCLAW_RT_MAX_SEQUENCE_RULES 16
 
 typedef struct {
-    /* Deny hash list (sorted for binary search) */
-    uint8_t  deny_hashes[DCLAW_RT_MAX_DENY_HASHES][32];
-    size_t   deny_hashes_count;
-
     /* Destination allowlist (NUL-terminated strings, max 64 chars each) */
     char     dest_allowlist[DCLAW_RT_MAX_DEST_ALLOWLIST][DCLAW_RT_MAX_DEST_LEN];
     size_t   dest_allowlist_count;

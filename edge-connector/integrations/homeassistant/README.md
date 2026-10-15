@@ -70,16 +70,18 @@ adapter = setup_homeassistant(
 | Device control | `turn_on`, `turn_off`, `set_temperature`, `set_brightness` | `ACTUATE` | Sync-block |
 | Security | `lock`, `unlock`, `arm_alarm`, `disarm_alarm` | `ACTUATE` | Sync-block |
 | Media | `media_play`, `set_volume`, `play_media` | `ACTUATE` | Sync-block |
-| Notifications | `send_notification`, `notify`, `tts_speak` | `SEND_MSG` | Allow if dest approved |
+| Notifications | `send_notification`, `notify` | `SEND_MSG` | Blocked until a reviewed message destination exists |
+| Text to speech | `tts_speak` | `ACTUATE` | Sync-block |
 | Automations | `run_script`, `trigger_automation`, `restart_ha` | `EXEC_SHELL` | Sync-block |
 | Config writes | `create_automation`, `update_automation` | `WRITE_FS` | Sync-block |
-| Webhooks | `register_webhook`, `setup_integration` | `NET_FETCH` | Allow if dest approved |
+| Webhooks/integrations | `register_webhook`, `call_webhook`, `setup_integration` | `NET_FETCH` | Blocked until a reviewed delegated target exists |
+| Integration manifest read | `get_integrations_manifest` | `SENSOR_READ` | Allow |
 
 ## Policy Recommendations
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
-The C engine accepts only reviewed tool names in `src/decision/policy_table.c`. This adapter's Python capability map does not authorize additional C tool names; unknown names fail closed. Review and extend the C table before using adapter tools absent from it. Network-capability calls to `homeassistant.local` are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+The shipped adapter tool names have reviewed mappings in the C engine's `src/decision/policy_table.c`. Custom names still need a reviewed C mapping; a Python capability map alone cannot authorize them. The wrapper no longer treats its MCP transport host as a delegated target. Home Assistant webhook/integration calls fail closed with `UNSUPPORTED_NETWORK_DESTINATION` until their argument and redirect behavior has a reviewed egress design; message tools also remain blocked without a destination. An allowlist entry alone cannot enable these calls. OTA cannot change the built-in rate limits.
 
 ```yaml
 iot_extensions:

@@ -128,13 +128,14 @@ static void test_ac03(void) {
     printf("  AC-03 PASS: BLOCK event triggered immediate flash write\n");
 }
 
-/* AC-04: Broker fallback list configured (structural test) */
+/* AC-04: Exactly one broker URL is configured. */
 static void test_ac04(void) {
     extern const char *dclaw_config_get_broker(uint8_t index);
     const char *b0 = dclaw_config_get_broker(0);
     assert(b0 != NULL);
     assert(strlen(b0) > 0);
-    printf("  AC-04 PASS: broker fallback list has at least 1 entry: %s\n", b0);
+    assert(dclaw_config_get_broker(1) == NULL);
+    printf("  AC-04 PASS: one broker URL configured: %s\n", b0);
 }
 
 /* AC-05: Invalid HMAC verdict is rejected */

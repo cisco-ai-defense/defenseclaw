@@ -730,8 +730,6 @@ ok "Assets match checksums.txt"
 
 tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${ARCHIVE}"
 [[ -f "${STAGING}/bin/defenseclaw-gateway" ]] || die "${ARCHIVE} has no defenseclaw-gateway"
-[[ -f "${STAGING}/bin/edge-connector/tools/policy_compiler.py" ]] \
-    || die "${ARCHIVE} has no Fleet policy compiler"
 # The sensor helper serves only the Linux sandbox kernel feed.
 [[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"
 for binary in ${MANAGED_BINARIES}; do
@@ -1432,17 +1430,41 @@ private_bin_dir() {
     return 0
 }
 
+fleet_config_enabled() {
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}"
+    [[ -f "${config}" ]] || return 1
+    "${VENV}/bin/python" -I - "${config}" <<'PY'
+import sys
+import yaml
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    enabled = isinstance(config, dict) and isinstance(config.get("fleet"), dict) and config["fleet"].get("enabled") is True
+except (OSError, yaml.YAMLError):
+    enabled = False
+sys.exit(0 if enabled else 1)
+PY
+}
+
 swap_in() {
     local binary link target
     info "Installing DefenseClaw ${VERSION}"
     make_venv "${VENV}" || return 1
-    # Snapshot/rollback moves installer/ with the version. Keep the compiler
-    # there so the gateway executes the compiler that shipped in its archive.
-    mkdir -p "${INSTALLER_DIR}" || return 1
-    cp -p "${STAGING}/bin/edge-connector/tools/policy_compiler.py" \
-        "${INSTALLER_DIR}/.policy_compiler.py.new" \
-        && mv -f "${INSTALLER_DIR}/.policy_compiler.py.new" \
-            "${INSTALLER_DIR}/policy_compiler.py" || return 1
+    # Fleet is opt-in. A core install never requires or installs its compiler;
+    # an enabled fleet gets the matching version inside the rollback snapshot.
+    if fleet_config_enabled; then
+        [[ -f "${STAGING}/bin/edge-connector/tools/policy_compiler.py" ]] || {
+            warn "Fleet is enabled but this release has no Fleet policy compiler"
+            return 1
+        }
+        mkdir -p "${INSTALLER_DIR}" || return 1
+        cp "${STAGING}/bin/edge-connector/tools/policy_compiler.py" \
+            "${INSTALLER_DIR}/.policy_compiler.py.new" \
+            && chmod 600 "${INSTALLER_DIR}/.policy_compiler.py.new" \
+            && mv -f "${INSTALLER_DIR}/.policy_compiler.py.new" \
+                "${INSTALLER_DIR}/policy_compiler.py" || return 1
+    fi
     mkdir -p "${BIN_DIR}" || return 1
     private_bin_dir
     for binary in ${MANAGED_BINARIES}; do

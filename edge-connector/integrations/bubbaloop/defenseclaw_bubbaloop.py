@@ -47,7 +47,7 @@ if _tools_dir not in sys.path:
 from generic_hook import (
     CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH,
     CAP_READ_FS, CAP_SENSOR_READ, CAP_WRITE_FS,
-    EdgeConnector,
+    EdgeConnector, Verdict, reviewed_adapter_destination,
 )
 
 logger = logging.getLogger("defenseclaw.bubbaloop")
@@ -91,6 +91,11 @@ BUBBALOOP_TOOL_CAP_MAP: Dict[str, int] = {
     "plugin_install": CAP_EXEC_SHELL, "firmware_update": CAP_EXEC_SHELL,
 }
 
+# These two reviewed tool schemas route to their explicit URL argument.
+# Broker, Zenoh and cloud endpoints remain unsupported until their server
+# schemas prove a bound destination and safe redirect/relay behavior.
+_HTTP_URL_FIELDS = {"http_fetch": "url", "model_download": "url"}
+
 DEFAULT_ZENOH_TOPICS = [
     "bubbaloop/telemetry/system", "bubbaloop/telemetry/camera",
     "bubbaloop/telemetry/sensors", "bubbaloop/events/alerts",
@@ -133,9 +138,15 @@ class BubbaloopAdapter:
                   arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Evaluate then forward. Returns {allowed, verdict, result}."""
         arguments = arguments or {}
-        verdict = self._connector.evaluate(
-            tool_name=tool_name, arguments=arguments, destination=self.host,
-        )
+        try:
+            destination = reviewed_adapter_destination(
+                tool_name, arguments, BUBBALOOP_TOOL_CAP_MAP, _HTTP_URL_FIELDS)
+        except ValueError as exc:
+            verdict = Verdict.error(str(exc))
+        else:
+            verdict = self._connector.evaluate(
+                tool_name=tool_name, arguments=arguments, destination=destination,
+            )
         if verdict.blocked:
             logger.warning("Bubbaloop tool %s blocked: %s", tool_name, verdict.reason)
             return {"allowed": False,

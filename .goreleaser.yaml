@@ -258,7 +258,7 @@ nfpms:
           - systemd >= 239
     contents:
       - src: edge-connector/tools/policy_compiler.py
-        dst: /opt/defenseclaw/lib/defenseclaw/policy_compiler.py
+        dst: /opt/defenseclaw/share/fleet/policy_compiler.py
         file_info:
           mode: 0644
       - src: packaging/systemd/defenseclaw-gateway.service

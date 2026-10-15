@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // buildTLSConfig constructs the broker TLS settings from the configured CA
@@ -29,7 +31,7 @@ import (
 // production mode.
 func buildTLSConfig() (*tls.Config, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if skip := os.Getenv("DCLAW_TLS_SKIP_VERIFY"); skip == "true" || skip == "1" {
+	if skip := envvars.Getenv("DCLAW_TLS_SKIP_VERIFY"); skip == "true" || skip == "1" {
 		if isProductionMode() {
 			log.Printf("[mqtt] WARNING: DCLAW_TLS_SKIP_VERIFY ignored in production mode — certificate verification enforced")
 		} else {

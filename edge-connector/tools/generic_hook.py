@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -58,6 +59,57 @@ from typing import Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger("defenseclaw")
+
+
+_NETWORK_DESTINATION_KEYS = frozenset((
+    "url", "href", "endpoint", "uri", "host", "destination",
+    "target_url", "broker_url", "webhook_url",
+))
+
+
+def reviewed_adapter_destination(tool_name: str, arguments: dict[str, Any],
+                                 cap_map: dict[str, int],
+                                 http_url_fields: dict[str, str]) -> str:
+    """Return a reviewed tool target, never the adapter's MCP transport host.
+
+    Only the HTTP tools listed by an adapter have an unambiguous delegated
+    target. Other network tools stay blocked until their argument schema and
+    actual egress behavior can be reviewed. The C SSRF guard checks this value
+    again; this early check also prevents a mocked/failed backend from
+    forwarding an unsafe target.
+    """
+    if cap_map.get(tool_name) != CAP_NET_FETCH:
+        return ""
+    expected_key = http_url_fields.get(tool_name)
+    if expected_key is None:
+        raise ValueError("UNSUPPORTED_NETWORK_DESTINATION")
+    if not isinstance(arguments, dict):
+        raise ValueError("NETWORK_DESTINATION_REQUIRED")
+    present = [key for key in _NETWORK_DESTINATION_KEYS if key in arguments]
+    if present != [expected_key]:
+        raise ValueError("NETWORK_DESTINATION_REQUIRED_OR_AMBIGUOUS")
+    value = arguments[expected_key]
+    if (not isinstance(value, str) or not value or value != value.strip()
+            or len(value.encode("utf-8")) >= 128
+            or "\\" in value or "\x00" in value):
+        raise ValueError("INVALID_NETWORK_DESTINATION")
+    parsed = urlparse(value)
+    if (parsed.scheme not in ("http", "https") or not parsed.netloc
+            or parsed.username is not None or parsed.password is not None):
+        raise ValueError("INVALID_NETWORK_DESTINATION")
+    try:
+        host = parsed.hostname
+        port = parsed.port  # also rejects malformed/out-of-range ports
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        raise ValueError("PRIVATE_OR_UNRESOLVED_NETWORK_DESTINATION")
+    if not address.is_global or port == 0:
+        raise ValueError("PRIVATE_OR_UNRESOLVED_NETWORK_DESTINATION")
+    if isinstance(address, ipaddress.IPv4Address) and host != str(address):
+        raise ValueError("INVALID_NETWORK_DESTINATION")
+    if isinstance(address, ipaddress.IPv6Address) and not parsed.netloc.startswith("["):
+        raise ValueError("INVALID_NETWORK_DESTINATION")
+    return value
 
 # ---------------------------------------------------------------------------
 # Fail-open attestation
@@ -321,7 +373,7 @@ class _FFIBackend:
             tenant_id=int(os.environ.get("DCLAW_TENANT_ID", "1")),
             fleet_id=int(os.environ.get("DCLAW_FLEET_ID", "1")),
             device_id=int(os.environ.get("DCLAW_DEVICE_ID", "1")),
-            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "1")),
+            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "0")),
             fw_version=int(os.environ.get("DCLAW_FW_VERSION", "1")),
             hw_profile=int(os.environ.get("DCLAW_HW_PROFILE", "2")),
             capabilities=int(os.environ.get("DCLAW_CAPABILITIES", "0xFF"), 0),

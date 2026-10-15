@@ -44,11 +44,16 @@ func stagedFleetConfig(t *testing.T, h *testHost) string {
 	return path
 }
 
+func allowTestFleetPython(h *testHost) {
+	h.env.MacFleetPythonCheck = func() (string, error) { return fleetpolicy.ManagedMacOSPythonCandidates()[0], nil }
+	h.env.LinuxFleetPythonCheck = func() (string, error) { return "/usr/bin/python3", nil }
+}
+
 func packagedCompiler(t *testing.T, h *testHost, content string) string {
 	t.Helper()
-	canonical := compilerInstallPath(h.env.Layout)
+	canonical := packageCompilerSourcePath(h.env.Layout)
 	path := h.env.P(canonical)
-	for _, dir := range []string{filepath.Join(h.env.Layout.InstallRoot, "lib"), filepath.Dir(canonical)} {
+	for _, dir := range []string{filepath.Join(h.env.Layout.InstallRoot, "share"), filepath.Dir(canonical)} {
 		rooted := h.env.P(dir)
 		if err := os.MkdirAll(rooted, 0o755); err != nil {
 			t.Fatal(err)
@@ -70,9 +75,10 @@ func TestPayloadCompilerInstalledVerifiedAndRolledBack(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
+			allowTestFleetPython(h)
 			first := h.payload("1.0.0")
 			stagedCompiler(t, first, "print('first')\n")
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: first}))
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: first, ConfigFile: stagedFleetConfig(t, h)}))
 			installed := compilerInstallPath(h.env.Layout)
 			if got := h.read(installed); got != "print('first')\n" {
 				t.Fatalf("installed compiler = %q", got)
@@ -114,6 +120,25 @@ func TestPayloadCompilerInstalledVerifiedAndRolledBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFleetOffPayloadDoesNotInstallOrValidateOptionalCompiler(t *testing.T) {
+	h := newTestHost(t, "linux")
+	payload := h.payload("1.0.0")
+	compiler := stagedCompiler(t, payload, "print('unused')\n")
+	if err := os.Chmod(compiler, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: payload}))
+	active := compilerInstallPath(h.env.Layout)
+	if _, err := os.Lstat(h.env.P(active)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Fleet-off install materialized compiler: %v", err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil || record.Files[active] != "" {
+		t.Fatalf("Fleet-off deployment tracked optional compiler: %v %+v", err, record)
+	}
+	requireError(t, h.run(Options{Action: ActionEnsure, ConfigFile: stagedFleetConfig(t, h)}), codePayload)
 }
 
 func TestPayloadCompilerRejectsUntrustedPaths(t *testing.T) {
@@ -165,7 +190,7 @@ func TestPayloadCompilerRejectsUntrustedPaths(t *testing.T) {
 			dir := h.payload("1.0.0")
 			path := stagedCompiler(t, dir, "print('valid')\n")
 			change(t, dir, path)
-			requireError(t, h.run(Options{Action: ActionInstall, PayloadDir: dir}), codePayload)
+			requireError(t, h.run(Options{Action: ActionInstall, PayloadDir: dir, ConfigFile: stagedFleetConfig(t, h)}), codePayload)
 			if record, err := h.env.loadDeployment(); err != nil || record != nil {
 				t.Fatalf("invalid compiler reached a committed deployment: %v %+v", err, record)
 			}
@@ -175,9 +200,10 @@ func TestPayloadCompilerRejectsUntrustedPaths(t *testing.T) {
 
 func TestPayloadCompilerTamperFailsVerifyAndRepairRestores(t *testing.T) {
 	h := newTestHost(t, "linux")
+	allowTestFleetPython(h)
 	staged := h.payload("1.0.0")
 	stagedCompiler(t, staged, "print('trusted')\n")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: staged}))
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: staged, ConfigFile: stagedFleetConfig(t, h)}))
 	writeFreshLedger(t, h)
 	installed := compilerInstallPath(h.env.Layout)
 	if err := os.WriteFile(h.env.P(installed), []byte("print('tampered')\n"), 0o644); err != nil {
@@ -204,11 +230,16 @@ func TestPayloadCompilerTamperFailsVerifyAndRepairRestores(t *testing.T) {
 
 func TestPackageCompilerRecordedWithoutLifecycleRewriting(t *testing.T) {
 	h := packageHost(t, "1.0.0")
+	allowTestFleetPython(h)
 	if err := os.Chmod(h.env.P("/opt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	installed := packagedCompiler(t, h, "print('package')\n")
-	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	source := packagedCompiler(t, h, "print('package')\n")
+	installed := compilerInstallPath(h.env.Layout)
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package", ConfigFile: stagedFleetConfig(t, h)}))
+	if got := h.read(source); got != "print('package')\n" {
+		t.Fatalf("package source changed: %q", got)
+	}
 	writeFreshLedger(t, h)
 	if got := messagesOf(h.run(Options{Action: ActionVerify}).Errors, codeVerify); strings.Contains(got, "installed compiler") || strings.Contains(got, installed+" was modified") {
 		t.Fatalf("untouched package compiler failed verify: %s", got)
@@ -229,6 +260,68 @@ func TestPackageCompilerRecordedWithoutLifecycleRewriting(t *testing.T) {
 		t.Fatalf("verify omitted package compiler drift: %s", got)
 	}
 	requireError(t, h.run(Options{Action: ActionEnsure, FromPackage: true}), codePayload)
+}
+
+func TestFleetOffPackageLeavesCompilerInactiveUntilConfigEnable(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	allowTestFleetPython(h)
+	if err := os.Chmod(h.env.P("/opt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := packagedCompiler(t, h, "print('package')\n")
+	active := compilerInstallPath(h.env.Layout)
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	if _, err := os.Lstat(h.env.P(active)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Fleet-off package activated compiler: %v", err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil || record.Files[active] != "" {
+		t.Fatalf("Fleet-off package recorded compiler: %v %+v", err, record)
+	}
+	if h.read(source) != "print('package')\n" {
+		t.Fatal("package source disappeared")
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, ConfigFile: stagedFleetConfig(t, h)}))
+	if got := h.read(active); got != "print('package')\n" {
+		t.Fatalf("Fleet enable did not materialize compiler: %q", got)
+	}
+	configFile := filepath.Join(t.TempDir(), "disabled.yaml")
+	if err := os.WriteFile(configFile, DefaultConfig(h.env.Layout), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, ConfigFile: configFile}))
+	if _, err := os.Lstat(h.env.P(active)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Fleet disable retained active compiler: %v", err)
+	}
+	if got := h.read(source); got != "print('package')\n" {
+		t.Fatalf("Fleet disable changed package source: %q", got)
+	}
+}
+
+func TestFleetEnableRejectsUntrustedPackageCompilerWithoutChangingConfig(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	allowTestFleetPython(h)
+	if err := os.Chmod(h.env.P("/opt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := packagedCompiler(t, h, "print('package')\n")
+	path := h.env.P(source)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway)), path); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	previous := h.read(h.env.Layout.ConfigPath)
+	result := h.run(Options{Action: ActionEnsure, FromPackage: true, ConfigFile: stagedFleetConfig(t, h)})
+	requireError(t, result, codePayload)
+	if got := h.read(h.env.Layout.ConfigPath); got != previous {
+		t.Fatal("untrusted optional compiler changed the active config")
+	}
+	if _, err := os.Lstat(h.env.P(compilerInstallPath(h.env.Layout))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("untrusted optional compiler became active: %v", err)
+	}
 }
 
 func TestManagedMacFleetRequiresUsablePythonOnlyWhenEnabled(t *testing.T) {
@@ -303,7 +396,7 @@ func TestManagedMacFleetConfigEnsureKeepsPriorDeploymentOnPythonFailure(t *testi
 		t.Fatal(err)
 	}
 	h.env.MacFleetPythonCheck = func() (string, error) { return "", errors.New("PyYAML unavailable") }
-	result := h.run(Options{Action: ActionEnsure, ConfigFile: configFile})
+	result := h.run(Options{Action: ActionEnsure, PayloadDir: payload, ConfigFile: configFile})
 	requireError(t, result, codeConfig)
 	if got := h.read(h.env.Layout.ConfigPath); got != previous {
 		t.Fatal("failed Fleet prerequisite changed the active config")

@@ -95,12 +95,6 @@ SEVERITY_MAP = {
     "critical": 4,
 }
 
-# Escalation mode name → value
-ESCALATION_MAP = {
-    "sync_block": 0,
-    "speculative": 1,
-}
-
 def validate_destination(dest: str) -> str:
     """The local SSRF guard can enforce only explicit public IP literals."""
     if not isinstance(dest, str):
@@ -366,45 +360,6 @@ def extract_dest_allowlist(policy: dict) -> list:
     return dest_list
 
 
-def extract_rate_limits(policy: dict) -> dict:
-    """Extract rate limits from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    rate_limits = iot_ext.get("rate_limits", {
-        "tool_calls_per_minute": 60,
-        "network_requests_per_minute": 30,
-        "actuations_per_minute": 10,
-    })
-    # Reject zero/negative values (disables limiting) and floats that truncate to 0 in uint16
-    for key, value in rate_limits.items():
-        if isinstance(value, (int, float)) and value <= 0:
-            raise ValueError(
-                f"Rate limit '{key}' must be > 0, got {value}. "
-                f"Zero or negative rate limits would disable rate limiting."
-            )
-        if isinstance(value, float) and int(value) == 0:
-            raise ValueError(
-                f"Rate limit '{key}' is {value} which truncates to 0 in uint16. "
-                f"Use an integer >= 1."
-            )
-        if isinstance(value, float):
-            rate_limits[key] = int(value)
-    return rate_limits
-
-
-def extract_escalation_modes(policy: dict) -> list:
-    """Extract escalation mode table from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    modes = iot_ext.get("escalation_mode", {})
-    entries = []
-    for cap_name, mode_name in modes.items():
-        cap_val = CAP_MAP.get(cap_name)
-        mode_val = ESCALATION_MAP.get(mode_name, 0)
-        if cap_val is not None:
-            entries.append((cap_val, mode_val))
-    entries.sort(key=lambda x: x[0])
-    return entries
-
-
 def extract_canary_baseline(policy: dict) -> int:
     """Extract canary baseline from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
@@ -423,8 +378,6 @@ def generate_c_header(policy: dict, version: int) -> str:
     severity_rules = extract_severity_rules(policy)
     sequence_rules = extract_sequence_rules(policy)
     dest_allowlist = extract_dest_allowlist(policy)
-    rate_limits = extract_rate_limits(policy)
-    escalation_modes = extract_escalation_modes(policy)
 
     lines = [
         '#ifndef DCLAW_POLICY_TABLES_H',
@@ -496,33 +449,6 @@ def generate_c_header(policy: dict, version: int) -> str:
         lines.append(f'    "{escape_c_string(dest)}",')
     lines.append('};')
     lines.append(f'DCLAW_UNUSED static const size_t dest_allowlist_count = {len(dest_allowlist)};')
-    lines.append('')
-
-    # Deny hash list (empty — populated by threat intel)
-    lines.append('/* === Deny Hash List (sorted for binary search) === */')
-    lines.append('')
-    lines.append('/* no deny hashes configured */')
-    lines.append('DCLAW_UNUSED')
-    lines.append('static const uint8_t deny_hashes[1][32] = {{0}};')
-    lines.append('DCLAW_UNUSED static const size_t deny_hashes_count = 0;')
-    lines.append('')
-
-    # Escalation table
-    lines.append('/* === Escalation Mode Table === */')
-    lines.append('')
-    lines.append('DCLAW_UNUSED')
-    lines.append('static const dclaw_escalation_entry_t escalation_table[] = {')
-    for cap, mode in escalation_modes:
-        lines.append(f'    {{ 0x{cap:02X}, {mode} }},')
-    lines.append('};')
-    lines.append(f'DCLAW_UNUSED static const size_t escalation_table_count = {len(escalation_modes)};')
-    lines.append('')
-
-    # Rate limits
-    lines.append('/* === Rate Limit Defaults === */')
-    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_tool_calls_per_min = {rate_limits.get("tool_calls_per_minute", 60)};')
-    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
-    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
     lines.append('')
 
     # ── Aho-Corasick Content DFA ─────────────────────────────────────────
