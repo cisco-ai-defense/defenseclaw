@@ -88,7 +88,9 @@ func TestConfirmedSignerRevocationIsReported(t *testing.T) {
 	}
 	writeBundleTestFile(t, e.anchors, bytes.Replace(raw, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1))
 	warning := bundleCurrentSignerWarning(e.anchors, "k1")
-	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) {
+	// The warning names the signer, so an anchor-only run that revoked it
+	// says which key no longer vouches for the enforcing bundle.
+	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) || !strings.Contains(warning.Message, "signer k1 is revoked") {
 		t.Fatalf("revoked confirmed signer warning = %+v", warning)
 	}
 }

@@ -240,6 +240,9 @@ type windowsBundleRun struct {
 	anchorPrevious        []byte
 	anchorExisted         bool
 	anchorCommitAttempted bool
+	// anchorOnly records the anchor file a TRUSTANCHORS= run without
+	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
+	anchorOnly *anchorOnlyChange
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
@@ -668,9 +671,22 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
 			}
 			driver.AnchorsPath = run.anchorStage
+		} else {
+			previous, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
+			if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
+			}
+			run.anchorOnly = &anchorOnlyChange{path: anchorPath, previous: previous}
 		}
 		if err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath); err != nil {
 			return refuse(string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)), "the trust anchors were not installed: "+err.Error())
+		}
+		if run.anchorOnly != nil {
+			installed, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
+			if readErr != nil {
+				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
+			}
+			run.anchorOnly.installed = installed
 		}
 	}
 	if opts.bundlePath == "" {
@@ -851,6 +867,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		receipt = p.Receipt
 	}
 	attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
+	settleAnchorOnlyEnsure(result, run.anchorOnly)
 }
 
 func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
