@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Warning codes verify adds.
@@ -259,14 +261,30 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
 		return res, err
 	}
-	var details map[string]string
-	digest, err := in.Digester(withPolicyComponents(ctx, func(got map[string]string) { details = got }), cfg, rendered, in.Platform, root)
+	device, err := computeDigest(ctx, in, cfg, rendered, root, "")
 	if err != nil {
-		return res, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s: %s", in.Platform, boundedDetail(err.Error()))
+		return res, err
 	}
-	res.EffectivePolicyDigest = digest
+	res.EffectivePolicyDigest = device.digest
 	res.ExpectedDigest = m.EffectivePolicy.Digests[in.Platform]
-	outcome, err := compareSignedDigest(m.EffectivePolicy, in.Platform, in.ProductVersion, digest, details, layout.IsStandard(in.Platform))
+	// The signer computed the standard layout's digest. A device on another
+	// managed layout recomputes it, so a signed digest it disproves still
+	// refuses (GAP-0113).
+	var standard func() (computedDigest, error)
+	if !layout.IsStandard(in.Platform) {
+		standard = func() (computedDigest, error) {
+			standardLayout, err := StandardDeviceLayout(in.Platform)
+			if err != nil {
+				return computedDigest{}, refuse(CodeManifestInvalid, "target.platforms", "%s", boundedDetail(err.Error()))
+			}
+			cfg, rendered, err := LoadConfigForDeviceLayout(b, root, in.Platform, standardLayout)
+			if err != nil {
+				return computedDigest{}, err
+			}
+			return computeDigest(ctx, in, cfg, rendered, root, " on the standard managed layout")
+		}
+	}
+	outcome, err := compareSignedDigest(m.EffectivePolicy, in.Platform, in.ProductVersion, device, standard)
 	if err != nil {
 		return res, err
 	}
@@ -281,7 +299,7 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	case digestLayoutDependent:
 		res.DigestLayoutUnverifiable = true
 		res.Warnings = append(res.Warnings, Warning{Code: WarnDigestLayoutUnverifiable, Platform: in.Platform,
-			Message: "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"})
+			Message: "this device's non-standard managed layout changes the effective digest; the signed digest equals this host's digest for the standard managed layout, files[] hashes still hold, and this host reports its own digest"})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
 	res.Warnings = append(res.Warnings, ruleWarnings...)
@@ -311,33 +329,75 @@ const (
 	// built-in policy and digest rules are not this build's, so this build
 	// cannot reproduce what the signer saw (digest_unverifiable).
 	digestOtherProduct
-	// digestLayoutDependent: this device's non-standard managed layout,
-	// which the offline signer cannot model, changed the digest
+	// digestLayoutDependent: this device's non-standard managed layout
+	// changed its digest, and the signed digest equals the digest this
+	// device computes for the standard layout the signer models
 	// (digest_layout_unverifiable).
 	digestLayoutDependent
 )
 
+// computedDigest is an effective policy digest a device computed and its
+// component sub-digests.
+type computedDigest struct {
+	digest     string
+	components map[string]string
+}
+
+// computeDigest runs the verify input's digester for cfg; where names the
+// layout in a refusal.
+func computeDigest(ctx context.Context, in VerifyInput, cfg *config.Config, rendered []byte, root, where string) (computedDigest, error) {
+	var out computedDigest
+	digest, err := in.Digester(withPolicyComponents(ctx, func(got map[string]string) { out.components = got }), cfg, rendered, in.Platform, root)
+	if err != nil {
+		return computedDigest{}, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s%s: %s", in.Platform, where, boundedDetail(err.Error()))
+	}
+	out.digest = digest
+	return out, nil
+}
+
 // compareSignedDigest is the signed-digest rule for every signer and device
 // platform pair (GAP-0113). A signer that ran this product version computes
-// the target platform's digest with that platform's defaults on any host
-// (GAP-0107), so it computes what this device computes from the same files.
-// A different digest from such a signer is disproved here and refused with
-// digest_mismatch, naming the signed components that differ; the signing
-// platform (computed_on) is reported, never an excuse. The built-in policy is
-// compiled into the build and pinned by the product version, so a signer
-// build of the same version with other built-in policy is refused as well
-// (component builtin): sign with the build the devices run.
-func compareSignedDigest(signed EffectivePolicy, platform, productVersion, local string, localComponents map[string]string, standardLayout bool) (digestOutcome, error) {
+// the target platform's digest with that platform's defaults and standard
+// managed layout on any host (GAP-0107), so it computes what this device
+// computes from the same files for that layout. A different digest from such
+// a signer is disproved here and refused with digest_mismatch, naming the
+// signed components that differ; the signing platform (computed_on) is
+// reported, never an excuse. The built-in policy is compiled into the build
+// and pinned by the product version, so a signer build of the same version
+// with other built-in policy is refused as well (component builtin): sign
+// with the build the devices run.
+//
+// standard is nil on the standard layout. On another layout (Windows
+// ProgramData on another drive) it computes this device's digest for the
+// standard layout, and that digest decides. Both loads read the same staged
+// files and differ only in the layout paths, so a signed digest equal to the
+// standard-layout one is the signer's policy and only this device's paths
+// changed its own digest (digest_layout_unverifiable; an explicit standard
+// data_dir on a relocated ProgramData does this); any other is disproved.
+func compareSignedDigest(signed EffectivePolicy, platform, productVersion string, device computedDigest, standard func() (computedDigest, error)) (digestOutcome, error) {
+	want := signed.Digests[platform]
 	switch {
 	case signed.ProductVersion != productVersion:
 		return digestOtherProduct, nil
-	case local == signed.Digests[platform]:
+	case device.digest == want:
 		return digestVerified, nil
-	case !standardLayout:
-		return digestLayoutDependent, nil
 	}
-	detail := "this host computes " + local + " for " + platform + "; the signer computed the digest on " + safePath(signed.ComputedOn) + " with the same product version " + boundedText(productVersion, 64)
-	if differing := differingDigestComponents(signed.Components[platform], localComponents); len(differing) > 0 {
+	disproved, layoutNote := device, ""
+	if standard != nil {
+		got, err := standard()
+		if err != nil {
+			return 0, err
+		}
+		if got.digest == want {
+			return digestLayoutDependent, nil
+		}
+		if got.digest != device.digest {
+			layoutNote = " (" + got.digest + " for the standard managed layout)"
+		}
+		disproved = got
+	}
+	detail := "this host computes " + device.digest + " for " + platform + layoutNote + "; the signer computed the digest on " + safePath(signed.ComputedOn) + " with the same product version " + boundedText(productVersion, 64)
+	if differing := differingDigestComponents(signed.Components[platform], disproved.components); len(differing) > 0 {
 		if len(differing) > maxNamedComponents {
 			differing = append(differing[:maxNamedComponents], "...")
 		}

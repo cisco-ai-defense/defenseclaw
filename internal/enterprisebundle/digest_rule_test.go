@@ -7,19 +7,24 @@
 package enterprisebundle
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
 
 // TestCompareSignedDigestRule is the GAP-0113 decision table, run for every
 // signer and device platform pair: a digest the device disproves refuses
-// with digest_mismatch whatever platform signed it, and only another signer
-// product version is unverifiable.
+// with digest_mismatch whatever platform signed it and whatever managed
+// layout the device uses, and only another signer product version is
+// unverifiable. On a non-standard layout the digest the device computes for
+// the standard layout decides; layout-unverifiable needs that digest to equal
+// the signed one.
 func TestCompareSignedDigestRule(t *testing.T) {
 	const (
 		version = "9.9.9"
 		signed  = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		local   = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		other   = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 		sub1    = "sha256:111111111111"
 		sub2    = "sha256:222222222222"
 	)
@@ -32,6 +37,10 @@ func TestCompareSignedDigestRule(t *testing.T) {
 		components   map[string]string
 		noSigned     bool // the signer reported no components
 		nonstandard  bool
+		standard     string // the device's standard-layout digest ("" = local)
+		standardComp map[string]string
+		standardErr  bool
+		noStandard   bool // the standard-layout digest must not be computed
 		want         digestOutcome
 		wantRefusal  bool
 		wantDetail   []string
@@ -59,9 +68,26 @@ func TestCompareSignedDigestRule(t *testing.T) {
 			wantRefusal: true, forbidDetail: []string{"component"}},
 		{name: "other product version, differs", signerOS: "other", version: "9.9.8", local: local, components: map[string]string{"builtin": sub2}, want: digestOtherProduct},
 		{name: "other product version, equal", version: "9.9.8", local: signed, want: digestOtherProduct},
-		{name: "other product version, non-standard layout", version: "9.9.8", local: local, nonstandard: true, want: digestOtherProduct},
-		{name: "non-standard layout, differs", signerOS: "other", local: local, nonstandard: true, want: digestLayoutDependent},
-		{name: "non-standard layout, equal", local: signed, nonstandard: true, want: digestVerified},
+		{name: "other product version, non-standard layout", version: "9.9.8", local: local, nonstandard: true, noStandard: true, want: digestOtherProduct},
+		{name: "non-standard layout, equal", local: signed, nonstandard: true, noStandard: true, want: digestVerified},
+		{name: "cross host, non-standard layout, equal", signerOS: "other", local: signed, nonstandard: true, noStandard: true, want: digestVerified},
+		// The verifier probe: paths canonicalise, so the device digest is the
+		// standard-layout digest and disproves a wrong signed digest.
+		{name: "non-standard layout, disproved", local: local, nonstandard: true, components: map[string]string{"builtin": sub1, "config": sub1, "rule_pack:custom": sub1},
+			wantRefusal: true, wantDetail: []string{"this host computes " + local + " for "}, forbidDetail: []string{"component", "standard managed layout"}},
+		{name: "cross host, non-standard layout, disproved", signerOS: "other", local: local, nonstandard: true, components: map[string]string{"builtin": sub1, "config": sub1, "rule_pack:custom": sub1},
+			wantRefusal: true, wantDetail: []string{"this host computes " + local + " for "}, forbidDetail: []string{"component", "standard managed layout"}},
+		{name: "cross host, non-standard layout, wrong config", signerOS: "other", local: local, nonstandard: true, components: map[string]string{"builtin": sub1, "config": sub2, "rule_pack:custom": sub1},
+			wantRefusal: true, wantDetail: []string{"component config differs"}},
+		// The layout changed the device digest and the standard-layout digest
+		// is another one again: refused, naming both and the components of
+		// the standard-layout comparison the signer modelled.
+		{name: "cross host, non-standard layout, standard digest disproves", signerOS: "other", local: local, nonstandard: true,
+			standard: other, standardComp: map[string]string{"builtin": sub1, "config": sub1, "rule_pack:custom": sub2},
+			wantRefusal: true, wantDetail: []string{"this host computes " + local + " for ", "(" + other + " for the standard managed layout)", "component rule_pack:custom differs"}},
+		{name: "non-standard layout, layout changed the digest", local: local, nonstandard: true, standard: signed, want: digestLayoutDependent},
+		{name: "cross host, non-standard layout, layout changed the digest", signerOS: "other", local: local, nonstandard: true, standard: signed, want: digestLayoutDependent},
+		{name: "cross host, non-standard layout, standard digest fails", signerOS: "other", local: local, nonstandard: true, standardErr: true},
 	} {
 		for _, device := range Platforms {
 			for _, signer := range Platforms {
@@ -76,7 +102,28 @@ func TestCompareSignedDigestRule(t *testing.T) {
 					if !tc.noSigned {
 						ep.Components = map[string][]DigestComponent{device: signerComponents}
 					}
-					got, err := compareSignedDigest(ep, device, version, tc.local, tc.components, !tc.nonstandard)
+					var standard func() (computedDigest, error)
+					if tc.nonstandard {
+						standard = func() (computedDigest, error) {
+							if tc.noStandard {
+								t.Fatal("the standard-layout digest was computed")
+							}
+							if tc.standardErr {
+								return computedDigest{}, errStandardDigest
+							}
+							if tc.standard == "" {
+								return computedDigest{digest: tc.local, components: tc.components}, nil
+							}
+							return computedDigest{digest: tc.standard, components: tc.standardComp}, nil
+						}
+					}
+					got, err := compareSignedDigest(ep, device, version, computedDigest{digest: tc.local, components: tc.components}, standard)
+					if tc.standardErr {
+						if !errors.Is(err, errStandardDigest) || got != 0 {
+							t.Fatalf("standard-layout digest failure = %d, %v", got, err)
+						}
+						return
+					}
 					if tc.wantRefusal {
 						if CodeOf(err) != CodeDigestMismatch || got != 0 {
 							t.Fatalf("want digest_mismatch, got outcome %d, %v", got, err)
@@ -115,8 +162,10 @@ func TestCompareSignedDigestBoundsNamedComponents(t *testing.T) {
 	ep := EffectivePolicy{ProductVersion: "9.9.9", ComputedOn: PlatformLinux,
 		Digests:    map[string]string{PlatformWindows: "sha256:" + strings.Repeat("a", 64)},
 		Components: map[string][]DigestComponent{PlatformWindows: signed}}
-	_, err := compareSignedDigest(ep, PlatformWindows, "9.9.9", "sha256:"+strings.Repeat("b", 64), local, true)
+	_, err := compareSignedDigest(ep, PlatformWindows, "9.9.9", computedDigest{digest: "sha256:" + strings.Repeat("b", 64), components: local}, nil)
 	if CodeOf(err) != CodeDigestMismatch || !strings.Contains(err.Error(), "rule_pack:h, ...") || strings.Contains(err.Error(), "rule_pack:i") {
 		t.Fatalf("bounded refusal = %v", err)
 	}
 }
+
+var errStandardDigest = errors.New("standard-layout digest failed")
