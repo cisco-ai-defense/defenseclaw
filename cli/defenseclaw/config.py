@@ -489,7 +489,7 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
         return value
     if value is None:
         return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return value != 0
     if isinstance(value, str):
         token = value.strip().lower()
@@ -3330,6 +3330,52 @@ class RoutingConfig:
 
 
 @dataclass
+class FleetConfig:
+    """Edge Connector fleet management configuration.
+
+    Mirrors internal/config.FleetConfig. Secret fields hold the NAME of the
+    environment variable (the _env pattern), not the secret itself.
+    """
+
+    enabled: bool = False
+    api_token_env: str = "DCLAW_FLEET_API_TOKEN"
+    tenant_tokens_env: str = ""
+    mqtt_broker_url: str = ""
+    mqtt_user_env: str = "DCLAW_MQTT_USER"
+    mqtt_pass_env: str = "DCLAW_MQTT_PASS"
+    mqtt_require_tls: bool = False
+    ota_key_env: str = "DCLAW_OTA_HMAC_KEY"
+    emergency_key_env: str = "DCLAW_EMERGENCY_KEY"
+    device_key_env: str = "DCLAW_DEVICE_KEY"
+    auto_register: bool = False
+    allow_key_over_http: bool = False
+    trust_proxy_headers: bool = False
+    verdict_cache_size: int = 4096
+    policy_compiler_path: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        if self.enabled:
+            d["enabled"] = True
+        for fld in (
+            "api_token_env", "tenant_tokens_env", "mqtt_broker_url",
+            "mqtt_user_env", "mqtt_pass_env", "ota_key_env",
+            "emergency_key_env", "device_key_env", "policy_compiler_path",
+        ):
+            v = getattr(self, fld)
+            if v:
+                d[fld] = v
+        for fld in ("mqtt_require_tls", "auto_register", "allow_key_over_http",
+                     "trust_proxy_headers"):
+            v = getattr(self, fld)
+            if v:
+                d[fld] = v
+        if self.verdict_cache_size and self.verdict_cache_size != 4096:
+            d["verdict_cache_size"] = self.verdict_cache_size
+        return d
+
+
+@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -3787,6 +3833,7 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     # enterprise.openshell as loaded. Load only: Python never writes the
@@ -4638,7 +4685,7 @@ def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
         return items or _V8_MISSING
     if value is None or value == "":
         return _V8_MISSING
-    is_zero = isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    is_zero = isinstance(value, int | float) and not isinstance(value, bool) and value == 0
     if drop_false and (value is False or is_zero):
         return _V8_MISSING
     return value
@@ -5901,7 +5948,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     private_upstreams_raw = raw.get("allow_private_upstreams", [])
     private_upstreams = (
         [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
-        if isinstance(private_upstreams_raw, (list, tuple))
+        if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
     return GuardrailConfig(
@@ -5979,7 +6026,7 @@ def _merge_guardrail_connectors(
 
 
 def _string_list(raw: Any) -> list[str]:
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list | tuple):
         return []
     return [str(item) for item in raw if str(item).strip()]
 
@@ -6013,7 +6060,7 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
 
 def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssignment]:
     """Parse the ordered ``guardrail.profile_assignments`` list."""
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list | tuple):
         return []
     out: list[GuardrailProfileAssignment] = []
     for entry in raw:
@@ -6328,7 +6375,7 @@ def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
 
 def _mcp_analyzers_text(raw: Any) -> str:
     """The v8 comma-separated analyzers string; a v9 list is joined."""
-    if isinstance(raw, (list, tuple)):
+    if isinstance(raw, list | tuple):
         return ",".join(str(item) for item in raw)
     return str(raw) if raw is not None else ""
 
@@ -7109,6 +7156,7 @@ def load(
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        fleet=_merge_fleet(raw.get("fleet")),
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
@@ -7394,6 +7442,30 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+    )
+
+
+def _merge_fleet(raw: dict[str, Any] | None) -> FleetConfig:
+    """Build a :class:`FleetConfig` from the YAML ``fleet:`` block."""
+    if not isinstance(raw, dict):
+        return FleetConfig()
+    defaults = FleetConfig()
+    return FleetConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        api_token_env=str(raw.get("api_token_env", defaults.api_token_env) or defaults.api_token_env),
+        tenant_tokens_env=str(raw.get("tenant_tokens_env", "") or ""),
+        mqtt_broker_url=str(raw.get("mqtt_broker_url", "") or ""),
+        mqtt_user_env=str(raw.get("mqtt_user_env", defaults.mqtt_user_env) or defaults.mqtt_user_env),
+        mqtt_pass_env=str(raw.get("mqtt_pass_env", defaults.mqtt_pass_env) or defaults.mqtt_pass_env),
+        mqtt_require_tls=_coerce_bool(raw.get("mqtt_require_tls", False)),
+        ota_key_env=str(raw.get("ota_key_env", defaults.ota_key_env) or defaults.ota_key_env),
+        emergency_key_env=str(raw.get("emergency_key_env", defaults.emergency_key_env) or defaults.emergency_key_env),
+        device_key_env=str(raw.get("device_key_env", defaults.device_key_env) or defaults.device_key_env),
+        auto_register=_coerce_bool(raw.get("auto_register", False)),
+        allow_key_over_http=_coerce_bool(raw.get("allow_key_over_http", False)),
+        trust_proxy_headers=_coerce_bool(raw.get("trust_proxy_headers", False)),
+        verdict_cache_size=_as_int(raw.get("verdict_cache_size", 4096), 4096),
+        policy_compiler_path=str(raw.get("policy_compiler_path", "") or ""),
     )
 
 

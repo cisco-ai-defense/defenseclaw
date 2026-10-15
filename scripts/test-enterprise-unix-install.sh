@@ -666,6 +666,10 @@ else
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
 fi
 
+if [ -e "$install_root/lib/defenseclaw/policy_compiler.py" ]; then
+    die "Fleet-off package install unexpectedly activated the optional policy compiler"
+fi
+
 # ---- converge ----------------------------------------------------------------
 # The apply trigger runs ensure after the admin config lands; on a slow runner it can
 # still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.

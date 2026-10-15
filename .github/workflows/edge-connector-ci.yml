@@ -1,0 +1,143 @@
+name: Edge Connector CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'edge-connector/**'
+      - 'internal/fleet/**'
+      - 'internal/gateway/**'
+      - 'internal/config/**'
+      - 'internal/enterpriseunix/**'
+      - '.goreleaser.yaml'
+      - 'scripts/build-release-assets.sh'
+      - 'scripts/install.sh'
+      - 'scripts/install.ps1'
+      - '.github/workflows/edge-connector-ci.yml'
+  pull_request:
+    paths:
+      - 'edge-connector/**'
+      - 'internal/fleet/**'
+      - 'internal/gateway/**'
+      - 'internal/config/**'
+      - 'internal/enterpriseunix/**'
+      - '.goreleaser.yaml'
+      - 'scripts/build-release-assets.sh'
+      - 'scripts/install.sh'
+      - 'scripts/install.ps1'
+      - '.github/workflows/edge-connector-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build-c-engine:
+    name: Build C Engine (STANDARD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - name: Configure (STANDARD profile, dev mode for tests)
+        run: cmake -B build -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=ON
+        working-directory: edge-connector
+      - name: Build
+        run: cmake --build build
+        working-directory: edge-connector
+      - name: Run CTests
+        run: ctest --test-dir build --output-on-failure
+        working-directory: edge-connector
+
+  build-c-production:
+    name: Build C Engine (production TLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: Mbed-TLS/mbedtls
+          ref: e185d7fd85499c8ce5ca2a54f5cf8fe7dbe3f8df # mbedtls-3.6.5
+          path: .deps/mbedtls
+          submodules: recursive
+          persist-credentials: false
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - name: Build mbedTLS 3.6.5
+        run: |
+          cmake -S .deps/mbedtls -B .deps/mbedtls-build \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/mbedtls" \
+            -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=ON
+          cmake --build .deps/mbedtls-build --parallel 2
+          cmake --install .deps/mbedtls-build
+      - name: Configure production engine
+        run: |
+          sudo install -d -m 0755 /var/lib/defenseclaw
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /var/lib/defenseclaw/ctest
+          cmake -S edge-connector -B edge-connector/build-production \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/mbedtls" \
+            -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF \
+            -DDCLAW_ALLOW_HMAC_OTA=ON \
+            -DDCLAW_TEST_FLASH_DIR=/var/lib/defenseclaw/ctest
+      - name: Build and test production engine
+        env:
+          LD_LIBRARY_PATH: ${{ runner.temp }}/mbedtls/lib
+        run: |
+          cmake --build edge-connector/build-production --parallel 2
+          ctest --test-dir edge-connector/build-production --output-on-failure
+          ldd edge-connector/build-production/edge-connector | tee "$RUNNER_TEMP/production-ldd.txt"
+          grep -q 'libmbedtls' "$RUNNER_TEMP/production-ldd.txt"
+          ! grep -q 'not found' "$RUNNER_TEMP/production-ldd.txt"
+
+  go-fleet-tests:
+    name: Go Fleet Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Run fleet tests with race detector
+        run: go test ./internal/fleet/... -count=1 -race -timeout 15m
+      - name: Run gateway and configuration tests
+        run: |
+          set -euo pipefail
+          test_log="$(mktemp)"
+          trap 'rm -f "$test_log"' EXIT
+          set +e
+          # This Edge/Fleet job checks the integration tests for this feature.
+          # The main Go Gateway and remaining-package shards run the full suites.
+          go test ./internal/gateway/... ./internal/config/... ./internal/enterpriseunix/... \
+            -count=1 -timeout 15m -run 'Fleet|Compiler' 2>&1 | tee "$test_log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            # Expose only bounded test identifiers in annotations. Assertion
+            # output remains in the ordinary step log.
+            mapfile -t failed_tests < <(
+              awk '/^--- FAIL: / && $3 ~ /^[A-Za-z0-9_\/]+$/ { print $3 }' "$test_log" |
+                sort -u | head -n 20
+            )
+            if (( ${#failed_tests[@]} == 0 )); then
+              echo "::error title=Fleet gateway/config tests failed::No named failing test was reported"
+            else
+              for failed_test in "${failed_tests[@]}"; do
+                echo "::error title=Fleet gateway/config tests failed::$failed_test"
+              done
+            fi
+          fi
+          exit "$test_status"

@@ -1,0 +1,382 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manager
+
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+type blockedHeartbeatStore struct {
+	mu            sync.Mutex
+	devices       map[uint64]Device
+	blockSave     bool
+	saveEntered   chan struct{}
+	releaseSave   chan struct{}
+	deleteEntered chan struct{}
+	once          sync.Once
+}
+
+func (s *blockedHeartbeatStore) SaveDevice(dev *Device) error {
+	s.mu.Lock()
+	block := s.blockSave
+	s.mu.Unlock()
+	if block {
+		s.once.Do(func() { close(s.saveEntered) })
+		<-s.releaseSave
+	}
+	s.mu.Lock()
+	s.devices[dev.DeviceID] = *dev
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockedHeartbeatStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dev, ok := s.devices[ComposeID(tenantID, fleetID, deviceID)]
+	if !ok {
+		return nil, nil
+	}
+	return &dev, nil
+}
+
+func (s *blockedHeartbeatStore) ListDevices() ([]*Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices := make([]*Device, 0, len(s.devices))
+	for _, dev := range s.devices {
+		copy := dev
+		devices = append(devices, &copy)
+	}
+	return devices, nil
+}
+
+func (s *blockedHeartbeatStore) DeleteDevice(tenantID, fleetID uint16, deviceID uint32) error {
+	return s.DeleteDeviceKeyAndTombstone(tenantID, fleetID, deviceID)
+}
+
+func (s *blockedHeartbeatStore) DeleteDeviceKeyAndTombstone(tenantID, fleetID uint16, deviceID uint32) error {
+	close(s.deleteEntered)
+	s.mu.Lock()
+	delete(s.devices, ComposeID(tenantID, fleetID, deviceID))
+	s.mu.Unlock()
+	return nil
+}
+
+func TestDecommissionWaitsForInFlightHeartbeatPersistence(t *testing.T) {
+	store := &blockedHeartbeatStore{
+		devices:       make(map[uint64]Device),
+		saveEntered:   make(chan struct{}),
+		releaseSave:   make(chan struct{}),
+		deleteEntered: make(chan struct{}),
+	}
+	fm := New(nil)
+	fm.SetStore(store)
+	if _, err := fm.RegisterDevice(1, 1, 42, "sbc", "1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.blockSave = true
+	store.mu.Unlock()
+	heartbeatDone := make(chan bool, 1)
+	go func() {
+		heartbeatDone <- fm.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+			DeviceID: 42, BootCounter: 1, UptimeSec: 100,
+		})
+	}()
+	select {
+	case <-store.saveEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat never reached the backing store")
+	}
+	decommissionDone := make(chan error, 1)
+	go func() {
+		removed, err := fm.DecommissionDeviceAtomically(1, 1, 42)
+		if err == nil && !removed {
+			err = ErrDeviceExists // sentinel for the unexpected false result
+		}
+		decommissionDone <- err
+	}()
+	deletedDuringHeartbeat := false
+	select {
+	case <-store.deleteEntered:
+		deletedDuringHeartbeat = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(store.releaseSave)
+	if !<-heartbeatDone {
+		t.Fatal("heartbeat was unexpectedly rejected")
+	}
+	if err := <-decommissionDone; err != nil {
+		t.Fatal(err)
+	}
+	if deletedDuringHeartbeat {
+		t.Fatal("decommission deleted persistent state during in-flight heartbeat write")
+	}
+	if dev, err := store.LoadDevice(1, 1, 42); err != nil || dev != nil {
+		t.Fatalf("heartbeat resurrected decommissioned device: %v, %v", dev, err)
+	}
+	if _, exists := fm.GetDevice(ComposeID(1, 1, 42)); exists {
+		t.Fatal("decommissioned device remains in memory")
+	}
+}
+
+func TestComposeID(t *testing.T) {
+	id := ComposeID(1, 5, 42)
+	expected := (uint64(1) << 48) | (uint64(5) << 32) | 42
+	if id != expected {
+		t.Fatalf("ComposeID(1, 5, 42) = %x, want %x", id, expected)
+	}
+}
+
+func TestRegisterDevice(t *testing.T) {
+	fm := New(nil)
+	dev, err := fm.RegisterDevice(1, 1, 100, "sbc", "1.0.0", 1, 0xFF)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if dev.Status != StatusOnline {
+		t.Fatalf("new device status = %s, want online", dev.Status)
+	}
+	if dev.PolicyVersion != 1 {
+		t.Fatalf("policy_version = %d, want 1", dev.PolicyVersion)
+	}
+
+	got, ok := fm.GetDevice(ComposeID(1, 1, 100))
+	if !ok {
+		t.Fatal("device not found after register")
+	}
+	if got.HWProfile != "sbc" {
+		t.Fatalf("hw_profile = %s, want sbc", got.HWProfile)
+	}
+}
+
+func TestRegisterDeviceDuplicate(t *testing.T) {
+	fm := New(nil)
+	_, err := fm.RegisterDevice(1, 1, 100, "sbc", "1.0.0", 1, 0xFF)
+	if err != nil {
+		t.Fatalf("unexpected error on first register: %v", err)
+	}
+
+	// Second registration of same device should return ErrDeviceExists
+	dev, err := fm.RegisterDevice(1, 1, 100, "sbc", "2.0.0", 2, 0xFF)
+	if err != ErrDeviceExists {
+		t.Fatalf("expected ErrDeviceExists, got %v", err)
+	}
+	// Safe fields should be updated
+	if dev.FWVersion != "2.0.0" {
+		t.Fatalf("fw_version = %s, want 2.0.0", dev.FWVersion)
+	}
+}
+
+func TestProcessHeartbeatUpdatesState(t *testing.T) {
+	fm := New(nil)
+	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	hb := &Heartbeat{
+		DeviceID:      42,
+		UptimeSec:     100,
+		PolicyVersion: 3,
+		DeniedCount:   10,
+		AllowedCount:  500,
+		Flags:         0,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb)
+
+	dev, _ := fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.PolicyVersion != 3 {
+		t.Fatalf("policy_version = %d, want 3", dev.PolicyVersion)
+	}
+	if dev.DeniedTotal != 10 {
+		t.Fatalf("denied_total = %d, want 10", dev.DeniedTotal)
+	}
+	if dev.Status != StatusOnline {
+		t.Fatalf("status = %s, want online", dev.Status)
+	}
+
+	// Second heartbeat: counters are cumulative, so delta should be applied.
+	hb2 := &Heartbeat{
+		DeviceID:      42,
+		UptimeSec:     200,
+		PolicyVersion: 3,
+		DeniedCount:   15,
+		AllowedCount:  600,
+		Flags:         0,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb2)
+
+	dev, _ = fm.GetDevice(ComposeID(1, 1, 42))
+	// Delta: 15 - 10 = 5, total = 10 + 5 = 15
+	if dev.DeniedTotal != 15 {
+		t.Fatalf("denied_total after second hb = %d, want 15", dev.DeniedTotal)
+	}
+	// Delta: 600 - 500 = 100, total = 500 + 100 = 600
+	if dev.AllowedTotal != 600 {
+		t.Fatalf("allowed_total after second hb = %d, want 600", dev.AllowedTotal)
+	}
+}
+
+func TestCanaryRollbackAlertOnlyOnNewTransition(t *testing.T) {
+	fm := New(nil)
+	if _, err := fm.RegisterDevice(1, 1, 42, "sbc", "1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	rollbacks := 0
+	fm.SetAlertHandler(func(alert Alert) {
+		if alert.Type == AlertCanaryRollback {
+			rollbacks++
+		}
+	})
+	for i, flags := range []uint8{0, 0x08, 0x08, 0x08, 0, 0x08} {
+		if !fm.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+			DeviceID: 42, UptimeSec: uint32(100 + i), BootCounter: 1,
+			PolicyVersion: 2, Flags: flags,
+		}) {
+			t.Fatalf("heartbeat %d rejected", i)
+		}
+	}
+	if rollbacks != 2 {
+		t.Fatalf("rollback alerts=%d, want one per 0-to-1 transition", rollbacks)
+	}
+	// Reloading persisted device flags must not emit another alert for a
+	// rollback that happened before the gateway restarted.
+	dev, ok := fm.GetDevice(ComposeID(1, 1, 42))
+	if !ok || dev.Flags&0x08 == 0 {
+		t.Fatal("rollback flag did not persist in device state")
+	}
+	fm2 := New(nil)
+	fm2.devices[ComposeID(1, 1, 42)] = &dev
+	restartAlerts := 0
+	fm2.SetAlertHandler(func(alert Alert) {
+		if alert.Type == AlertCanaryRollback {
+			restartAlerts++
+		}
+	})
+	if !fm2.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+		DeviceID: 42, UptimeSec: 106, BootCounter: 1, PolicyVersion: 2, Flags: 0x08,
+	}) || restartAlerts != 0 {
+		t.Fatalf("persistent rollback generated %d repeat alerts after gateway reload", restartAlerts)
+	}
+}
+
+func TestHeartbeatReplayRejected(t *testing.T) {
+	fm := New(nil)
+	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	// First heartbeat at uptime 100
+	hb1 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    100,
+		DeniedCount:  5,
+		AllowedCount: 50,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb1)
+
+	// Replay with same uptime — should be dropped
+	hb2 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    100,
+		DeniedCount:  999,
+		AllowedCount: 999,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb2)
+
+	dev, _ := fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.DeniedTotal != 5 {
+		t.Fatalf("denied_total = %d, want 5 (replay should be rejected)", dev.DeniedTotal)
+	}
+
+	hb3 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    50,
+		DeniedCount:  999,
+		AllowedCount: 999,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb3)
+
+	dev, _ = fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.DeniedTotal != 5+999 {
+		t.Fatalf("denied_total = %d, want %d (reboot should accept heartbeat with reset counters)", dev.DeniedTotal, 5+999)
+	}
+	if dev.LastUptime != 50 {
+		t.Fatalf("last_uptime = %d, want 50 (should track post-reboot uptime)", dev.LastUptime)
+	}
+}
+
+func TestTamperDetectAlert(t *testing.T) {
+	var fired Alert
+	handler := func(a Alert) { fired = a }
+
+	fm := New(handler)
+	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	hb := &Heartbeat{
+		DeviceID:  42,
+		UptimeSec: 10,
+		Flags:     0x04, // TAMPER_DETECT
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb)
+
+	if fired.Type != AlertTamperDetect {
+		t.Fatalf("expected tamper alert, got %v", fired.Type)
+	}
+
+	dev, _ := fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.Status != StatusLockdown {
+		t.Fatalf("status = %s, want lockdown", dev.Status)
+	}
+}
+
+func TestSEDegradedAlert(t *testing.T) {
+	var fired Alert
+	handler := func(a Alert) { fired = a }
+
+	fm := New(handler)
+	fm.RegisterDevice(1, 1, 43, "sbc", "1.0.0", 1, 0xFF)
+
+	hb := &Heartbeat{
+		DeviceID:  43,
+		UptimeSec: 10,
+		Flags:     0x80, // SE_DEGRADED
+	}
+	fm.ProcessHeartbeat(1, 1, 43, hb)
+
+	if fired.Type != AlertSEDegraded {
+		t.Fatalf("expected SE degraded alert, got %v", fired.Type)
+	}
+}
+
+func TestFleetHealth(t *testing.T) {
+	fm := New(nil)
+	fm.RegisterDevice(1, 1, 1, "sbc", "1.0.0", 5, 0xFF)
+	fm.RegisterDevice(1, 1, 2, "sbc", "1.0.0", 5, 0xFF)
+	fm.RegisterDevice(1, 1, 3, "mcu", "1.0.0", 4, 0x0F)
+
+	health := fm.GetFleetHealth()
+	if health.TotalDevices != 3 {
+		t.Fatalf("total = %d, want 3", health.TotalDevices)
+	}
+	if health.Online != 3 {
+		t.Fatalf("online = %d, want 3", health.Online)
+	}
+	if health.PolicyVersions[5] != 2 {
+		t.Fatalf("version 5 count = %d, want 2", health.PolicyVersions[5])
+	}
+}

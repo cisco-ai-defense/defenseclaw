@@ -43,6 +43,7 @@ const (
 	CategoryCredential      = "credential"
 	CategoryDiscovery       = "discovery"
 	CategorySplunkBridge    = "splunk_bridge"
+	CategoryFleet           = "fleet"
 	CategoryTestFixture     = "test_fixture"
 )
 
@@ -58,6 +59,7 @@ var AllowedCategories = map[string]struct{}{
 	CategoryDiscovery:       {},
 	CategorySplunkBridge:    {},
 	CategoryTestFixture:     {},
+	CategoryFleet:           {},
 }
 
 // SecurityImpact levels.
@@ -307,10 +309,10 @@ func validateEntry(idx int, e EnvVar) error {
 	if e.Name == "" {
 		return fmt.Errorf("registry.json: entry #%d has empty name", idx)
 	}
-	// Names must start with DEFENSECLAW_ (or be the legacy
-	// MIGRATION_DEFENSECLAW_HOME).
-	if !strings.HasPrefix(e.Name, "DEFENSECLAW_") && e.Name != "MIGRATION_DEFENSECLAW_HOME" {
-		return fmt.Errorf("registry.json: entry %q: name must start with DEFENSECLAW_", e.Name)
+	if !strings.HasPrefix(e.Name, "DEFENSECLAW_") &&
+		!strings.HasPrefix(e.Name, "DCLAW_") &&
+		e.Name != "MIGRATION_DEFENSECLAW_HOME" {
+		return fmt.Errorf("registry.json: entry %q: name must start with DEFENSECLAW_ or DCLAW_", e.Name)
 	}
 	if _, ok := AllowedCategories[e.Category]; !ok {
 		return fmt.Errorf("registry.json: entry %q: unknown category %q", e.Name, e.Category)

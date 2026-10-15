@@ -129,6 +129,7 @@ func configDigest(cfg *config.Config, scope digestScope) (string, error) {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
 	dropTetragonDefaults(doc)
+	dropFleetDefaults(doc)
 	doc = materializeConfigDefaults(cfg, doc)
 	canonical, err := json.Marshal(canonicalConfigValue("", doc, scope))
 	if err != nil {
@@ -173,6 +174,18 @@ func dropTetragonDefaults(doc any) {
 	}
 	if len(enterprise) == 0 {
 		delete(root, "enterprise")
+	}
+}
+
+func dropFleetDefaults(doc any) {
+	root, _ := doc.(map[string]any)
+	fleet, ok := root["fleet"].(map[string]any)
+	if !ok {
+		return
+	}
+	enabled, _ := fleet["enabled"].(bool)
+	if !enabled {
+		delete(root, "fleet")
 	}
 }
 

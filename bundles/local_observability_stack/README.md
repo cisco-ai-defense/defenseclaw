@@ -63,6 +63,12 @@ access-control boundary when exposed beyond loopback.
   receivers, processors, and exporters.
 - [`prometheus/prometheus.yml`](prometheus/prometheus.yml): scrape and rule
   loading.
+- [`prometheus/examples/fleet.yml`](prometheus/examples/fleet.yml): optional
+  authenticated Fleet scrape. Copy it into `prometheus/scrape.d/` only after
+  enabling Fleet, making the gateway API reachable from Prometheus, and
+  applying [`docker-compose.fleet.yml`](docker-compose.fleet.yml) with a
+  private admin bearer-token file. Tenant-scoped tokens cannot access global
+  Fleet metrics. The default stack has no Fleet target.
 - [`prometheus/rules/recording.yml`](prometheus/rules/recording.yml): dashboard
   recording rules.
 - [`prometheus/rules/alerts.yml`](prometheus/rules/alerts.yml): alerts whose
@@ -71,7 +77,7 @@ access-control boundary when exposed beyond loopback.
   local storage configuration.
 - [`grafana/provisioning/`](grafana/provisioning/): datasource and dashboard
   provisioning.
-- [`grafana/dashboards/`](grafana/dashboards/): the sixteen shipped dashboard
+- [`grafana/dashboards/`](grafana/dashboards/): the nineteen shipped dashboard
   JSON definitions.
 - [`bin/openclaw-observability-bridge`](bin/openclaw-observability-bridge):
   low-level bundle controller; [`run.sh`](run.sh) is its compatibility shim.

@@ -24,6 +24,7 @@ param(
     [string]$ACPBinary,
     [string]$HookBinary,
     [string]$SensorHelperBinary,
+    [string]$PolicyCompiler,
     [string]$CLIBinary,
     [string]$NativeCleanupBinary,
     [string]$Config,
@@ -3545,6 +3546,7 @@ try {
         ACPBinary = $ACPBinary
         HookBinary = $HookBinary
         SensorHelperBinary = $SensorHelperBinary
+        PolicyCompiler = $PolicyCompiler
         CLIBinary = $CLIBinary
         NativeCleanupBinary = $NativeCleanupBinary
         Config = $Config

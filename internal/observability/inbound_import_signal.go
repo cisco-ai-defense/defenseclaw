@@ -303,9 +303,9 @@ type InboundImportedTraceInput struct {
 }
 
 // inboundImportedTraceDescriptor is the import-only generated descriptor view
-// after the sealed dynamic resource contract has materialized safe custom keys.
-// It cannot change family identity or ordinary fields; it only carries
-// descriptors returned by mergeFamilyTraceResource.
+// after the sealed dynamic resource contract has materialized safe custom keys
+// and compatibility aliases. It cannot change family identity or ordinary
+// fields; it only carries descriptors returned by mergeFamilyTraceResource.
 type inboundImportedTraceDescriptor struct{ contract familyTraceContract }
 
 func (descriptor inboundImportedTraceDescriptor) familyDescriptorContract() familyDescriptorContract {

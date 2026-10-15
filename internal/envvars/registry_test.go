@@ -63,8 +63,8 @@ func TestEntries_AllHaveDefenseClawPrefix(t *testing.T) {
 		if e.Name == "MIGRATION_DEFENSECLAW_HOME" {
 			continue
 		}
-		if !strings.HasPrefix(e.Name, "DEFENSECLAW_") {
-			t.Errorf("entry %q: name must start with DEFENSECLAW_", e.Name)
+		if !strings.HasPrefix(e.Name, "DEFENSECLAW_") && !strings.HasPrefix(e.Name, "DCLAW_") {
+			t.Errorf("entry %q: name must start with DEFENSECLAW_ or DCLAW_", e.Name)
 		}
 	}
 }

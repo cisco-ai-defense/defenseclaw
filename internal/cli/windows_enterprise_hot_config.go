@@ -207,6 +207,22 @@ func windowsEnterpriseHotConfigApply(
 	if err != nil || config.NeedsMigrationV9(previous) {
 		return false, nil
 	}
+	previousFleet, previousFleetErr := config.FleetEnabledFromSource(layout.ConfigPath, previous)
+	nextFleet, nextFleetErr := config.FleetEnabledFromSource(opts.configPath, next)
+	if previousFleetErr != nil || nextFleetErr != nil {
+		return false, nil
+	}
+	if previousFleet != nextFleet {
+		// Fleet enablement changes the installed compiler as well as the
+		// gateway config. A signed bundle has no compiler payload, and even
+		// restarting the gateway cannot perform that lifecycle transaction.
+		// Setup falls through to its full Upgrade; a bundle fails before any
+		// config write so the administrator can apply it through Setup.
+		if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
+			result.AddError("fleet_setup_required", "Fleet enablement changes require signed standalone Setup to install or remove the compiler; installed config and services were not changed")
+		}
+		return false, nil
+	}
 	changed, err := configwrite.ChangedPaths(previous, next)
 	if err != nil || bytes.Equal(previous, next) {
 		return false, nil

@@ -1,0 +1,16 @@
+# Build directories
+build*/
+build-*/
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+
+# Binaries
+edge-connector
+!src/
+
+# Compiled policy blobs
+*.bin

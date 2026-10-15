@@ -211,6 +211,9 @@
     },
     "update": {
       "$ref": "#/$defs/update"
+    },
+    "fleet": {
+      "$ref": "#/$defs/fleet"
     }
   },
   "$defs": {
@@ -5829,6 +5832,74 @@
               }
             }
           }
+        }
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "api_token_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "tenant_tokens_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "mqtt_broker_url": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "mqtt_user_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "mqtt_pass_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "mqtt_require_tls": {
+          "type": "boolean",
+          "default": false
+        },
+        "ota_key_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "emergency_key_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "device_key_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        },
+        "auto_register": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_key_over_http": {
+          "type": "boolean",
+          "default": false
+        },
+        "trust_proxy_headers": {
+          "type": "boolean",
+          "default": false
+        },
+        "verdict_cache_size": {
+          "type": "integer",
+          "minimum": 128,
+          "maximum": 1000000,
+          "default": 4096
+        },
+        "policy_compiler_path": {
+          "type": "string",
+          "maxLength": 4096
         }
       }
     }

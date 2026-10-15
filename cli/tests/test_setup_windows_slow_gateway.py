@@ -130,3 +130,6 @@ def test_restart_accepts_a_gateway_left_starting_that_answers_later(tmp_path):
 
     assert restart(True) == (True, 1)
     assert restart(False) == (False, 1)
+    # A real setup caller consumes this one-shot result. Leave no stale
+    # failure state for unrelated tests or a later setup in this process.
+    assert cmd_setup._take_gateway_left_starting() is True

@@ -354,6 +354,28 @@ function Write-Diagnostics {
         ForEach-Object { Write-Host "  event $($_.Id): $(($_.Message -split "`n")[0])" }
 }
 
+# Public GitHub job annotations omit the step log on unauthenticated views.
+# Emit only structured codes, never config paths or free-form diagnostics.
+function Write-FailureAnnotation {
+    param($Failure, $Run)
+    $exceptionType = [string]$Failure.Exception.GetType().Name
+    if ($exceptionType -cnotmatch '^[A-Za-z0-9_.-]{1,64}$') { $exceptionType = 'unknown' }
+    $parts = @("step=$script:StepNumber", "exception=$exceptionType")
+    if ($null -ne $Run -and $Run.Result -and (Test-Path -LiteralPath $Run.Result -PathType Leaf)) {
+        try {
+            $result = Get-Content -LiteralPath $Run.Result -Raw | ConvertFrom-Json
+            $exitCode = [string]$result.exit_code
+            if ($exitCode -cmatch '^-?[0-9]{1,10}$') { $parts += "exit_code=$exitCode" }
+            foreach ($item in @($result.errors | Select-Object -First 2)) {
+                $code = [string]$item.code
+                if ($code -cmatch '^[A-Za-z0-9_.-]{1,64}$') { $parts += "error_code=$code" }
+            }
+        }
+        catch { $parts += 'result_unreadable' }
+    }
+    Write-Host "::error title=Enterprise Windows Setup::$($parts -join '; ')"
+}
+
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'run this lane with PowerShell 7 (pwsh)' }
 if (-not $IsWindows) { throw 'this lane runs on Windows only' }
 if (-not (Test-Elevated)) { throw 'run this lane from an elevated administrator session on a disposable host' }
@@ -378,6 +400,7 @@ $ResultsRoot = (Resolve-Path -LiteralPath $ResultsRoot).Path
 # an administrator-only folder under ProgramData.
 $stage = Join-Path $env:ProgramData ("DefenseClawInstallLane-" + [guid]::NewGuid().ToString('N').Substring(0, 12))
 $config = Join-Path $stage 'config.yaml'
+$run = $null
 
 # What every installed step reports. Codex's requirements verify
 # (effective_lock 'enforce') and Claude Code has an enabled target. Windows
@@ -548,6 +571,8 @@ try {
 }
 catch {
     # A refused preflight changed nothing; the host's own logs are not ours.
+    $failure = $_
+    Write-FailureAnnotation -Failure $failure -Run $run
     if ($script:SetupRan) { Write-Diagnostics }
     Write-Host "install lane FAILED (Windows Setup, results in $ResultsRoot)"
     throw

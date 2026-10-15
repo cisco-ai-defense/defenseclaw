@@ -275,16 +275,33 @@ $failures = & $module {
         # the sensor helper still present; Secure Client keeps its allowlist.
         $retired = 'C:\\RetiredRoot'
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
-        $standaloneFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
-        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe')) {
+        $standaloneAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
+        $standaloneFiles = @($standaloneAllowlist.files)
+        $standaloneOnly = @(
+            'bin\defenseclaw-acp.exe',
+            'bin\defenseclaw-sensor-helper.exe',
+            'lib\defenseclaw\policy_compiler.py'
+        ) | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $retired $_)) }
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'lib\defenseclaw\policy_compiler.py')) {
             if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $standaloneFiles) {
                 $failures.Add("standalone retired-tree allowlist lacks $leaf")
             }
         }
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-        $secureClientFiles = @((Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired).files)
-        if ($secureClientFiles.Count -ne ($standaloneFiles.Count - 2)) {
+        $secureClientAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
+        $secureClientFiles = @($secureClientAllowlist.files)
+        $expectedSecureClientFiles = @($standaloneFiles | Where-Object { $_ -notin $standaloneOnly } | Sort-Object)
+        if ($secureClientFiles.Count -ne $expectedSecureClientFiles.Count -or
+            (@($secureClientFiles | Sort-Object) -join '|') -cne ($expectedSecureClientFiles -join '|')) {
             $failures.Add('Secure Client retired-tree allowlist changed')
+        }
+        $standaloneOnlyDirectories = @(
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib\defenseclaw')).TrimEnd('\')
+        )
+        if (@($standaloneOnlyDirectories | Where-Object { $_ -notin $standaloneAllowlist.directories }).Count -gt 0 -or
+            @($standaloneOnlyDirectories | Where-Object { $_ -in $secureClientAllowlist.directories }).Count -gt 0) {
+            $failures.Add('retired compiler directories are not standalone-only')
         }
 
         # Wiring: the deferred managed-hook rollback restart starts the helper

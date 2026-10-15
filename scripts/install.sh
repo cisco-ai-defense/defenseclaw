@@ -439,6 +439,11 @@ trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 is_gateway_process() {
     # After a crash the PID in gateway.pid can belong to an unrelated process.
+    # A stopped daemon can remain a zombie until its parent reaps it. kill -0
+    # and ps -o comm both still succeed for zombies, but they cannot serve.
+    local state
+    state="$(ps -p "$1" -o stat= 2>/dev/null)" || return 1
+    [[ ! "${state}" =~ ^[[:space:]]*Z ]] || return 1
     ps -p "$1" -o comm= 2>/dev/null | grep -q defenseclaw
 }
 
@@ -1430,10 +1435,41 @@ private_bin_dir() {
     return 0
 }
 
+fleet_config_enabled() {
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}"
+    [[ -f "${config}" ]] || return 1
+    "${VENV}/bin/python" -I - "${config}" <<'PY'
+import sys
+import yaml
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    enabled = isinstance(config, dict) and isinstance(config.get("fleet"), dict) and config["fleet"].get("enabled") is True
+except (OSError, yaml.YAMLError):
+    enabled = False
+sys.exit(0 if enabled else 1)
+PY
+}
+
 swap_in() {
     local binary link target
     info "Installing DefenseClaw ${VERSION}"
     make_venv "${VENV}" || return 1
+    # Fleet is opt-in. A core install never requires or installs its compiler;
+    # an enabled fleet gets the matching version inside the rollback snapshot.
+    if fleet_config_enabled; then
+        [[ -f "${STAGING}/bin/edge-connector/tools/policy_compiler.py" ]] || {
+            warn "Fleet is enabled but this release has no Fleet policy compiler"
+            return 1
+        }
+        mkdir -p "${INSTALLER_DIR}" || return 1
+        cp "${STAGING}/bin/edge-connector/tools/policy_compiler.py" \
+            "${INSTALLER_DIR}/.policy_compiler.py.new" \
+            && chmod 600 "${INSTALLER_DIR}/.policy_compiler.py.new" \
+            && mv -f "${INSTALLER_DIR}/.policy_compiler.py.new" \
+                "${INSTALLER_DIR}/policy_compiler.py" || return 1
+    fi
     mkdir -p "${BIN_DIR}" || return 1
     private_bin_dir
     for binary in ${MANAGED_BINARIES}; do

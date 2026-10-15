@@ -578,8 +578,8 @@ sync-openclaw-extension: _checkout-write-preflight
 	    $(PLUGIN_DIR)/dist/ "$$embed_dir/dist/"; \
 	else \
 	  mkdir -p "$$embed_dir/dist"; \
-	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print0 \
-	    | while IFS= read -r -d '' f; do \
+	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print \
+	    | while IFS= read -r f; do \
 	        mkdir -p "../../../$$embed_dir/dist/$$(dirname "$$f")"; \
 	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
 	      done); \
@@ -1358,6 +1358,12 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
+	@rm -rf cli/defenseclaw/_data/edge-connector
+	@mkdir -p cli/defenseclaw/_data/edge-connector
+	cp edge-connector/CMakeLists.txt cli/defenseclaw/_data/edge-connector/
+	cp -R edge-connector/src edge-connector/include edge-connector/generated \
+		edge-connector/third_party edge-connector/tools edge-connector/policies \
+		edge-connector/packaging cli/defenseclaw/_data/edge-connector/
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm

@@ -89,7 +89,7 @@ def test_packaged_telemetry_resource_matches_generated_source(
     document = json.loads(packaged)
     marker = document["x-defenseclaw-generated"]
     assert marker["artifact"] == source_name
-    assert marker["registry_version"] == 2
+    assert marker["registry_version"] == 3
 
 
 def test_staged_telemetry_inventory_is_exact() -> None:
@@ -196,7 +196,9 @@ from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatib
 raw = v7_exporter_selection_bytes()
 selection = load_packaged_v7_compatibility_selection()
 audit_selector = next(selector for selector in selection.exporter_selectors('audit_sink', 'logs') if selector.actions)
-assert len(audit_selector.actions) == 220
+assert len(audit_selector.actions) == 234
+assert 'fleet.device.credential_provision_authorized' in audit_selector.actions
+assert 'fleet.device.decommission_authorized' in audit_selector.actions
 assert 'setup-redaction-policy' in audit_selector.actions
 print(json.dumps({{
     'v7-exporter-selection': hashlib.sha256(raw).hexdigest(),

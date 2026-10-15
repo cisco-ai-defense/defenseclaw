@@ -29,8 +29,89 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// Keep the running Setup image open without write/delete sharing while the
+// trailer is decoded and its Authenticode signature is verified. The Python
+// compiler cannot be individually Authenticode signed; the signed outer
+// image and its digest manifest authenticate those bytes as one unit.
+func loadTrustedEnterprisePayload() (enterprisePayload, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("resolve enterprise Setup image: %w", err)
+	}
+	encoded, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	handle, err := windows.CreateFile(encoded, windows.GENERIC_READ, windows.FILE_SHARE_READ,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("lock enterprise Setup image: %w", err)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return enterprisePayload{}, errors.New("wrap enterprise Setup image handle")
+	}
+	defer file.Close()
+	var identity windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &identity); err != nil {
+		return enterprisePayload{}, err
+	}
+	if identity.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		return enterprisePayload{}, errors.New("enterprise Setup image is not a regular non-reparse file")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	result, err := setuppayload.Read(file, info.Size())
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("read enterprise Setup image trailer: %w", err)
+	}
+	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	if payload.Standalone() && !payload.Manifest.Unsigned {
+		if err := verifySignedEnterpriseSetup(file, path); err != nil {
+			return enterprisePayload{}, fmt.Errorf("signed standalone Setup image is not trusted: %w", err)
+		}
+	}
+	return payload, nil
+}
+
+func verifySignedEnterpriseSetup(file *os.File, path string) error {
+	encoded, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	fileInfo := &windows.WinTrustFileInfo{
+		Size: uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})), FilePath: encoded,
+		File: windows.Handle(file.Fd()),
+	}
+	data := &windows.WinTrustData{
+		Size: uint32(unsafe.Sizeof(windows.WinTrustData{})), UIChoice: windows.WTD_UI_NONE,
+		RevocationChecks: windows.WTD_REVOKE_NONE, UnionChoice: windows.WTD_CHOICE_FILE,
+		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(fileInfo),
+		StateAction:                     windows.WTD_STATEACTION_VERIFY,
+		ProvFlags:                       windows.WTD_CACHE_ONLY_URL_RETRIEVAL | windows.WTD_REVOCATION_CHECK_NONE | windows.WTD_DISABLE_MD2_MD4,
+		UIContext:                       windows.WTD_UICONTEXT_INSTALL,
+	}
+	verifyErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
+	data.StateAction = windows.WTD_STATEACTION_CLOSE
+	closeErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
+	if verifyErr != nil {
+		return fmt.Errorf("WinVerifyTrust rejected outer Setup signature: %w", verifyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close WinVerifyTrust state: %w", closeErr)
+	}
+	return nil
+}
 
 const (
 	enterpriseSetupStagePrefix = "DefenseClaw-Enterprise-Setup-"
@@ -590,6 +671,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
 		appendValue("--sensor-helper-binary", filepath.Join(stageRoot, "defenseclaw-sensor-helper.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
+		if opts.Standalone {
+			appendValue("--policy-compiler", filepath.Join(stageRoot, "policy_compiler.py"))
+		}
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)
 		// QA shorthand pair. Forwarded only when both are non-empty

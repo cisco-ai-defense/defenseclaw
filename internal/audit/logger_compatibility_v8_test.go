@@ -67,6 +67,31 @@ func TestCompatibilityAuditV8OwnsGenericActionCorrelationAndMetric(t *testing.T)
 	}
 }
 
+func TestFleetCredentialPreCommitActionsPersistAsAuthorizationOnly(t *testing.T) {
+	for _, action := range []Action{
+		ActionFleetDeviceCredentialProvisionAuthorized,
+		ActionFleetDeviceDecommissionAuthorized,
+	} {
+		t.Run(string(action), func(t *testing.T) {
+			logger := newTestLogger(t)
+			runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+			logger.SetRuntimeV8Emitter(runtime)
+			if err := logger.LogAction(string(action), "281474976776234", "pre-commit authorization"); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := logger.store.ListEvents(10)
+			if err != nil || len(rows) != 1 || rows[0].Action != string(action) {
+				t.Fatalf("stored events=%+v err=%v", rows, err)
+			}
+			_, records := runtime.snapshot()
+			if len(records) != 1 || records[0].Bucket() != observability.BucketComplianceActivity ||
+				records[0].EventName() != observability.EventName(action) {
+				t.Fatalf("authorization telemetry=%+v", records)
+			}
+		})
+	}
+}
+
 // TestCompatibilityAuditV8CarriesSandboxIdentity pins the sandbox
 // attribution of generic audit rows (codex notify, inspect, ...): the
 // envelope's sandbox id and name reach the event and its v8 record body,

@@ -49,6 +49,8 @@ try {
                 $install = [IO.Path]::Combine($Root, $Name, 'DefenseClaw')
                 $bin = [IO.Path]::Combine($install, 'bin')
                 $libexec = [IO.Path]::Combine($install, 'libexec')
+                $compilerLib = [IO.Path]::Combine($install, 'lib')
+                $compilerDir = [IO.Path]::Combine($compilerLib, 'defenseclaw')
                 [void][IO.Directory]::CreateDirectory($bin)
                 [void][IO.Directory]::CreateDirectory($libexec)
                 $gateway = [IO.Path]::Combine($bin, 'defenseclaw-gateway.exe')
@@ -57,6 +59,9 @@ try {
                     InstallRoot = $install
                     BinDirectory = $bin
                     LibexecDirectory = $libexec
+                    CompilerLibDirectory = $compilerLib
+                    CompilerDirectory = $compilerDir
+                    CompilerPath = [IO.Path]::Combine($compilerDir, 'policy_compiler.py')
                     ManagedIPCDirectory = [IO.Path]::Combine($install, 'ipc')
                     GatewayPath = $gateway
                     BrokerPath = ''
@@ -173,6 +178,28 @@ try {
             Test-Accepted 'tree without the plugin' $layout
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
+
+            # The Fleet compiler is the only Python source admitted under
+            # the protected lib tree. A sibling or link still aborts uninstall.
+            $layout = New-TestLayout 'compiler'
+            [void][IO.Directory]::CreateDirectory($layout.CompilerDirectory)
+            [IO.File]::WriteAllText($layout.CompilerPath, 'print("compiler")')
+            Test-Accepted 'standalone tree with Fleet compiler' $layout
+            $unexpectedCompiler = [IO.Path]::Combine($layout.CompilerDirectory, 'other.py')
+            [IO.File]::WriteAllText($unexpectedCompiler, 'print("unexpected")')
+            Test-Refused 'unexpected compiler sibling' {
+                Assert-DefenseClawManagedInstallTree -Layout $layout
+            } 'unexpected file'
+            [IO.File]::Delete($unexpectedCompiler)
+            $linkedCompiler = New-TestLayout 'linked-compiler'
+            [void][IO.Directory]::CreateDirectory($linkedCompiler.CompilerDirectory)
+            $compilerTarget = [IO.Path]::Combine($Root, 'outside-compiler.py')
+            [IO.File]::WriteAllText($compilerTarget, 'print("outside")')
+            if (New-TestLink $linkedCompiler.CompilerPath $compilerTarget) {
+                Test-Refused 'compiler reparse point' {
+                    Assert-DefenseClawManagedInstallTree -Layout $linkedCompiler
+                } 'reparse point'
+            }
 
             # Anything other than the exact leaves stays refused, and a
             # refused removal deletes nothing.

@@ -36,6 +36,12 @@ const (
 var requiredBinaries = []string{binGateway, binHook, binSensorHelper}
 var optionalBinaries = []string{binACP}
 
+// compilerInstallPath is shared by the package and payload channels so the
+// gateway finds its compiler under its own installation prefix.
+func compilerInstallPath(l managed.StandaloneLayout) string {
+	return filepath.Join(l.InstallRoot, "lib", "defenseclaw", compilerFileName)
+}
+
 // desiredDir is a directory the lifecycle owns or must be able to rely on.
 type desiredDir struct {
 	Path  string

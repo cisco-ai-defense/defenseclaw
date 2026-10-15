@@ -164,6 +164,16 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
 # negative-lookahead avoids matching things like
 # DEFENSECLAW_SOMETHING_${var} which are template fragments.
 _ENV_TOKEN = re.compile(r"\b(MIGRATION_)?DEFENSECLAW_[A-Z][A-Z0-9_]*\b")
+_FLEET_ENV_READ = re.compile(
+    r'''(?:getenv|Getenv|os\.environ\.get|os\.getenv)\(\s*["'](DCLAW_[A-Z0-9_]+)["']'''
+)
+_FLEET_SOURCE_PATHS = (
+    "edge-connector/src",
+    "internal/fleet",
+    "internal/gateway/sidecar.go",
+    "cli/defenseclaw/commands/cmd_edge_install.py",
+    "cli/defenseclaw/commands/cmd_edge_connector_cli.py",
+)
 
 # Tokens that look like env vars but are actually CONSTANT NAMES or
 # HEADER NAMES in code (the registry uses the runtime env-var names, not
@@ -196,6 +206,8 @@ _NON_ENVVAR_TOKENS = frozenset(
         # (internal/cli/windows_enterprise_service_test.go and
         # cli/tests/test_windows_enterprise_service_contract.py), so no
         # token-level exclusion is required.
+        # C header include guard in edge-connector/include/defenseclaw.h.
+        "DEFENSECLAW_H",
     }
 )
 
@@ -331,6 +343,28 @@ class CodebaseCoverageTests(unittest.TestCase):
             "than reading them.",
         ]
         self.fail("\n".join(msg_lines))
+
+    def test_fleet_runtime_env_reads_are_registered(self) -> None:
+        """Catalog direct Fleet/Edge C, Go and CLI environment readers."""
+        refs: dict[str, set[str]] = {}
+        for relative in _FLEET_SOURCE_PATHS:
+            root = _REPO_ROOT / relative
+            files = root.rglob("*") if root.is_dir() else [root]
+            for path in files:
+                if path.suffix not in {".c", ".go", ".py"}:
+                    continue
+                for name in _FLEET_ENV_READ.findall(path.read_text(errors="replace")):
+                    refs.setdefault(name, set()).add(path.relative_to(_REPO_ROOT).as_posix())
+        self.assertEqual(
+            sorted(refs.keys() - self.declared), [],
+            "Add direct Fleet/Edge DCLAW_* readers to the registry",
+        )
+        for entry in self.registry.by_category("fleet"):
+            for consumer in entry.consumers:
+                path = _REPO_ROOT / consumer.location
+                self.assertTrue(path.is_file(), f"{entry.name}: missing consumer {path}")
+                self.assertIn(entry.name, path.read_text(errors="replace"),
+                              f"{entry.name}: stale consumer {path}")
 
     def test_managed_ignored_opt_outs_are_read_through_lookup(self) -> None:
         """A variable a managed device ignores (security opt-outs, debug,

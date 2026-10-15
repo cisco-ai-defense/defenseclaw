@@ -1,0 +1,10 @@
+# Optional authenticated Fleet metrics scrape. Apply only after following the
+# published Edge Connector Grafana setup; the default stack remains unchanged.
+services:
+  prometheus:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    group_add:
+      - "${FLEET_METRICS_TOKEN_GID:?Set FLEET_METRICS_TOKEN_GID to the token file group ID}"
+    volumes:
+      - "${FLEET_METRICS_TOKEN_FILE:?Set FLEET_METRICS_TOKEN_FILE to an absolute path}:/run/secrets/fleet_metrics_token:ro"

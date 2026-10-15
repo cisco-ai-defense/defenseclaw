@@ -1688,7 +1688,11 @@ def test_ctrl_c_before_the_swap_says_so_and_drops_what_was_staged(tmp_path: Path
         "set -euo pipefail\nerr() { echo \"x $*\" >&2; }\n"
         f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" BIN_DIR="{tmp_path}/bin" UV_DIR_NEW=1 UV_INSTALLED=""\n'
         f'LOG="{tmp_path}/install.log"\n{tee}\n{cancel}\n'
-        'mkdir -p "${STAGING}/bin" "${DEFENSECLAW_HOME}/.uv/cache"\nkill -INT 0\nsleep 5\n',
+        'mkdir -p "${STAGING}/bin" "${DEFENSECLAW_HOME}/.uv/cache"\n'
+        # Process substitution starts tee asynchronously. Wait until tee has
+        # opened the log so SIGINT exercises the install trap, not tee startup.
+        'for attempt in {1..200}; do [[ -e "${LOG}" ]] && break; sleep 0.01; done\n'
+        '[[ -e "${LOG}" ]] || exit 98\nkill -INT 0\nsleep 5\n',
         encoding="utf-8",
     )
     # A shell started with SIGINT ignored (a background job) cannot trap it.

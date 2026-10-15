@@ -2,165 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.io/schemas/audit-event.json",
   "title": "DefenseClaw Audit Event",
-  "description": "Row persisted in audit_events (SQLite) and forwarded to Splunk/HTTP sinks. v7 adds provenance (SchemaVersion=7) + three-tier agent identity. Consumers MUST treat every field marked optional as nullable — not every action emits every field.",
+  "description": "Row persisted in audit_events (SQLite) and forwarded to Splunk/HTTP sinks. v7 adds provenance (SchemaVersion=7) + three-tier agent identity. Consumers MUST treat every field marked optional as nullable \u2014 not every action emits every field.",
   "type": "object",
-  "required": ["id", "timestamp", "action", "actor", "schema_version"],
+  "required": [
+    "id",
+    "timestamp",
+    "action",
+    "actor",
+    "schema_version"
+  ],
   "properties": {
-    "id": { "type": "string", "format": "uuid" },
-    "timestamp": { "type": "string", "format": "date-time" },
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
     "action": {
       "type": "string",
-      "description": "Curated action — see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept the static enum, the prefixed pattern, or the v8 record action: rows written by the v8 runtime (event_name set, not legacy.audit.*) keep the action of their telemetry family, for example telemetry-destination, circuit_breaker_open or config.change.applied.",
+      "description": "Curated action \u2014 see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept the static enum, the prefixed pattern, or the v8 record action: rows written by the v8 runtime (event_name set, not legacy.audit.*) keep the action of their telemetry family, for example telemetry-destination, circuit_breaker_open or config.change.applied.",
       "anyOf": [
         {
           "enum": [
-            "init",
-            "stop",
-            "ready",
-            "scan",
-            "scan-start",
-            "rescan",
-            "rescan-start",
-            "block",
-            "allow",
-            "warn",
-            "quarantine",
-            "restore",
-            "disable",
-            "enable",
-            "deploy",
-            "drift",
-            "network-egress-blocked",
-            "network-egress-allowed",
-            "guardrail-block",
-            "guardrail-warn",
-            "guardrail-allow",
-            "approval-request",
-            "approval-granted",
-            "approval-denied",
-            "tool-call",
-            "tool-result",
-            "config-update",
-            "config.bundle.receipt",
-            "policy-update",
-            "policy-reload",
-            "action",
             "acknowledge-alerts",
-            "dismiss-alerts",
-            "webhook-delivered",
-            "webhook-failed",
-            "sink-failure",
-            "sink-restored",
+            "action",
             "alert",
-            "otel.ingest.logs",
-            "otel.ingest.metrics",
-            "otel.ingest.traces",
-            "otel.ingest.malformed",
-            "connector-hook",
-            "connector-hook-synthetic",
-            "asset-policy",
-            "connector-hook-tampered",
-            "connector-hook-repaired",
-            "enterprise-exempt-user",
-            "codex.notify",
-            "codex.notify.agent-turn-complete",
-            "codex.notify.malformed",
-            "sandbox-lifecycle",
-            "sandbox-workspace",
-            "sandbox-egress",
-            "sandbox-approval",
-            "sandbox-policy",
-            "sandbox-health",
-            "sandbox-finding",
-            "sandbox-activity",
-            "sandbox-process",
-            "sandbox.policy.rematched",
-            "sandbox.policy.foreign_rule",
-            "sandbox.managed",
-            "sidecar-start",
-            "sidecar-stop",
-            "sidecar-connected",
-            "sidecar-disconnected",
-            "sidecar-watcher-verdict",
-            "sidecar-watcher-disable",
-            "sidecar-watcher-disable-plugin",
-            "sidecar-watcher-block-mcp",
-            "bootstrap",
-            "watch-start",
-            "watch-stop",
-            "watcher-block",
-            "install-detected",
-            "install-rejected",
-            "install-allowed",
-            "install-allowed-skip-enforce",
-            "install-clean",
-            "install-warning",
-            "install-scan-error",
-            "install-enforced",
-            "install-blocked",
-            "install-dep",
-            "gateway-ready",
-            "gateway-session-message",
-            "gateway-session-prompt-alert",
-            "gateway-session-error",
-            "gateway-chat-error",
-            "gateway-agent-start",
-            "gateway-agent-end",
-            "gateway-agent-error",
-            "gateway-tool-call",
-            "gateway-tool-call-blocked",
-            "gateway-tool-call-flagged",
-            "gateway-tool-call-judge-flagged",
-            "gateway-tool-result",
-            "gateway-approval-requested",
-            "gateway-approval-denied",
-            "gateway-approval-granted",
-            "gateway-approval-pending",
-            "gateway-multi-turn-injection",
-            "gateway-down",
-            "gateway-recovered",
-            "gateway-degraded",
-            "tool-result-pii-alert",
-            "gateway.judge_bodies.ready",
-            "gateway.judge_bodies.fallback",
-            "gateway.judge_bodies.close_skipped",
-            "gateway.judge_bodies.close_error",
-            "gateway.judge_store.drain_timeout",
-            "guardrail-start",
-            "guardrail-healthy",
-            "guardrail-verdict",
-            "guardrail-inspection",
-            "guardrail-opa-inspection",
-            "guardrail-opa-verdict",
-            "guardrail-config-reload",
-            "guardrail-degraded",
-            "guardrail-launder",
-            "guardrail-notify-inject",
-            "guardrail-tool-call-parse-error",
-            "guardrail-tool-call-inspect",
-            "guardrail-disable",
-            "guardrail-enable",
-            "guardrail-fail-mode",
-            "guardrail-hilt",
-            "guardrail-block-message",
-            "llm-judge-response",
-            "inspect-tool-confirm",
-            "inspect-tool-block",
-            "inspect-tool-alert",
-            "inspect-tool-allow",
-            "inspect-request-confirm",
-            "inspect-request-block",
-            "inspect-request-alert",
-            "inspect-request-allow",
-            "inspect-response-confirm",
-            "inspect-response-block",
-            "inspect-response-alert",
-            "inspect-response-allow",
-            "inspect-tool-response-confirm",
-            "inspect-tool-response-block",
-            "inspect-tool-response-alert",
-            "inspect-tool-response-allow",
-            "inspect-reveal",
+            "allow",
+            "allow-mcp",
             "api-auth-failure",
             "api-config-patch",
             "api-enforce-allow",
@@ -174,66 +44,222 @@
             "api-skill-enable",
             "api-skill-fetch",
             "api-skill-scan",
-            "sink-flush-error",
-            "setup-skill-scanner",
-            "setup-mcp-scanner",
-            "setup-gateway",
-            "setup-guardrail",
-            "setup-hook-connector",
-            "setup-connector-mode",
-            "setup-redaction-toggle",
-            "setup-redaction-policy",
-            "setup-notifications-toggle",
-            "setup-notifications-set",
-            "setup-splunk",
-            "setup-observability",
-            "setup-local-observability",
-            "setup-webhook",
-            "setup-routing",
+            "approval-denied",
+            "approval-granted",
+            "approval-request",
+            "asset-policy",
+            "block",
+            "block-mcp",
+            "bootstrap",
+            "codex.notify",
+            "codex.notify.agent-turn-complete",
+            "codex.notify.malformed",
+            "config-update",
+            "config.bundle.receipt",
+            "connector-hook",
+            "connector-hook-repaired",
+            "connector-hook-synthetic",
+            "connector-hook-tampered",
+            "deploy",
+            "disable",
+            "dismiss-alert",
+            "dismiss-alerts",
             "doctor",
-            "upgrade",
+            "drift",
+            "enable",
+            "enterprise-exempt-user",
+            "fleet.alert",
+            "fleet.device.command",
+            "fleet.device.credential_provision_authorized",
+            "fleet.device.decommission",
+            "fleet.device.decommission_authorized",
+            "fleet.device.heartbeat",
+            "fleet.device.key_rotated",
+            "fleet.device.offline",
+            "fleet.device.registered",
+            "fleet.device.reregistered",
+            "fleet.policy.emergency",
+            "fleet.policy.push",
+            "fleet.threat_intel.push",
+            "fleet.token.rotated",
+            "gateway-agent-end",
+            "gateway-agent-error",
+            "gateway-agent-start",
+            "gateway-approval-denied",
+            "gateway-approval-granted",
+            "gateway-approval-pending",
+            "gateway-approval-requested",
+            "gateway-chat-error",
+            "gateway-degraded",
+            "gateway-down",
+            "gateway-multi-turn-injection",
+            "gateway-ready",
+            "gateway-recovered",
+            "gateway-session-error",
+            "gateway-session-message",
+            "gateway-session-prompt-alert",
+            "gateway-tool-call",
+            "gateway-tool-call-blocked",
+            "gateway-tool-call-flagged",
+            "gateway-tool-call-judge-flagged",
+            "gateway-tool-result",
+            "gateway.judge_bodies.close_error",
+            "gateway.judge_bodies.close_skipped",
+            "gateway.judge_bodies.fallback",
+            "gateway.judge_bodies.ready",
+            "gateway.judge_store.drain_timeout",
+            "guardrail-allow",
+            "guardrail-block",
+            "guardrail-block-message",
+            "guardrail-config-reload",
+            "guardrail-degraded",
+            "guardrail-disable",
+            "guardrail-enable",
+            "guardrail-fail-mode",
+            "guardrail-healthy",
+            "guardrail-hilt",
+            "guardrail-inspection",
+            "guardrail-launder",
+            "guardrail-notify-inject",
+            "guardrail-opa-inspection",
+            "guardrail-opa-verdict",
+            "guardrail-start",
+            "guardrail-tool-call-inspect",
+            "guardrail-tool-call-parse-error",
+            "guardrail-verdict",
+            "guardrail-warn",
+            "init",
             "init-gateway",
             "init-guardrail",
             "init-notifications-toggle",
             "init-sidecar",
-            "policy-create",
+            "inspect-request-alert",
+            "inspect-request-allow",
+            "inspect-request-block",
+            "inspect-request-confirm",
+            "inspect-response-alert",
+            "inspect-response-allow",
+            "inspect-response-block",
+            "inspect-response-confirm",
+            "inspect-reveal",
+            "inspect-tool-alert",
+            "inspect-tool-allow",
+            "inspect-tool-block",
+            "inspect-tool-confirm",
+            "inspect-tool-response-alert",
+            "inspect-tool-response-allow",
+            "inspect-tool-response-block",
+            "inspect-tool-response-confirm",
+            "install-allowed",
+            "install-allowed-skip-enforce",
+            "install-blocked",
+            "install-clean",
+            "install-dep",
+            "install-detected",
+            "install-enforced",
+            "install-rejected",
+            "install-scan-error",
+            "install-warning",
+            "llm-judge-response",
+            "mcp-set",
+            "mcp-set-blocked",
+            "mcp-unblock",
+            "mcp-unset",
+            "network-egress-allowed",
+            "network-egress-blocked",
+            "otel.ingest.logs",
+            "otel.ingest.malformed",
+            "otel.ingest.metrics",
+            "otel.ingest.traces",
+            "plugin-allow",
+            "plugin-block",
+            "plugin-disable",
+            "plugin-enable",
+            "plugin-install",
+            "plugin-quarantine",
+            "plugin-remove",
+            "plugin-restore",
+            "plugin-unblock",
             "policy-activate",
+            "policy-create",
             "policy-delete",
+            "policy-reload",
+            "policy-update",
+            "quarantine",
+            "ready",
             "registry-add",
-            "registry-edit",
-            "registry-remove",
-            "registry-sync",
-            "registry-require",
             "registry-approve",
+            "registry-edit",
             "registry-reject",
+            "registry-remove",
+            "registry-require",
+            "registry-sync",
+            "rescan",
+            "rescan-start",
+            "restore",
+            "sandbox-activity",
+            "sandbox-approval",
+            "sandbox-egress",
+            "sandbox-finding",
+            "sandbox-health",
+            "sandbox-lifecycle",
+            "sandbox-policy",
+            "sandbox-process",
+            "sandbox-workspace",
+            "sandbox.managed",
+            "sandbox.policy.foreign_rule",
+            "sandbox.policy.rematched",
+            "scan",
             "scan-enforced",
             "scan-finding",
-            "dismiss-alert",
-            "skill-block",
-            "skill-unblock",
+            "scan-start",
+            "setup-connector-mode",
+            "setup-gateway",
+            "setup-guardrail",
+            "setup-hook-connector",
+            "setup-local-observability",
+            "setup-mcp-scanner",
+            "setup-notifications-set",
+            "setup-notifications-toggle",
+            "setup-observability",
+            "setup-redaction-policy",
+            "setup-redaction-toggle",
+            "setup-routing",
+            "setup-skill-scanner",
+            "setup-splunk",
+            "setup-webhook",
+            "sidecar-connected",
+            "sidecar-disconnected",
+            "sidecar-start",
+            "sidecar-stop",
+            "sidecar-watcher-block-mcp",
+            "sidecar-watcher-disable",
+            "sidecar-watcher-disable-plugin",
+            "sidecar-watcher-verdict",
+            "sink-failure",
+            "sink-flush-error",
+            "sink-restored",
             "skill-allow",
+            "skill-block",
             "skill-disable",
             "skill-enable",
             "skill-quarantine",
             "skill-restore",
-            "plugin-install",
-            "plugin-remove",
-            "plugin-block",
-            "plugin-allow",
-            "plugin-disable",
-            "plugin-enable",
-            "plugin-quarantine",
-            "plugin-restore",
-            "plugin-unblock",
-            "block-mcp",
-            "allow-mcp",
-            "mcp-unblock",
-            "mcp-set",
-            "mcp-set-blocked",
-            "mcp-unset",
-            "tool-block",
+            "skill-unblock",
+            "stop",
             "tool-allow",
-            "tool-unblock"
+            "tool-block",
+            "tool-call",
+            "tool-result",
+            "tool-result-pii-alert",
+            "tool-unblock",
+            "upgrade",
+            "warn",
+            "watch-start",
+            "watch-stop",
+            "watcher-block",
+            "webhook-delivered",
+            "webhook-failed"
           ]
         },
         {
@@ -249,86 +275,201 @@
       ]
     },
     "target": {
-      "type": ["string", "null"],
-      "description": "Target of the action (skill id, mcp server id, policy id, etc). Nullable — lifecycle events like 'init' and 'ready' have no target."
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Target of the action (skill id, mcp server id, policy id, etc). Nullable \u2014 lifecycle events like 'init' and 'ready' have no target."
     },
     "actor": {
       "type": "string",
       "description": "Who caused the action. Format: '<subsystem>:<principal>' (e.g. 'cli:alice', 'scanner:skill', 'system')."
     },
     "details": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Redacted legacy free-form detail blob. Treat as opaque. Connector-hook rows keep a transitional details_json= token here for older parsers; new consumers should prefer structured."
     },
     "structured": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Optional first-class machine-readable payload stored in audit_events.structured_json and forwarded to audit sinks. Connector-hook rows use hook-audit-envelope.json (schema=defenseclaw.hook.v1)."
     },
     "severity": {
       "type": "string",
-      "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "WARN"],
+      "enum": [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "INFO",
+        "WARN"
+      ],
       "default": "INFO"
     },
-
-    "run_id":     { "type": ["string", "null"] },
-    "session_id": { "type": ["string", "null"] },
-    "trace_id":   { "type": ["string", "null"] },
-    "span_id":    { "type": ["string", "null"] },
-    "parent_span_id": { "type": ["string", "null"], "description": "W3C trace-context parent span id, propagated via the traceparent header by the OTel SDK. Optional — present when the event was emitted inside an active span with a parent." },
-    "trace_flags":    { "type": ["string", "null"], "description": "W3C trace-context trace-flags (e.g. '01' sampled), propagated via the traceparent header. Optional." },
-
-    "agent_id":            { "type": ["string", "null"], "description": "Stable agent identity across process restarts." },
-    "agent_name":          { "type": ["string", "null"], "description": "Human-readable agent name." },
-    "agent_instance_id":   { "type": ["string", "null"], "description": "Per-session agent identity — rotates on new session." },
-    "sidecar_instance_id": { "type": ["string", "null"], "description": "Per-process sidecar identity — rotates on every defenseclaw gateway start." },
-
-    "destination_app": { "type": ["string", "null"], "description": "Tool provider / downstream app. Optional." },
-    "tool_name":       { "type": ["string", "null"] },
-    "tool_id":         { "type": ["string", "null"] },
-    "policy_id":       { "type": ["string", "null"] },
-
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trace_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "span_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parent_span_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "W3C trace-context parent span id, propagated via the traceparent header by the OTel SDK. Optional \u2014 present when the event was emitted inside an active span with a parent."
+    },
+    "trace_flags": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "W3C trace-context trace-flags (e.g. '01' sampled), propagated via the traceparent header. Optional."
+    },
+    "agent_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Stable agent identity across process restarts."
+    },
+    "agent_name": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Human-readable agent name."
+    },
+    "agent_instance_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Per-session agent identity \u2014 rotates on new session."
+    },
+    "sidecar_instance_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Per-process sidecar identity \u2014 rotates on every defenseclaw gateway start."
+    },
+    "destination_app": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Tool provider / downstream app. Optional."
+    },
+    "tool_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tool_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "policy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "schema_version": {
       "type": "integer",
       "minimum": 7,
       "description": "Audit row format version. v7 = provenance + three-tier agent identity. Downstream MUST reject unrecognized versions."
     },
     "content_hash": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "SHA-256 hex of the canonical JSON serialization of the emitting config / policy at emit time. Optional; present when the event describes a configurable surface."
     },
     "generation": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 0,
       "description": "Monotonic counter incremented on every Save of the governing config/policy. Optional."
     },
     "binary_version": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Semver of the DefenseClaw binary that produced the event."
     },
-
     "connector": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Multi-connector identity: the hook connector that produced this event (codex, claudecode, antigravity, ...). Recovered from request context; null for proxy / non-connector events."
     },
     "step_idx": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 1,
       "description": "1-indexed per-turn counter within a session_id. A turn is one prompt-response cycle; all hook events emitted during the same turn share one step_idx. Null/absent when the event is not turn-anchored."
     },
     "enforced": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "description": "True when the guardrail decision was actually enforced (blocked), as opposed to an observe-mode would-block. Null/absent for non-enforcement events."
     },
     "rule_pack_dir": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Effective rule-pack directory the verdict was evaluated against (per-connector override or global). Null when no rule pack applies."
     },
     "sandbox_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "OpenShell sandbox id of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
     },
     "sandbox_name": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "OpenShell sandbox name of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
     }
   },

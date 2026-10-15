@@ -117,3 +117,15 @@ Unicode Character Database 13.0 `DerivedAge.txt` file.
 Copyright © 1991-2020 Unicode, Inc. All rights reserved.
 Distributed under the Unicode Data Files and Software License; see
 https://www.unicode.org/copyright.html.
+
+THIRD-PARTY MQTT LIBRARIES
+
+This product includes:
+
+  - Eclipse Paho MQTT Go Client (github.com/eclipse/paho.golang v0.23.0)
+    Copyright (c) 2023 Contributors to the Eclipse Foundation
+    Licensed under the Eclipse Public License 2.0 and the Eclipse Distribution License 1.0
+
+  - Eclipse Paho Embedded C/C++ MQTT Client (edge-connector/third_party/paho-embedded/)
+    Copyright (c) 2014, 2026 IBM Corp., Ian Craggs
+    Licensed under the Eclipse Public License v2.0
