@@ -177,9 +177,12 @@ def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
         ("guardrail:\n  block_at: HIGH\n", (),
          "scanners:\n  x:\n  - - |\n      text\n    - \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
          "base CONFIG= line 5 leaves a quoted value open"),
+        # Only a leading --- is allowed; a second document is refused.
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n---\nclaude_code: {mode: observe}\n",
+         "base CONFIG= line 3 is not a plain top-level key"),
         ("guardrail:\n  block_at: HIGH\n", (),
          "---\n# it's \"fine\nguardrail:\n  block_at: HIGH\nscanners:\n  note: it's a \"plain\" value # 'x\n"
-         "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n\n  more: >-\n    a \"b\n  'q': 'it''s'\n", ""),
+         "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n    it's: 'open\n\n  more: >-\n    a \"b\n  'q': 'it''s'\n", ""),
     ],
 )
 def test_intune_bundle_package_compares_every_pack(
