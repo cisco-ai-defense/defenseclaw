@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -500,6 +501,76 @@ func assertWindowsBundleLockRemoved(t *testing.T, layout managed.StandaloneLayou
 	}
 }
 
+// windowsBundleCandidateAnchors writes TRUSTANCHORS= for a device that
+// already has anchors installed: the same active k1 key with min_version
+// raised to 1, so the bytes differ from the installed file while the
+// version 5 test bundle still verifies against either.
+func windowsBundleCandidateAnchors(t *testing.T, e *bundleCLIEnv) string {
+	t.Helper()
+	installed, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := bytes.Replace(installed, []byte(`"min_version":0`), []byte(`"min_version":1`), 1)
+	if bytes.Equal(candidate, installed) {
+		t.Fatal("candidate anchors equal the installed anchors")
+	}
+	path := filepath.Join(e.dir, "candidate-anchors.json")
+	writeBundleTestFile(t, path, candidate)
+	return path
+}
+
+// readWindowsBundleAnchors returns the bytes at path, or nil when there is
+// no file.
+func readWindowsBundleAnchors(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// assertWindowsBundleInstalledAnchors checks that the installed anchor file
+// holds want byte for byte; want nil means no installed anchor file.
+func assertWindowsBundleInstalledAnchors(t *testing.T, layout managed.StandaloneLayout, want []byte, when string) {
+	t.Helper()
+	got := readWindowsBundleAnchors(t, newWindowsBundleDriver(layout).AnchorsPath)
+	if (got == nil) != (want == nil) || !bytes.Equal(got, want) {
+		t.Fatalf("installed anchors %s: present=%v (%d bytes), want present=%v (%d bytes)",
+			when, got != nil, len(got), want != nil, len(want))
+	}
+}
+
+// assertWindowsBundleAnchorsStaged checks a prepared BUNDLE= TRUSTANCHORS=
+// run against the GAP-0106 contract: the delivered anchors sit in the
+// private stage under the lifecycle directory, the bundle was verified
+// against that stage, Finish will commit it over the installed path, and
+// the installed anchor file still holds installed (nil: no file).
+func assertWindowsBundleAnchorsStaged(t *testing.T, layout managed.StandaloneLayout, run *windowsBundleRun, delivered string, installed []byte) {
+	t.Helper()
+	installedPath := newWindowsBundleDriver(layout).AnchorsPath
+	stage := filepath.Join(layout.LifecycleDir, windowsBundleStagedAnchorsName)
+	if run == nil || run.anchorStage != stage || run.anchorPath != installedPath || run.driver.AnchorsPath != stage {
+		var got [3]string
+		if run != nil {
+			got = [3]string{run.anchorStage, run.anchorPath, run.driver.AnchorsPath}
+		}
+		t.Fatalf("anchors not staged for Finish: stage/commit/verify paths %q, want %q", got, [3]string{stage, installedPath, stage})
+	}
+	want, err := os.ReadFile(delivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged := readWindowsBundleAnchors(t, stage); !bytes.Equal(staged, want) {
+		t.Fatalf("staged anchors (%d bytes) differ from TRUSTANCHORS= (%d bytes)", len(staged), len(want))
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, installed, "while the run is prepared")
+}
+
 func TestWindowsBundleStandardUserRefusedBeforeManagedLookup(t *testing.T) {
 	newBundleCLIEnv(t)
 	savedElevated, savedManaged := windowsEnterpriseIsElevated, bundleManagedDevice
@@ -528,6 +599,12 @@ func TestWindowsBundleStandardUserRefusedBeforeManagedLookup(t *testing.T) {
 	}
 }
 
+// An interrupted BUNDLE= TRUSTANCHORS= run leaves device trust as it was:
+// it only staged the anchors (GAP-0106), so a first delivery still has no
+// installed anchor file. The MDM re-runs the same command line; the retry
+// stages the delivered anchors again, also over a stage that a killed run
+// left behind, and records the interrupted receipt as failed instead of
+// reusing it.
 func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
@@ -543,17 +620,34 @@ func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
 		t.Fatalf("first prepare ended: %v", err)
 	}
 	cleanupPreparedWindowsBundle(t, first)
+	assertWindowsBundleAnchorsStaged(t, layout, first.bundle, e.anchors, nil)
 	firstID := first.bundle.prepared.Receipt.ReceiptID
+	stage := first.bundle.anchorStage
 	first.bundle.release() // The lifecycle process stopped after staging.
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after the interrupted run")
+
+	// A killed run never reaches release and leaves its stage. Make that
+	// stage one whose only key is revoked: the retry must replace it with
+	// the delivered anchors, not verify the bundle against it.
+	delivered, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := bytes.Replace(delivered, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1)
+	if bytes.Equal(stale, delivered) {
+		t.Fatal("stale stage equals the delivered anchors")
+	}
+	writeBundleTestFile(t, stage, stale)
 
 	cmd, _ = windowsBundleCommand()
-	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed,
+	retry := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", retry); done || err != nil {
 		t.Fatalf("retry prepare ended: %v", err)
 	}
 	cleanupPreparedWindowsBundle(t, retry)
 	defer retry.bundle.release()
+	assertWindowsBundleAnchorsStaged(t, layout, retry.bundle, e.anchors, nil)
 	if retry.bundle.prepared.Receipt.ReceiptID == firstID {
 		t.Fatalf("retry reused the interrupted receipt %s", firstID)
 	}
@@ -572,6 +666,12 @@ func TestWindowsBundleRetryKeepsInterruptedReceipt(t *testing.T) {
 	}
 }
 
+// A run killed after the ensure transaction installed the bundle config,
+// but before Finish confirmed the bundle, never committed its TRUSTANCHORS=
+// (GAP-0106): the device keeps the anchor file it had, byte for byte. The
+// retry, verified against those installed anchors, receives the bundle into
+// a fresh version directory and leaves the installed unconfirmed version
+// alone.
 func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
@@ -580,13 +680,19 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatalf("sign exit %d: %s", code, out)
 	}
 	layout := stubWindowsBundleHost(t)
+	if err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+		t.Fatal(err)
+	}
+	anchorsBefore := readWindowsBundleAnchors(t, newWindowsBundleDriver(layout).AnchorsPath)
+	candidate := windowsBundleCandidateAnchors(t, e)
 	cmd, _ := windowsBundleCommand()
-	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+	first := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: candidate,
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	if done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", first); done || err != nil {
 		t.Fatalf("first prepare ended: %v", err)
 	}
 	cleanupPreparedWindowsBundle(t, first)
+	assertWindowsBundleAnchorsStaged(t, layout, first.bundle, candidate, anchorsBefore)
 	rendered := first.bundle.prepared.Config
 	versionDir := first.bundle.driver.Store.VersionDir(first.bundle.prepared.Receipt.Dir)
 	manifest := filepath.Join(versionDir, enterprisebundle.ManifestName)
@@ -601,6 +707,7 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.bundle.release() // Installed, then killed before confirmation.
+	assertWindowsBundleInstalledAnchors(t, layout, anchorsBefore, "after the run was killed before confirmation")
 	windowsBundlePolicy = func(context.Context) *enterprisebundle.GatewayPolicy { return nil }
 
 	cmd, _ = windowsBundleCommand()
@@ -620,16 +727,19 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 	if err != nil || !bytes.Equal(after, before) {
 		t.Fatalf("installed version changed: %v", err)
 	}
+	assertWindowsBundleInstalledAnchors(t, layout, anchorsBefore, "after the retry was prepared")
 	// The retry owns the store lock until its ensure finishes.
 	retry.bundle.release()
 	assertWindowsBundleLockRemoved(t, layout)
 }
 
-// Setup /ensure BUNDLE= on an installed device installs the trust anchors,
-// hands the rendered bundle config to the ensure transaction, and confirms
-// the bundle once the gateway enforces it; then the device is in bundle
-// mode, so a CONFIG= that is not the bundle config is refused, and BUNDLE=
-// with CONFIG= is invalid arguments (1639).
+// Setup /ensure BUNDLE= TRUSTANCHORS= on an installed device verifies the
+// bundle against the delivered anchors from a private stage, hands the
+// rendered bundle config to the ensure transaction, and confirms the bundle
+// once the gateway enforces it. Only that successful Finish commits the
+// anchors to <state root>\etc\trust, once, as a complete file (GAP-0106).
+// Then the device is in bundle mode, so a CONFIG= that is not the bundle
+// config is refused, and BUNDLE= with CONFIG= is invalid arguments (1639).
 func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
@@ -639,6 +749,24 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	}
 	layout := stubWindowsBundleHost(t)
 	ctx := context.Background()
+	installedAnchors := newWindowsBundleDriver(layout).AnchorsPath
+	delivered, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every write of the installed anchor file is sealed through this seam
+	// right after its rename into place: it counts the commits and checks
+	// that each one published the complete delivered file.
+	var anchorCommits int
+	windowsBundlePublishPrivateFile = func(path string) error {
+		if path == installedAnchors {
+			anchorCommits++
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, delivered) {
+				t.Errorf("anchor commit %d published other bytes than TRUSTANCHORS=: read %v", anchorCommits, err)
+			}
+		}
+		return nil
+	}
 
 	cmd, out := windowsBundleCommand()
 	both := &windowsEnterpriseLifecycleOptions{bundlePath: signed, configPath: filepath.Join(e.dir, "config.yaml"),
@@ -668,9 +796,8 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if opts.configPath != filepath.Join(layout.LifecycleDir, windowsBundleConfigName) {
 		t.Fatalf("the ensure config is %q", opts.configPath)
 	}
-	if _, err := os.Stat(filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName)); err != nil {
-		t.Fatalf("anchors not installed: %v", err)
-	}
+	assertWindowsBundleAnchorsStaged(t, layout, opts.bundle, e.anchors, nil)
+	stage := opts.bundle.anchorStage
 	// The ensure transaction installs the rendered config.
 	rendered, err := os.ReadFile(opts.configPath)
 	if err != nil {
@@ -692,12 +819,34 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 		attribution.SignerKeyID != opts.bundle.prepared.Receipt.SignerKeyID {
 		t.Fatalf("restart config.change.applied attribution = %+v, ok=%v", attribution, ok)
 	}
+	if anchorCommits != 0 {
+		t.Fatalf("the anchors were committed %d time(s) before Finish", anchorCommits)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, nil, "after the transaction installed the bundle config")
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	expected := opts.bundle.prepared.Receipt.ExpectedDigest
 	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: expected, GatewayReportedDigest: expected, ConfigGeneration: 3, Applied: true}
 	finishWindowsEnterpriseBundle(cmd, opts, result)
 	if len(result.Errors) != 0 || result.Bundle == nil || result.Bundle.State != enterprisebundle.StateConfirmed || result.Bundle.Version != 5 {
 		t.Fatalf("bundle not confirmed: errors %+v bundle %+v", result.Errors, result.Bundle)
+	}
+	if anchorCommits != 1 {
+		t.Fatalf("Finish committed the anchors %d time(s), want once", anchorCommits)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, delivered, "after Finish confirmed the bundle")
+	if _, err := os.Lstat(stage); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("anchor stage left after Finish: %v", err)
+	}
+	trust, err := os.ReadDir(filepath.Dir(installedAnchors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trustNames []string
+	for _, entry := range trust {
+		trustNames = append(trustNames, entry.Name())
+	}
+	if len(trustNames) != 1 || trustNames[0] != enterprisebundle.AnchorsName {
+		t.Fatalf("trust directory after the commit holds %q, want only %s", trustNames, enterprisebundle.AnchorsName)
 	}
 	// A repeated confirmed delivery is a no-op, but still owns the lock
 	// during prepare and finish.
@@ -717,6 +866,10 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	if len(noOp.Errors) != 0 || noOp.NoopReason != "already_applied" {
 		t.Fatalf("already-applied result: %+v", noOp)
 	}
+	if anchorCommits != 1 {
+		t.Fatalf("a repeat delivery without TRUSTANCHORS= rewrote the anchors (%d commits)", anchorCommits)
+	}
+	assertWindowsBundleInstalledAnchors(t, layout, delivered, "after the repeat delivery")
 	assertWindowsBundleLockRemoved(t, layout)
 	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
 	if err != nil {
