@@ -23176,13 +23176,28 @@ function Test-DefenseClawStandaloneIPCSocketLeaf {
     if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
         return $true
     }
-    try {
-        $target = $Item.LinkTarget
+    # A link resolves a target; an AF_UNIX socket file does not. PowerShell 7
+    # reports it as LinkTarget. Windows PowerShell 5.1, which Setup runs, has
+    # no LinkTarget and reports Target and LinkType instead, so reading only
+    # LinkTarget refused every live socket there.
+    $inspected = $false
+    foreach ($name in @('LinkTarget', 'Target', 'LinkType')) {
+        $property = $Item.PSObject.Properties[$name]
+        if ($null -eq $property) {
+            continue
+        }
+        try {
+            $value = $property.Value
+        }
+        catch {
+            return $false
+        }
+        if (-not [string]::IsNullOrEmpty((@($value) -join ''))) {
+            return $false
+        }
+        $inspected = $true
     }
-    catch {
-        return $false
-    }
-    return [string]::IsNullOrEmpty([string]$target)
+    return $inspected
 }
 
 function Remove-DefenseClawStandaloneManagedIPCDirectory {

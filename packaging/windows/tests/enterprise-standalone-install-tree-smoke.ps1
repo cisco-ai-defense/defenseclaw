@@ -374,7 +374,20 @@ try {
                 $socket.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new($sensorSocket))
             }
             else {
-                [IO.File]::WriteAllText($sensorSocket, '')
+                # Windows PowerShell 5.1, which Setup runs, has no AF_UNIX
+                # endpoint. A PowerShell 7 child binds the socket and exits
+                # without closing it, leaving the reparse file a crashed
+                # service leaves; without pwsh a plain file stands in.
+                $pwsh = Microsoft.PowerShell.Core\Get-Command pwsh -ErrorAction SilentlyContinue
+                if ($null -ne $pwsh) {
+                    & $pwsh.Source -NoProfile -NonInteractive -Command (
+                        "`$s=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Unspecified); " +
+                        "`$s.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new('$sensorSocket')); [Environment]::Exit(0)"
+                    )
+                }
+                if (-not [IO.File]::Exists($sensorSocket)) {
+                    [IO.File]::WriteAllText($sensorSocket, '')
+                }
             }
             Test-Accepted 'Secure Client tree with the sensor helper socket' $secureClient
             Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
