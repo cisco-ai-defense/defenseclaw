@@ -43,6 +43,8 @@ from mcp_proxy import (
     _HttpUpstream,
     _StdioUpstream,
     _encode,
+    _handle_stdio_line,
+    _log_non_json_stdio_line,
     _make_error,
 )
 
@@ -441,6 +443,71 @@ class TestErrorHandling:
         assert resp is None
 
 
+@pytest.mark.parametrize("msg,expected_code,expected_id", [
+    (42, -32600, None),
+    ([], -32600, None),
+    ("secret-marker", -32600, None),
+    ({"id": 1, "method": 42}, -32600, 1),
+    ({"id": 2, "method": "tools/call", "params": []}, -32600, 2),
+    ({"id": 3, "method": "tools/call", "params": None}, -32600, 3),
+    ({"id": 4, "method": "tools/call", "params": {"name": "read_sensor", "arguments": []}}, -32602, 4),
+    ({"id": "x" * 129, "method": "ping"}, -32600, None),
+])
+@pytest.mark.asyncio
+async def test_malformed_inbound_json_fails_closed(msg, expected_code, expected_id):
+    proxy = _make_proxy()
+    response = await proxy.handle_message(msg)
+    assert response["error"]["code"] == expected_code
+    assert response["id"] == expected_id
+    proxy._gate.evaluate_tool_call.assert_not_called()
+    proxy._upstream.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stdio_scalar_frames_do_not_stop_next_request_or_notification():
+    proxy = _make_proxy(upstream_response={"jsonrpc": "2.0", "id": 8, "result": {"ok": True}})
+    for raw in (b"42\n", b"[]\n", b'{"id":7,"method":42}\n'):
+        response = json.loads(await _handle_stdio_line(proxy, raw))
+        assert response["error"]["code"] == -32600
+    response = json.loads(await _handle_stdio_line(proxy, b'{"jsonrpc":"2.0","id":8,"method":"ping"}\n'))
+    assert response["result"] == {"ok": True}
+    assert await _handle_stdio_line(proxy, b'{"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n') is None
+    assert proxy._upstream.send.await_count == 2
+
+
+@pytest.mark.parametrize("line", [
+    b"Bearer secret-marker\n",
+    b"\xff\n",
+    b"9" * 5000 + b"\n",
+    b"[" * 20000 + b"]" * 20000 + b"\n",
+])
+@pytest.mark.asyncio
+async def test_stdio_parse_failures_return_bounded_error_without_payload_log(line, caplog):
+    proxy = _make_proxy()
+    with caplog.at_level(logging.WARNING, logger="defenseclaw.mcp_proxy"):
+        response = json.loads(await _handle_stdio_line(proxy, line))
+    assert response == {
+        "jsonrpc": "2.0", "id": None,
+        "error": {"code": -32700, "message": "Parse error"},
+    }
+    assert "secret-marker" not in caplog.text
+    assert len(caplog.text) < 200
+    proxy._gate.evaluate_tool_call.assert_not_called()
+    proxy._upstream.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_logged_method_and_tool_names_cannot_inject_log_lines(caplog):
+    proxy = _make_proxy()
+    with caplog.at_level(logging.INFO, logger="defenseclaw.mcp_proxy"):
+        rejected = await proxy.handle_message({"id": 1, "method": "custom/secret-marker\nFORGED"})
+        assert rejected["error"]["code"] == -32601
+        await proxy.handle_message(_tool_call_msg("read_sensor\nFORGED", {}))
+    assert "secret-marker" not in caplog.text
+    assert "read_sensor\\nFORGED" in caplog.text
+    assert "read_sensor\nFORGED" not in caplog.text
+
+
 # -----------------------------------------------------------------------
 # MCPProxy construction
 # -----------------------------------------------------------------------
@@ -532,6 +599,25 @@ async def test_http_upstream_error_log_redacts_exception_url(caplog):
         response = await proxy._forward({"id": 1})
     assert response["error"]["message"] == "Upstream unavailable"
     assert "Upstream HTTP error: OSError" in caplog.text
+    assert "secret-marker" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_upstream_response_is_not_logged(caplog):
+    proxy = _make_proxy(upstream_response={
+        "result": {"content": [{"text": "secret-marker"}]},
+    })
+    with caplog.at_level(logging.WARNING, logger="defenseclaw.mcp_proxy"):
+        response = await proxy._forward({"id": 1})
+    assert response["error"]["message"] == "Upstream returned invalid response"
+    assert "Upstream returned malformed JSON-RPC response" in caplog.text
+    assert "secret-marker" not in caplog.text
+
+
+def test_non_json_stdio_input_is_not_logged(caplog):
+    with caplog.at_level(logging.WARNING, logger="defenseclaw.mcp_proxy"):
+        _log_non_json_stdio_line(b"Bearer secret-marker\n")
+    assert "Ignoring non-JSON stdio message (21 bytes)" in caplog.text
     assert "secret-marker" not in caplog.text
 
 

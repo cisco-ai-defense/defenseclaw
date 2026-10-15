@@ -440,26 +440,32 @@ class MCPProxy:
 
     # -- message handling ---------------------------------------------------
 
-    async def handle_message(self, msg: dict) -> dict | None:
+    async def handle_message(self, msg: Any) -> dict | None:
         """Process one JSON-RPC message from the client.
 
         Returns a response dict, or None for notifications (no ``id``).
         """
-        raw_method = msg.get("method", "")
+        if not isinstance(msg, dict):
+            return _make_error(None, -32600, "Invalid Request")
+
+        req_id = msg.get("id")
+        if (isinstance(req_id, bool)
+                or (req_id is not None and not isinstance(req_id, (int, str)))
+                or (isinstance(req_id, str) and len(req_id) > 128)):
+            return _make_error(None, -32600, "Invalid Request")
+
+        raw_method = msg.get("method")
+        if not isinstance(raw_method, str) or not raw_method.strip() or len(raw_method) > 128:
+            return _make_error(req_id, -32600, "Invalid Request")
         method = raw_method.strip().lower()
         # Normalize so downstream sees the same method string the proxy evaluated
         msg["method"] = method
-        req_id = msg.get("id")
-
         # tools/call — ALWAYS intercept, regardless of whether an id is present.
         # A tools/call without an id is invalid JSON-RPC (cannot correlate a
         # response) so we reject it rather than forwarding unexamined.
         if method == "tools/call":
             if req_id is None:
-                logger.warning(
-                    "Rejecting tools/call with no JSON-RPC id (tool=%s)",
-                    msg.get("params", {}).get("name", ""),
-                )
+                logger.warning("Rejecting tools/call with no JSON-RPC id")
                 return _make_error(
                     None,
                     code=-32600,
@@ -480,17 +486,19 @@ class MCPProxy:
             return await self._forward(msg)
 
         # Unknown method — block to prevent method smuggling
-        logger.warning("Blocking unknown method: %s", msg.get("method"))
+        logger.warning("Blocking unknown method")
         return _make_error(
             req_id,
             code=-32601,
-            message=f"Method not allowed: {msg.get('method')}",
+            message="Method not allowed",
         )
 
     async def _handle_tool_call(self, msg: dict) -> dict:
         """Intercept a tools/call, evaluate, and allow or block."""
         req_id = msg.get("id")
         params = msg.get("params", {})
+        if not isinstance(params, dict):
+            return _make_error(req_id, -32600, "Invalid Request: tools/call params must be an object")
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
 
@@ -510,14 +518,14 @@ class MCPProxy:
                 message="DefenseClaw: tool name exceeds maximum length (63)",
             )
         if not isinstance(arguments, dict):
-            arguments = {}
+            return _make_error(req_id, -32602, "Invalid params: tool arguments must be an object")
 
         # Evaluate through the local policy pipeline
         verdict = self._gate.evaluate_tool_call(tool_name, arguments)
 
         if verdict.blocked:
             logger.warning(
-                "BLOCKED tools/call: tool=%s reason=%s",
+                "BLOCKED tools/call: tool=%r reason=%s",
                 tool_name, verdict.reason,
             )
             return _make_error(
@@ -532,7 +540,7 @@ class MCPProxy:
             )
 
         logger.info(
-            "ALLOWED tools/call: tool=%s reason=%s",
+            "ALLOWED tools/call: tool=%r reason=%s",
             tool_name, verdict.reason,
         )
 
@@ -613,7 +621,8 @@ class MCPProxy:
             and ("result" in resp or "error" in resp)
         )
         if not valid:
-            logger.warning("Upstream returned malformed JSON-RPC response: %s", resp)
+            # Upstream payloads can contain credentials or agent output.
+            logger.warning("Upstream returned malformed JSON-RPC response")
             return _make_error(
                 msg.get("id"),
                 code=-32603,
@@ -626,6 +635,24 @@ class MCPProxy:
 # ---------------------------------------------------------------------------
 # Stdio server loop (LLM client <-> proxy via stdin/stdout)
 # ---------------------------------------------------------------------------
+
+def _log_non_json_stdio_line(line: bytes) -> None:
+    """Report invalid input without copying its contents into logs."""
+    logger.warning("Ignoring non-JSON stdio message (%d bytes)", len(line))
+
+
+async def _handle_stdio_line(proxy: MCPProxy, line: bytes) -> bytes | None:
+    """Parse one stdio frame and encode its response, if any."""
+    try:
+        msg = json.loads(line)
+    except (ValueError, RecursionError):
+        # Includes JSONDecodeError, invalid UTF-8, oversized numeric literals,
+        # and excessive nesting. All can fit under the stdio byte limit.
+        _log_non_json_stdio_line(line)
+        return _encode(_make_error(None, -32700, "Parse error"))
+    response = await proxy.handle_message(msg)
+    return _encode(response) if response is not None else None
+
 
 async def _run_stdio(proxy: MCPProxy) -> None:
     """Serve MCP over stdin/stdout (the standard MCP stdio transport)."""
@@ -664,15 +691,9 @@ async def _run_stdio(proxy: MCPProxy) -> None:
             logger.warning("Dropping oversized stdio message (%d bytes)", len(line))
             continue
 
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("Ignoring non-JSON line: %s", line[:100])
-            continue
-
-        response = await proxy.handle_message(msg)
-        if response is not None:
-            writer.write(_encode(response))
+        response_line = await _handle_stdio_line(proxy, line)
+        if response_line is not None:
+            writer.write(response_line)
             await writer.drain()
 
 
