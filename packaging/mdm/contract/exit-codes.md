@@ -17,7 +17,7 @@ them with their default return-code tables.
 | --- | --- | --- | --- |
 | `0` | success | Installed, upgraded, repaired, removed, or nothing to do (`noop: true`). | Success |
 | `1603` | `ERROR_INSTALL_FAILURE` | The action failed. Mutating actions have already rolled back to the previous deployment. | Failure; read `errors[].code` |
-| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock. | Retry later (Intune's default table retries 1618) |
+| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`). | Retry later (Intune's default table retries 1618) |
 | `1639` | `ERROR_INVALID_COMMAND_LINE` | Invalid arguments, for example a first install without a config. Retrying will not help. | Failure; fix the assignment |
 | `3010` | `ERROR_SUCCESS_REBOOT_REQUIRED` | Reserved. The standalone lifecycle does not require reboots today. | Soft reboot |
 
@@ -89,7 +89,12 @@ lifecycle itself.
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,
 `secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`;
-`lifecycle_busy` exits `1618` / `75`. A repeated delivery of the bundle in
+`lifecycle_busy` exits `1618` / `75`. On Windows, a bundle that verified
+but did not finish applying to the running deployment exits `1618` too:
+`bundle_apply_failed`, after the error that names the cause (for example
+`bundle_hot_apply_unavailable` with the verify detail, or
+`bundle_policy_not_adopted`). Its receipt fails, the last good bundle or the
+base config keeps enforcing, and the MDM's retry delivers it again. A repeated delivery of the bundle in
 force is a success (`already_applied`). The bundle codes are defined in
 `internal/enterprisebundle/errors.go`; a public page that explains each one
 ships with the sync service.
