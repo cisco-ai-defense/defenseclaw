@@ -1282,6 +1282,19 @@ skill, MCP server and plugin install stays blocked and `verify` fails until a
 `/repair` prepares the runtime. That run continues the unpack where the stopped
 one ended instead of starting over.
 
+The prepare is CPU work: it writes and hashes about 13,600 files (360 MB),
+the antivirus scans each new file, and Python compiles them. A computer that
+is short of CPU can reach the bound. The usual case is a burstable cloud VM
+(Azure B-series, AWS T-series) that has used up its CPU credits and is held
+at its baseline, while other work runs: install and uninstall cycles back to
+back, an agent session, a script that calls the hook every second. On a
+2-vCPU Azure `Standard_B2s_v2`, a first prepare took about 3.5 minutes with
+CPU credits, 5 minutes held at the 40 % baseline, and 13 minutes held at the
+baseline with one other busy process; with more load it did not finish. Run
+Setup `/repair JSON=1` as LocalSystem again once the computer has CPU to
+spare (on a burstable VM, after its credits build up, or on a size that is
+not burstable). Each run continues where the last one stopped.
+
 ## Per-user installs
 
 On a computer with the standalone deployment, the per-user product refuses
