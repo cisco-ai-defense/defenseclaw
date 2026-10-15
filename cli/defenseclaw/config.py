@@ -2641,13 +2641,23 @@ class GuardrailConfig:
         runtime response-integrity choices in observe mode.
 
         Secure Client exception (spec 007, Secure Client only): a config the
-        loader marked as Secure Client resolves explicit connector posture >
+        loader marked as Secure Client resolves automatic-protection posture
+        (for connectors outside manual setup) > explicit connector posture >
         global, independent of the guardrail mode, with its unset global
         loaded as open; an explicit closed is kept. Mirrors Go
         ``Config.EffectiveHookFailModeForConnector`` under
         ``SecureClientIntegration()``, which also skips Cursor's mode rule.
         """
         if getattr(self, "_secure_client", False):
+            owner = getattr(self, "_owner", None)
+            cfg = owner() if callable(owner) else None
+            if cfg is not None and getattr(cfg, "guardrail", None) is self:
+                application = cfg.application_protection
+                if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+                    override = application._connector_override(connector)
+                    overlay = override.guardrail if override is not None else application.guardrail
+                    if overlay.hook_fail_mode.strip():
+                        return _normalize_hook_fail_mode(overlay.hook_fail_mode)
             pc = self._connector_override(connector)
             if pc is not None and pc.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(pc.hook_fail_mode)
@@ -3806,8 +3816,8 @@ class Config:
             return os.path.abspath(raw)
 
     def __post_init__(self) -> None:
-        # GuardrailConfig.effective_rule_pack_dir resolves a rule_pack preset
-        # under this config's policy_dir.
+        # Guardrail resolvers use the owning config's policy directory and
+        # automatic-protection overlay without keeping the whole config alive.
         import weakref
 
         try:
