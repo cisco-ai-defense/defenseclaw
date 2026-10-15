@@ -1045,11 +1045,58 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
     host = _Host(tmp_path, gateway_rc=rc)
     result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
     assert result.returncode == exit_code, (result.stdout, result.stderr)
-    assert host.calls() == ["gateway enterprise linux uninstall --json --lock-wait 8m"]
+    assert [c for c in host.calls() if c.startswith("gateway ")] == ["gateway enterprise linux uninstall --json --lock-wait 8m"]
     if rc == 75:
         assert "nothing was removed" in result.stderr
+        # A refused removal keeps the package, so its units keep running.
+        assert not [c for c in host.calls() if c.startswith("systemctl ")]
     elif rc:
         assert "uninstall reported a problem" in result.stderr
+
+
+# GAP-0112: the preremove's uninstall waited on the lock of a concurrent MDM
+# purge, which removed the deployment and the lock with it. That uninstall
+# now reports a not_installed no-op and exits 0 (it exited busy 75, and the
+# preremove aborted the rpm or deb removal after the purge had removed
+# everything): the removal goes on, stops the package units and keeps no
+# result.
+@pytest.mark.parametrize("argument", ["remove", "0"])
+def test_linux_preremove_goes_on_when_a_concurrent_purge_removed_the_deployment(tmp_path: Path, argument: str) -> None:
+    noop = {
+        "schema_version": 2,
+        "action": "uninstall",
+        "ok": True,
+        "exit_code": 0,
+        "noop": True,
+        "noop_reason": "not_installed",
+        "warnings": [
+            {
+                "code": "not_installed",
+                "message": "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove",
+            }
+        ],
+    }
+    host = _Host(tmp_path, gateway_rc=0, gateway_out=json.dumps(noop))
+    result = host.run(_linux_scriptlet(host, "preremove.sh").replace("${TMPDIR:-/tmp}", str(tmp_path)), argument)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "nothing was removed" not in result.stderr
+    assert "reported a problem" not in result.stderr
+    assert not host.state.exists()
+    assert list(tmp_path.glob("defenseclaw-preremove.*")) == []
+    calls = host.calls()
+    assert calls[0] == "gateway enterprise linux uninstall --json --lock-wait 8m"
+    assert any(call.startswith("systemctl stop ") for call in calls), calls
+
+
+# The preremove aborts the package removal only on a busy lock (75) and on a
+# refused hook-removal precheck; every other uninstall outcome, the
+# not_installed no-op above included, lets the removal go on.
+def test_linux_preremove_aborts_only_on_busy_or_a_refused_precheck() -> None:
+    text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    aborts = [line.strip() for line in text.splitlines() if re.match(r"\s*exit [1-9]", line)]
+    assert aborts == ["exit 1", "exit 1"], aborts  # busy, precheck
+    assert 'if [ "$status" = 75 ]; then' in text
+    assert 'if [ "$precheck_refused" = 1 ]; then' in text
 
 
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
@@ -1400,6 +1447,136 @@ def test_linux_postremove_keeps_the_vendor_policies_while_the_deployment_stays(t
     result = host.run(script, "remove")
     assert result.returncode == 0, result.stderr
     assert (pack / "pack.yaml").is_file() is deployment_kept
+
+
+# GAP-0112: the package removal deleted the unit files of units that were
+# still running. Under hook traffic the gateway's API socket stayed
+# "not-found active (listening)" after the MDM purge. The preremove now stops
+# and disables every unit the package ships, after the lifecycle uninstall
+# and only on a removal.
+def _package_system_units() -> set[str]:
+    return {
+        Path(c["dst"]).name
+        for c in _enterprise_nfpm_contents()
+        if c.get("dst", "").startswith("/usr/lib/systemd/system/") and c.get("type") != "dir"
+    }
+
+
+def _preremove_units(name: str) -> list[str]:
+    text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    match = re.search(rf'^{name}="([^"]*)"', text, re.M)
+    assert match, f"{name} is not set in preremove.sh"
+    return match.group(1).split()
+
+
+def test_enterprise_package_scripts_are_the_linux_scriptlets() -> None:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    assert nfpm["scripts"]["preremove"] == "packaging/linux/preremove.sh"
+    assert nfpm["scripts"]["postremove"] == "packaging/linux/postremove.sh"
+
+
+def test_linux_preremove_names_every_unit_the_package_ships() -> None:
+    shipped = _package_system_units()
+    assert len(shipped) >= 11 and {"defenseclaw-gateway-api.socket", "defenseclaw-gateway-hook.socket"} <= shipped
+    assert set(_preremove_units("package_units")) == shipped
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("argument", ["remove", "0"])
+@pytest.mark.parametrize("gateway", [True, False])
+def test_linux_preremove_stops_and_disables_every_package_unit_on_removal(tmp_path: Path, argument: str, gateway: bool) -> None:
+    host = _Host(tmp_path)
+    if not gateway:
+        host.gateway.unlink()
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), argument)
+    assert result.returncode == 0, result.stderr
+    calls = host.calls()
+    units = _preremove_units("package_units")
+    stops = [c.split()[2:] for c in calls if c.startswith("systemctl stop ")]
+    # One request for all of them, after the lifecycle uninstall.
+    assert stops == [[*units, "defenseclaw-enterprise-apply-recovery.timer"]], calls
+    assert [c.split()[2:] for c in calls if c.startswith("systemctl disable ")] == [units]
+    if gateway:
+        assert calls.index("gateway enterprise linux uninstall --json --lock-wait 8m") < calls.index(
+            "systemctl stop " + " ".join(stops[0])
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("arguments", [("upgrade", "9.9.10"), ("1",), ("deconfigure",), ("failed-upgrade", "9.9.8")])
+def test_linux_preremove_leaves_the_units_alone_on_an_upgrade(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    host = _Host(tmp_path, apply_path_active=True)
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), *arguments)
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in host.calls() if c.startswith(("systemctl stop", "systemctl disable", "gateway "))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+def test_linux_preremove_stops_again_while_a_unit_still_runs(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    log = host.log
+    _write_stub(host.bin, "systemctl", f"""echo "systemctl $*" >>'{log}'
+case "$1" in
+    is-active) [ "$3" = defenseclaw-gateway-api.socket ] ;;
+esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "0")
+    assert result.returncode == 0, result.stderr
+    assert len([c for c in host.calls() if c.startswith("systemctl stop ")]) == 3
+    assert "could not stop defenseclaw-gateway-api.socket" in result.stderr
+
+
+def _postremove(host: _Host, tmp_path: Path) -> str:
+    _write_stub(host.bin, "flock", f"echo \"flock $*\" >>'{host.log}'\nshift 3\nexec \"$@\"")
+    return _rooted(
+        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
+        {
+            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
+            "/etc/defenseclaw": str(tmp_path / "etc-defenseclaw"),
+            "/var/lib/defenseclaw ": str(tmp_path / "var-lib-defenseclaw") + " ",
+            "/var/lib/defenseclaw-hook-guardian": str(tmp_path / "guardian"),
+            "/var/log/defenseclaw": str(tmp_path / "log"),
+            "/opt/defenseclaw": str(tmp_path / "opt"),
+            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
+            "/run/systemd/system": str(host.run_systemd),
+        },
+    )
+
+
+# GAP-0112: the purge left root-only /var/lib/defenseclaw-enterprise with its
+# lifecycle.lock. A removal drops the lock, under its own flock, and the
+# directory once nothing else is in it; an upgrade keeps both.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize(("argument", "gone"), [("remove", True), ("0", True), ("purge", True), ("1", False), ("upgrade", False)])
+def test_linux_postremove_removes_the_lone_lifecycle_lock(tmp_path: Path, argument: str, gone: bool) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    lock = host.state / "lifecycle.lock"
+    lock.write_text("", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), argument)
+    assert result.returncode == 0, result.stderr
+    assert host.state.exists() is not gone
+    if gone:
+        assert f"flock -w 10 {lock} rm -f {lock}" in host.calls()
+        assert "systemctl reset-failed defenseclaw-*" in host.calls()
+    else:
+        assert lock.is_file()
+        assert "systemctl reset-failed defenseclaw-*" not in host.calls()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+def test_linux_postremove_keeps_the_lock_with_a_kept_result(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "lifecycle.lock").write_text("", encoding="utf-8")
+    (host.state / "last-package-result.json").write_text("{}\n", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), "remove")
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in host.state.iterdir()) == ["last-package-result.json", "lifecycle.lock"]
+    # A deb purge removes the kept result too, and then the lock.
+    result = host.run(_postremove(host, tmp_path), "purge")
+    assert result.returncode == 0, result.stderr
+    assert not host.state.exists()
 
 
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored

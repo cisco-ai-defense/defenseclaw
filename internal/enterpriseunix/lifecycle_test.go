@@ -849,9 +849,10 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if !again.Noop || again.NoopReason != "not_installed" || hasWarning(again, codeLeftovers) {
 		t.Fatalf("second uninstall should be a clean no-op: %+v", again)
 	}
-	// A no-op uninstall keeps the same lock inode for other waiting runs.
-	if !exists(h.env.P(filepath.Join(l.LifecycleDir, lockFileName))) {
-		t.Fatal("a no-op uninstall removed the lifecycle lock")
+	// Nothing is left of the lifecycle state, so the no-op uninstall leaves
+	// no lock (and no directory) behind either (GAP-0112).
+	if exists(h.env.P(l.LifecycleDir)) {
+		t.Fatal("a no-op uninstall left the lifecycle directory")
 	}
 
 	// --keep-state keeps all of it, and the account.
@@ -893,9 +894,11 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	}
 }
 
-// The lock pathname must survive cleanup. A waiter can have the old inode
-// open before a failed first install or uninstall finishes; replacing it lets
-// another run take a second exclusive flock.
+// The lock pathname survives the cleanup of a failed first install: a waiter
+// can have the inode open, and replacing it would let another run take a
+// second exclusive flock. An uninstall that leaves nothing else removes it
+// while it holds it; acquireLock stops a waiter on the removed inode (see
+// purge_residue_test.go).
 func TestLifecycleLockInodeSurvivesCleanup(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -920,14 +923,14 @@ func TestLifecycleLockInodeSurvivesCleanup(t *testing.T) {
 			}
 			held.release()
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			requireOK(t, h.run(Options{Action: ActionUninstall}))
 			after, err := os.Stat(path)
 			if err != nil || !os.SameFile(before, after) {
-				t.Fatalf("uninstall replaced lifecycle lock inode: before=%v after=%v err=%v", before, after, err)
+				t.Fatalf("install replaced lifecycle lock inode: before=%v after=%v err=%v", before, after, err)
 			}
-			entries, err := os.ReadDir(h.env.P(h.env.Layout.LifecycleDir))
-			if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName {
-				t.Fatalf("uninstall left more than its lifecycle lock: %v, %v", entries, err)
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if exists(h.env.P(h.env.Layout.LifecycleDir)) {
+				entries, _ := os.ReadDir(h.env.P(h.env.Layout.LifecycleDir))
+				t.Fatalf("uninstall left the lifecycle directory: %v", entries)
 			}
 		})
 	}
