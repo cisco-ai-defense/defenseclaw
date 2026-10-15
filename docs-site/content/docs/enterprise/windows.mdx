@@ -341,6 +341,12 @@ the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
 
+To turn Fleet on or off, run the signed standalone Setup so it installs or
+removes the optional policy compiler with the config change. On a host that
+uses signed policy bundles, deliver the Fleet-changing `BUNDLE=` through
+Setup; the installed CLI refuses that transition because it has no compiler
+payload. Repeating `/ensure` with Fleet off and the same config is a no-op.
+
 An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
 carries the default Program Files permissions, including the inherit-only
 `CREATOR OWNER` entry) is taken over: Setup replaces its owner and
