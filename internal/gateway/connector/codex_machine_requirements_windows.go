@@ -908,7 +908,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		HookBinary:         hookExecutable,
 		ManagedStatePath:   statePath,
 		CodexTargetEnabled: true,
-		HookContractID:     WindowsCodexStandaloneHookContract(hookExecutable),
+		HookContractID:     WindowsCodexManagedHookContract(hookExecutable),
 	}
 	if !stateExists {
 		contains, markerErr := windowsCodexRequirementsContainExactManagedHook(
@@ -1834,10 +1834,9 @@ func validateWindowsCodexMachineVolume(path string) error {
 // WindowsCodexStandaloneHookContract is the hook contract the standalone
 // profile binds into every Codex machine-requirements command when
 // hookBinary is the standalone install's hook launcher, and "" for any
-// other launcher: the Secure Client profile keeps its certified unbound
-// command. The standalone launcher path derives from the protected HKLM
-// Program Files registration, never the caller's environment, so the hook
-// process (which runs with the agent's environment) and the SYSTEM
+// other launcher. The standalone launcher path derives from the protected
+// HKLM Program Files registration, never the caller's environment, so the
+// hook process (which runs with the agent's environment) and the SYSTEM
 // lifecycle render and verify the same commands.
 func WindowsCodexStandaloneHookContract(hookBinary string) string {
 	layout, err := managed.StandaloneWindowsLayout()
@@ -1845,4 +1844,19 @@ func WindowsCodexStandaloneHookContract(hookBinary string) string {
 		return ""
 	}
 	return windowsCodexStandaloneHookContractFor(layout, hookBinary)
+}
+
+// WindowsCodexManagedHookContract is the hook contract every Windows Codex
+// machine-requirements command binds, for both profiles: the standalone
+// launcher's contract, else the default Codex contract, which registers
+// every event of the published group matrix. A bound command names its
+// event and contract and waits for the GUI-subsystem launcher. The Secure
+// Client profile used to keep the pre-1.0 call-operator command instead; the
+// hook refuses it (it names no event or contract) and the call operator does
+// not wait for the launcher, so its exit code (2 blocks) never reached Codex.
+func WindowsCodexManagedHookContract(hookBinary string) string {
+	if contract := WindowsCodexStandaloneHookContract(hookBinary); contract != "" {
+		return contract
+	}
+	return ResolveHookContract("codex", "").Contract.ContractID
 }

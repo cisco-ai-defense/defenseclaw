@@ -112,10 +112,10 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 	}
 }
 
-// WindowsCodexManagedHookCommand renders the exact Codex machine-requirements
-// command the Windows Secure Client installer certifies for hookBinary. The
-// standalone profile reuses it so both profiles launch the GUI-subsystem
-// hook through the same exit-code-preserving PowerShell boundary.
+// WindowsCodexManagedHookCommand renders the pre-1.0 unbound Codex
+// machine-requirements command for hookBinary. Neither profile publishes it
+// any more (both bind a contract, WindowsCodexManagedHookContract); it
+// stays so callers can recognize a command an earlier release wrote.
 func WindowsCodexManagedHookCommand(hookBinary string) string {
 	return windowsCodexManagedHookCommand(hookBinary)
 }

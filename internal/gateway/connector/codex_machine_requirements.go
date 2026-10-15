@@ -68,9 +68,8 @@ type WindowsCodexMachineRequirementsOptions struct {
 	CursorTargetEnabled           bool
 	// HookContractID binds every managed group's command to its Codex event
 	// and this hook contract. The hook refuses a Codex invocation that does
-	// not carry both, so an unbound command never reaches the gateway. Only
-	// the standalone profile sets it (WindowsCodexStandaloneHookContract);
-	// the Secure Client profile keeps its certified command byte for byte.
+	// not carry both, so an unbound command never reaches the gateway. Both
+	// Windows profiles set it (WindowsCodexManagedHookContract).
 	HookContractID string
 }
 

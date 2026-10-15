@@ -29,4 +29,12 @@ func TestWindowsCodexStandaloneHookContractResolvesTheProtectedLayout(t *testing
 	if got := WindowsCodexStandaloneHookContract(secureClient); got != "" {
 		t.Fatalf("Secure Client launcher selected contract %q", got)
 	}
+	// Both profiles' requirements bind a contract, so every published Codex
+	// command names its event and waits for the launcher.
+	if got := WindowsCodexManagedHookContract(secureClient); got != want {
+		t.Fatalf("Secure Client managed contract = %q, want %q", got, want)
+	}
+	if got := WindowsCodexManagedHookContract(filepath.Join(layout.BinDir, "defenseclaw-hook.exe")); got != want {
+		t.Fatalf("standalone managed contract = %q, want %q", got, want)
+	}
 }

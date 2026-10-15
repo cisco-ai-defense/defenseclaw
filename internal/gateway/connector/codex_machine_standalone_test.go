@@ -90,7 +90,7 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 		}
 	}
 
-	// The Secure Client options keep the certified unbound command.
+	// Options without a contract render the pre-1.0 unbound command.
 	secureClient := testWindowsCodexMachineOptions()
 	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient)
 	if err != nil {
