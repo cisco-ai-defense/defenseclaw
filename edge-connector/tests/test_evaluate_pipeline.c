@@ -153,6 +153,47 @@ static void test_capability_sequence_block(void) {
     dclaw_get_state()->online = false;
 }
 
+static void test_truncated_content_keeps_local_guards(void) {
+    dclaw_tool_request_t private_ip = make_request("curl", DCLAW_CAP_NET_FETCH,
+                                                   "169.254.169.254");
+    private_ip.flags = DCLAW_FLAG_CONTENT_TRUNCATED;
+    private_ip.content = "benign prefix";
+    private_ip.content_len = (uint16_t)strlen(private_ip.content);
+    dclaw_verdict_t verdict = dclaw_evaluate(&private_ip);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_SSRF_BLOCK);
+
+    dclaw_tool_request_t denied = make_request("curl", DCLAW_CAP_NET_FETCH, "9.9.9.9");
+    denied.flags = DCLAW_FLAG_CONTENT_TRUNCATED;
+    denied.content = "benign prefix";
+    denied.content_len = (uint16_t)strlen(denied.content);
+    verdict = dclaw_evaluate(&denied);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_DEST_DENY);
+
+    dclaw_tool_request_t network = make_request("download", DCLAW_CAP_NET_FETCH, "8.8.8.8");
+    network.session_id = 510;
+    (void)dclaw_evaluate(&network);
+    dclaw_tool_request_t shell = make_request("bash", DCLAW_CAP_EXEC_SHELL, NULL);
+    shell.session_id = 510;
+    shell.flags = DCLAW_FLAG_CONTENT_TRUNCATED;
+    shell.content = "benign prefix";
+    shell.content_len = (uint16_t)strlen(shell.content);
+    verdict = dclaw_evaluate(&shell);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_CAP_SEQUENCE);
+
+    dclaw_tool_request_t plain = make_request("read_file", DCLAW_CAP_READ_FS, NULL);
+    plain.flags = DCLAW_FLAG_CONTENT_TRUNCATED;
+    plain.content = "benign prefix";
+    plain.content_len = (uint16_t)strlen(plain.content);
+    verdict = dclaw_evaluate(&plain);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_CONTENT_BLOCK);
+    assert(verdict.mode == DCLAW_VERDICT_SYNC);
+    printf("  PASS: truncated content retains SSRF, destination, sequence, and fail-closed guards\n");
+}
+
 static void test_rate_limit_triggers(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->rate_limiters[0].tokens = 0; /* exhaust global tokens */
@@ -241,6 +282,7 @@ int main(void) {
     test_unknown_tool_cannot_use_cloud_allow();
     test_allowed_destination();
     test_capability_sequence_block();
+    test_truncated_content_keeps_local_guards();
     test_rate_limit_triggers();
     test_invalid_input_blocks();
 #if DCLAW_CONTENT_SCAN
@@ -249,9 +291,9 @@ int main(void) {
 #endif
     test_hash_mismatch_blocks();
 #if DCLAW_CONTENT_SCAN
-    printf("  ALL PASSED (12 tests)\n");
+    printf("  ALL PASSED (13 tests)\n");
 #else
-    printf("  ALL PASSED (10 tests)\n");
+    printf("  ALL PASSED (11 tests)\n");
 #endif
 
     dclaw_shutdown();

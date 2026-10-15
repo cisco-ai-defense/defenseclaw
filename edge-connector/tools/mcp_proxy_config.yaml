@@ -3,7 +3,7 @@
 #
 # The MCP proxy sits between an LLM client (Claude, Codex, etc.) and
 # a real MCP server, intercepting every tools/call request and
-# evaluating it through the 8-stage policy pipeline.
+# evaluating it through the local policy pipeline.
 #
 # Usage:
 #   python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml

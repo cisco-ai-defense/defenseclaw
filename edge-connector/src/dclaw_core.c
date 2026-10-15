@@ -376,28 +376,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     }
 #endif
 
-    /* Step 3b: If content was truncated, escalate to cloud for a full
-     * inspection rather than relying on the partial local scan. Truncated
-     * content may hide malicious payloads past the cutoff point. */
-    if (req->flags & DCLAW_FLAG_CONTENT_TRUNCATED) {
-#if DCLAW_MQTT_ENABLED
-        dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CONTENT_BLOCK,
-                          target_hash, req->session_id);
-        g_state.eval_escalated_count++;
-        in_eval = false;
-        return make_verdict(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CONTENT_BLOCK,
-                            DCLAW_VERDICT_PENDING);
-#endif
-#if !DCLAW_MQTT_ENABLED
-        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
-                          target_hash, req->session_id);
-        g_state.eval_denied_count++;
-        in_eval = false;
-        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
-                            DCLAW_VERDICT_SYNC);
-#endif
-    }
-
     /* Step 4: Destination allow/deny + SSRF check (if network capability) */
     if (req->cap_flags & (DCLAW_CAP_NET_FETCH | DCLAW_CAP_SEND_MSG)) {
         if (req->destination[0] == '\0') {
@@ -437,6 +415,21 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_canary_record_block();
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
+    }
+
+    /* Step 5b: A truncated body may hide a dangerous suffix. Run every
+     * local destination and sequence guard first, then fail closed before a
+     * cached or cloud verdict can authorize content we have not inspected.
+     * The IPC buffer contains only the prefix, so we cannot ask the cloud
+     * to inspect the missing tail. */
+    if (req->flags & DCLAW_FLAG_CONTENT_TRUNCATED) {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
+                          target_hash, req->session_id);
+        g_state.eval_denied_count++;
+        dclaw_canary_record_block();
+        in_eval = false;
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
+                            DCLAW_VERDICT_SYNC);
     }
 
     /* Step 6: Verdict cache lookup */

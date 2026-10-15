@@ -168,7 +168,7 @@ Uses the Unix socket first when the daemon is running, then FFI (ctypes) when no
 
 ### MCP proxy (Model Context Protocol)
 
-A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server. Intercepts every `tools/call` request and evaluates it through the 8-stage pipeline. All other MCP messages pass through unchanged.
+A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server. Intercepts every `tools/call` request and evaluates it through the C engine's local guards, verdict cache, and optional Fleet escalation. All other MCP messages pass through unchanged.
 
 ```
 LLM Client (Claude, Codex)
@@ -217,7 +217,7 @@ Replace `/usr/local/lib` if CMake installed into another library directory. The 
 
 | MCP Method | Action | Description |
 | --- | --- | --- |
-| `tools/call` | Evaluate | Full 8-stage pipeline. Blocked calls return an MCP error with the reason. |
+| `tools/call` | Evaluate | Local guards, verdict cache, and optional Fleet request. Blocked calls return an MCP error with the reason. |
 | `tools/list`, `resources/*`, `prompts/*`, `initialize`, etc. | Passthrough | Forwarded unchanged to the real server. |
 
 Environment variables: `DCLAW_MCP_UPSTREAM` (target command or URL), `DCLAW_MCP_TRANSPORT` (`stdio` or `http`), `DCLAW_MCP_PORT` (default 8089). All standard Edge Connector env vars are passed through.
@@ -293,7 +293,7 @@ Replace `USERNAME` with the real home directory. Process launchers do not necess
 
 | Hook | What happens | Actions |
 | --- | --- | --- |
-| `before_tool` | Full 8-stage pipeline (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence, cache, escalation) | `deny_tool` or `continue` |
+| `before_tool` | Input validation, rate limit, content scan, destination and SSRF checks, sequence correlation, cache lookup, then optional Fleet request | `deny_tool` or `continue` |
 | `before_llm` | Prompt injection detection (20+ patterns) | `abort_turn` or `continue` |
 | `after_llm` | PII/credential leakage scanning | Detection + logging |
 

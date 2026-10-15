@@ -35,9 +35,18 @@ foreach ($log in $logs) {
             if ($line -match '^--- FAIL: ((?:Test|Fuzz|Example)[A-Za-z0-9_]{1,127})(?:/[^ ]*)? \(') {
                 $name = $Matches[1]
             }
-        } elseif ($line -match '^(?:FAILED|ERROR) (cli/tests/[A-Za-z0-9_./-]+[.]py)(?:::([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*))?') {
+        } elseif ($line -match '^(?:FAILED|ERROR) (cli/tests/[A-Za-z0-9_./-]+[.]py)(?:::([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*))?(\[(?:powershell|pwsh)-enterprise-(?:standalone|profile)-[a-z0-9-]+-smoke[.]ps1\])?') {
             $name = if ($Matches[2]) { "$($Matches[1])::$($Matches[2])" } else { $Matches[1] }
+            # This one native smoke matrix needs its parameter ID to identify
+            # the failing engine and script. Admit only the fixed, non-secret
+            # engine/script shape; arbitrary pytest parameter values remain hidden.
+            if ($Matches[3] -and
+                $Matches[1] -eq 'cli/tests/test_windows_enterprise_standalone_contract.py' -and
+                $Matches[2] -eq 'test_standalone_smokes_run_on_every_engine') {
+                $name += $Matches[3]
+            }
         }
+        if ($name.Length -gt 256) { continue }
         if ($name -and $seen.Add($name)) {
             $names.Add($name)
             if ($names.Count -ge $limit) { break }

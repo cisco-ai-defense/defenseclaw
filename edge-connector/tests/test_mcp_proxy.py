@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -491,6 +492,47 @@ class TestProxyConstruction:
 def test_http_upstream_rejects_loopback_aliases_and_unsafe_urls(url):
     with pytest.raises(ValueError):
         _HttpUpstream(url)
+
+
+@pytest.mark.parametrize("url,production", [
+    ("https://1.1.1.1\\bad/mcp?token=secret-marker", False),
+    ("https:///mcp?token=secret-marker", False),
+    ("http://1.1.1.1/mcp?token=secret-marker", True),
+])
+def test_http_upstream_validation_does_not_echo_url_secret(url, production, monkeypatch):
+    if production:
+        monkeypatch.setenv("DCLAW_PRODUCTION", "true")
+    with pytest.raises(ValueError) as excinfo:
+        _HttpUpstream(url)
+    assert "secret-marker" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_http_upstream_start_log_redacts_path_query_and_fragment(caplog):
+    upstream = _HttpUpstream("https://1.1.1.1/private-path?token=secret-marker#secret-fragment")
+    with caplog.at_level(logging.INFO, logger="defenseclaw.mcp_proxy"):
+        await upstream.start()
+        try:
+            assert "Upstream HTTP: https://1.1.1.1" in caplog.text
+            assert "private-path" not in caplog.text
+            assert "secret-marker" not in caplog.text
+            assert "secret-fragment" not in caplog.text
+        finally:
+            await upstream.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_upstream_error_log_redacts_exception_url(caplog):
+    upstream = _HttpUpstream("https://1.1.1.1/mcp?token=secret-marker")
+    upstream._session = MagicMock()
+    upstream._session.post.side_effect = OSError("https://1.1.1.1/mcp?token=secret-marker")
+    proxy = MCPProxy.__new__(MCPProxy)
+    proxy._upstream = upstream
+    with caplog.at_level(logging.ERROR, logger="defenseclaw.mcp_proxy"):
+        response = await proxy._forward({"id": 1})
+    assert response["error"]["message"] == "Upstream unavailable"
+    assert "Upstream HTTP error: OSError" in caplog.text
+    assert "secret-marker" not in caplog.text
 
 
 @pytest.mark.asyncio

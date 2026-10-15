@@ -439,6 +439,11 @@ trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 is_gateway_process() {
     # After a crash the PID in gateway.pid can belong to an unrelated process.
+    # A stopped daemon can remain a zombie until its parent reaps it. kill -0
+    # and ps -o comm both still succeed for zombies, but they cannot serve.
+    local state
+    state="$(ps -p "$1" -o stat= 2>/dev/null)" || return 1
+    [[ ! "${state}" =~ ^[[:space:]]*Z ]] || return 1
     ps -p "$1" -o comm= 2>/dev/null | grep -q defenseclaw
 }
 

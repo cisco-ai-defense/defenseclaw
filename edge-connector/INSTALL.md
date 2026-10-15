@@ -238,7 +238,7 @@ Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL
 
 ### MCP Proxy (Model Context Protocol)
 
-A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server, intercepting every `tools/call` request and evaluating it through the 8-stage pipeline. All other MCP messages (`tools/list`, `resources/read`, `prompts/get`, etc.) pass through unchanged.
+A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server, intercepting every `tools/call` request and evaluating it through the C engine's local guards, verdict cache, and optional Fleet escalation. All other MCP messages (`tools/list`, `resources/read`, `prompts/get`, etc.) pass through unchanged.
 
 ```
 LLM Client (Claude, Codex)
@@ -302,7 +302,7 @@ All standard Edge Connector env vars (`DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DC
 
 | MCP Method | Action | Description |
 |---|---|---|
-| `tools/call` | Evaluate | Full 8-stage pipeline (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence, cache, escalation). Blocked calls return an MCP error. |
+| `tools/call` | Evaluate | Input validation, rate limit, content scan, destination and SSRF checks, sequence correlation, cache lookup, then optional Fleet request. Blocked calls return an MCP error. |
 | `tools/list`, `resources/*`, `prompts/*`, `initialize`, etc. | Passthrough | Forwarded unchanged to the real server. |
 
 ---
@@ -403,7 +403,7 @@ Replace `USERNAME` with the actual home directory. A process launcher need not e
 
 | Hook | What DefenseClaw Does | Supported Actions |
 |------|----------------------|-------------------|
-| `before_tool` | 8-stage policy evaluation (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence detect, cache, escalation) | `deny_tool` with canned message, `continue` |
+| `before_tool` | Local guards, verdict cache, then optional Fleet request | `deny_tool` with canned message, `continue` |
 | `before_llm` | Pattern-based prompt injection detection (20+ patterns) | `abort_turn` (blocks LLM call entirely), `continue` |
 | `after_llm` | PII/credential leakage scanning (SSN, credit cards, API keys, private keys) via content scanner | Detection + logging (redaction not supported in PicoClaw v0.3.x) |
 
@@ -634,11 +634,11 @@ sudo ldconfig
 ┌─────────────────────────────────────────────────────────┐
 │  DefenseClaw Edge Connector Engine (libdclaw_core.so)   │
 │                                                         │
-│  8-Stage Pipeline:                                      │
-│  1. Input validation    5. Dest filtering + SSRF        │
-│  2. Rate limiting       6. Sequence correlation         │
-│  3. Content scanning    7. Verdict cache                │
-│  4. Hash deny-list      8. Fleet hash verdict request   │
+│  7-Stage Evaluation Path:                               │
+│  1. Input validation    5. Sequence correlation         │
+│  2. Rate limiting       6. Verdict cache                │
+│  3. Content scanning    7. Fleet hash verdict request   │
+│  4. Dest filtering + SSRF                                │
 │                                                         │
 │  → ALLOW / BLOCK / WARN / PENDING                       │
 └─────────────────────────────────────────────────────────┘
@@ -650,16 +650,15 @@ sudo ldconfig
 
 | DefenseClaw Edge Connector Provides | You Configure |
 |-------------------------------------|---------------|
-| 8-stage evaluation engine | Reviewed tool names in the C capability table |
+| Seven-checkpoint evaluation path | Reviewed tool names in the C capability table |
 | Built-in content scanning (secrets, PII, credentials, exfil, injection, commands) | Content text to inspect |
 | SSRF validation | Approved public numeric IP destinations |
-| Sequence correlation (FSM) | Destination allowlist |
-| Rate limiting (3 buckets) | Rate limit values |
-| HMAC-chained audit trail | Log file path |
+| Sequence correlation (FSM) | Capability sequences in supported policy YAML |
+| Rate limiting (3 buckets) | Built-in rates; OTA policy cannot change them |
+| HMAC-chained audit trail | `DCLAW_AUDIT_KEY` and protected flash state |
 | Verdict caching (LRU) | — |
 | Destination filtering | Allowed public numeric IPs |
-| Hash deny-list stage (empty in the shipped compiled policy) | No YAML hash feed in this release |
-| Gateway hash-verdict escalation with a truncated content snippet on the wire | Max escalation payload size |
+| Gateway hash-verdict escalation with a truncated content snippet on the wire | Per-device keys and broker ACLs; no external content model |
 | Response evaluation when the integration calls it | Integration's request/response direction |
 | Pre-built adapters (Generic Python, LangChain, HTTP, PicoClaw) | Custom hooks for other frameworks |
 

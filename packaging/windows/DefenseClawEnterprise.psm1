@@ -19197,7 +19197,10 @@ function Test-DefenseClawStandaloneFleetSourceEnabled {
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
         throw "standalone Fleet source inspection failed before service changes: $detail"
     }
-    $answer = ([string]$probe.output).Trim()
+    # The trusted path validator may emit a nonfatal ancestor ACL advisory on
+    # stderr. The gateway's contract is one exact boolean line on stdout;
+    # combining the two streams would reject a valid Fleet-off config.
+    $answer = ([string]$probe.stdout).Trim()
     if ($answer -cnotin @('true', 'false')) {
         throw 'standalone Fleet source inspection returned an invalid result'
     }

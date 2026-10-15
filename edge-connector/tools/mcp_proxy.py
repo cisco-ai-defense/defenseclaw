@@ -17,7 +17,7 @@
 """MCP (Model Context Protocol) proxy for the DefenseClaw Edge Connector.
 
 Sits between an LLM client and a real MCP server, intercepting every
-``tools/call`` request and evaluating it through the 8-stage policy
+``tools/call`` request and evaluating it through the local policy
 pipeline.  All other MCP messages (``tools/list``, ``resources/read``,
 ``prompts/get``, etc.) are forwarded transparently.
 
@@ -87,7 +87,7 @@ def _validate_upstream_url(url: str) -> str:
     """Validate upstream URL is not targeting private/internal networks."""
     # Backslashes can bypass URL authority parsing in some libraries
     if '\\' in url:
-        raise ValueError(f"URL contains backslash (potential authority bypass): {url}")
+        raise ValueError("URL contains backslash (potential authority bypass)")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("HTTP upstream must use http:// or https://")
@@ -95,7 +95,7 @@ def _validate_upstream_url(url: str) -> str:
         raise ValueError("HTTP upstream URL must not contain credentials")
     hostname = parsed.hostname
     if not hostname:
-        raise ValueError(f"Invalid upstream URL (no hostname): {url}")
+        raise ValueError("Invalid upstream URL (no hostname)")
     # A hostname spelling of loopback previously bypassed the safe resolver.
     normalized = hostname.lower().rstrip(".")
     if normalized in ("localhost", "localhost.localdomain") or normalized.endswith(".localhost"):
@@ -304,12 +304,8 @@ class _HttpUpstream:
         is_production = os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes")
         if is_production and url and url.startswith("http://"):
             raise ValueError(
-                f"DCLAW_PRODUCTION is set but upstream URL uses plaintext HTTP: {url}. "
-                f"Use https:// for production upstream connections."
-            )
-        if is_production and url and not url.startswith("https://"):
-            logger.warning(
-                "DCLAW_PRODUCTION is set and upstream URL scheme is not https: %s", url
+                "DCLAW_PRODUCTION is set but upstream URL uses plaintext HTTP. "
+                "Use https:// for production upstream connections."
             )
         self._url = url
         self._session: Any = None  # aiohttp.ClientSession
@@ -335,7 +331,8 @@ class _HttpUpstream:
         connector = aiohttp.TCPConnector(resolver=_SafeResolver())
         self._session = aiohttp.ClientSession(connector=connector)
 
-        logger.info("Upstream HTTP: %s", self._url)
+        parsed = urllib.parse.urlparse(self._url)
+        logger.info("Upstream HTTP: %s://%s", parsed.scheme, parsed.hostname)
 
     async def send(self, msg: dict) -> dict:
         assert self._session is not None
@@ -370,7 +367,7 @@ class SecurityGate:
     def evaluate_tool_call(self, tool_name: str,
                            arguments: dict[str, Any],
                            direction: str = "request") -> Verdict:
-        """Evaluate a single MCP tools/call through the 8-stage pipeline."""
+        """Evaluate a single MCP tools/call through the local policy pipeline."""
         return self._ec.evaluate(
             tool_name=tool_name,
             arguments=arguments,
@@ -515,7 +512,7 @@ class MCPProxy:
         if not isinstance(arguments, dict):
             arguments = {}
 
-        # Evaluate through the 8-stage pipeline
+        # Evaluate through the local policy pipeline
         verdict = self._gate.evaluate_tool_call(tool_name, arguments)
 
         if verdict.blocked:
@@ -597,7 +594,12 @@ class MCPProxy:
         try:
             resp = await self._upstream.send(msg)
         except Exception as exc:
-            logger.error("Upstream error: %s", exc)
+            if isinstance(self._upstream, _HttpUpstream):
+                # aiohttp exceptions can embed the configured URL, including
+                # bearer tokens in its query string.
+                logger.error("Upstream HTTP error: %s", type(exc).__name__)
+            else:
+                logger.error("Upstream error: %s", exc)
             return _make_error(
                 msg.get("id"),
                 code=-32603,
