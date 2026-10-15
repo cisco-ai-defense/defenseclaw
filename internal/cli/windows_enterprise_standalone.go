@@ -3111,7 +3111,10 @@ func windowsEnterpriseCompilerSourceDrift(recorded, source string, opts *windows
 		return false, fmt.Errorf("inspect standalone Fleet config: %w", err)
 	}
 	if !enabled {
-		return false, nil
+		// An older deployment can still record an active compiler after Fleet
+		// was disabled. Reapply the release so the installer removes it and
+		// writes metadata without a compiler hash.
+		return recorded != "", nil
 	}
 	if recorded == "" {
 		return true, nil // adopt compiler for an older Fleet-enabled deployment

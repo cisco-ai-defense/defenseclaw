@@ -554,6 +554,38 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
+func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name, previous, next string
+	}{
+		{"enable", "config_version: 9\nfleet:\n  enabled: false\n", "config_version: 9\nfleet:\n  enabled: true\n"},
+		{"disable", "config_version: 9\nfleet:\n  enabled: true\n", "config_version: 9\nfleet:\n  enabled: false\n"},
+	} {
+		for _, bundle := range []bool{false, true} {
+			name := tc.name + " Setup"
+			if bundle {
+				name = tc.name + " bundle"
+			}
+			t.Run(name, func(t *testing.T) {
+				host, opts := newHotConfigHost(t, tc.previous, tc.next)
+				if bundle {
+					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+				}
+				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+				applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+					&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+				installed, err := os.ReadFile(host.configPath)
+				if err != nil || applied || len(host.writes) != 0 || string(installed) != tc.previous {
+					t.Fatalf("Fleet transition applied=%t writes=%q installed=%q read=%v", applied, host.writes, installed, err)
+				}
+				if got := windowsBundleHasCode(result.Errors, "fleet_setup_required"); got != bundle {
+					t.Fatalf("Fleet transition bundle=%t setup-required=%t errors=%v", bundle, got, result.Errors)
+				}
+			})
+		}
+	}
+}
+
 func TestWindowsHotBundleReloadsWhenWatcherMissesConfigWrite(t *testing.T) {
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"

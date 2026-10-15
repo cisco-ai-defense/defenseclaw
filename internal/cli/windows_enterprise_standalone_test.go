@@ -395,7 +395,7 @@ func TestWindowsEnterpriseCompilerDriftOnlyForFleetEnabled(t *testing.T) {
 		wantErr  bool
 	}{
 		{"Fleet off, payload compiler absent from metadata", "config_version: 9\nfleet:\n  enabled: false\n", "", false, false},
-		{"Fleet off, old compiler hash is irrelevant", "config_version: 9\nfleet:\n  enabled: false\n", strings.Repeat("0", 64), false, false},
+		{"Fleet off, old compiler hash needs removal", "config_version: 9\nfleet:\n  enabled: false\n", strings.Repeat("0", 64), true, false},
 		{"Fleet enabled, adopt missing hash", "config_version: 9\nfleet:\n  enabled: true\n", "", true, false},
 		{"Fleet enabled, identical source", "config_version: 9\nfleet:\n  enabled: true\n", digest, false, false},
 		{"Fleet enabled, changed source", "config_version: 9\nfleet:\n  enabled: true\n", strings.Repeat("0", 64), true, false},
