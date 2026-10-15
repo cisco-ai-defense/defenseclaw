@@ -443,6 +443,11 @@ stops each enrolled user's per-user gateway and removes all of that user's
 the per-user binaries and launcher links in `~/.local/bin`, and the
 DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone.
+Pass `--purge` in the same run as the uninstall: uninstall deletes the list of
+enrolled accounts, so a later `--purge` on a host that is already uninstalled
+is a no-op (`not_installed`) and leaves each user's `~/.defenseclaw`. To
+clean it after a plain uninstall, delete `~/.defenseclaw` by hand, or install
+again and run the uninstall with `--purge`.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 If macOS denies deleting the `_defenseclaw` account (it can, from a remote
