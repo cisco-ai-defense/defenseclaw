@@ -528,8 +528,12 @@ For offline bundle signing on Windows, an omitted `data_dir` is modeled as
 `C:\ProgramData\Cisco\DefenseClaw\runtime`. An explicit `data_dir` is accepted
 only when it equals that standard runtime path; signing refuses any other
 value with `config_invalid`. A device registered under another ProgramData root
-reports `digest_layout_unverifiable` when that root changes the digest, while
-still checking its installed and gateway digests against each other. A device
+also computes the digest for the standard layout and refuses a signed digest
+that differs from it (`digest_mismatch`). It reports
+`digest_layout_unverifiable` only when the signed digest equals that
+standard-layout digest but its own root changes its digest (for example with an
+explicit standard `data_dir`), and still checks its installed and gateway
+digests against each other. A device
 on the signer's product version refuses a signed digest it computes differently
 (`digest_mismatch`) whatever OS signed the bundle; only a signer of another
 product version leaves the digest `digest_unverifiable`.
