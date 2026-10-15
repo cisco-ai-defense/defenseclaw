@@ -502,8 +502,20 @@ func runWindowsEnterpriseStandaloneAction(
 			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
 		}
 	}
+	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
+	// bundle config, not an edit made outside the lifecycle (GAP-0114).
+	var bundleRestore windowsBundleRestore
+	if windowsBundleRestoreRequested(action, opts) {
+		if bundleRestore = restoreWindowsBundleConfig(ctx); bundleRestore.failed() {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			bundleRestore.apply(result)
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
+	bundleRestore.apply(result)
 	if hookRuntimeRepaired != "" {
 		result.Changes = append(result.Changes, hookRuntimeRepaired)
 	}
@@ -2064,7 +2076,14 @@ func finishWindowsEnterpriseStandalone(
 	failureCode int,
 ) error {
 	addWindowsEnterprisePipeWaitWarning(result, opts)
+	deliveredBundle := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	finishWindowsEnterpriseBundle(cmd, opts, result)
+	addWindowsBundleEnforcementError(result, opts, deliveredBundle)
+	if result.Noop && windowsBundleHasCode(result.Warnings, "bundle_config_restored") {
+		// The plan after the restore found nothing to do, but the run put the
+		// bundle config back: that is a repair, not a no-op.
+		result.Noop, result.NoopReason = false, ""
+	}
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
@@ -2592,6 +2611,18 @@ func runWindowsEnterpriseStandaloneEnsure(
 	}
 	defaultWindowsEnterpriseEnsurePayload(opts, script)
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	// An ensure without CONFIG= or BUNDLE= on a bundle-mode device puts the
+	// confirmed bundle config back before it plans: the repair it may run
+	// starts the gateway on the installed config (GAP-0114). A restore that
+	// fails stops here, before any service starts on the edited file.
+	if windowsBundleRestoreRequested("ensure", opts) {
+		restore := restoreWindowsBundleConfig(ctx)
+		restore.apply(result)
+		if restore.failed() {
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
 	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true)
 	if !retry {
 		return err

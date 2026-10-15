@@ -1480,3 +1480,42 @@ def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() ->
     assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
     assert "$code = 1603" in branch
     assert "$($runtime.message)" in branch
+
+
+# Timeout and recovery wiring of the Windows MDM scripts (formerly
+# packaging/mdm/intune/windows/test_remediate_timeout.py, which pytest never
+# collected: testpaths is cli/tests).
+def test_native_helper_has_a_bounded_process_and_pipe_wait_in_every_upload() -> None:
+    # The copies are identical (test_copied_helpers_are_identical); check one.
+    helper = _shared_region(_text(WINDOWS_SHARED[0]))
+    assert "$process.WaitForExit($TimeoutSeconds * 1000)" in helper
+    assert "taskkill.exe" in helper and "/T /F" in helper
+    assert "[System.Threading.Tasks.Task]::WaitAll(" in helper
+    assert "$process.WaitForExit()" not in helper
+
+
+def test_remediation_bounds_ensure_and_restores_start_modes_on_failure() -> None:
+    script = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text()
+    assert "Get-DefenseClawRemediationStartModes" in script
+    assert "Restore-DefenseClawRemediationStartModes -PriorModes $priorModes" in script
+    assert "$modes[$name] = if ($mode -in @(2, 3)) { $mode } else { -1 }" in script
+    assert "if ([int]$PriorModes[$name] -notin @(2, 3)) { continue }" in script
+    assert "if ($current -ne 4) { continue }" in script
+    assert "$committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending" in script
+    assert "$run.ExitCode -notin @(0, 3010, 1618)" in script
+    assert "4 { 'disabled' }" not in script
+    assert "-TimeoutSeconds 840 -ArgumentList @(" in script
+    assert "startup-mode restore failed" in script
+    assert "_.code -eq 'startup_mode_restore_failed'" in script
+
+
+def test_standalone_installer_binds_native_output_to_the_process_deadline() -> None:
+    module = (MDM.parent / "windows" / "DefenseClawEnterprise.psm1").read_text()
+    native = module.split("function Invoke-DefenseClawProcess {", 1)[1].split(
+        "function Invoke-DefenseClawNative {", 1
+    )[0]
+    assert "if (Test-DefenseClawStandaloneProfile)" in native
+    assert "[Threading.Tasks.Task]::WaitAll(" in native
+    assert "native process output timed out" in native
+    assert "DC_LIFECYCLE_PHASE:" in module
+    assert "transaction quiesce stop services" in module
