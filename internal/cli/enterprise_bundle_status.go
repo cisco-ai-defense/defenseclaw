@@ -185,7 +185,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			if manifest, err := enterprisebundle.DecodeManifest(raw); err == nil {
 				manifestKnown = true
 				signedExpected = manifest.EffectivePolicy.Digests[runtime.GOOS]
-				digestComparable = enterprisebundle.DigestComparable(manifest, appVersion, runtime.GOOS)
+				digestComparable = enterprisebundle.DigestComparableWithLocal(manifest, appVersion, runtime.GOOS, runtime.GOOS, st.Current.EffectivePolicyDigest)
 			}
 		}
 	}
@@ -216,7 +216,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		}
 		message := "the gateway's effective policy digest differs from the signed expected digest"
 		if code == enterprisebundle.WarnDigestUnverifiable {
-			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
+			message = "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
 		} else if code == enterprisebundle.WarnDigestLayoutUnverifiable {
 			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
 		} else if code == "capability_disabled" {

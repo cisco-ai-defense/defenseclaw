@@ -313,6 +313,36 @@ func TestVerifyTamperMatrix(t *testing.T) {
 	}
 }
 
+func TestWindowsDigestSignedOnLinuxComparesOnlyWhenEqual(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.Platforms = []string{enterprisebundle.PlatformWindows}
+		in.HostPlatform = enterprisebundle.PlatformLinux
+	})
+	anchor := anchors(t, "acme", []string{"eng"}, 0, activeKey("k1", f.key.Public()))
+	in := f.input(t, f.bundle, anchor)
+	in.Platform, in.HostPlatform = enterprisebundle.PlatformWindows, enterprisebundle.PlatformWindows
+	matched, err := enterprisebundle.Verify(context.Background(), in)
+	if err != nil || !matched.DigestVerified || matched.DigestUnverifiable {
+		t.Fatalf("cross-host equal digest = %+v, %v", matched, err)
+	}
+	manifest, err := enterprisebundle.DecodeManifest(f.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.EffectivePolicy.Digests[enterprisebundle.PlatformWindows] = gatewayDigest
+	raw, err := manifest.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Bundle = f.signed(t, raw)
+	differed, err := enterprisebundle.Verify(context.Background(), in)
+	if err != nil || differed.DigestVerified || !differed.DigestUnverifiable ||
+		len(differed.Warnings) == 0 || differed.Warnings[0].Code != enterprisebundle.WarnDigestUnverifiable ||
+		!strings.Contains(differed.Warnings[0].Message, "computed the windows digest on linux") {
+		t.Fatalf("cross-host differing digest = %+v, %v", differed, err)
+	}
+}
+
 // A signer and verifier stage the same files in different directories. Path
 // defaults derived from those directories must not change the signed digest.
 func TestVerifyBundleWithDefaultedPaths(t *testing.T) {
