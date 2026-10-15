@@ -1,0 +1,156 @@
+{"body":"{}","code":2,"connector":"claudecode","event":"Stop","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"Stop","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"claudecode","event":"Stop","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"claudecode","event":"Stop","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"Stop","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"Stop","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"SubagentStop","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"SubagentStop","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"claudecode","event":"SubagentStop","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"claudecode","event":"SubagentStop","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"SubagentStop","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"SubagentStop","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"TeammateIdle","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"TeammateIdle","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"claudecode","event":"TeammateIdle","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"claudecode","event":"TeammateIdle","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"TeammateIdle","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"TeammateIdle","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"StopFailure","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"StopFailure","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"claudecode","event":"StopFailure","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"claudecode","event":"StopFailure","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"StopFailure","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"StopFailure","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"SessionEnd","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"SessionEnd","profile":"oss-closed","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"claudecode","event":"SessionEnd","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"claudecode","event":"SessionEnd","profile":"oss-open","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"claudecode","event":"SessionEnd","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"claudecode","event":"SessionEnd","profile":"secure-client","stderr":"defenseclaw: claude-code hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"Stop","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":"{\"decision\":\"block\",\"reason\":\"DefenseClaw hook failed closed\"}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"Stop","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":"{\"decision\":\"block\",\"reason\":\"DefenseClaw hook failed closed\"}\n"}
+{"body":"{}","code":0,"connector":"codex","event":"Stop","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"Stop","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"Stop","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":"{\"decision\":\"block\",\"reason\":\"DefenseClaw hook failed closed\"}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"Stop","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":"{\"decision\":\"block\",\"reason\":\"DefenseClaw hook failed closed\"}\n"}
+{"body":"{}","code":2,"connector":"codex","event":"SubagentStop","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"codex","event":"SubagentStop","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"SubagentStop","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"SubagentStop","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":2,"connector":"codex","event":"SubagentStop","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":2,"connector":"codex","event":"SubagentStop","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"SessionEnd","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"SessionEnd","profile":"oss-closed","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"SessionEnd","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"SessionEnd","profile":"oss-open","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"codex","event":"SessionEnd","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"codex","event":"SessionEnd","profile":"secure-client","stderr":"defenseclaw: codex hook error: invalid or missing action in gateway response\n","stdout":""}
+{"body":"{}","code":0,"connector":"cursor","event":"stop","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"stop","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"stop","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"stop","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"stop","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"stop","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"subagentStop","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"subagentStop","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"subagentStop","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"subagentStop","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"subagentStop","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"subagentStop","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"sessionEnd","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"sessionEnd","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"sessionEnd","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"sessionEnd","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"cursor","event":"sessionEnd","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"cursor","event":"sessionEnd","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{}","code":0,"connector":"devin","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"devin","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"devin","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"devin","event":"SessionEnd","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"SessionEnd","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"devin","event":"SessionEnd","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"SessionEnd","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"devin","event":"SessionEnd","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"devin","event":"SessionEnd","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"agentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"agentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"agentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"agentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"agentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"agentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"subagentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"subagentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"subagentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"subagentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"subagentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"subagentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"sessionEnd","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"sessionEnd","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"sessionEnd","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"sessionEnd","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"sessionEnd","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"sessionEnd","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"SubagentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"SubagentStop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"SubagentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"SubagentStop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"copilot","event":"SubagentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"copilot","event":"SubagentStop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"kiro","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"kiro","event":"Stop","profile":"oss-closed","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"kiro","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"kiro","event":"Stop","profile":"oss-open","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"kiro","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"kiro","event":"Stop","profile":"secure-client","stderr":"","stdout":""}
+{"body":"{}","code":0,"connector":"opencode","event":"session.created","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.created","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.created","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.created","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.created","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.created","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.updated","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.updated","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.updated","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.updated","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.updated","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.updated","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.status","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.status","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.status","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.status","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.status","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.status","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.idle","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.idle","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.idle","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.idle","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.idle","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.idle","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.compacted","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.compacted","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.compacted","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.compacted","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.compacted","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.compacted","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.error","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.error","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.error","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.error","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.error","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.error","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.deleted","profile":"oss-closed","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.deleted","profile":"oss-closed","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.deleted","profile":"oss-open","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.deleted","profile":"oss-open","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}
+{"body":"{}","code":0,"connector":"opencode","event":"session.deleted","profile":"secure-client","stderr":"","stdout":"{}\n"}
+{"body":"{\"action\":\"bogus\"}","code":0,"connector":"opencode","event":"session.deleted","profile":"secure-client","stderr":"","stdout":"{\"action\":\"bogus\"}\n"}

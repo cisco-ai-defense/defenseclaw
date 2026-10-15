@@ -1051,13 +1051,16 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		lifecycle := NeutralLifecycleEvent(sp.connector, opts.Event)
+		// Only the managed standalone profiles keep a lifecycle event neutral
+		// here. Per-user and Secure Client hooks keep their fail path: a
+		// Claude Code or Codex Stop still fails with the fail mode it has.
+		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
 		if !lifecycle &&
 			(sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts)) {
 			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
 		}
 		action = "allow"
-		if lifecycle && managedNativeDecision(opts) && sp.style == stylePluginBridge {
+		if lifecycle && sp.style == stylePluginBridge {
 			// The plugin reads the echoed response itself; make the neutral
 			// lifecycle allow explicit instead of handing it an invalid verdict.
 			body = []byte(`{"action":"allow"}`)

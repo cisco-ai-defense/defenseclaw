@@ -4,7 +4,10 @@
 package hookexec
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -44,33 +47,101 @@ func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	}
 }
 
+// TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes covers every
+// lifecycle event, Claude Code and Codex included, on the Unix standalone and
+// the Windows standalone shapes: a missing or unknown action is a neutral
+// allow there, never a block, a deny or a follow-up.
 func TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes(t *testing.T) {
-	for _, tc := range []struct{ connector, event string }{
-		{"cursor", "stop"}, {"devin", "Stop"}, {"kiro", "Stop"},
-		{"opencode", "session.idle"}, {"copilot", "agentStop"},
-	} {
-		for _, windowsShape := range []bool{false, true} {
-			for _, body := range []string{`{}`, `{"action":"unexpected"}`} {
-				sp, ok := specFor(tc.connector)
-				if !ok {
-					t.Fatalf("missing spec for %s", tc.connector)
+	for connector, events := range neutralLifecycleSets {
+		sp, ok := specFor(connector)
+		if !ok {
+			t.Fatalf("missing spec for %s", connector)
+		}
+		for _, event := range events {
+			for _, windowsShape := range []bool{false, true} {
+				for _, body := range []string{`{}`, `{"action":"unexpected"}`} {
+					var stdout, stderr bytes.Buffer
+					opts := Options{Connector: connector, Event: event, ManagedEnterprise: true,
+						FailMode: "closed", Stdout: &stdout, Stderr: &stderr}
+					if windowsShape {
+						opts.ExplainUnenrolledAccount = true
+					} else {
+						opts.ManagedStandalone = true
+					}
+					code := sp.decide(opts, []byte(body))
+					out := stdout.String()
+					if code != 0 || strings.Contains(out, `"deny"`) || strings.Contains(out, `"block"`) ||
+						strings.Contains(out, "followup_message") || strings.Contains(stderr.String(), "failed closed") {
+						t.Errorf("%s/%s Windows=%v body=%s: code=%d stdout=%q stderr=%q",
+							connector, event, windowsShape, body, code, out, stderr.String())
+					}
+					if connector == "opencode" && strings.TrimSpace(out) != `{"action":"allow"}` {
+						t.Errorf("%s/%s Windows=%v: plugin did not receive an explicit allow: %q",
+							connector, event, windowsShape, out)
+					}
 				}
-				var stdout, stderr bytes.Buffer
-				opts := Options{Connector: tc.connector, Event: tc.event, ManagedEnterprise: true,
-					FailMode: "closed", Stdout: &stdout, Stderr: &stderr}
-				if windowsShape {
-					opts.ExplainUnenrolledAccount = true
-				} else {
-					opts.ManagedStandalone = true
-				}
-				if code := sp.decide(opts, []byte(body)); code != 0 ||
-					strings.Contains(stdout.String(), `"deny"`) || strings.Contains(stderr.String(), "failed closed") {
-					t.Errorf("%s/%s Windows=%v body=%s: code=%d stdout=%q stderr=%q",
-						tc.connector, tc.event, windowsShape, body, code, stdout.String(), stderr.String())
-				}
-				if tc.connector == "opencode" && strings.TrimSpace(stdout.String()) != `{"action":"allow"}` {
-					t.Errorf("%s/%s Windows=%v: plugin did not receive an explicit allow: %q",
-						tc.connector, tc.event, windowsShape, stdout.String())
+			}
+		}
+	}
+}
+
+// TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes pins the
+// per-user (fail_mode closed and open) and Secure Client results of a missing
+// or unknown gateway action on every lifecycle event to commit 6210dbcee, the
+// last commit before the managed standalone lifecycle change. Only the managed
+// standalone profiles keep these events neutral. The golden file is the output
+// of a decide() probe run on a git-archive copy of 6210dbcee; regenerate it
+// only from that commit, never from the current code.
+func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testing.T) {
+	f, err := os.Open("testdata/lifecycle_invalid_action_6210dbcee.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	type row struct {
+		Connector, Event, Profile, Body, Stdout, Stderr string
+		Code                                            int
+	}
+	covered := map[[3]string]int{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var want row
+		if err := json.Unmarshal(scanner.Bytes(), &want); err != nil {
+			t.Fatalf("golden row %q: %v", scanner.Text(), err)
+		}
+		sp, ok := specFor(want.Connector)
+		if !ok {
+			t.Fatalf("missing spec for %s", want.Connector)
+		}
+		var stdout, stderr bytes.Buffer
+		opts := Options{Connector: want.Connector, Event: want.Event, Stdout: &stdout, Stderr: &stderr}
+		switch want.Profile {
+		case "oss-closed":
+			opts.FailMode = "closed"
+		case "oss-open":
+			opts.FailMode = "open"
+		case "secure-client":
+			opts.ManagedEnterprise, opts.SecureClient, opts.FailMode = true, true, "closed"
+		default:
+			t.Fatalf("unknown golden profile %q", want.Profile)
+		}
+		code := sp.decide(opts, []byte(want.Body))
+		if code != want.Code || stdout.String() != want.Stdout || stderr.String() != want.Stderr {
+			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
+				want.Connector, want.Event, want.Profile, want.Body,
+				code, stdout.String(), stderr.String(), want.Code, want.Stdout, want.Stderr)
+		}
+		covered[[3]string{want.Connector, want.Event, want.Profile}]++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for connector, events := range neutralLifecycleSets {
+		for _, event := range events {
+			for _, profile := range []string{"oss-closed", "oss-open", "secure-client"} {
+				if covered[[3]string{connector, event, profile}] != 2 {
+					t.Errorf("%s/%s %s: golden rows = %d, want 2 (missing and unknown action)",
+						connector, event, profile, covered[[3]string{connector, event, profile}])
 				}
 			}
 		}
