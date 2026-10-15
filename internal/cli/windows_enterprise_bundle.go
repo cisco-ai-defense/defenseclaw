@@ -672,20 +672,16 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 			}
 			driver.AnchorsPath = run.anchorStage
 		} else {
+			// The install below replaces the file as before; an unreadable
+			// one only counts as changed (previous nil).
 			previous, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
-				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
-			}
-			run.anchorOnly = &anchorOnlyChange{path: anchorPath, previous: previous}
+			run.anchorOnly = &anchorOnlyChange{path: anchorPath, existed: !errors.Is(readErr, fs.ErrNotExist), previous: previous}
 		}
-		if err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath); err != nil {
+		installed, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
+		if err != nil {
 			return refuse(string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)), "the trust anchors were not installed: "+err.Error())
 		}
 		if run.anchorOnly != nil {
-			installed, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			if readErr != nil {
-				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
-			}
 			run.anchorOnly.installed = installed
 		}
 	}
@@ -817,7 +813,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
 		if len(result.Errors) == 0 && run.anchorStage != "" {
 			run.anchorCommitAttempted = true
-			if err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+			if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
 				result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 			}
 		}
@@ -855,7 +851,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		}
 	}
 	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
-		if err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+		if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
 			result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 			if restoreErr := run.restoreAnchors(); restoreErr != nil {
 				result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
@@ -866,8 +862,8 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil {
 		receipt = p.Receipt
 	}
-	attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
-	settleAnchorOnlyEnsure(result, run.anchorOnly)
+	confirmed := attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
+	settleAnchorOnlyEnsure(result, run.anchorOnly, confirmed)
 }
 
 func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
@@ -947,10 +943,11 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 
 // attachWindowsBundleSummary sets the result v2 bundle block: the receipt
 // of this run if it reached staging, else the store summary. A store this account
-// cannot read (status as a standard user) adds nothing.
-func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterprisebundle.Store, receipt *enterprisebundle.Receipt, sessions *enterprisestatus.SessionRestartStatus) {
+// cannot read (status as a standard user) adds nothing. It reports whether
+// the store has a confirmed current bundle.
+func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterprisebundle.Store, receipt *enterprisebundle.Receipt, sessions *enterprisestatus.SessionRestartStatus) (confirmed bool) {
 	if result == nil {
-		return
+		return false
 	}
 	attachSessions := func() {
 		if sessions == nil {
@@ -963,7 +960,7 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 	if store == nil {
 		layout, err := windowsBundleLayout()
 		if err != nil {
-			return
+			return false
 		}
 		store = newWindowsBundleDriver(layout).Store
 	}
@@ -971,6 +968,7 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 		if receipts, err := store.Receipts(); err == nil {
 			for _, current := range receipts {
 				if current.State == enterprisebundle.StateConfirmed && current.BundleID == state.Current.BundleID && current.Version == state.Current.Version {
+					confirmed = true
 					if layout, err := windowsBundleLayout(); err == nil {
 						if warning := bundleCurrentSignerWarning(newWindowsBundleDriver(layout).AnchorsPath, current.SignerKeyID); warning != nil {
 							result.AddWarning(warning.Code, warning.Message)
@@ -986,19 +984,20 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 	}
 	if result.Bundle != nil {
 		attachSessions()
-		return
+		return confirmed
 	}
 	if receipt != nil && !receipt.IsRefusal() {
 		if st, err := store.LoadState(); err == nil {
 			result.Bundle = receipt.Status(st.Current)
 			attachSessions()
 		}
-		return
+		return confirmed
 	}
 	if summary, err := store.Summary(); err == nil && summary != nil && summary.BundleID != "" {
 		result.Bundle = summary
 		attachSessions()
 	}
+	return confirmed
 }
 
 // platformBundleSessionStatus uses the same process inventory and activation
@@ -1179,25 +1178,26 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 
 // installWindowsBundleAnchors installs the administrator anchor file src
 // as <state root>\etc\trust\bundle-anchors.json once it decodes and passes
-// the trust check, then checks the installed copy the same way.
-func installWindowsBundleAnchors(src, dst string) error {
+// the trust check, then checks the installed copy the same way. It returns
+// the bytes it wrote.
+func installWindowsBundleAnchors(src, dst string) ([]byte, error) {
 	if _, err := enterprisebundle.LoadAnchors(src, bundleAnchorTrust); err != nil {
-		return err
+		return nil, err
 	}
 	raw, err := safefile.ReadRegularFileBounded(src, windowsBundleMaxAnchors)
 	if err != nil {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeAnchorInvalid, Detail: err.Error()}
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeAnchorInvalid, Detail: err.Error()}
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 	}
 	if err := writeWindowsBundleAdminFile(dst, raw); err != nil {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 	}
 	if _, err := enterprisebundle.LoadAnchors(dst, bundleAnchorTrust); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return raw, nil
 }
 
 // lockWindowsBundleStore takes the bundle store lock for the run, or

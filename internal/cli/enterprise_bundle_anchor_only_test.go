@@ -17,7 +17,6 @@
 package cli
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -30,38 +29,47 @@ func TestAnchorOnlyEnsureThatChangedTheAnchorsIsNotANoop(t *testing.T) {
 	compliant := func() *enterprisestatus.Result {
 		return &enterprisestatus.Result{Action: "ensure", Noop: true, NoopReason: "compliant"}
 	}
+	revoked := []byte(`{"schema_version":1,"keys":[{"id":"k1","status":"revoked"}]}`)
 	for _, tc := range []struct {
-		name     string
-		previous []byte
-		want     string
+		name      string
+		existed   bool
+		previous  []byte
+		confirmed bool
+		want      string
 	}{
-		{"replaced", []byte(`{"schema_version":1,"keys":[{"id":"k1","status":"active"}]}`), "replaced the trust anchors in " + path},
-		{"first", nil, "installed trust anchors in " + path},
+		{"replaced under a confirmed bundle", true, []byte(`{"schema_version":1,"keys":[{"id":"k1","status":"active"}]}`), true,
+			"replaced the trust anchors in " + path + anchorOnlyConfirmedClause},
+		// A base-only device, or one whose bundle never confirmed: no
+		// bundle keeps enforcing, so the line does not say one does.
+		{"replaced without a confirmed bundle", true, []byte(`{"schema_version":1}`), false, "replaced the trust anchors in " + path},
+		{"first install", false, nil, false, "installed trust anchors in " + path},
+		// An existing file the run could not read first is replaced as
+		// before and counts as changed.
+		{"unreadable before", true, nil, true, "replaced the trust anchors in " + path + anchorOnlyConfirmedClause},
 	} {
 		result := compliant()
-		settleAnchorOnlyEnsure(result, &anchorOnlyChange{path: path, previous: tc.previous,
-			installed: []byte(`{"schema_version":1,"keys":[{"id":"k1","status":"revoked"}]}`)})
-		if result.Noop || result.NoopReason != "" || len(result.Changes) != 1 || !strings.HasPrefix(result.Changes[0], tc.want) {
+		settleAnchorOnlyEnsure(result, &anchorOnlyChange{path: path, existed: tc.existed, previous: tc.previous, installed: revoked}, tc.confirmed)
+		if result.Noop || result.NoopReason != "" || len(result.Changes) != 1 || result.Changes[0] != tc.want {
 			t.Fatalf("%s: noop=%v reason=%q changes=%q", tc.name, result.Noop, result.NoopReason, result.Changes)
 		}
 	}
 
 	same := []byte(`{"schema_version":1}`)
 	unchanged := compliant()
-	settleAnchorOnlyEnsure(unchanged, &anchorOnlyChange{path: path, previous: same, installed: append([]byte(nil), same...)})
+	settleAnchorOnlyEnsure(unchanged, &anchorOnlyChange{path: path, existed: true, previous: same, installed: append([]byte(nil), same...)}, true)
 	if !unchanged.Noop || unchanged.NoopReason != "compliant" || len(unchanged.Changes) != 0 {
 		t.Fatalf("byte-identical anchors: %+v", unchanged)
 	}
 
 	failed := compliant()
 	failed.AddError("lifecycle_busy", "busy")
-	settleAnchorOnlyEnsure(failed, &anchorOnlyChange{path: path, installed: same})
+	settleAnchorOnlyEnsure(failed, &anchorOnlyChange{path: path, installed: same}, true)
 	if len(failed.Changes) != 0 {
 		t.Fatalf("a failed run reported changes: %q", failed.Changes)
 	}
 
 	bundleRun := compliant()
-	settleAnchorOnlyEnsure(bundleRun, nil)
+	settleAnchorOnlyEnsure(bundleRun, nil, true)
 	if !bundleRun.Noop || len(bundleRun.Changes) != 0 {
 		t.Fatalf("a run without TRUSTANCHORS= alone changed: %+v", bundleRun)
 	}

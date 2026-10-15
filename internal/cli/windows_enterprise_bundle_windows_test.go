@@ -680,7 +680,7 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatalf("sign exit %d: %s", code, out)
 	}
 	layout := stubWindowsBundleHost(t)
-	if err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+	if _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
 		t.Fatal(err)
 	}
 	anchorsBefore := readWindowsBundleAnchors(t, newWindowsBundleDriver(layout).AnchorsPath)
@@ -909,7 +909,7 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 		named = named || (w.Code == string(enterprisebundle.CodeKeyRevoked) && strings.Contains(w.Message, "signer k1 is revoked"))
 	}
 	if compliant.Noop || compliant.NoopReason != "" || len(compliant.Changes) != 1 ||
-		!strings.HasPrefix(compliant.Changes[0], "replaced the trust anchors in "+installedAnchors) || !named {
+		compliant.Changes[0] != "replaced the trust anchors in "+installedAnchors+anchorOnlyConfirmedClause || !named {
 		t.Fatalf("anchor-only revocation result: noop=%v reason=%q changes=%q warnings=%+v",
 			compliant.Noop, compliant.NoopReason, compliant.Changes, compliant.Warnings)
 	}
@@ -1094,7 +1094,7 @@ func TestWindowsRefusedBundleKeepsInstalledAnchors(t *testing.T) {
 			}
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)

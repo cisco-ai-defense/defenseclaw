@@ -22,12 +22,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+// anchorOnlyConfirmedClause ends the change line when a confirmed bundle is
+// current: new anchors do not re-check or remove it.
+const anchorOnlyConfirmedClause = "; the confirmed bundle keeps enforcing until a newer signed bundle replaces it"
+
 // anchorOnlyChange is what a Windows standalone ensure with trust anchors
 // and no bundle (Setup /ensure TRUSTANCHORS= without BUNDLE=) did to the
-// installed anchor file: its bytes before the run (nil when there was none)
-// and the bytes the run installed.
+// installed anchor file: whether a file was there, its bytes before the run
+// (nil when there was none or it could not be read, which counts as
+// changed) and the bytes the run installed.
 type anchorOnlyChange struct {
 	path      string
+	existed   bool
 	previous  []byte
 	installed []byte
 }
@@ -37,17 +43,22 @@ type anchorOnlyChange struct {
 // noop_reason "compliant" although the run had replaced the anchor file, so
 // Intune showed a successful install while the new anchors revoked the
 // confirmed bundle signer. A run that changed the file is not a no-op: it
-// says what it installed in changes. The warning that names a confirmed
-// signer the new anchors revoke or drop comes from the bundle summary
-// (bundleCurrentSignerWarning). Byte-identical anchors stay a no-op.
-func settleAnchorOnlyEnsure(result *enterprisestatus.Result, change *anchorOnlyChange) {
+// says what it installed in changes, and that the confirmed bundle keeps
+// enforcing only when one is current (confirmedBundle). The warning that
+// names a confirmed signer the new anchors revoke or drop comes from the
+// bundle summary (bundleCurrentSignerWarning). Byte-identical anchors stay
+// a no-op.
+func settleAnchorOnlyEnsure(result *enterprisestatus.Result, change *anchorOnlyChange, confirmedBundle bool) {
 	if result == nil || change == nil || len(result.Errors) != 0 || bytes.Equal(change.previous, change.installed) {
 		return
 	}
 	result.Noop, result.NoopReason = false, ""
-	verb := "replaced the trust anchors in "
-	if change.previous == nil {
-		verb = "installed trust anchors in "
+	text := "replaced the trust anchors in " + change.path
+	if !change.existed {
+		text = "installed trust anchors in " + change.path
 	}
-	result.Changes = append(result.Changes, verb+change.path+"; the confirmed bundle keeps enforcing until a newer signed bundle replaces it")
+	if confirmedBundle {
+		text += anchorOnlyConfirmedClause
+	}
+	result.Changes = append(result.Changes, text)
 }
