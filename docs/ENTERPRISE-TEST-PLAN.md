@@ -1081,6 +1081,7 @@ that the 64-bit view is read:
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 '<setup sha256>' -BundlePath .\policy.dcbundle `
   -TrustAnchorPath .\bundle-anchors.json -RequireBundle 7 `
+  -BaseConfigPath .\config.yaml `
   -ProductVersion 9.9.9 -OutputDirectory "$sim\intune-bundle"
 ```
 
