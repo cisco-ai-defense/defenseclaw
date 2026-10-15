@@ -323,7 +323,13 @@ try {
     exit 1
 }
 if ($run.ExitCode -eq 0) {
-    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy")
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    try { $bundleState = [string]$key.GetValue('BundleState') } finally { $key.Dispose() }
+    if ($bundleState -ne 'confirmed') {
+        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): base-only; signed bundle not confirmed")
+    } else {
+        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy; check bundle detection for enforced policy")
+    }
     exit 0
 }
 $summary = Format-DefenseClawVerifyFailure -Json ([string]$run.StdOut)

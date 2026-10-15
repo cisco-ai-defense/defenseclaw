@@ -10,11 +10,12 @@
     commands and scripts in Windows PowerShell 5.1. This launcher is
     therefore 5.1-compatible and does only what 5.1 can do safely: it
     re-checks the SHA-256 pins that New-DefenseClawIntunePackage.ps1 wrote
-    into intune-package.json for the Setup executable and config.yaml that
-    ship in the same .intunewin, then launches the native x64
+    into intune-package.json for the Setup executable and either config.yaml
+    or a signed policy bundle with optional trust anchors that ship in the
+    same .intunewin, then launches the native x64
     DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure with absolute paths (Setup
     refuses relative or environment-expanded paths). Setup then launches the
-    trusted PowerShell 7 engine itself.
+    trusted PowerShell 7 engine itself. A bundle requires an installed base deployment.
 
     Exit codes are Setup's: 0 success or no-op, 1603 failure (rolled back),
     1618 another lifecycle run is active (Intune retries), 1639 invalid
@@ -289,6 +290,13 @@ function Exit-Launcher {
     exit $ExitCode
 }
 
+function Get-LauncherPin {
+    param($Pins, [string]$Name)
+    $property = $Pins.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    return ([string]$property.Value).ToLowerInvariant()
+}
+
 $root = $PSScriptRoot
 if (-not $root) { Exit-Launcher 1639 'mdm_invalid_arguments' 'run this launcher with -File from the Win32 app content folder' }
 $setup = Join-Path $root 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
@@ -308,6 +316,33 @@ $actualSetup = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLower
 if ($actualSetup -ne ([string]$pins.setup_sha256).ToLowerInvariant()) {
     Exit-Launcher 1603 'mdm_hash_mismatch' "Setup SHA-256 $actualSetup does not match the package pin"
 }
+$bundlePin = Get-LauncherPin -Pins $pins -Name 'bundle_sha256'
+$anchorPin = Get-LauncherPin -Pins $pins -Name 'trust_anchors_sha256'
+if ($pins.config_sha256 -and $bundlePin) {
+    Exit-Launcher 1639 'mdm_invalid_arguments' 'the package pins both config.yaml and a policy bundle; rebuild it with New-DefenseClawIntunePackage.ps1 (a signed bundle carries its config, so a package carries one or the other)'
+}
+if ($anchorPin -and -not $bundlePin) {
+    Exit-Launcher 1639 'mdm_invalid_arguments' 'the package pins trust anchors without a policy bundle; rebuild it with -BundlePath'
+}
+$bundle = Join-Path $root 'policy.dcbundle'
+$anchors = Join-Path $root 'bundle-anchors.json'
+foreach ($item in @(@($bundle, $bundlePin, 4MB), @($anchors, $anchorPin, 64KB))) {
+    $path = [string]$item[0]
+    $pin = [string]$item[1]
+    $maximum = [long]$item[2]
+    if (-not $pin) { continue }
+    $name = [IO.Path]::GetFileName($path)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Exit-Launcher 1603 'mdm_package_incomplete' "the package pins $name, which is missing; rebuild it with New-DefenseClawIntunePackage.ps1"
+    }
+    if ((Get-Item -LiteralPath $path).Length -gt $maximum) {
+        Exit-Launcher 1639 'mdm_input_too_large' "$name exceeds $maximum bytes"
+    }
+    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $pin) {
+        Exit-Launcher 1603 'mdm_hash_mismatch' "$name SHA-256 $actual does not match the package pin"
+    }
+}
 $arguments = @('/ensure', 'JSON=1')
 if ($pins.config_sha256) {
     if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { Exit-Launcher 1603 'mdm_package_incomplete' 'the package pins a config.yaml that is missing' }
@@ -316,6 +351,12 @@ if ($pins.config_sha256) {
         Exit-Launcher 1603 'mdm_hash_mismatch' "config.yaml SHA-256 $actualConfig does not match the package pin"
     }
     $arguments += ('CONFIG=' + [System.IO.Path]::GetFullPath($config))
+}
+if ($bundlePin) {
+    $arguments += ('BUNDLE=' + [System.IO.Path]::GetFullPath($bundle))
+    if ($anchorPin) {
+        $arguments += ('TRUSTANCHORS=' + [System.IO.Path]::GetFullPath($anchors))
+    }
 }
 if ($pins.trust_mode -eq 'authenticode') {
     $signature = Get-AuthenticodeSignature -LiteralPath $setup

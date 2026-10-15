@@ -67,7 +67,7 @@ inbox and version assets retain protected ACLs without a Users grant.
 
 | OS | Is bundle N (or newer) enforcing? | Enforcing receipt and latest refusal |
 | --- | --- | --- |
-| Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed) | `enterprise bundle status --json` |
+| Windows | `detect.ps1 -RequireBundle <version\|b-ULID>`; the marker gains `BundleId`, `BundleVersion` and `BundleState` (written only when a bundle is confirmed). Intune: the packager writes `detect-bundle.ps1` with `-RequireBundle` and `-MinimumVersion` defaults for each bundle app. | `enterprise bundle status --json` |
 | Linux, macOS | `detect.sh --require-bundle <version\|b-ULID>` (setting `DC_REQUIRE_BUNDLE`) | `detect.sh --bundle-status` (setting `DC_BUNDLE_STATUS=1`) for the enforcing receipt; `enterprise bundle status --json` for `last_refusal` |
 
 `-RequireBundle` and `--require-bundle` detect only when the current,

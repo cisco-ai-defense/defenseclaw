@@ -24,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 from email.message import Message
@@ -39,6 +40,63 @@ OKTA_INSTALL = OKTA.parent / "install-sssd-okta.sh"
 KIT_DIRS = (ENTRA.parent, INTUNE.parent, OKTA.parent)
 REGION_BEGIN = "# region graph client"
 REGION_END = "# endregion graph client"
+
+
+def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
+    script = (ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1").read_text()
+    assert "if ($BundlePath -and -not $BaseConfigPath)" in script
+    assert "base CONFIG= guardrail policy differs from signed bundle rule pack" in script
+    assert script.index("$basePolicy -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
+    detect = (ROOT / "packaging/mdm/intune/windows/Remediate-Detect.ps1").read_text()
+    assert "base-only; signed bundle not confirmed" in detect
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")
+def test_intune_bundle_package_refuses_weak_base_and_accepts_matching_pack(tmp_path: Path) -> None:
+    packager = ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1"
+    setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+    setup.write_bytes(b"packager-only stub")
+    bundle_config = (
+        "guardrail:\n  block_at: HIGH\n  rule_pack: testpack\n  custom_packs:\n"
+        "    testpack:\n      path: policies/guardrail/testpack\n"
+        "      digest: sha256:" + "a" * 64 + "\n"
+    )
+    config_bytes = bundle_config.encode()
+    manifest = {"files": [
+        {"path": "config.yaml", "sha256": hashlib.sha256(config_bytes).hexdigest()},
+        {"path": "policies/guardrail/testpack/rules.yaml", "sha256": "b" * 64},
+    ]}
+    bundle = tmp_path / "policy.dcbundle"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, data in (("manifest.json", json.dumps(manifest).encode()),
+                           ("config.yaml", config_bytes)):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+    base = tmp_path / "base.yaml"
+
+    def package(output: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(packager),
+             "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+             "-BundlePath", str(bundle), "-BaseConfigPath", str(base),
+             "-RequireBundle", "1", "-OutputDirectory", str(tmp_path / output)],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    base.write_text(bundle_config.replace("  rule_pack: testpack", "  rule_pack: default"))
+    refused = package("weak")
+    assert refused.returncode != 0 and "must select the bundle rule pack testpack" in refused.stderr
+    assert not (tmp_path / "weak/content").exists()
+    base.write_text(bundle_config.replace("block_at: HIGH", "block_at: CRITICAL")
+                    .replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"))
+    weaker = package("weaker-threshold")
+    assert weaker.returncode != 0 and "guardrail policy differs" in weaker.stderr
+    assert not (tmp_path / "weaker-threshold/content").exists()
+    base.write_text(bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"))
+    accepted = package("matching")
+    assert accepted.returncode == 0, accepted.stderr
+    assert (tmp_path / "matching/content/policy.dcbundle").exists()
 
 
 def _load(path: Path):

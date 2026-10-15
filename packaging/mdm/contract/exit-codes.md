@@ -60,14 +60,14 @@ evaluated". Run the `status` action to inspect the host.
 
 | Code | Where | Exit (Windows / Unix) | Meaning |
 | --- | --- | --- | --- |
-| `mdm_invalid_arguments` | all | `1639` / `2` | A flag or setting is missing, malformed, contradictory or unknown. The Unix wrapper also refuses positional arguments. |
+| `mdm_invalid_arguments` | all | `1639` / `2` | A flag or setting is missing, malformed, contradictory or unknown. The Unix wrapper also refuses positional arguments. The Intune Windows launcher refuses a package pinning both config and bundle, or anchors without a bundle. |
 | `mdm_not_root`, `mdm_not_elevated` | all | `1603` / `1` | Not running as root / SYSTEM / elevated administrator. |
 | `mdm_wrong_platform` | unix | — / `2` | The Linux copy ran on macOS or the reverse. |
 | `mdm_hash_mismatch` | all | `1603` / `1` | The staged source does not match the pinned SHA-256. |
 | `mdm_signature_invalid`, `mdm_signer_not_allowed`, `mdm_signature_unsupported` | all | `1603` / `1` | Signature trust failed, the signer isn't allowed, or signing isn't supported for this source type. |
 | `mdm_untrusted_input` | all | `1603` / `1` | A config, credential or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned. |
 | `mdm_untrusted_install` | Windows | `1603` / — | `uninstall.ps1` only: the installed CLI or its folders are not administrator-only. `Invoke-DefenseClawEnterprise.ps1` reports the same condition as `mdm_lifecycle_launch_failed`. |
-| `mdm_input_too_large` | all | `1639` / `2` | Config over 1 MiB or credential over 16 KiB. |
+| `mdm_input_too_large` | all | `1639` / `2` | Config over 1 MiB, credential over 16 KiB, policy bundle over 4 MiB or trust anchors over 64 KiB (Intune launcher). |
 | `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | unix | — / `1` | The archive or package is not a DefenseClaw enterprise artifact for this host. |
 | `mdm_version_mismatch` | unix | — / `1` | The package is not the version set with `--product-version`. |
 | `mdm_package_manager_busy` | unix | — / `75` | dpkg, rpm or installer held its lock. |
@@ -77,7 +77,7 @@ evaluated". Run the `status` action to inspect the host.
 | `mdm_not_installed` | all | `1603` / `1` | A read-only action or source-less `ensure` found no installed deployment. |
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | all | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result. |
 | `mdm_secret_failed` | all | `1603` / `1`, `2` or `75` | Storing the credential failed. On Windows the deployment applied. On Linux and macOS the wrapper stores it before the config, so the config was not applied, and the exit code is the one `secret set` returned. |
-| `mdm_staging_untrusted`, `mdm_package_incomplete` | all | `1603` / `1` | The private staging folder or the Intune content is not as expected. |
+| `mdm_staging_untrusted`, `mdm_package_incomplete` | all | `1603` / `1` | The private staging folder or the Intune content is not as expected, including a missing pinned bundle or anchors. |
 | `mdm_anchor_install_failed` | unix | — / `1` | The wrapper could not write the bundle trust anchor file (`--trust-anchor-file`), or its folder is not root-only. Nothing was applied. |
 | `mdm_staging_noexec` | unix | — / `1` | Linux: the payload's gateway cannot run from the staging folder (a `noexec` mount, named in the message). Use `--staging-dir` or a deb/rpm source. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | Windows | `1603` / — | Host refusals of the PowerShell 7 wrapper. The lifecycle applies the same checks itself. |
