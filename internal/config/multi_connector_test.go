@@ -333,6 +333,7 @@ func TestGuardrailValidate(t *testing.T) {
 		// multi-connector support and were never load-gated), so even an
 		// odd global value passes — only the connectors map is checked.
 		{"global_fields_not_validated", GuardrailConfig{Mode: "blarg", HookFailMode: "halfopen", HILT: HILTConfig{MinSeverity: "SPICY"}}, ""},
+		{"ipv6_metadata_allowlist_rejected", GuardrailConfig{AllowPrivateUpstreams: []string{"fd00:ec2::254"}}, "cloud metadata address"},
 		{
 			name: "bad_connector_mode_named",
 			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{

@@ -3009,9 +3009,33 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
         return
 
-    if not active:
+    private_env_name = "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"
+    active = [entry for entry in active if entry.name != private_env_name]
+    configured = getattr(getattr(cfg, "guardrail", None), "allow_private_upstreams", [])
+    config_entries = configured if isinstance(configured, (list, tuple)) else []
+    env_entries = os.environ.get(private_env_name, "").split(",")
+    private_entries: list[str] = []
+    sources: list[str] = []
+    for source, values in (("config.yaml", config_entries), ("environment", env_entries)):
+        added_source = False
+        for value in values:
+            normalized = str(value).strip()
+            if normalized and normalized not in private_entries:
+                private_entries.append(normalized)
+                added_source = True
+        if added_source:
+            sources.append(source)
+
+    if not active and not private_entries:
         _emit("pass", "Security overrides", "none active", r=r)
         return
+
+    if private_entries:
+        detail = (
+            f"active entries: {', '.join(private_entries)} | impact=high | "
+            f"sources={', '.join(sources)}"
+        )
+        _emit("warn", "Private upstream allowlist", detail, r=r)
 
     for entry in active:
         tag = _OVERRIDE_TAG_BY_IMPACT.get(entry.security_impact, "warn")

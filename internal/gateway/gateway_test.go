@@ -1204,6 +1204,113 @@ func TestBlockMessage(t *testing.T) {
 	}
 }
 
+func TestTrimAfterLastBlock(t *testing.T) {
+	blocked := "[DefenseClaw] This request was blocked. A potential security concern was detected in the prompt (injection)."
+	customBlocked := "[DefenseClaw] Custom policy violation"
+
+	tests := []struct {
+		name     string
+		messages []ChatMessage
+		wantLen  int
+		wantFirst string // expected Content of first message in result, empty if result should be empty
+	}{
+		{
+			name:     "empty messages",
+			messages: nil,
+			wantLen:  0,
+		},
+		{
+			name: "no block message",
+			messages: []ChatMessage{
+				{Role: "user", Content: "hello"},
+				{Role: "assistant", Content: "hi there"},
+				{Role: "user", Content: "do something"},
+			},
+			wantLen:   3,
+			wantFirst: "hello",
+		},
+		{
+			name: "single block in middle",
+			messages: []ChatMessage{
+				{Role: "user", Content: "bad prompt"},
+				{Role: "assistant", Content: blocked},
+				{Role: "user", Content: "good prompt"},
+			},
+			wantLen:   1,
+			wantFirst: "good prompt",
+		},
+		{
+			name: "custom block message in middle",
+			messages: []ChatMessage{
+				{Role: "user", Content: "bad prompt"},
+				{Role: "assistant", Content: customBlocked},
+				{Role: "user", Content: "good prompt"},
+				{Role: "assistant", Content: "response"},
+			},
+			wantLen:   2,
+			wantFirst: "good prompt",
+		},
+		{
+			name: "multiple blocks trims to last",
+			messages: []ChatMessage{
+				{Role: "user", Content: "first bad"},
+				{Role: "assistant", Content: blocked},
+				{Role: "user", Content: "second bad"},
+				{Role: "assistant", Content: customBlocked},
+				{Role: "user", Content: "final good"},
+			},
+			wantLen:   1,
+			wantFirst: "final good",
+		},
+		{
+			name: "block is last message",
+			messages: []ChatMessage{
+				{Role: "user", Content: "bad prompt"},
+				{Role: "assistant", Content: blocked},
+			},
+			wantLen: 0,
+		},
+		{
+			name: "user message with DefenseClaw prefix ignored",
+			messages: []ChatMessage{
+				{Role: "user", Content: "[DefenseClaw] I pasted this from logs"},
+				{Role: "assistant", Content: "ok"},
+				{Role: "user", Content: "next question"},
+			},
+			wantLen:   3,
+			wantFirst: "[DefenseClaw] I pasted this from logs",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := trimAfterLastBlock(tc.messages)
+			if len(got) != tc.wantLen {
+				t.Fatalf("trimAfterLastBlock: got %d messages, want %d", len(got), tc.wantLen)
+			}
+			if tc.wantLen > 0 && got[0].Content != tc.wantFirst {
+				t.Errorf("first message Content = %q, want %q", got[0].Content, tc.wantFirst)
+			}
+		})
+	}
+
+	// Verify original slice is not mutated.
+	t.Run("original slice unmodified", func(t *testing.T) {
+		original := []ChatMessage{
+			{Role: "user", Content: "before"},
+			{Role: "assistant", Content: blocked},
+			{Role: "user", Content: "after"},
+		}
+		trimmed := trimAfterLastBlock(original)
+		if len(original) != 3 {
+			t.Fatalf("original slice length changed: got %d", len(original))
+		}
+		if len(trimmed) != 1 || trimmed[0].Content != "after" {
+			t.Fatalf("trimmed result unexpected: len=%d", len(trimmed))
+		}
+	})
+}
+
 func TestMergeVerdicts(t *testing.T) {
 	t.Run("both nil", func(t *testing.T) {
 		v := mergeVerdicts(nil, nil)
