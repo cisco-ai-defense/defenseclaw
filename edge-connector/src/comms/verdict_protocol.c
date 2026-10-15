@@ -35,8 +35,8 @@
  */
 
 extern dclaw_state_t *dclaw_get_state(void);
-extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                              dclaw_severity_t severity);
+extern void dclaw_cache_store_with_ttl(const uint8_t *tool_hash, dclaw_action_t action,
+                                       dclaw_severity_t severity, uint16_t ttl_minutes);
 extern void dclaw_cache_invalidate(const uint8_t *tool_hash);
 extern const char *dclaw_mqtt_get_session_id(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
@@ -451,9 +451,10 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
         dclaw_cache_invalidate(local_hash);
     }
 
-    /* Cache the verdict */
-    dclaw_cache_store(local_hash, (dclaw_action_t)action,
-                      (dclaw_severity_t)severity);
+    /* The authenticated wire TTL is in minutes. A zero TTL (including
+     * emergency lockdown BLOCK) must not leave a reusable cache entry. */
+    dclaw_cache_store_with_ttl(local_hash, (dclaw_action_t)action,
+                               (dclaw_severity_t)severity, ttl);
 
     /* Invoke retroactive callback when cloud returns BLOCK for a
      * previously speculatively-allowed request. */

@@ -33,11 +33,8 @@ int main(void) {
 #else /* DCLAW_VERDICT_CACHE_SIZE > 0 */
 
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
-extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                              dclaw_severity_t severity);
-extern void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
-                                       dclaw_severity_t severity, uint8_t category,
-                                       const char *evidence);
+extern void dclaw_cache_store_with_ttl(const uint8_t *tool_hash, dclaw_action_t action,
+                                       dclaw_severity_t severity, uint16_t ttl_minutes);
 extern void dclaw_cache_invalidate(const uint8_t *tool_hash);
 extern void dclaw_cache_flush_all(void);
 extern dclaw_state_t *dclaw_get_state(void);
@@ -61,7 +58,7 @@ static void test_store_and_hit(void) {
 
     uint8_t hash[32];
     make_hash(hash, 0xBB);
-    dclaw_cache_store(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == true);
@@ -102,7 +99,7 @@ static void test_untrusted_clock_cache_still_works(void) {
 
     uint8_t hash[32];
     make_hash(hash, 0xDD);
-    dclaw_cache_store(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH);
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH, 60);
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == true);
@@ -117,7 +114,7 @@ static void test_untrusted_clock_cache_still_works(void) {
 static void test_flush_all_clears_cache(void) {
     uint8_t hash[32];
     make_hash(hash, 0xEE);
-    dclaw_cache_store(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
     dclaw_cache_flush_all();
 
     dclaw_verdict_t v;
@@ -134,13 +131,13 @@ static void test_lru_eviction(void) {
     for (int i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
         uint8_t hash[32];
         make_hash(hash, (uint8_t)i);
-        dclaw_cache_store(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+        dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
     }
 
     /* Store one more — should evict LRU */
     uint8_t new_hash[32];
     make_hash(new_hash, 0xFF);
-    dclaw_cache_store(new_hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH);
+    dclaw_cache_store_with_ttl(new_hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH, 60);
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(new_hash, &v) == true);
@@ -149,66 +146,40 @@ static void test_lru_eviction(void) {
     printf("  PASS: LRU eviction works (new entry stored when full)\n");
 }
 
-static void test_cache_stores_and_retrieves_category(void) {
+static void test_duplicate_hashes_cannot_resurface(void) {
     dclaw_state_t *s = dclaw_get_state();
-    s->clock.time_trusted = true;
-
     uint8_t hash[32];
-    memset(hash, 0xEE, 32);
-    dclaw_cache_store_enriched(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH,
-                                DCLAW_CONTENT_CATEGORY_SECRET, "api_key=sk-proj-...");
-
-    /* Verify cache entry was stored with enriched fields */
-    bool found = false;
-    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
-        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, hash, 32) == 0) {
-            assert(s->cache[i].action == DCLAW_ACTION_BLOCK);
-            assert(s->cache[i].severity == DCLAW_SEV_HIGH);
-            assert(s->cache[i].category == DCLAW_CONTENT_CATEGORY_SECRET);
-            assert(strcmp(s->cache[i].evidence, "api_key=sk-proj-...") == 0);
-            found = true;
-            break;
-        }
+    make_hash(hash, 0xA7);
+    for (size_t i = 0; i < 2; i++) {
+        memcpy(s->cache[i].tool_hash, hash, 32);
+        s->cache[i].action = DCLAW_ACTION_ALLOW;
+        s->cache[i].ttl_minutes = 60;
+        s->cache[i].cached_at_tick = hal_tick_ms();
+        s->cache[i].occupied = true;
     }
-    assert(found);
-    (void)found;
+    dclaw_cache_invalidate(hash);
+    dclaw_verdict_t verdict;
+    assert(!dclaw_cache_lookup(hash, &verdict));
+    assert(!s->cache[0].occupied && !s->cache[1].occupied);
 
-    /* Basic lookup still works */
-    dclaw_verdict_t v;
-    bool hit = dclaw_cache_lookup(hash, &v);
-    assert(hit);
-    assert(v.action == DCLAW_ACTION_BLOCK);
-    (void)hit; (void)v;
-    printf("  PASS: cache stores and retrieves enriched verdict\n");
-}
-
-static void test_cache_truncates_long_evidence(void) {
-    dclaw_state_t *s = dclaw_get_state();
-    s->clock.time_trusted = true;
-
-    uint8_t hash[32];
-    memset(hash, 0xAB, 32);
-
-    /* Create evidence string longer than 64 bytes */
-    char long_evidence[128];
-    memset(long_evidence, 'X', 127);
-    long_evidence[127] = '\0';
-
-    dclaw_cache_store_enriched(hash, DCLAW_ACTION_WARN, DCLAW_SEV_MEDIUM,
-                                DCLAW_CONTENT_CATEGORY_PII, long_evidence);
-
-    /* Verify evidence was truncated to 63 chars + null terminator */
-    bool found = false;
-    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
-        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, hash, 32) == 0) {
-            assert(strlen(s->cache[i].evidence) == 63);
-            found = true;
-            break;
-        }
+    for (size_t i = 0; i < 2; i++) {
+        memcpy(s->cache[i].tool_hash, hash, 32);
+        s->cache[i].action = DCLAW_ACTION_ALLOW;
+        s->cache[i].ttl_minutes = 60;
+        s->cache[i].cached_at_tick = hal_tick_ms();
+        s->cache[i].occupied = true;
     }
-    assert(found);
-    (void)found;
-    printf("  PASS: cache truncates long evidence to 63 bytes\n");
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH, 2);
+    size_t matching = 0;
+    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
+        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, hash, 32) == 0) matching++;
+    }
+    assert(matching == 1);
+    assert(dclaw_cache_lookup(hash, &verdict));
+    assert(verdict.action == DCLAW_ACTION_BLOCK && verdict.ttl_minutes == 2);
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH, 0);
+    assert(!dclaw_cache_lookup(hash, &verdict));
+    printf("  PASS: revocation, replacement, and zero TTL clear duplicate prior ALLOWs\n");
 }
 
 int main(void) {
@@ -224,9 +195,8 @@ int main(void) {
     test_untrusted_clock_cache_still_works();
     test_flush_all_clears_cache();
     test_lru_eviction();
-    test_cache_stores_and_retrieves_category();
-    test_cache_truncates_long_evidence();
-    printf("  ALL PASSED (9 tests)\n");
+    test_duplicate_hashes_cannot_resurface();
+    printf("  ALL PASSED (8 tests)\n");
 
     dclaw_shutdown();
     return 0;

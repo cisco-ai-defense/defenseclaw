@@ -36,12 +36,12 @@ extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t act
                                                 const uint8_t *request_nonce,
                                                 uint8_t *out_hmac_32bytes);
 extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
+extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 
 static void build_valid_response(uint16_t request_id, uint8_t action,
-                                 const uint8_t *tool_hash, uint8_t *buf) {
+                                 uint16_t ttl, const uint8_t *tool_hash, uint8_t *buf) {
     /* Build 44-byte wire format response (12 header + 32 HMAC) */
     uint8_t severity = 0;
-    uint16_t ttl = 60;
     uint8_t reason = DCLAW_REASON_CLOUD_BLOCK;
     uint8_t flags = 0;
     uint32_t server_ts = 0x000F4240; /* 1000000 */
@@ -80,7 +80,7 @@ static void test_valid_verdict_accepted(void) {
     dclaw_verdict_register_pending(rid, tool_hash);
 
     uint8_t resp[44];
-    build_valid_response(rid, DCLAW_ACTION_ALLOW, tool_hash, resp);
+    build_valid_response(rid, DCLAW_ACTION_ALLOW, 60, tool_hash, resp);
 
     int rc = dclaw_verdict_handle_response(resp, 44, tool_hash);
     assert(rc == 0);
@@ -101,7 +101,7 @@ static void test_duplicate_discarded(void) {
     memset(tool_hash, 0xAA, 32);
 
     uint8_t resp[44];
-    build_valid_response(1, DCLAW_ACTION_ALLOW, tool_hash, resp);
+    build_valid_response(1, DCLAW_ACTION_ALLOW, 60, tool_hash, resp);
 
     /* Second response for same request_id should be rejected.
      * After Comment 24 fix, resolved slots have request_id cleared to 0
@@ -120,7 +120,7 @@ static void test_invalid_hmac_rejected(void) {
     dclaw_verdict_register_pending(rid, tool_hash);
 
     uint8_t resp[44];
-    build_valid_response(rid, DCLAW_ACTION_ALLOW, tool_hash, resp);
+    build_valid_response(rid, DCLAW_ACTION_ALLOW, 60, tool_hash, resp);
     /* Corrupt HMAC */
     resp[12] ^= 0xFF;
     resp[13] ^= 0xFF;
@@ -136,7 +136,7 @@ static void test_unknown_request_id_rejected(void) {
     memset(tool_hash, 0xCC, 32);
 
     uint8_t resp[44];
-    build_valid_response(999, DCLAW_ACTION_ALLOW, tool_hash, resp);
+    build_valid_response(999, DCLAW_ACTION_ALLOW, 60, tool_hash, resp);
 
     int rc = dclaw_verdict_handle_response(resp, 44, tool_hash);
     assert(rc == -1);
@@ -151,6 +151,74 @@ static void test_wrong_size_rejected(void) {
     assert(rc == -1);
     (void)rc;
     printf("  PASS: wrong response size (8 < 44) rejected\n");
+}
+
+static void test_signed_ttl_controls_cache(void) {
+    uint8_t hash[32];
+    uint8_t response[44];
+    dclaw_verdict_t verdict;
+    dclaw_state_t *state = dclaw_get_state();
+
+    memset(hash, 0xD1, sizeof(hash));
+    assert(dclaw_verdict_register_pending(3, hash) >= 0);
+    build_valid_response(3, DCLAW_ACTION_ALLOW, 5, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(dclaw_cache_lookup(hash, &verdict));
+    assert(verdict.ttl_minutes == 5);
+    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
+        if (state->cache[i].occupied && memcmp(state->cache[i].tool_hash, hash, 32) == 0) {
+            state->cache[i].cached_at_tick = hal_tick_ms() - 6ULL * 60000ULL;
+            break;
+        }
+    }
+    assert(!dclaw_cache_lookup(hash, &verdict));
+
+    memset(hash, 0xD2, sizeof(hash));
+    assert(dclaw_verdict_register_pending(4, hash) >= 0);
+    build_valid_response(4, DCLAW_ACTION_ALLOW, 0, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(!dclaw_cache_lookup(hash, &verdict));
+
+    memset(hash, 0xD3, sizeof(hash));
+    assert(dclaw_verdict_register_pending(5, hash) >= 0);
+    build_valid_response(5, DCLAW_ACTION_ALLOW, UINT16_MAX, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(dclaw_cache_lookup(hash, &verdict));
+    assert(verdict.ttl_minutes == 60); /* device ceiling for cloud ALLOW */
+
+    memset(hash, 0xD4, sizeof(hash));
+    assert(dclaw_verdict_register_pending(6, hash) >= 0);
+    build_valid_response(6, DCLAW_ACTION_ALLOW, 5, hash, response);
+    response[5] ^= 1; /* tamper with signed TTL, keep original HMAC */
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == -1);
+    assert(!dclaw_cache_lookup(hash, &verdict));
+    build_valid_response(6, DCLAW_ACTION_ALLOW, 5, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(dclaw_cache_lookup(hash, &verdict));
+    assert(verdict.ttl_minutes == 5);
+
+    memset(hash, 0xD5, sizeof(hash));
+    assert(dclaw_verdict_register_pending(7, hash) >= 0);
+    build_valid_response(7, DCLAW_ACTION_BLOCK, 2, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(dclaw_cache_lookup(hash, &verdict));
+    assert(verdict.action == DCLAW_ACTION_BLOCK && verdict.ttl_minutes == 2);
+
+    memset(hash, 0xD6, sizeof(hash));
+    assert(dclaw_verdict_register_pending(8, hash) >= 0);
+    build_valid_response(8, DCLAW_ACTION_BLOCK, 0, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(!dclaw_cache_lookup(hash, &verdict));
+
+    /* A zero-TTL lockdown BLOCK must also remove an earlier ALLOW for the
+     * same tool instead of leaving it available for the next lookup. */
+    memset(hash, 0xD3, sizeof(hash));
+    assert(dclaw_verdict_register_pending(9, hash) >= 0);
+    build_valid_response(9, DCLAW_ACTION_BLOCK, 0, hash, response);
+    assert(dclaw_verdict_handle_response(response, sizeof(response), hash) == 0);
+    assert(!dclaw_cache_lookup(hash, &verdict));
+
+    printf("  PASS: signed TTL controls ALLOW/BLOCK expiry, zero/no-cache, ceiling, and tamper rejection\n");
 }
 
 int main(void) {
@@ -174,7 +242,8 @@ int main(void) {
     test_invalid_hmac_rejected();
     test_unknown_request_id_rejected();
     test_wrong_size_rejected();
-    printf("  ALL PASSED (6 tests)\n");
+    test_signed_ttl_controls_cache();
+    printf("  ALL PASSED (7 tests)\n");
 
     dclaw_shutdown();
     return 0;

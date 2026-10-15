@@ -51,8 +51,6 @@ extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
 extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
 extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
-extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                              dclaw_severity_t severity);
 extern bool dclaw_rate_limit_check(uint8_t cap_flags);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint32_t target_hash, uint16_t session_id);

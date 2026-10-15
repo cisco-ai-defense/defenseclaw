@@ -24,23 +24,13 @@ extern dclaw_state_t *dclaw_get_state(void);
 
 #if DCLAW_VERDICT_CACHE_SIZE > 0
 
-/* Runtime-configurable TTLs (in minutes). Defaults match original compile-time constants. */
-static uint32_t s_ttl_allow = 24 * 60;       /* 24 hours */
-static uint32_t s_ttl_block = 7 * 24 * 60;   /* 7 days  */
-static uint32_t s_ttl_warn  = 4 * 60;        /* 4 hours */
-
-void dclaw_verdict_cache_set_ttls(uint32_t allow_secs, uint32_t block_secs, uint32_t warn_secs)
-{
-    if (allow_secs > 0) s_ttl_allow = (allow_secs > UINT16_MAX) ? UINT16_MAX : allow_secs;
-    if (block_secs > 0) s_ttl_block = (block_secs > UINT16_MAX) ? UINT16_MAX : block_secs;
-    if (warn_secs > 0)  s_ttl_warn  = (warn_secs > UINT16_MAX) ? UINT16_MAX : warn_secs;
-}
-
-static uint32_t ttl_for_action(dclaw_action_t action) {
+/* Local defaults and maximum accepted signed TTLs, in minutes. Cloud ALLOW
+ * is bounded to one hour even if a peer signs an excessive lifetime. */
+static uint16_t ttl_for_action(dclaw_action_t action) {
     switch (action) {
-    case DCLAW_ACTION_ALLOW: return s_ttl_allow;
-    case DCLAW_ACTION_BLOCK: return s_ttl_block;
-    case DCLAW_ACTION_WARN:  return s_ttl_warn;
+    case DCLAW_ACTION_ALLOW: return 24 * 60;
+    case DCLAW_ACTION_BLOCK: return 7 * 24 * 60;
+    case DCLAW_ACTION_WARN:  return 4 * 60;
     default: return 0;
     }
 }
@@ -56,19 +46,54 @@ static bool is_expired(const dclaw_cache_entry_t *entry) {
     return elapsed_min >= entry->ttl_minutes;
 }
 
-static size_t find_lru_slot(void) {
+static size_t find_lru_slot(const uint8_t *tool_hash) {
     dclaw_state_t *s = dclaw_get_state();
     size_t lru_idx = 0;
+    size_t empty_idx = DCLAW_VERDICT_CACHE_SIZE;
     uint64_t lru_tick = UINT64_MAX;
 
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
-        if (!s->cache[i].occupied) return i;
-        if (s->cache[i].cached_at_tick < lru_tick) {
+        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, tool_hash, 32) == 0)
+            return i; /* Replace a previous decision for this tool. */
+        if (!s->cache[i].occupied) {
+            if (empty_idx == DCLAW_VERDICT_CACHE_SIZE) empty_idx = i;
+        } else if (s->cache[i].cached_at_tick < lru_tick) {
             lru_tick = s->cache[i].cached_at_tick;
             lru_idx = i;
         }
     }
-    return lru_idx;
+    return empty_idx < DCLAW_VERDICT_CACHE_SIZE ? empty_idx : lru_idx;
+}
+
+static void cache_store_entry(const uint8_t *tool_hash, dclaw_action_t action,
+                              dclaw_severity_t severity, uint16_t ttl_minutes) {
+    dclaw_state_t *s = dclaw_get_state();
+    size_t idx = find_lru_slot(tool_hash);
+    /* Older cache writers could create duplicate entries for one hash.
+     * Clear every other copy so a stale ALLOW cannot resurface later. */
+    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
+        if (i != idx && s->cache[i].occupied &&
+            memcmp(s->cache[i].tool_hash, tool_hash, 32) == 0)
+            s->cache[i].occupied = false;
+    }
+    if (ttl_minutes == 0) {
+        /* A signed zero TTL revokes any previous cached answer for the tool. */
+        if (s->cache[idx].occupied && memcmp(s->cache[idx].tool_hash, tool_hash, 32) == 0)
+            s->cache[idx].occupied = false;
+        return;
+    }
+
+    memcpy(s->cache[idx].tool_hash, tool_hash, 32);
+    s->cache[idx].action = (uint8_t)action;
+    s->cache[idx].severity = (uint8_t)severity;
+    /* Keep the reserved public state fields deterministic until a separate
+     * ABI revision can remove them. Verdicts carry no evidence snippet. */
+    s->cache[idx].category = 0;
+    memset(s->cache[idx].evidence, 0, sizeof(s->cache[idx].evidence));
+
+    s->cache[idx].ttl_minutes = ttl_minutes;
+    s->cache[idx].cached_at_tick = hal_tick_ms();
+    s->cache[idx].occupied = true;
 }
 
 #endif /* DCLAW_VERDICT_CACHE_SIZE > 0 */
@@ -95,49 +120,21 @@ bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out) {
         out->reason = DCLAW_REASON_CLOUD_BLOCK; /* cached cloud decision */
         out->mode = DCLAW_VERDICT_SYNC;
         out->from_cache = true;
-        /* category and evidence available in cache entry but not exposed via verdict yet */
         return true;
     }
     return false;
 #endif /* DCLAW_VERDICT_CACHE_SIZE */
 }
 
-void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
-                                dclaw_severity_t severity, uint8_t category,
-                                const char *evidence) {
+void dclaw_cache_store_with_ttl(const uint8_t *tool_hash, dclaw_action_t action,
+                                dclaw_severity_t severity, uint16_t ttl_minutes) {
 #if DCLAW_VERDICT_CACHE_SIZE == 0
-    (void)tool_hash; (void)action; (void)severity; (void)category; (void)evidence;
-    return;
+    (void)tool_hash; (void)action; (void)severity; (void)ttl_minutes;
 #else
-    dclaw_state_t *s = dclaw_get_state();
-    size_t idx = find_lru_slot();
-
-    memcpy(s->cache[idx].tool_hash, tool_hash, 32);
-    s->cache[idx].action = (uint8_t)action;
-    s->cache[idx].severity = (uint8_t)severity;
-    s->cache[idx].category = category;
-
-    /* Truncate evidence to fit 64-byte buffer */
-    if (evidence != NULL && evidence[0] != '\0') {
-        strncpy(s->cache[idx].evidence, evidence, 63);
-        s->cache[idx].evidence[63] = '\0';
-    } else {
-        s->cache[idx].evidence[0] = '\0';
-    }
-
-    s->cache[idx].ttl_minutes = (uint16_t)ttl_for_action(action);
-    s->cache[idx].cached_at_tick = hal_tick_ms();
-    s->cache[idx].occupied = true;
-#endif /* DCLAW_VERDICT_CACHE_SIZE */
-}
-
-void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                       dclaw_severity_t severity) {
-#if DCLAW_VERDICT_CACHE_SIZE == 0
-    (void)tool_hash; (void)action; (void)severity;
-#else
-    /* Backward compatibility: call enriched store with empty category and evidence */
-    dclaw_cache_store_enriched(tool_hash, action, severity, 0, "");
+    uint16_t ceiling = ttl_for_action(action);
+    if (action == DCLAW_ACTION_ALLOW && ceiling > 60) ceiling = 60;
+    if (ttl_minutes > ceiling) ttl_minutes = ceiling;
+    cache_store_entry(tool_hash, action, severity, ttl_minutes);
 #endif
 }
 
@@ -149,7 +146,6 @@ void dclaw_cache_invalidate(const uint8_t *tool_hash) {
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
         if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, tool_hash, 32) == 0) {
             s->cache[i].occupied = false;
-            return;
         }
     }
 #endif

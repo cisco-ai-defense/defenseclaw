@@ -69,8 +69,8 @@ static void bench_local_decision(void) {
 
 static void bench_cache_hit(void) {
     /* Pre-populate cache */
-    extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                                  dclaw_severity_t severity);
+    extern void dclaw_cache_store_with_ttl(const uint8_t *tool_hash, dclaw_action_t action,
+                                           dclaw_severity_t severity, uint16_t ttl_minutes);
     extern dclaw_state_t *dclaw_get_state(void);
 
     dclaw_state_t *s = dclaw_get_state();
@@ -78,7 +78,7 @@ static void bench_cache_hit(void) {
 
     uint8_t hash[32];
     dclaw_sha256((const uint8_t *)"cached-tool", strlen("cached-tool"), hash);
-    dclaw_cache_store(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+    dclaw_cache_store_with_ttl(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO, 60);
 
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));

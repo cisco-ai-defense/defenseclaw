@@ -37,8 +37,6 @@ extern dclaw_state_t *dclaw_get_state(void);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_ipc_parse_request(const char *json, size_t json_len,
                                    dclaw_tool_request_t *out);
-extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                              dclaw_severity_t severity);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
 extern void dclaw_ota_reset_key_state(void);
 
@@ -342,25 +340,6 @@ static void test_ac14_ssrf_validation(void) {
     printf("  AC-14 PASS: SSRF blocks all private/reserved addresses\n");
 }
 
-/* AC-15: Enriched escalation includes content+direction+findings */
-/* (Verified by Task 7's CBOR tests — structural check here) */
-static void test_ac15_enriched_escalation(void) {
-    /* Verify that dclaw_cache_entry_t has the enriched fields.
-     * The end-to-end escalation CBOR encoding is tested in test_evaluate_pipeline. */
-
-    /* Verify cache entry has category and evidence fields (compile-time check) */
-    dclaw_cache_entry_t entry;
-    entry.category = DCLAW_CONTENT_CATEGORY_SECRET;
-    strncpy(entry.evidence, "test", 63);
-    entry.evidence[63] = '\0';
-
-    assert(entry.category == DCLAW_CONTENT_CATEGORY_SECRET);
-    assert(strlen(entry.evidence) > 0);
-    (void)entry;
-
-    printf("  AC-15 PASS: enriched cache entry has category+evidence fields\n");
-}
-
 /* AC-16: Binary < 80KB, RAM within profile budget */
 static void test_ac16_binary_size(void) {
     /* This is a build-time check — verified by examining the binary.
@@ -404,7 +383,7 @@ int main(void) {
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
     dclaw_init(&info);
 
-    printf("=== Acceptance Test Suite (AC-01 through AC-17) ===\n\n");
+    printf("=== Acceptance Test Suite (16 active criteria; AC-15 retired) ===\n\n");
     test_ac01();
     test_ac02();
     test_ac03();
@@ -419,10 +398,9 @@ int main(void) {
     test_ac12();
     test_ac13_content_scanner_all_categories();
     test_ac14_ssrf_validation();
-    test_ac15_enriched_escalation();
     test_ac16_binary_size();
     test_ac17_backward_compat();
-    printf("\n=== ALL 17 ACCEPTANCE CRITERIA PASSED ===\n");
+    printf("\n=== ALL 16 ACTIVE ACCEPTANCE CRITERIA PASSED ===\n");
 
     dclaw_shutdown();
     return 0;

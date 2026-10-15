@@ -499,7 +499,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
  *
  * Reads the active flash partition, parses the policy blob header and payload
  * sections, and overwrites the runtime policy tables (rt_policy) so the new
- * deny hashes, destination allowlist, severity rules, and sequence rules take
+ * destination allowlist, severity rules, and sequence rules take
  * effect immediately — no daemon restart required.
  *
  * Binary payload layout (produced by policy_compiler.py):

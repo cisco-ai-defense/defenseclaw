@@ -24,8 +24,8 @@
 #include <assert.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
-extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                              dclaw_severity_t severity);
+extern void dclaw_cache_store_with_ttl(const uint8_t *tool_hash, dclaw_action_t action,
+                                       dclaw_severity_t severity, uint16_t ttl_minutes);
 
 static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const char *dest) {
     dclaw_tool_request_t req;
@@ -106,7 +106,8 @@ static void test_unknown_tool_cannot_use_cloud_allow(void) {
                                                "http://127.0.0.1/");
     /* Simulate a previous cloud ALLOW for the same hash. Unknown names must
      * stop before the verdict cache or the cloud dispatch path. */
-    dclaw_cache_store(unknown.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+    dclaw_cache_store_with_ttl(unknown.tool_hash, DCLAW_ACTION_ALLOW,
+                               DCLAW_SEV_INFO, 60);
     dclaw_verdict_t verdict = dclaw_evaluate(&unknown);
     assert(verdict.action == DCLAW_ACTION_BLOCK);
     assert(verdict.reason == DCLAW_REASON_INVALID_INPUT);
