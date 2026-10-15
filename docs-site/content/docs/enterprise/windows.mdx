@@ -1293,7 +1293,7 @@ CPU credits, 5 minutes held at the 40 % baseline, and 13 minutes held at the
 baseline with one other busy process; with more load it did not finish. Run
 Setup `/repair JSON=1` as LocalSystem again once the computer has CPU to
 spare (on a burstable VM, after its credits build up, or on a size that is
-not burstable). Each run continues where the last one stopped.
+not burstable). A run that was stopped resumes the unpacking where it stopped; the file checks and the compile run again.
 
 ## Per-user installs
 
