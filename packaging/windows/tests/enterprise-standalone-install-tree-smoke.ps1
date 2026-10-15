@@ -355,6 +355,54 @@ try {
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
                 $failures.Add('Secure Client ipc directory was removed by the standalone helper')
             }
+            # A Secure Client layout with the sensor helper admits its exact
+            # socket leaf. Uninstall removes only that leaf after the service
+            # is gone and leaves the ipc directory for the tree removal; a
+            # link at the socket path is still refused.
+            $secureClient = New-TestLayout 'scsock'
+            $secureClient.SensorHelperPath = [IO.Path]::Combine($secureClient.BinDirectory, 'defenseclaw-sensor-helper.exe')
+            [IO.File]::WriteAllText($secureClient.SensorHelperPath, 'stand-in')
+            [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
+            $sensorSocket = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'sensor-helper.sock')
+            if ($BindSocket) {
+                $socket = [Net.Sockets.Socket]::new(
+                    [Net.Sockets.AddressFamily]::Unix,
+                    [Net.Sockets.SocketType]::Stream,
+                    [Net.Sockets.ProtocolType]::Unspecified
+                )
+                $openSockets.Add($socket)
+                $socket.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new($sensorSocket))
+            }
+            else {
+                [IO.File]::WriteAllText($sensorSocket, '')
+            }
+            Test-Accepted 'Secure Client tree with the sensor helper socket' $secureClient
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            if ([IO.File]::Exists($sensorSocket)) {
+                $failures.Add('Secure Client sensor helper socket survived removal')
+            }
+            if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
+                $failures.Add('Secure Client ipc directory was removed with the sensor helper socket')
+            }
+            # Removal with no socket is a no-op.
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            $socketTarget = [IO.Path]::Combine($Root, 'outside-socket.txt')
+            [IO.File]::WriteAllText($socketTarget, 'outside')
+            if (New-TestLink $sensorSocket $socketTarget) {
+                Test-Refused 'Secure Client sensor helper socket link' {
+                    Assert-DefenseClawManagedInstallTree -Layout $secureClient
+                } 'reparse point'
+                Test-Refused 'Secure Client sensor helper socket link removal' {
+                    Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+                } 'unexpected managed IPC content'
+                if (-not [IO.File]::Exists($socketTarget)) {
+                    $failures.Add('Secure Client socket link removal touched its target')
+                }
+                [IO.File]::Delete($sensorSocket)
+            }
+            if (@(Get-DefenseClawSecureClientSensorHelperSocketLeaves -Layout (New-TestLayout 'scnosock')).Count -ne 0) {
+                $failures.Add('Secure Client layout without the sensor helper reported a socket leaf')
+            }
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
             Test-SecureClientTreeDrift 'Secure Client allow-list (share)' $secureClient 'unexpected directory'

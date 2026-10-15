@@ -23048,6 +23048,28 @@ function Get-DefenseClawStandaloneIPCSocketLeaves {
     )
 }
 
+function Get-DefenseClawSecureClientSensorHelperSocketLeaves {
+    <#
+        The sensor helper's AF_UNIX acquisition socket in a Secure Client
+        deployment's managed IPC directory under InstallRoot. A layout that
+        carries the sensor helper binds it there; Windows backs the socket
+        file with a reparse point, so it is the only reparse point besides the
+        gateway's IPC socket a Secure Client install tree may contain.
+        Standalone (Get-DefenseClawStandaloneIPCSocketLeaves) and a layout
+        without the sensor helper return nothing.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if ((Test-DefenseClawStandaloneProfile) -or
+        [string]::IsNullOrWhiteSpace([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name SensorHelperPath)) -or
+        [string]::IsNullOrWhiteSpace([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCDirectory))) {
+        return @()
+    }
+    $directory = [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    return @(
+        [IO.Path]::GetFullPath((Microsoft.PowerShell.Management\Join-Path $directory 'sensor-helper.sock'))
+    )
+}
+
 function Get-DefenseClawStandaloneOpenCodePluginPaths {
     <#
         The managed OpenCode plugin a standalone deployment carries at
@@ -23196,6 +23218,29 @@ function Remove-DefenseClawStandaloneManagedIPCDirectory {
     [IO.Directory]::Delete($directory, $false)
 }
 
+function Remove-DefenseClawSecureClientSensorHelperSocket {
+    <#
+        Secure Client uninstall: after the sensor helper service is removed,
+        delete the stale socket file it left in the managed IPC directory, so
+        the install-tree removal below sees only the gateway's IPC socket. A
+        file at that path that is not a plain AF_UNIX socket (a link, a
+        junction or a directory) aborts the uninstall. The directory itself
+        and everything else in it stay for the tree removal.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $leaves = @(Get-DefenseClawSecureClientSensorHelperSocketLeaves -Layout $Layout)
+    foreach ($leaf in $leaves) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $leaf -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        if (-not (Test-DefenseClawStandaloneIPCSocketLeaf -Item $item -Leaves $leaves)) {
+            throw "refusing to remove unexpected managed IPC content: $leaf"
+        }
+        [IO.File]::Delete($leaf)
+    }
+}
+
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
@@ -23222,6 +23267,9 @@ function Assert-DefenseClawManagedInstallTree {
     if ($standaloneIPCLeaves.Count -gt 0) {
         $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
     }
+    # A Secure Client layout with the sensor helper also admits its exact
+    # socket leaf; every other reparse point is still refused below.
+    $sensorHelperSocketLeaves = @(Get-DefenseClawSecureClientSensorHelperSocketLeaves -Layout $Layout)
     $allowedFiles = @(
         $Layout.BrokerPath,
         $Layout.GatewayPath,
@@ -23248,6 +23296,10 @@ function Assert-DefenseClawManagedInstallTree {
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.InstallRoot -Recurse -Force) {
         if ($standaloneIPCLeaves.Count -gt 0 -and
             (Test-DefenseClawStandaloneIPCSocketLeaf -Item $item -Leaves $standaloneIPCLeaves)) {
+            continue
+        }
+        if ($sensorHelperSocketLeaves.Count -gt 0 -and
+            (Test-DefenseClawStandaloneIPCSocketLeaf -Item $item -Leaves $sensorHelperSocketLeaves)) {
             continue
         }
         $full = [IO.Path]::GetFullPath($item.FullName)
@@ -27842,6 +27894,7 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     # refuse unexpected content before deleting anything; Ensure recreates
     # them. Secure Client is unchanged: both return at once there.
     Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout
+    Remove-DefenseClawSecureClientSensorHelperSocket -Layout $Layout
     Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout
 
     # With exact services stopped, prove the whole root is canonical and that
@@ -30392,6 +30445,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             Remove-DefenseClawService -Name $Layout.BrokerServiceName
         }
         Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout
+        Remove-DefenseClawSecureClientSensorHelperSocket -Layout $Layout
         Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
