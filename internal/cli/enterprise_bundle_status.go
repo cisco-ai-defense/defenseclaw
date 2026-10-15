@@ -250,12 +250,6 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	}
 	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
-	for _, warning := range res.Warnings {
-		if warning.Code == string(enterprisebundle.CodeKeyRevoked) {
-			res.Applied = false
-			break
-		}
-	}
 	if policy.LastReloadError != "" {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "policy_reload_rejected",
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})

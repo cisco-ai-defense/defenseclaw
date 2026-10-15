@@ -66,6 +66,15 @@ def test_launcher_checks_pins_before_running_setup() -> None:
     assert "if ($anchorPin) {\n        $arguments += ('TRUSTANCHORS='" in script
 
 
+def test_bundle_detection_fails_on_a_revoked_signer_before_applied() -> None:
+    # GAP-0106: status keeps applied truthful and warns key_revoked; the
+    # bundle detection turns that warning into NotDetected with its reason.
+    script = _text(DETECT)
+    revoked = script.index("[string]$_.code -eq 'key_revoked'")
+    assert revoked < script.index("-not $status.applied")
+    assert "is revoked in the installed trust anchors" in script[revoked:]
+
+
 def _ps51() -> str | None:
     system_root = os.environ.get("SystemRoot", r"C:\Windows")
     for part in ("SysWOW64", "System32"):
