@@ -8,6 +8,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -247,6 +248,7 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 				code := hookexec.Run(context.Background(), hookOpts)
 				if event == tc.toolEvent {
 					if code != tc.toolCode || (tc.toolDeny != "" && !strings.Contains(stdout.String(), tc.toolDeny)) ||
+						(tc.connector == "devin" && json.Valid(bytes.TrimSpace(stdout.Bytes()))) ||
 						(tc.connector == "kiro" && (stdout.Len() != 0 || !strings.Contains(stderr.String(), "DefenseClaw blocked"))) {
 						t.Fatalf("%s %s with policy=%v: want native deny, got code=%d stdout=%q stderr=%q", tc.connector, event, policyPresent, code, stdout.String(), stderr.String())
 					}
