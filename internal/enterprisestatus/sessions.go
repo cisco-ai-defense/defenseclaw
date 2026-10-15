@@ -125,7 +125,7 @@ func (r *Result) SetBundleReceiptWarnings() {
 				return
 			}
 		}
-		message := "the signed digest could not be compared on this product version or platform; the gateway's enforcing digest was recorded"
+		message := "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
 		if code == "digest_layout_unverifiable" {
 			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
 		}

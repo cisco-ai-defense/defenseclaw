@@ -2044,6 +2044,8 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 		switch message.Code {
 		case "lifecycle_busy":
 			return enterprisestatus.WindowsExitBusy
+		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
+			return enterprisestatus.WindowsExitBusy
 		case "invalid_arguments":
 			return enterprisestatus.WindowsExitInvalidArgs
 		case "elevation_required":

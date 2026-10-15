@@ -71,6 +71,27 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func TestWindowsFirstBundleFailureIsRetryableAndNamesBasePolicy(t *testing.T) {
+	result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+	result.AddError("bundle_apply_failed", "the hot apply did not complete")
+	result.Bundle = &enterprisestatus.BundleState{}
+	result.SetBundleSessions(enterprisestatus.SessionRestartStatus{State: "unknown", Reason: "context deadline exceeded"})
+	receipt := &enterprisebundle.Receipt{}
+	recordWindowsBundleSessions(receipt, *result.Bundle.SessionsRestartRequired)
+	if len(receipt.WarningCodes) != 1 || receipt.WarningCodes[0] != "sessions_scan_unknown" {
+		t.Fatalf("unknown scan missing from receipt: %+v", receipt)
+	}
+	if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("retry exit = %d", got)
+	}
+	if got := windowsBundleNotApplied(&enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: "b-01JA0000000000000000000033", Version: 1}}, "apply_failed", false); !strings.Contains(got, "base policy") || strings.Contains(got, "last good") {
+		t.Fatalf("first apply refusal = %q", got)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != "bundle_apply_failed" {
+		t.Fatalf("unknown sessions scan changed apply errors: %+v", result.Errors)
+	}
+}
+
 func TestWindowsBundleDeadlineRecordsSkippedRollback(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
@@ -880,6 +901,58 @@ func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
 				t.Fatalf("apply failure was not recorded: %+v", result.Errors)
 			}
 			assertWindowsBundleLockRemoved(t, layout)
+		})
+	}
+}
+
+func TestWindowsRefusedBundleKeepsInstalledAnchors(t *testing.T) {
+	for _, kind := range []string{"key_revoked", "archive_invalid", "version_not_newer", "apply_failed"} {
+		t.Run(kind, func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			layout := stubWindowsBundleHost(t)
+			installed := newWindowsBundleDriver(layout).AnchorsPath
+			if err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(installed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := filepath.Join(e.dir, "candidate-anchors.json")
+			replacement := bytes.Replace(before, []byte(`"min_version":0`), []byte(`"min_version":1`), 1)
+			if kind == "key_revoked" {
+				replacement = bytes.Replace(replacement, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1)
+			} else if kind == "version_not_newer" {
+				replacement = bytes.Replace(replacement, []byte(`"min_version":1`), []byte(`"min_version":6`), 1)
+			}
+			writeBundleTestFile(t, candidate, replacement)
+			if kind == "archive_invalid" {
+				signed = filepath.Join(e.dir, "absent.dcbundle")
+			}
+			cmd, _ := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: candidate,
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			if kind == "apply_failed" {
+				if done || err != nil {
+					t.Fatalf("prepare: done=%v err=%v", done, err)
+				}
+				cleanupPreparedWindowsBundle(t, opts)
+				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+				result.AddError("bundle_apply_failed", "test apply failure")
+				finishWindowsEnterpriseBundle(cmd, opts, result)
+			} else if !done || err == nil {
+				t.Fatalf("wanted %s refusal: done=%v err=%v", kind, done, err)
+			}
+			after, err := os.ReadFile(installed)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("%s changed installed anchors: read=%v", kind, err)
+			}
 		})
 	}
 }

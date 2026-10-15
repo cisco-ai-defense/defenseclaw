@@ -105,7 +105,7 @@ func TestBundleDigestUnverifiableMarkerReachesStatus(t *testing.T) {
 	r.SetBundleReceiptWarnings()
 	r.SetBundleReceiptWarnings()
 	if len(r.Warnings) != 1 || r.Warnings[0].Code != "digest_unverifiable" ||
-		!strings.Contains(r.Warnings[0].Message, "enforcing digest was recorded") {
+		!strings.Contains(r.Warnings[0].Message, "gateway-versus-installed digest were checked") {
 		t.Fatalf("digest marker omitted or duplicated: %+v", r)
 	}
 }
