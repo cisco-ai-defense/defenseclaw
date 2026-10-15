@@ -164,10 +164,13 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	}
 }
 
+// GAP-0113: the refusal holds for every signer and device platform pair, a
+// cross-host signer included.
 func TestDriverRefusesComparableDigestBeforeActivation(t *testing.T) {
-	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
-		t.Run(platform, func(t *testing.T) {
-			f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = platform })
+	for _, pair := range platformPairs() {
+		signer, platform := pair[0], pair[1]
+		t.Run(signer+"-signs-"+platform, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = signer })
 			manifest, err := enterprisebundle.DecodeManifest(f.raw)
 			if err != nil {
 				t.Fatal(err)
@@ -196,6 +199,17 @@ func TestDriverRefusesComparableDigestBeforeActivation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// platformPairs is every signer and device platform pair.
+func platformPairs() [][2]string {
+	var pairs [][2]string
+	for _, signer := range enterprisebundle.Platforms {
+		for _, device := range enterprisebundle.Platforms {
+			pairs = append(pairs, [2]string{signer, device})
+		}
+	}
+	return pairs
 }
 
 func containsWarning(codes []string, want string) bool {

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -112,11 +113,10 @@ type VerifyInput struct {
 	Now time.Time
 	// Confirmed is the device's last confirmed bundle (zero off a device).
 	Confirmed Confirmed
-	// ProductVersion is the running product version and HostPlatform the
-	// platform this process runs on: the manifest digest is compared only
-	// when both equal those of the signer.
+	// ProductVersion is the running product version. The signed digest is
+	// compared whenever it equals the signer's product version, whatever
+	// platform the signer ran on (compareSignedDigest).
 	ProductVersion string
-	HostPlatform   string
 	// DeviceLayout is the installed layout on a device. Nil uses the target's
 	// standard layout for offline verification.
 	DeviceLayout *DeviceLayout
@@ -141,8 +141,8 @@ type VerifyResult struct {
 	FloorSource    string
 	// EffectivePolicyDigest is the digest this host computed for Platform;
 	// ExpectedDigest is the manifest entry; DigestVerified reports that
-	// they were compared and equal. A different signer product version or
-	// platform is the only reason to report WarnDigestUnverifiable.
+	// they were compared and equal. A different signer product version is
+	// the only reason to report WarnDigestUnverifiable.
 	EffectivePolicyDigest    string
 	ExpectedDigest           string
 	DigestVerified           bool
@@ -266,40 +266,22 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	}
 	res.EffectivePolicyDigest = digest
 	res.ExpectedDigest = m.EffectivePolicy.Digests[in.Platform]
-	standardLayout := layout.IsStandard(in.Platform)
-	if DigestComparableWithLocal(m, in.ProductVersion, in.HostPlatform, in.Platform, digest) {
-		if digest != res.ExpectedDigest {
-			if !standardLayout {
-				res.DigestLayoutUnverifiable = true
-				res.Warnings = append(res.Warnings, Warning{Code: WarnDigestLayoutUnverifiable, Platform: in.Platform,
-					Message: "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"})
-			} else {
-				component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details)
-				if component != "" {
-					return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s; component %s differs", digest, boundedDetail(component))
-				}
-				return res, refuse(CodeDigestMismatch, "effective_policy.digests."+in.Platform, "this host computes %s", digest)
-			}
-		} else {
-			res.DigestVerified = true
-		}
-	} else {
+	outcome, err := compareSignedDigest(m.EffectivePolicy, in.Platform, in.ProductVersion, digest, details, layout.IsStandard(in.Platform))
+	if err != nil {
+		return res, err
+	}
+	switch outcome {
+	case digestVerified:
+		res.DigestVerified = true
+	case digestOtherProduct:
 		res.DigestUnverifiable = true
-		message := "the signer used another product version; its signed digest cannot be compared with this build's policy digest; files[] hashes still hold"
-		if m.EffectivePolicy.ProductVersion == in.ProductVersion {
-			message = "the signer computed the " + in.Platform + " digest on " + m.EffectivePolicy.ComputedOn + "; it differs from this " + in.Platform + " device's digest"
-			// The signed components say which input the signing host saw
-			// differently, so the difference can be traced (GAP-0107).
-			if component := differingDigestComponent(m.EffectivePolicy.Components[in.Platform], details); component != "" {
-				message += " in component " + boundedDetail(component)
-			}
-			message += ", so signed-versus-enforcing comparison is unavailable; files[] hashes still hold"
-		}
-		res.Warnings = append(res.Warnings, Warning{
-			Code:     WarnDigestUnverifiable,
-			Platform: in.Platform,
-			Message:  message,
-		})
+		res.Warnings = append(res.Warnings, Warning{Code: WarnDigestUnverifiable, Platform: in.Platform,
+			Message: "the signer used product version " + m.EffectivePolicy.ProductVersion + " and this build is " + boundedText(in.ProductVersion, 64) +
+				"; the built-in policy differs by version, so the signed digest cannot be compared with this build's digest; files[] hashes still hold"})
+	case digestLayoutDependent:
+		res.DigestLayoutUnverifiable = true
+		res.Warnings = append(res.Warnings, Warning{Code: WarnDigestLayoutUnverifiable, Platform: in.Platform,
+			Message: "this device uses a non-standard managed layout whose paths the offline signer could not know; files[] hashes still hold, and this host reports its own digest"})
 	}
 	res.Warnings = append(res.Warnings, Reachability(cfg, []string{in.Platform})...)
 	res.Warnings = append(res.Warnings, ruleWarnings...)
@@ -311,24 +293,75 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	return res, nil
 }
 
-// DigestComparable is derived from the signed manifest for each delivery.
+// DigestComparable is derived from the signed manifest for each delivery: a
+// build compares the signed digest of a signer that ran its product version.
 // A receipt from an earlier attempt must never decide comparability.
-func DigestComparable(m *Manifest, productVersion, hostPlatform string) bool {
-	return m != nil && m.EffectivePolicy.ProductVersion == productVersion && m.EffectivePolicy.ComputedOn == hostPlatform
+func DigestComparable(m *Manifest, productVersion string) bool {
+	return m != nil && m.EffectivePolicy.ProductVersion == productVersion
 }
 
-// A target digest computed on a different signing host is comparable when
-// its signed value equals the digest computed on this device. A difference
-// remains informational: host-specific inputs cannot safely be ruled out.
-func DigestComparableWithLocal(m *Manifest, productVersion, hostPlatform, targetPlatform, localDigest string) bool {
-	return DigestComparable(m, productVersion, hostPlatform) ||
-		(m != nil && m.EffectivePolicy.ProductVersion == productVersion &&
-			digestPattern.MatchString(localDigest) && m.EffectivePolicy.Digests[targetPlatform] == localDigest)
+// digestOutcome is how a signed digest that compareSignedDigest did not
+// refuse relates to the digest this device computed.
+type digestOutcome uint8
+
+const (
+	// digestVerified: the signed digest equals this device's digest.
+	digestVerified digestOutcome = iota + 1
+	// digestOtherProduct: the signer ran another product version. Its
+	// built-in policy and digest rules are not this build's, so this build
+	// cannot reproduce what the signer saw (digest_unverifiable).
+	digestOtherProduct
+	// digestLayoutDependent: this device's non-standard managed layout,
+	// which the offline signer cannot model, changed the digest
+	// (digest_layout_unverifiable).
+	digestLayoutDependent
+)
+
+// compareSignedDigest is the signed-digest rule for every signer and device
+// platform pair (GAP-0113). A signer that ran this product version computes
+// the target platform's digest with that platform's defaults on any host
+// (GAP-0107), so it computes what this device computes from the same files.
+// A different digest from such a signer is disproved here and refused with
+// digest_mismatch, naming the signed components that differ; the signing
+// platform (computed_on) is reported, never an excuse. The built-in policy is
+// compiled into the build and pinned by the product version, so a signer
+// build of the same version with other built-in policy is refused as well
+// (component builtin): sign with the build the devices run.
+func compareSignedDigest(signed EffectivePolicy, platform, productVersion, local string, localComponents map[string]string, standardLayout bool) (digestOutcome, error) {
+	switch {
+	case signed.ProductVersion != productVersion:
+		return digestOtherProduct, nil
+	case local == signed.Digests[platform]:
+		return digestVerified, nil
+	case !standardLayout:
+		return digestLayoutDependent, nil
+	}
+	detail := "this host computes " + local + " for " + platform + "; the signer computed the digest on " + safePath(signed.ComputedOn) + " with the same product version " + boundedText(productVersion, 64)
+	if differing := differingDigestComponents(signed.Components[platform], localComponents); len(differing) > 0 {
+		if len(differing) > maxNamedComponents {
+			differing = append(differing[:maxNamedComponents], "...")
+		}
+		detail += "; component " + boundedDetail(strings.Join(differing, ", ")) + " differs"
+		if slices.Contains(differing, builtinComponent) {
+			detail += " (the signer build's built-in policy is not this build's: sign with the build the devices run)"
+		}
+	}
+	return 0, refuse(CodeDigestMismatch, "effective_policy.digests."+platform, "%s", detail)
 }
 
-func differingDigestComponent(expected []DigestComponent, actual map[string]string) string {
+// builtinComponent is the digest component of the policy compiled into the
+// build; maxNamedComponents bounds the components a refusal names.
+const (
+	builtinComponent   = "builtin"
+	maxNamedComponents = 8
+)
+
+// differingDigestComponents names, sorted, the components whose signed and
+// local sub-digests differ, including one only either side has. It is nil
+// when either side reported no components.
+func differingDigestComponents(expected []DigestComponent, actual map[string]string) []string {
 	if len(expected) == 0 || len(actual) == 0 {
-		return ""
+		return nil
 	}
 	want := make(map[string]string, len(expected))
 	for _, component := range expected {
@@ -344,10 +377,11 @@ func differingDigestComponent(expected []DigestComponent, actual map[string]stri
 		}
 	}
 	sort.Strings(names)
+	var differing []string
 	for _, name := range names {
 		if want[name] != actual[name] {
-			return name
+			differing = append(differing, name)
 		}
 	}
-	return ""
+	return differing
 }

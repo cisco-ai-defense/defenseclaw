@@ -135,7 +135,11 @@ path. Build the bundle app with the same base config:
   -BaseConfigPath .\config.yaml -OutputDirectory .\intune-bundle-1
 ```
 
-Verify the bundle signature offline first. The packager compares the base
+Verify the bundle offline first with the release the devices run. A device
+that runs the signer's product version refuses a bundle whose signed Windows
+digest it computes differently (`digest_mismatch`), whatever OS signed it, and
+`enterprise bundle verify --platform windows` shows the same result offline.
+The packager compares the base
 config with the manifest-pinned bundle config and refuses a different
 guardrail policy; only the pack path may differ. Set the bundle app's
 dependency to the base app with **Automatically install: Yes**, and upload
@@ -441,5 +445,6 @@ To see the current state on a device, run from an elevated PowerShell:
 | Intune reports `1618` and retries | Another lifecycle run held the lock, or a bundle did not finish applying (see above). Intune retries three times, five minutes apart. |
 | The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |
 | Graph still shows Installed after uninstall | The app install report lagged device detection by more than 15 minutes in the live test. Check local Intune detection or `enterprise windows status` for current device state. |
-| Receipt shows `digest_unverifiable` | The signed Windows digest differs from this device's and was computed by another release or on another OS. A signer that runs the devices' release computes the Windows digest with Windows defaults on any OS, so a bundle it signs on Linux or macOS is verified on the device. When the release matches, the warning names the first digest component that differs. A bundle signed on Windows by the release the devices run is always compared, and a different digest refuses it (`digest_mismatch`). The warning alone does not prove a policy mismatch: `files[]` hashes and the gateway's enforcing digest are still checked. |
+| Receipt shows `digest_unverifiable` | The bundle was signed by another product version than the device runs. The built-in policy differs by version, so the device cannot compare the signed Windows digest with its own; `files[]` hashes and the gateway's enforcing digest are still checked. Investigate the warning, and do not count it as a digest pass: re-sign the bundle with the release the devices run and deliver it again. |
+| Bundle refused with `digest_mismatch` | The device runs the signer's product version and computes another Windows digest than the signed one. This refuses the bundle whatever OS signed it: a Linux or macOS signer computes the Windows digest with Windows defaults, so a difference means that the policy or the build differs. The previous bundle keeps enforcing and the trust anchors stay unchanged. The message names the signed digest components that differ. `builtin` means the signer build is not the devices' build: sign with the release the devices run. Any other component means the device loads that part of the policy differently: run `bundle verify --platform windows` with the devices' release, fix the policy, and sign a new version. |
 | Rollback receipt has no `rollback_of` | Current Windows receipts omit that field. Correlate the rollback with bundle IDs and versions in status and lifecycle logs. |

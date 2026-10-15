@@ -178,14 +178,15 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 				break
 			}
 		}
-		// Older receipts predate digest_comparable. The signed manifest in
-		// the immutable current version still tells status whether this
-		// platform and build can compare the expected and live digests.
+		// The signed manifest in the immutable current version tells status
+		// whether the running build can compare the expected and live
+		// digests: an upgrade since the apply makes the signed digest
+		// unverifiable.
 		if raw, err := os.ReadFile(filepath.Join(store.VersionDir(st.Current.Dir), enterprisebundle.ManifestName)); err == nil {
 			if manifest, err := enterprisebundle.DecodeManifest(raw); err == nil {
 				manifestKnown = true
 				signedExpected = manifest.EffectivePolicy.Digests[runtime.GOOS]
-				digestComparable = enterprisebundle.DigestComparableWithLocal(manifest, appVersion, runtime.GOOS, runtime.GOOS, st.Current.EffectivePolicyDigest)
+				digestComparable = enterprisebundle.DigestComparable(manifest, appVersion)
 			}
 		}
 	}
@@ -254,7 +255,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt) string {
 	switch code {
 	case enterprisebundle.WarnDigestUnverifiable:
-		return "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
+		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
 	case enterprisebundle.WarnDigestLayoutUnverifiable:
 		return "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
 	case "capability_disabled":
