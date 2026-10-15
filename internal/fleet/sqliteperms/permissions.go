@@ -25,6 +25,9 @@ import (
 // existing database, WAL, and shared-memory files before SQLite opens them.
 // It refuses symlinks and other non-regular files in these positions.
 func Prepare(dbPath string) error {
+	if err := protectParent(dbPath); err != nil {
+		return err
+	}
 	if err := Secure(dbPath); err != nil {
 		return err
 	}
@@ -54,10 +57,8 @@ func Secure(dbPath string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("SQLite file %s is not a regular file", path)
 		}
-		if info.Mode().Perm() != 0o600 {
-			if err := os.Chmod(path, 0o600); err != nil {
-				return fmt.Errorf("restrict SQLite file %s: %w", path, err)
-			}
+		if err := secureFile(path, info); err != nil {
+			return fmt.Errorf("restrict SQLite file %s: %w", path, err)
 		}
 	}
 	return nil

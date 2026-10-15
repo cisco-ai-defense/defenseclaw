@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -688,7 +687,7 @@ func TestFleetSQLiteReopenRestrictsExistingJournals(t *testing.T) {
 	for _, kind := range []string{"fleet", "policy"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.Chmod(dir, 0o755); err != nil {
+			if err := widenSQLiteParentAccess(dir); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, kind+".db")
@@ -711,8 +710,14 @@ func TestFleetSQLiteReopenRestrictsExistingJournals(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if err := assertSQLiteParentPrivate(dir); err != nil {
+				t.Fatal(err)
+			}
 			for _, suffix := range []string{"", "-wal", "-shm"} {
-				if err := os.Chmod(path+suffix, 0o644); err != nil {
+				if err := assertSQLiteFilePrivate(path + suffix); err != nil {
+					t.Fatalf("new %s%s: %v", kind, suffix, err)
+				}
+				if err := widenSQLiteFileAccess(path + suffix); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -730,12 +735,8 @@ func TestFleetSQLiteReopenRestrictsExistingJournals(t *testing.T) {
 				defer reopened.Close()
 			}
 			for _, suffix := range []string{"", "-wal", "-shm"} {
-				info, err := os.Stat(path + suffix)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got := info.Mode().Perm(); got != 0o600 {
-					t.Fatalf("%s%s mode=%04o, want 0600", kind, suffix, got)
+				if err := assertSQLiteFilePrivate(path + suffix); err != nil {
+					t.Fatalf("%s%s: %v", kind, suffix, err)
 				}
 			}
 		})
