@@ -13,12 +13,16 @@ were removed):
 
 | Folder | Content |
 | --- | --- |
-| `windows/` | `New-DefenseClawIntunePackage.ps1` (builds the Win32 app content), `Install-DefenseClawIntune.ps1` (the launcher), `Remediate-Detect.ps1` and `Remediate-Fix.ps1` |
+| `windows/` | `New-DefenseClawIntunePackage.ps1` (builds the Win32 app content), `Install-DefenseClawIntune.ps1` (the launcher), `Remediate-Detect.ps1` and `Remediate-Fix.ps1`, and the reference rule-pack app `Install-DefenseClawRulePack.ps1` with `Detect-DefenseClawRulePack.ps1` |
 | `tenant/` | `intune_tenant.py`, a Microsoft Graph helper: check the tenant, create device groups, assign the app, create the Remediations package or a macOS shell script, report compliance. Previews by default. See its README |
 
-Validation status: a live test tenant delivered the Windows base and signed bundle
-Win32 apps, checked bundle detection and hook enforcement, and ran uninstall.
-The first bundle apply failed and needed a manual IME retry. Tenant setup and
+Validation status: a live test tenant delivered a rule-pack app and the Windows
+base and signed bundle Win32 apps, checked bundle detection and hook
+enforcement, and ran uninstall. With the pack installed first and the base
+config naming the bundle's pack, no test call the bundle blocks was allowed
+between hook start and bundle confirmation. Intune retried a bundle app that
+met a busy lifecycle (`1618`) by itself. The reference rule-pack scripts here
+are newer than that run and have not yet run in a tenant. Tenant setup and
 Windows/Linux enrollment and compliance were also tested. Pilot other channels
 and upgrades before fleet assignment.
 
@@ -30,11 +34,28 @@ and upgrades before fleet assignment.
 
 ## Signed policy bundles on Windows
 
-Build the base Win32 app with `-ConfigPath`. Its guardrail block must select
-the same custom rule pack, digest, threshold and rules as the signed bundle.
-Install that pack's files in an administrator-owned directory before the base
-app, as a dependency. Setup cannot apply a bundle on the first install. After
-the base app is installed, build one Win32 app per signed bundle version:
+Deliver three apps, in this order: the rule-pack app, the base app, the
+bundle app. Each later app depends on the one before it.
+
+1. **Rule-pack app.** `Install-DefenseClawRulePack.ps1` copies the pack folder
+   from its content to `C:\ProgramData\DefenseClaw-RulePacks\<pack>`, gives
+   that folder and the pack SYSTEM and Administrators Full control and
+   `NT SERVICE\DefenseClawGateway` Read & execute, removes `Users`, verifies the
+   copy and the permissions, and changes nothing when run again. Run it with
+   `-PlanOnly` on the workstation to print the pack's tree SHA-256 and the
+   `icacls` commands; set that SHA-256 and the pack name in your copy of
+   `Detect-DefenseClawRulePack.ps1`, the app's detection script. Without the
+   pack, or when the gateway cannot read the pack or its parent folder, Setup
+   refuses the base config with `1639` and prints the `icacls` fix, for
+   example `icacls "C:\ProgramData\DefenseClaw-RulePacks" /grant "NT SERVICE\DefenseClawGateway:RX"`.
+2. **Base app**, built with `-ConfigPath`. Its guardrail block must select the
+   same custom rule pack, digest, threshold and rules as the signed bundle,
+   with the pack's installed absolute path. Make the rule-pack app its
+   dependency. The packaging script prints a `Prerequisite` line for every
+   pack the config names outside the DefenseClaw install folders. Setup cannot
+   apply a bundle on the first install.
+3. **Bundle app.** After the base app is installed, build one Win32 app per
+   signed bundle version:
 
 ```powershell
 ./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
@@ -52,8 +73,9 @@ beside `content`; upload that file as the bundle app's custom detection script.
 It reads the bundle's manifest-pinned config and refuses a base config with a
 different guardrail policy; only the installed pack path may differ. Use the
 same `config.yaml` to build the base app and this bundle app. A base-only device
-is installed but has no confirmed signed bundle; its configured pack must
-enforce the same rules during that interval.
+is installed but has no confirmed signed bundle; until the bundle applies, the
+base config's pack, which the packager requires to match the bundle's, enforces
+the bundle's rules.
 Use a numeric `-RequireBundle` version so a later bundle remains detected.
 Set the base app as a dependency with **Automatically install: Yes**. Each new
 bundle app supersedes the previous bundle app with **Uninstall previous

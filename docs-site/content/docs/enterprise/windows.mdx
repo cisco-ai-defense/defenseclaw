@@ -273,9 +273,9 @@ in the config and run Setup again. Once DefenseClaw is installed,
 `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"`
 prints it as `custom_packs pin:`, for example when you change the pack.
 
-For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
-dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
-[Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back).
+For an Intune fleet, deliver a custom pack before the DefenseClaw app with the
+kit's reference rule-pack app, which sets these permissions and checks them; see
+[Custom rule pack app](/docs/enterprise/mdm/intune-windows#custom-rule-pack-app).
 
 Setup checks these permissions before it changes anything: the pack folder,
 every file and folder in it (the manifest and the rules folder included) and

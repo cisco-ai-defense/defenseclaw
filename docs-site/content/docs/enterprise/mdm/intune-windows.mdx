@@ -10,13 +10,14 @@ keywords:
   - PowerShell 7 dependency
 ---
 
-<Callout title="Pilot evidence">A live test tenant delivered the base Win32 app, signed bundle app and uninstall to an enrolled Windows device. Bundle detection and hook enforcement were observed. A first bundle apply failed and needed a manual Intune retry; upgrades through supersedence remain unverified because Intune rejected the app graph.</Callout>
+<Callout title="Pilot evidence">A live test tenant delivered a rule-pack app, the base Win32 app, signed bundle apps and the uninstall to an enrolled Windows device. With the pack installed first and the base config naming the bundle's pack, no test call that the bundle blocks was allowed between hook start and bundle confirmation. A bundle app that met a busy lifecycle (`1618`) was retried by Intune after five minutes without help. The kit's reference rule-pack scripts below are newer than that run and have not yet run in a tenant. Supersedence of the base app is unsupported because Intune rejected the app graph.</Callout>
 
 <Callout title="At a glance">
 - **You upload:** a base Win32 app, `Install-DefenseClawIntune.intunewin`, that
   `New-DefenseClawIntunePackage.ps1` builds from
   `DefenseClawSetup-Enterprise-Standalone-x64.exe` and your `config.yaml`,
-  one dependent Win32 app per signed bundle, and a PowerShell 7 Win32 app.
+  one dependent Win32 app per signed bundle, a PowerShell 7 Win32 app, and,
+  when the config names a custom rule pack, a rule-pack Win32 app.
 - **Install:** the app runs `Install-DefenseClawIntune.ps1` as System, which
   runs Setup `/ensure`.
 - **Base detection:** the registry value `ProductVersion` under
@@ -122,10 +123,20 @@ The script:
 
 Setup needs `CONFIG=` on first install and accepts `BUNDLE=` only after that
 install. The base config must select the same custom rule pack, digest,
-thresholds and rule settings as the signed bundle. Install the pack files in
-an administrator-owned directory **before** the base app; make that pack app
-a dependency of the base app. The base config names that installed absolute
-path. Build the bundle app with the same base config:
+thresholds and rule settings as the signed bundle, so the device enforces the
+bundle's rules from the first install. Deliver three apps, in this order:
+
+1. **Rule-pack app.** It installs the pack in an administrator-only folder
+   that the gateway service can read; see [Custom rule pack app](#custom-rule-pack-app).
+2. **Base app**, built with `-ConfigPath`. Its config names the installed
+   absolute pack path. Make the rule-pack app a dependency of the base app
+   with **Automatically install: Yes**. The packaging script prints a
+   `Prerequisite` line for every pack the config names outside the
+   DefenseClaw install folders.
+3. **Bundle app**, built with `-BundlePath` and the same base config, with the
+   base app as its dependency.
+
+Build the bundle app with the same base config:
 
 ```powershell
 ./New-DefenseClawIntunePackage.ps1 `
@@ -140,9 +151,69 @@ config with the manifest-pinned bundle config and refuses a different
 guardrail policy; only the pack path may differ. Set the bundle app's
 dependency to the base app with **Automatically install: Yes**, and upload
 the generated `detect-bundle.ps1` as its custom detection rule. A base-only
-device is installed but has no confirmed signed bundle. It enforces only the
-base config's pack during the interval until the bundle applies; with an
-empty or weaker base pack, that interval can allow calls the bundle denies.
+device is installed but has no confirmed signed bundle. Until the bundle
+applies, it enforces the base config's pack; the packager refuses a base
+config whose guardrail policy differs from the bundle's, so that pack carries
+the bundle's rules. With an empty or weaker base pack, that interval can allow
+calls the bundle denies.
+
+### Custom rule pack app
+
+The kit's `Install-DefenseClawRulePack.ps1` and
+`Detect-DefenseClawRulePack.ps1` are a reference rule-pack app. They are
+Windows PowerShell 5.1 scripts, so Intune runs them as they are. The install
+script copies the pack folder from the app content to
+`C:\ProgramData\DefenseClaw-RulePacks\<pack>` (or `-PacksRoot`), then sets
+what Setup checks:
+
+- on the parent folder: owner Administrators, no inherited entries, Full
+  control for SYSTEM and Administrators, Read & execute for
+  `NT SERVICE\DefenseClawGateway`, no `Users` or `Authenticated Users` entry;
+- on the pack and everything in it: the same entries, owner Administrators.
+
+It then checks the copy and the permissions of the pack, its parent and every
+folder above, and exits `0`. Run again, it changes nothing when everything is
+in place and repairs only what differs. A changed pack is copied beside the
+old one and swapped in. It exits `1603` with the problem and the `icacls` fix
+when a check fails, and `1639` for invalid arguments.
+
+1. On the administrator workstation, put the reviewed pack folder (its name
+   is the `guardrail.custom_packs` name) next to the two scripts in a content
+   folder, and print the pack's tree SHA-256 and the `icacls` commands the
+   install runs, without changing anything:
+
+   ```powershell
+   .\Install-DefenseClawRulePack.ps1 -PackName my-pack -PlanOnly
+   ```
+
+2. In your copy of `Detect-DefenseClawRulePack.ps1`, set the defaults of
+   `$PackName` and `$ExpectedTreeSha256` (and `$PacksRoot` if you changed it).
+   Intune runs detection scripts without arguments.
+3. Wrap the content folder with `IntuneWinAppUtil.exe` (setup file
+   `Install-DefenseClawRulePack.ps1`) and create the Win32 app:
+
+| Setting | Value |
+| --- | --- |
+| Install command | `%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawRulePack.ps1 -PackName my-pack -ExpectedTreeSha256 <tree sha256>` |
+| Uninstall command | The same with `-Remove` instead of `-ExpectedTreeSha256 <tree sha256>` |
+| Install behavior | **System** |
+| Return codes | Keep the defaults; `1603` and `1639` report Failed |
+| Detection rules | **Use a custom detection script**: your `Detect-DefenseClawRulePack.ps1`, *Run script as 32-bit process on 64-bit clients*: **No** |
+| Assignments | The same device groups as the base app; the base app's dependency installs it first |
+
+The detection script reports the pack installed only when the folder has the
+expected tree SHA-256, only SYSTEM and Administrators own and can change it
+and its parent, no standard user can read them, and the gateway service can
+read them. Otherwise Intune runs the install command again, which repairs it.
+The pack's digest in the config (`guardrail.custom_packs.<pack>.digest`)
+still pins its files for the gateway.
+
+If you deliver the pack another way, for example a pinned HTTPS download, it
+needs the same permissions. When the gateway cannot read the pack folder or
+its parent, Setup refuses the base app with `1639` and prints the fix, for
+example `icacls "C:\ProgramData\DefenseClaw-RulePacks" /grant "NT SERVICE\DefenseClawGateway:RX"`.
+Run that from an elevated prompt, or run the rule-pack app's install command
+again, then retry the base app.
 
 ## 3. Create the Win32 app
 
@@ -307,31 +378,12 @@ and a digest prefix, never the value. The same wrapper options,
 
 **Custom rule pack before the first install.** If `guardrail.rule_pack`
 selects a `guardrail.custom_packs` entry, deliver its digest-pinned files
-before assigning the DefenseClaw base Win32 app.
-The simplest route is a separate Intune Win32 app containing the pack archive,
-with a detection rule for the unpacked pack and a dependency from the
-DefenseClaw app. Avoid embedding a large encoded pack in a platform script:
-Defender can block that script before it runs. If the pack is hosted on HTTPS,
-the pack app's SYSTEM install script can download an archive and verify its
-published SHA-256 before extraction:
-
-```powershell
-$archive = 'C:\ProgramData\Cisco\DefenseClaw\custom-pack.zip'
-$destination = 'C:\ProgramData\DefenseClaw-RulePacks'
-$expectedSha256 = '<64 lowercase hex characters from the approved pack release>'
-New-Item -ItemType Directory -Force -Path (Split-Path $archive), $destination | Out-Null
-Invoke-WebRequest -Uri 'https://downloads.example.com/defenseclaw/custom-pack.zip' -OutFile $archive
-if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256) {
-    throw 'custom rule pack SHA-256 mismatch'
-}
-Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
-```
-
-Keep the archive's structure such that the config points to the extracted
-rule-pack directory, set the gateway's read permissions as in
-[Windows rule packs](/docs/enterprise/windows), and test the pack before
-assignment. Make the pack app a dependency of the install, upgrade and config
-apps.
+with a [rule-pack app](#custom-rule-pack-app) before the DefenseClaw base
+Win32 app, and make the rule-pack app a dependency of the install, upgrade and
+config apps. Avoid embedding a large encoded pack in a platform script:
+Defender can block that script before it runs. A new pack version is a new
+rule-pack app version with a new tree SHA-256, delivered before the config or
+bundle that pins its digest.
 
 **Upgrade.** Superseding the base app while a required bundle app depends on
 it failed in the live tenant with Intune error `0x87D300DB`; Intune did not
@@ -341,7 +393,9 @@ Win32 app from the new release (no `-ConfigPath` and no supersedence), assign
 it to a pilot group and confirm its version detection. Then package and
 assign the next signed bundle with the new Setup, and confirm bundle detection
 and enforcement. Do not remove the old base app while bundle apps depend on
-it. This interim sequence has not yet been verified live.
+it. One live test ran this sequence: the Setup-only app installed the new
+release and kept the confirmed bundle, and the next bundle built with the new
+Setup applied.
 After each Intune upgrade, an administrator must verify an enrolled user's
 Claude Code hook policy and run the documented repair with
 `--attest-claude-effective-policy`. Until that attestation, `status` can report
@@ -431,6 +485,7 @@ To see the current state on a device, run from an elevated PowerShell:
 | --- | --- |
 | Install fails with `1639` | No config in the package, or its `enterprise.profile` is not `standalone`. |
 | Install fails with `1639` and `invalid_arguments` | The config does not parse, is not UTF-8, does not validate, or sits where a standard user can change it. `errors[].message` names the line or the folder and the fix. |
+| Install fails with `1639`: the gateway service cannot read the guardrail rule pack | The rule pack is missing, or `NT SERVICE\DefenseClawGateway` cannot read it or the folder above it. Deliver it with the [rule-pack app](#custom-rule-pack-app) as a dependency of the base app, or run the `icacls` command the message prints, then retry. |
 | Bundle app reports `1618` with `bundle_apply_failed` | The bundle verified but did not finish applying; it is not confirmed, and the base config (or the last good bundle) keeps enforcing. The error before `bundle_apply_failed` names the cause, for example `bundle_hot_apply_unavailable` with the verify detail, `lifecycle_busy` or `bundle_policy_not_adopted`. Intune retries `1618` three times, five minutes apart. `sessions_scan_unknown` alone is a warning: the running-session scan took longer than 3 seconds. If every retry fails, fix the named cause and force a retry as below. |
 | Failed bundle app stays NotDetected | IME may keep its GRS retry record. After preserving `AppWorkload.log`, have an Intune administrator identify the failed app ID, back up and remove only that app's stale GRS registry value under `HKLM\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\<identity>\GRS\...`, restart the Intune Management Extension service, then sync the device. In the live test this caused IME to retry. |
 | A gateway scan refuses a project inside a user profile | Run the scan as the signed-in user or move the project outside the profile. The gateway still scans readable paths outside profiles; scanner children inherit its write-restricted LocalSystem token. |
