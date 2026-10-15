@@ -66,6 +66,21 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	}
 }
 
+func TestConfirmedSignerRevocationIsReported(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	bundleDevice(t, e)
+	raw, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBundleTestFile(t, e.anchors, bytes.Replace(raw, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1))
+	warning := bundleCurrentSignerWarning(e.anchors, "k1")
+	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) {
+		t.Fatalf("revoked confirmed signer warning = %+v", warning)
+	}
+}
+
 func TestBundleStatusSettlesBeforeReadingCurrent(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	store := bundleDevice(t, e)

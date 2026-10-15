@@ -228,8 +228,13 @@ type windowsBundleRun struct {
 	sessions *enterprisestatus.SessionRestartStatus
 	// previous is the installed config.yaml before the run: the last good
 	// config while no bundle is current.
-	previous []byte
-	warnings []enterprisebundle.Warning
+	previous              []byte
+	warnings              []enterprisebundle.Warning
+	anchorStage           string
+	anchorPath            string
+	anchorPrevious        []byte
+	anchorExisted         bool
+	anchorCommitAttempted bool
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
@@ -237,6 +242,10 @@ type windowsBundleRun struct {
 }
 
 func (run *windowsBundleRun) release() {
+	if run.anchorStage != "" {
+		_ = os.Remove(run.anchorStage)
+		run.anchorStage = ""
+	}
 	if run.unlock != nil {
 		run.unlock()
 		run.unlock = nil
@@ -641,6 +650,18 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot protect the policy bundle directory: "+err.Error())
 	}
 	if opts.trustAnchors != "" {
+		anchorPath := driver.AnchorsPath
+		if opts.bundlePath != "" {
+			run.anchorPath = anchorPath
+			run.anchorStage = filepath.Join(layout.LifecycleDir, "bundle-staged-anchors.json")
+			previous, readErr := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
+			if readErr == nil {
+				run.anchorPrevious, run.anchorExisted = previous, true
+			} else if !errors.Is(readErr, fs.ErrNotExist) {
+				return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the installed trust anchors: "+readErr.Error())
+			}
+			driver.AnchorsPath = run.anchorStage
+		}
 		if err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath); err != nil {
 			return refuse(string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)), "the trust anchors were not installed: "+err.Error())
 		}
@@ -771,6 +792,12 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		result.NoopReason = "already_applied"
 	}
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
+		if len(result.Errors) == 0 && run.anchorStage != "" {
+			run.anchorCommitAttempted = true
+			if err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+				result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
+			}
+		}
 		sessions := platformBundleSessionStatus(run.ctx)
 		run.sessions = &sessions
 		recordWindowsBundleSessions(p.Receipt, sessions)
@@ -798,6 +825,19 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
+		if p.Receipt.State != enterprisebundle.StateConfirmed && run.anchorCommitAttempted {
+			if err := run.restoreAnchors(); err != nil {
+				result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+err.Error())
+			}
+		}
+	}
+	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
+		if err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+			result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
+			if restoreErr := run.restoreAnchors(); restoreErr != nil {
+				result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
+			}
+		}
 	}
 	var receipt *enterprisebundle.Receipt
 	if p != nil {
@@ -811,6 +851,16 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 	if sessions.State == "unknown" {
 		receipt.WarningCodes = append(receipt.WarningCodes, "sessions_scan_unknown")
 	}
+}
+
+func (run *windowsBundleRun) restoreAnchors() error {
+	if run.anchorExisted {
+		return writeWindowsBundleAdminFile(run.anchorPath, run.anchorPrevious)
+	}
+	if err := os.Remove(run.anchorPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func windowsBundleRollbackDeadlineExpired(ctx context.Context, receipt *enterprisebundle.Receipt, result *enterprisestatus.Result) bool {
@@ -892,6 +942,20 @@ func attachWindowsBundleSummary(result *enterprisestatus.Result, store *enterpri
 			return
 		}
 		store = newWindowsBundleDriver(layout).Store
+	}
+	if state, err := store.LoadState(); err == nil && state.Current != nil {
+		if receipts, err := store.Receipts(); err == nil {
+			for _, current := range receipts {
+				if current.State == enterprisebundle.StateConfirmed && current.BundleID == state.Current.BundleID && current.Version == state.Current.Version {
+					if layout, err := windowsBundleLayout(); err == nil {
+						if warning := bundleCurrentSignerWarning(newWindowsBundleDriver(layout).AnchorsPath, current.SignerKeyID); warning != nil {
+							result.AddWarning(warning.Code, warning.Message)
+						}
+					}
+					break
+				}
+			}
+		}
 	}
 	if _, refusal, err := store.Latest(); err == nil {
 		result.LastRefusal = refusal

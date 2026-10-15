@@ -225,6 +225,9 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
 	}
 	if currentReceipt != nil {
+		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
+			res.Warnings = append(res.Warnings, *warning)
+		}
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
@@ -247,9 +250,33 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	}
 	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
+	for _, warning := range res.Warnings {
+		if warning.Code == string(enterprisebundle.CodeKeyRevoked) {
+			res.Applied = false
+			break
+		}
+	}
 	if policy.LastReloadError != "" {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "policy_reload_rejected",
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})
+	}
+	return nil
+}
+
+func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebundle.Warning {
+	if anchorsPath == "" || signerKeyID == "" {
+		return nil
+	}
+	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
+	if err != nil {
+		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
+	}
+	key := anchors.Key(signerKeyID)
+	if key == nil {
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyUnknown), Message: "the confirmed bundle signer is absent from the installed trust anchors"}
+	}
+	if key.Status == enterprisebundle.KeyRevoked {
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyRevoked), Message: "the confirmed bundle signer is revoked in the installed trust anchors; review the device policy"}
 	}
 	return nil
 }
