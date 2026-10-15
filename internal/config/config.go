@@ -382,6 +382,7 @@ type Config struct {
 	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
+	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -434,6 +435,89 @@ type RoutingCondition struct {
 type RoutingRemoteConfig struct {
 	Endpoint  string `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
 	TimeoutMs int    `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
+}
+
+// FleetConfig controls the Edge Connector fleet management subsystem.
+// Secret fields use the _env pattern: the config value holds the NAME
+// of the environment variable that contains the secret, matching the
+// established LLMConfig.APIKeyEnv / WebhookConfig.SecretEnv convention.
+// Every Resolved* method follows: config env var → canonical env var fallback → empty.
+type FleetConfig struct {
+	Enabled            bool   `mapstructure:"enabled"              yaml:"enabled,omitempty"`
+	APITokenEnv        string `mapstructure:"api_token_env"        yaml:"api_token_env,omitempty"`
+	TenantTokensEnv    string `mapstructure:"tenant_tokens_env"    yaml:"tenant_tokens_env,omitempty"`
+	MQTTBrokerURL      string `mapstructure:"mqtt_broker_url"      yaml:"mqtt_broker_url,omitempty"`
+	MQTTUserEnv        string `mapstructure:"mqtt_user_env"        yaml:"mqtt_user_env,omitempty"`
+	MQTTPassEnv        string `mapstructure:"mqtt_pass_env"        yaml:"mqtt_pass_env,omitempty"`
+	MQTTRequireTLS     bool   `mapstructure:"mqtt_require_tls"     yaml:"mqtt_require_tls,omitempty"`
+	OTAKeyEnv          string `mapstructure:"ota_key_env"          yaml:"ota_key_env,omitempty"`
+	EmergencyKeyEnv    string `mapstructure:"emergency_key_env"    yaml:"emergency_key_env,omitempty"`
+	DeviceKeyEnv       string `mapstructure:"device_key_env"       yaml:"device_key_env,omitempty"`
+	AutoRegister       bool   `mapstructure:"auto_register"        yaml:"auto_register,omitempty"`
+	AllowKeyOverHTTP   bool   `mapstructure:"allow_key_over_http"  yaml:"allow_key_over_http,omitempty"`
+	TrustProxyHeaders  bool   `mapstructure:"trust_proxy_headers"  yaml:"trust_proxy_headers,omitempty"`
+	VerdictCacheSize   int    `mapstructure:"verdict_cache_size"   yaml:"verdict_cache_size,omitempty"`
+	PolicyCompilerPath string `mapstructure:"policy_compiler_path" yaml:"policy_compiler_path,omitempty"`
+}
+
+func (f FleetConfig) resolveEnvKey(configEnv, canonicalEnv string) string {
+	if configEnv != "" {
+		if v, ok := GetKey(configEnv); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+		if v := strings.TrimSpace(os.Getenv(configEnv)); v != "" {
+			return v
+		}
+	}
+	if v, ok := GetKey(canonicalEnv); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(os.Getenv(canonicalEnv))
+}
+
+func (f FleetConfig) ResolvedAPIToken() string {
+	return f.resolveEnvKey(f.APITokenEnv, "DCLAW_FLEET_API_TOKEN")
+}
+
+func (f FleetConfig) ResolvedTenantTokens() string {
+	return f.resolveEnvKey(f.TenantTokensEnv, "DCLAW_FLEET_TENANT_TOKENS")
+}
+
+func (f FleetConfig) ResolvedOTAHMACKey() (string, error) {
+	if f.OTAKeyEnv == "DCLAW_OTA_KEY" {
+		return "", fmt.Errorf("fleet.ota_key_env names DCLAW_OTA_KEY, which is an Ed25519 public key; use DCLAW_OTA_HMAC_KEY for HMAC policy signing")
+	}
+	return f.resolveEnvKey(f.OTAKeyEnv, "DCLAW_OTA_HMAC_KEY"), nil
+}
+
+func (f FleetConfig) ResolvedEmergencyKey() string {
+	return f.resolveEnvKey(f.EmergencyKeyEnv, "DCLAW_EMERGENCY_KEY")
+}
+
+func (f FleetConfig) ResolvedDeviceKey() string {
+	return f.resolveEnvKey(f.DeviceKeyEnv, "DCLAW_DEVICE_KEY")
+}
+
+func (f FleetConfig) ResolvedMQTTUser() string {
+	return f.resolveEnvKey(f.MQTTUserEnv, "DCLAW_MQTT_USER")
+}
+
+func (f FleetConfig) ResolvedMQTTPass() string {
+	return f.resolveEnvKey(f.MQTTPassEnv, "DCLAW_MQTT_PASS")
+}
+
+func (f FleetConfig) EffectiveMQTTBrokerURL() string {
+	if f.MQTTBrokerURL != "" {
+		return f.MQTTBrokerURL
+	}
+	return os.Getenv("DCLAW_MQTT_BROKER_URL")
+}
+
+func (f FleetConfig) EffectiveVerdictCacheSize() int {
+	if f.VerdictCacheSize > 0 {
+		return f.VerdictCacheSize
+	}
+	return 4096
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
@@ -3778,6 +3862,17 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	// in gatewayShouldConnectForConfiguredConnector. See the field
 	// doc on GatewayConfig.FleetMode for the override semantics.
 	viper.SetDefault("gateway.fleet_mode", "auto")
+
+	// Fleet defaults — all off/empty by default so fleet costs nothing when unused.
+	viper.SetDefault("fleet.enabled", false)
+	viper.SetDefault("fleet.api_token_env", "DCLAW_FLEET_API_TOKEN")
+	viper.SetDefault("fleet.mqtt_user_env", "DCLAW_MQTT_USER")
+	viper.SetDefault("fleet.mqtt_pass_env", "DCLAW_MQTT_PASS")
+	viper.SetDefault("fleet.ota_key_env", "DCLAW_OTA_HMAC_KEY")
+	viper.SetDefault("fleet.emergency_key_env", "DCLAW_EMERGENCY_KEY")
+	viper.SetDefault("fleet.device_key_env", "DCLAW_DEVICE_KEY")
+	viper.SetDefault("fleet.verdict_cache_size", 4096)
+
 	viper.SetDefault("gateway.config_reload.mode", "hot")
 	viper.SetDefault("gateway.device_key_file", join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)

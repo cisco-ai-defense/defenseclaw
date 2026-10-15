@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions a focused catalog of 18 Grafana dashboards. Each board
+DefenseClaw provisions a focused catalog of 19 Grafana dashboards. Each board
 has one job: start broad, select a connector, agent, rule, or execution, and
 then move to the detail surface that owns that question. The catalog avoids
 duplicating the same analysis across several boards.
@@ -49,6 +49,7 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Sandboxes** (`defenseclaw-sandboxes`) | What are the OpenShell sandboxes doing, what did they reach, and what was refused? | Operator, SOC, platform owner | Prometheus, Loki | Fleet gauge and phase changes, egress decisions by source (OpenShell or the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, a destinations table, shadow-AI and other sandbox findings, integration health, and opt-in process starts. See [Sandboxes board](#sandboxes-board). |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or destination delivery unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, destination delivery, and gateway errors. |
+| **IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online, sending heartbeats, or receiving allow and block verdicts? | Fleet operator, SOC | Prometheus | Device status, verdict rates, Fleet alerts, verdict cache, and rollback counters. Requires the [optional authenticated Fleet scrape](/docs/edge-connector/install#grafana-dashboard); an empty panel means the Fleet endpoint has not been scraped. |
 
 ## Kernel controls and your Tetragon policies
 

@@ -67,7 +67,21 @@ func processExists(pid int) bool {
 		return false
 	}
 	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "linux" {
+		// An unreaped zombie still accepts signal 0. It has already exited, and
+		// waiting for PID 1 to reap it can make gateway stop time out in a
+		// container. Only a positively identified Z state overrides signal 0.
+		if stat, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); readErr == nil {
+			endComm := strings.LastIndexByte(string(stat), ')')
+			if endComm >= 0 && endComm+2 < len(stat) && stat[endComm+2] == 'Z' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {

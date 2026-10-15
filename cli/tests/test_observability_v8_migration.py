@@ -3503,7 +3503,9 @@ audit_sinks:
         "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 220
+    assert len(action_selector) == 234
+    assert "fleet.device.credential_provision_authorized" in action_selector
+    assert "fleet.device.decommission_authorized" in action_selector
     assert "setup-redaction-policy" in action_selector
     assert {"config-update", "gateway-agent-start", "guardrail-verdict", "scan"}.issubset(action_selector)
     assert "judge" not in routes[0]["selector"]["event_names"]

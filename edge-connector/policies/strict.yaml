@@ -1,0 +1,40 @@
+name: strict
+description: Strict security for production IoT deployments
+
+admission:
+  scan_on_install: true
+  allow_list_bypass_scan: false
+
+skill_actions:
+  critical:
+    file: quarantine
+    runtime: disable
+    install: block
+  high:
+    file: quarantine
+    runtime: disable
+    install: block
+  medium:
+    file: none
+    runtime: warn
+    install: none
+
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [read_fs, send_msg]
+      action: warn
+    - sequence: [net_fetch, actuate]
+      action: block
+    - sequence: [sensor_read, net_fetch]
+      action: warn
+
+  destination_allowlist:
+    # The local SSRF guard accepts only explicit public IP literals.
+    - "8.8.8.8"
+    - "1.1.1.1"
+
+
+  canary:
+    baseline_blocks_per_min: 5

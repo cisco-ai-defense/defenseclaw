@@ -174,6 +174,10 @@ $script:DefenseClawEnterpriseProfile = 'SecureClient'
 $script:DefenseClawPinnedPayloadSHA256 = @{}
 $script:DefenseClawAllowedSignerSHA256 = @()
 $script:DefenseClawTrustMode = 'Authenticode'
+# Signed standalone modules authenticate the Python source even though a .py
+# file cannot carry embedded Authenticode. Keep this digest aligned with the
+# release checkout's edge-connector/tools/policy_compiler.py.
+$script:DefenseClawPolicyCompilerSHA256 = 'b2c3766d4ba51bb37bd57158d510f251ea2532bf6f8a5e7a44a98a724826ac39'
 # Standalone roots a standard user created and Install moved aside.
 $script:DefenseClawQuarantinedRoots = @()
 # Standalone pending-transaction recovery: the gateway of the running Setup
@@ -5040,6 +5044,7 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.InstallerPath,
         $Layout.ModulePath
     )
@@ -7535,6 +7540,20 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
+    foreach ($directory in @(
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$directory) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
+            Set-DefenseClawPathAcl -Path $directory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
+        }
+    }
+    $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
+    if (-not [string]::IsNullOrWhiteSpace($compilerPath) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
+        Set-DefenseClawPathAcl -Path $compilerPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
+    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
@@ -8776,6 +8795,11 @@ function Get-DefenseClawLayout {
         # treats an absent key as the Secure Client broker deployment.
         $layout['Profile'] = 'Standalone'
         $layout['BrokerEnabled'] = $false
+        # The Fleet compiler is executable Python source. Keep it in the
+        # protected installation, outside writable per-user runtimes.
+        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib')
+        $layout['CompilerDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw')
+        $layout['CompilerPath'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
     }
     return $layout
 }
@@ -8831,6 +8855,8 @@ function New-DefenseClawLayoutDirectories {
         $Layout.InstallRoot,
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
@@ -9143,6 +9169,7 @@ function New-DefenseClawDeploymentMetadata {
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
+        @('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),
         @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
         @('sensor_helper', $Layout.SensorHelperPath),
@@ -9909,6 +9936,7 @@ function New-DefenseClawTransaction {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.ConfigPath,
         $Layout.ManifestPath,
         $Layout.InstallerPath,
@@ -19132,6 +19160,112 @@ function Assert-DefenseClawInstalledConfig {
         -Arguments $arguments)
 }
 
+function Assert-DefenseClawSecureClientFleetSourcePreflight {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    if (Test-DefenseClawStandaloneProfile) {
+        return
+    }
+    # Use exactly the config this install-like transaction will publish. A
+    # Repair/Upgrade that keeps config.yaml checks the protected installed
+    # copy. The source descriptors authenticate both files before execution.
+    $configSource = if ($Sources.ContainsKey('config')) {
+        [hashtable]$Sources['config']
+    }
+    elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        Get-DefenseClawSourceDescriptor `
+            -Path $Layout.ConfigPath `
+            -Label 'installed managed config'
+    }
+    else {
+        return
+    }
+    # This gate uses the gateway from the new release. A Repair with no new
+    # gateway can service an older installed release whose binary does not
+    # have this helper; its own config validation remains transactional.
+    $gatewaySource = [hashtable]$Sources['gateway']
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    $probe = Invoke-DefenseClawProcess `
+        -File ([string]$gatewaySource.path) `
+        -Arguments @(
+            'enterprise', 'windows', 'preflight-secure-client-fleet',
+            '--config', ([string]$configSource.path)
+        )
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    if ([int]$probe.exit_code -ne 0) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
+        throw "Secure Client config preflight failed before service changes: $detail"
+    }
+}
+
+function Test-DefenseClawStandaloneFleetSourceEnabled {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    if (-not $Sources.ContainsKey('gateway')) {
+        throw 'standalone Fleet source inspection needs the authenticated replacement gateway'
+    }
+    $configSource = if ($Sources.ContainsKey('config')) {
+        [hashtable]$Sources['config']
+    }
+    elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        Get-DefenseClawSourceDescriptor `
+            -Path $Layout.ConfigPath `
+            -Label 'installed standalone config'
+    }
+    else {
+        throw 'standalone Fleet source inspection needs a managed config'
+    }
+    $gatewaySource = [hashtable]$Sources['gateway']
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    $probe = Invoke-DefenseClawProcess `
+        -File ([string]$gatewaySource.path) `
+        -Arguments @(
+            'enterprise', 'windows', 'inspect-standalone-fleet',
+            '--config', ([string]$configSource.path)
+        )
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
+    if ([int]$probe.exit_code -ne 0) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
+        throw "standalone Fleet source inspection failed before service changes: $detail"
+    }
+    # The trusted path validator may emit a nonfatal ancestor ACL advisory on
+    # stderr. The gateway's contract is one exact boolean line on stdout;
+    # combining the two streams would reject a valid Fleet-off config.
+    $answer = ([string]$probe.stdout).Trim()
+    if ($answer -cnotin @('true', 'false')) {
+        throw 'standalone Fleet source inspection returned an invalid result'
+    }
+    return ($answer -ceq 'true')
+}
+
+function Add-DefenseClawStandaloneFleetCompilerSource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$PolicyCompiler,
+        [switch]$AllowUnsigned
+    )
+    $descriptor = Get-DefenseClawSourceDescriptor `
+        -Path $PolicyCompiler `
+        -Label 'Fleet policy compiler' `
+        -AllowUnsigned:$AllowUnsigned
+    if (-not [string]::Equals(
+        [string]$descriptor.sha256,
+        $script:DefenseClawPolicyCompilerSHA256,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Fleet policy compiler does not match the release source authenticated by this installer module'
+    }
+    $Sources['compiler'] = $descriptor
+}
+
 function Test-DefenseClawGatewayReady {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -20377,6 +20511,28 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $serviceInstallRights `
             -AllowUsersRead
     }
+    foreach ($directory in @(
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$directory) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
+            Assert-DefenseClawPathAcl `
+                -Path $directory `
+                -AllowedWriterSIDs $adminWriters `
+                -RequiredRights $serviceInstallRights `
+                -AllowUsersRead
+        }
+    }
+    $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
+    if (-not [string]::IsNullOrWhiteSpace($compilerPath) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
+        Assert-DefenseClawPathAcl `
+            -Path $compilerPath `
+            -AllowedWriterSIDs $adminWriters `
+            -RequiredRights $serviceInstallRights `
+            -AllowUsersRead
+    }
     Assert-DefenseClawPathAcl `
         -Path $Layout.LibexecDirectory `
         -AllowedWriterSIDs $adminWriters `
@@ -20633,6 +20789,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             'acp' { $Layout.ACPPath }
             'hook' { $Layout.HookPath }
             'sensor_helper' { $Layout.SensorHelperPath }
+            'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
             'cli' { $Layout.CLIPath }
             'installer' { $Layout.InstallerPath }
             'module' { $Layout.ModulePath }
@@ -20924,6 +21081,7 @@ function Get-DefenseClawArtifactPath {
         'acp' { $Layout.ACPPath }
         'hook' { $Layout.HookPath }
         'sensor_helper' { $Layout.SensorHelperPath }
+        'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
         'cli' { $Layout.CLIPath }
         'installer' { $Layout.InstallerPath }
         'module' { $Layout.ModulePath }
@@ -20995,6 +21153,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$ACPBinary,
         [string]$HookBinary,
         [string]$SensorHelperBinary,
+        [string]$PolicyCompiler,
         [string]$CLIBinary,
         [string]$NativeCleanupBinary,
         [string]$Config,
@@ -21002,9 +21161,8 @@ function Get-DefenseClawLifecycleSources {
         [string]$InstallerSource,
         [string]$ModuleSource,
         [switch]$AllowUnsigned,
-        # Retained only for internal call-shape compatibility. The public
-        # lifecycle entry point rejects deferred configuration before layout
-        # resolution, so this legacy source-selection branch is unreachable.
+        # Deferred Install still authenticates protected placeholder config
+        # and manifest inputs, but Fleet activation waits for Repair.
         [switch]$DeferredConfig
     )
     $sources = @{}
@@ -21028,6 +21186,9 @@ function Get-DefenseClawLifecycleSources {
             -not [string]::IsNullOrWhiteSpace($ProviderLibrary))) {
         throw 'the standalone profile has no credential broker; omit -BrokerBinary and -ProviderLibrary'
     }
+    if ($brokerEnabled -and -not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {
+        throw '-PolicyCompiler applies only to the standalone profile'
+    }
     if ($Action -eq 'Install') {
         $required = @()
         if ($brokerEnabled) {
@@ -21046,9 +21207,8 @@ function Get-DefenseClawLifecycleSources {
             @('HookBinary', $HookBinary),
             @('SensorHelperBinary', $SensorHelperBinary)
         )
-        # Legacy compatibility scaffolding: direct callers of this internal
-        # helper can still describe the old source shape, but the lifecycle
-        # gate rejects that mode before this function is reached.
+        # Deferred Install supplies authenticated placeholder config and
+        # manifest sources; their Fleet content is inspected at Repair.
         if (-not $DeferredConfig) {
             $required += @(
                 @('Config', $Config),
@@ -21093,11 +21253,12 @@ function Get-DefenseClawLifecycleSources {
         if ([string]::IsNullOrWhiteSpace([string]$entry[1])) {
             continue
         }
-        $sources[[string]$entry[0]] = Get-DefenseClawSourceDescriptor `
+        $descriptor = Get-DefenseClawSourceDescriptor `
             -Path ([string]$entry[1]) `
             -Label ([string]$entry[2]) `
             -Authenticode:([bool]$entry[3]) `
             -AllowUnsigned:$AllowUnsigned
+        $sources[[string]$entry[0]] = $descriptor
     }
     return $sources
 }
@@ -21895,6 +22056,8 @@ function Assert-DefenseClawManagedInstallTree {
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.ManagedIPCDirectory
     )
     # Standalone keeps its managed IPC directory (sensor helper socket)
@@ -21913,6 +22076,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.CLIPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $managedIPCSocketPath
     )
     # Standalone also carries the managed OpenCode plugin under share\opencode.
@@ -22550,6 +22714,11 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc\defenseclaw_ipc.sock')
     )
     if (Test-DefenseClawStandaloneProfile) {
+        $directories += @(
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib'),
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
+        )
+        $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
         # The standalone payload also installs the ACP bridge and the sensor
         # helper under bin. Without them a committed standalone uninstall
         # could never retire its InstallRoot ("committed InstallRoot contains
@@ -25094,6 +25263,16 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         # runs.
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
+    if (Test-DefenseClawStandaloneProfile) {
+        foreach ($directory in @(
+            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
+            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$directory)) {
+                $allowed += [IO.Path]::GetFullPath($directory).TrimEnd('\')
+            }
+        }
+    }
     # A layout without the socket key tolerates no leaf file at all.
     $managedIPCSocketPath = Get-DefenseClawOptionalLayoutValue `
         -Layout $Layout `
@@ -26553,6 +26732,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][hashtable]$Sources,
+        [switch]$StandaloneFleetStateKnown,
+        [switch]$StandaloneFleetEnabled,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$RefreshApplicationControlAttestation,
@@ -26690,6 +26871,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 'broker',
                 'hook',
                 'sensor_helper',
+                'compiler',
                 'cli',
                 'installer',
                 'module'
@@ -26877,6 +27059,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -Path $destination `
                     -Kind AdminFile `
                     -GatewayServiceSID $script:AdministratorsSID
+            }
+        }
+        if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
+            $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
+            if (-not [string]::IsNullOrWhiteSpace($compilerPath)) {
+                Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+                    [IO.File]::Delete($compilerPath)
+                }
             }
         }
         foreach ($requiredPath in @(
@@ -28844,6 +29035,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ACPBinary,
         [string]$HookBinary,
         [string]$SensorHelperBinary,
+        [string]$PolicyCompiler,
         [string]$CLIBinary,
         [string]$NativeCleanupBinary,
         [string]$Config,
@@ -29180,6 +29372,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -ACPBinary $ACPBinary `
         -HookBinary $HookBinary `
         -SensorHelperBinary $SensorHelperBinary `
+        -PolicyCompiler $PolicyCompiler `
         -CLIBinary $CLIBinary `
         -NativeCleanupBinary $NativeCleanupBinary `
         -Config $Config `
@@ -29198,6 +29391,35 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
+    $standaloneFleetStateKnown = $false
+    $standaloneFleetEnabled = $false
+    if ($Action -in @('Install', 'Upgrade', 'Repair') -and
+        $sources.ContainsKey('gateway')) {
+        if (Test-DefenseClawStandaloneProfile) {
+            # Deferred Install publishes placeholders with services stopped;
+            # Repair later supplies the real config and performs Fleet opt-in.
+            if (-not $DeferredConfig) {
+                $standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `
+                    -Layout $layout `
+                    -Sources $sources
+                $standaloneFleetStateKnown = $true
+                if ($standaloneFleetEnabled) {
+                    if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {
+                        throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'
+                    }
+                    Add-DefenseClawStandaloneFleetCompilerSource `
+                        -Sources $sources `
+                        -PolicyCompiler $PolicyCompiler `
+                        -AllowUnsigned:$AllowUnsigned
+                }
+            }
+        }
+        else {
+            Assert-DefenseClawSecureClientFleetSourcePreflight `
+                -Layout $layout `
+                -Sources $sources
+        }
+    }
     Initialize-DefenseClawManagedRoot `
         -Path $layout.LifecycleLockDirectory `
         -Label 'lifecycle lock directory' `
@@ -29212,6 +29434,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
+        if ($standaloneFleetStateKnown) {
+            $recheckedFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `
+                -Layout $layout `
+                -Sources $sources
+            if ($recheckedFleetEnabled -ne $standaloneFleetEnabled) {
+                throw 'standalone Fleet enablement changed while waiting for the lifecycle lock'
+            }
+        }
         # The profiles share SCM service names but keep separate lifecycle
         # locks. While holding this profile's lock, refuse if the other
         # profile's lifecycle is mid-mutation, and repeat the deployment
@@ -29463,6 +29693,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Action $Action `
             -Layout $layout `
             -Sources $sources `
+            -StandaloneFleetStateKnown:$standaloneFleetStateKnown `
+            -StandaloneFleetEnabled:$standaloneFleetEnabled `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RefreshApplicationControlAttestation:(

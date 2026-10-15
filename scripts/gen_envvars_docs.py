@@ -45,6 +45,7 @@ from defenseclaw.envvars import (  # noqa: E402  (sys.path manipulated above)
     CATEGORY_CREDENTIAL,
     CATEGORY_DEBUG,
     CATEGORY_DISCOVERY,
+    CATEGORY_FLEET,
     CATEGORY_HOOK_INTERNAL,
     CATEGORY_RUNTIME_PATH,
     CATEGORY_SECURITY_OPT_OUT,
@@ -75,6 +76,7 @@ _CATEGORY_ORDER = (
     CATEGORY_HOOK_INTERNAL,
     CATEGORY_UPGRADE_INTERNAL,
     CATEGORY_SPLUNK_BRIDGE,
+    CATEGORY_FLEET,
     CATEGORY_TEST_FIXTURE,
 )
 assert set(_CATEGORY_ORDER) == ALLOWED_CATEGORIES, (
@@ -92,6 +94,7 @@ _CATEGORY_TITLES = {
     CATEGORY_UPGRADE_INTERNAL: "Upgrade-internal (do not override)",
     CATEGORY_SPLUNK_BRIDGE: "Splunk-bridge bundle",
     CATEGORY_TEST_FIXTURE: "Test fixtures (test-only)",
+    CATEGORY_FLEET: "Fleet management (Edge Connector)",
 }
 
 _SENTINEL_BEGIN_MDX = "{/* AUTOGEN-BEGIN: env-vars */}"
@@ -341,7 +344,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     """\
     ---
     title: Environment variables
-    description: Every environment variable DefenseClaw reads, grouped by category, with defaults, accepted values, and the files that read each one.
+    description: Supported DefenseClaw and Fleet environment variables, with defaults, accepted values, and source readers.
     keywords:
       - DefenseClaw env vars
       - DEFENSECLAW_LLM_KEY
@@ -349,10 +352,10 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
       - DefenseClaw configuration
     ---
 
-    This is the canonical list of every environment variable DefenseClaw reads. The list is generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json); CI fails if any callsite references a `DEFENSECLAW_*` var not declared in the registry.
+    This is the supported environment-variable catalog generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json). CI checks all `DEFENSECLAW_*` references and direct Fleet/Edge `DCLAW_*` readers against the registry.
 
     <Callout title="See live what's active">
-    `defenseclaw doctor` surfaces any **active security override** in real time. Operators with no overrides set see a single "none active" pass row; if you've left a debug toggle on, doctor flags it loudly.
+    `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
     </Callout>
 
     {begin}
@@ -361,7 +364,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
 
     ## When in doubt
 
-    Run `defenseclaw doctor`. The doctor walks the same env-var resolution code paths as the running gateway and surfaces effective values plus any active opt-outs.
+    Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`; doctor cannot read another process's effective environment.
 
     ```bash
     defenseclaw doctor

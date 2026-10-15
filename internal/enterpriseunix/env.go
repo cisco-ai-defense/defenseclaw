@@ -190,6 +190,13 @@ type Env struct {
 	Services      ServiceManager
 	Accounts      AccountManager
 	MachinePolicy MachinePolicyManager
+	// MacFleetPythonCheck verifies the managed macOS interpreter and PyYAML.
+	// Nil uses Fleet's production trust and isolated import checks; tests may
+	// substitute a probe for an absent macOS framework on non-macOS hosts.
+	MacFleetPythonCheck func() (string, error)
+	// LinuxFleetPythonCheck has the same test seam for the distro Python and
+	// PyYAML prerequisite of a Fleet-enabled managed Linux deployment.
+	LinuxFleetPythonCheck func() (string, error)
 
 	Now     func() time.Time
 	Geteuid func() int

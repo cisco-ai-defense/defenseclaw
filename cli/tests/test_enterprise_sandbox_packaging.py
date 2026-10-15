@@ -128,7 +128,11 @@ def _stub(bin_dir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def _build_fixture(tmp_path: Path, agents: tuple[str, ...] = LAUNCH_AGENTS):
+def _build_fixture(
+    tmp_path: Path,
+    agents: tuple[str, ...] = LAUNCH_AGENTS,
+    compiler_kind: str = "regular",
+):
     """A copy of the builder in a fixture repo, with stubs for the Apple tools.
 
     The stub pkgbuild copies the payload root it is given (symlinks kept) so
@@ -146,6 +150,12 @@ def _build_fixture(tmp_path: Path, agents: tuple[str, ...] = LAUNCH_AGENTS):
     for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"):
         (payload / name).write_text("#!/bin/sh\n", encoding="utf-8")
         (payload / name).chmod(0o755)
+    compiler = payload / "edge-connector" / "tools" / "policy_compiler.py"
+    compiler.parent.mkdir(parents=True)
+    if compiler_kind == "regular":
+        shutil.copyfile(ROOT / "edge-connector" / "tools" / "policy_compiler.py", compiler)
+    elif compiler_kind == "symlink":
+        compiler.symlink_to(payload / "defenseclaw-gateway")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     captured = tmp_path / "captured-root"
@@ -165,8 +175,13 @@ def _build_fixture(tmp_path: Path, agents: tuple[str, ...] = LAUNCH_AGENTS):
     return repo, payload, bin_dir, captured
 
 
-def _run_builder(tmp_path: Path, umask: str = "022", agents: tuple[str, ...] = LAUNCH_AGENTS):
-    repo, payload, bin_dir, captured = _build_fixture(tmp_path, agents)
+def _run_builder(
+    tmp_path: Path,
+    umask: str = "022",
+    agents: tuple[str, ...] = LAUNCH_AGENTS,
+    compiler_kind: str = "regular",
+):
+    repo, payload, bin_dir, captured = _build_fixture(tmp_path, agents, compiler_kind)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "TMPDIR": str(tmp_path)}
     result = subprocess.run(
         [
@@ -219,6 +234,19 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     ):
         assert _mode(directory) & 0o755 == 0o755, directory
     assert _mode(root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway") == 0o755
+    compiler = root / "opt" / "cisco" / "defenseclaw" / "share" / "fleet" / "policy_compiler.py"
+    assert compiler.read_bytes() == (ROOT / "edge-connector" / "tools" / "policy_compiler.py").read_bytes()
+    assert not (root / "opt" / "cisco" / "defenseclaw" / "lib" / "defenseclaw" / "policy_compiler.py").exists()
+    assert _mode(compiler) == 0o644
+    assert _mode(compiler.parent) == 0o755
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+@pytest.mark.parametrize("compiler_kind", ["missing", "symlink"])
+def test_macos_pkg_rejects_missing_or_symlink_compiler(tmp_path: Path, compiler_kind: str):
+    result, _ = _run_builder(tmp_path, compiler_kind=compiler_kind)
+    assert result.returncode == 1
+    assert "payload lacks a regular policy compiler" in result.stderr
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")

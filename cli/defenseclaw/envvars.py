@@ -53,6 +53,7 @@ __all__ = [
     "CATEGORY_DISCOVERY",
     "CATEGORY_SPLUNK_BRIDGE",
     "CATEGORY_TEST_FIXTURE",
+    "CATEGORY_FLEET",
     "ALLOWED_CATEGORIES",
     "ALLOWED_SECURITY_IMPACT",
 ]
@@ -69,6 +70,7 @@ CATEGORY_CREDENTIAL = "credential"
 CATEGORY_DISCOVERY = "discovery"
 CATEGORY_SPLUNK_BRIDGE = "splunk_bridge"
 CATEGORY_TEST_FIXTURE = "test_fixture"
+CATEGORY_FLEET = "fleet"
 
 ALLOWED_CATEGORIES = frozenset(
     {
@@ -82,6 +84,7 @@ ALLOWED_CATEGORIES = frozenset(
         CATEGORY_DISCOVERY,
         CATEGORY_SPLUNK_BRIDGE,
         CATEGORY_TEST_FIXTURE,
+        CATEGORY_FLEET,
     }
 )
 
@@ -235,9 +238,13 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
             )
 
     name = raw["name"]
-    if not isinstance(name, str) or not name.startswith("DEFENSECLAW_") and name != "MIGRATION_DEFENSECLAW_HOME":
+    if not isinstance(name, str) or (
+        not name.startswith("DEFENSECLAW_")
+        and not name.startswith("DCLAW_")
+        and name != "MIGRATION_DEFENSECLAW_HOME"
+    ):
         raise ValueError(
-            f"{path}: entry name {name!r} must start with 'DEFENSECLAW_' "
+            f"{path}: entry name {name!r} must start with 'DEFENSECLAW_' or 'DCLAW_' "
             "(or be the legacy MIGRATION_DEFENSECLAW_HOME)"
         )
 

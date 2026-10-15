@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -11,7 +11,8 @@
     "credential": "Auth materials (API keys, tokens, passwords). Should reference env vars, not contain raw values in code.",
     "discovery": "Probe / discovery tuning.",
     "splunk_bridge": "Splunk-bridge bundle (bundles/splunk_local_bridge). Not consumed by the Go gateway.",
-    "test_fixture": "Test-only fixtures. Should never be set in production."
+    "test_fixture": "Test-only fixtures. Should never be set in production.",
+    "fleet": "Fleet management (Edge Connector IoT device lifecycle, MQTT, OTA, emergency)"
   },
   "entries": [
     {
@@ -102,7 +103,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
+      "security_note": "CGNAT egress guard \u2014 prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
     },
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
@@ -131,7 +132,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
+      "security_note": "Hook contract verification \u2014 prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
     },
     {
       "name": "DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS",
@@ -152,7 +153,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts."
+      "security_note": "MCP scan-target SSRF guard \u2014 prevents a scan request from reaching IMDS / loopback / private hosts."
     },
     {
       "name": "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS",
@@ -177,7 +178,7 @@
         }
       ],
       "since": "0.8.1",
-      "security_note": "Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
+      "security_note": "Private-upstream SSRF guard exemption \u2014 allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
     },
     {
       "name": "DEFENSECLAW_ANTHROPIC_PROBE_MODEL",
@@ -342,7 +343,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook PATH lockdown — a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
+      "security_note": "Hook PATH lockdown \u2014 a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
     },
     {
       "name": "DEFENSECLAW_BIN",
@@ -418,7 +419,7 @@
     {
       "name": "DEFENSECLAW_CISCO_CA_BUNDLE",
       "category": "test_fixture",
-      "purpose": "CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, `osslsigncode verify -CAfile <bundle>` uses the supplied bundle instead of the system trust store — the Workstream A round-trip CI test sets this to a disposable CA that signs a `Cisco Systems, Inc.` CN so the assemble.sh flow can be exercised on Linux runners without a real production certificate. MUST remain unset for production AVC assembly and any release build; a rogue bundle here would let a non-Cisco signer pass the signature preflight (`assert-cisco-signature`). Enforced by convention only — there is no runtime check that refuses set-when-in-production because the assembler is not aware of environment class.",
+      "purpose": "CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, `osslsigncode verify -CAfile <bundle>` uses the supplied bundle instead of the system trust store \u2014 the Workstream A round-trip CI test sets this to a disposable CA that signs a `Cisco Systems, Inc.` CN so the assemble.sh flow can be exercised on Linux runners without a real production certificate. MUST remain unset for production AVC assembly and any release build; a rogue bundle here would let a non-Cisco signer pass the signature preflight (`assert-cisco-signature`). Enforced by convention only \u2014 there is no runtime check that refuses set-when-in-production because the assembler is not aware of environment class.",
       "default": "unset",
       "accepted_values": [
         "<path to PEM bundle>",
@@ -635,7 +636,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "Authentication material path — the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path."
+      "security_note": "Authentication material path \u2014 the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path."
     },
     {
       "name": "DEFENSECLAW_CMID_BROKER_PIPE",
@@ -657,7 +658,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "Local IPC identity boundary — the installer pins this value in the protected gateway service registry environment; partial configuration fails closed."
+      "security_note": "Local IPC identity boundary \u2014 the installer pins this value in the protected gateway service registry environment; partial configuration fails closed."
     },
     {
       "name": "DEFENSECLAW_CMID_BROKER_SERVICE_NAME",
@@ -679,7 +680,7 @@
         }
       ],
       "since": "0.9.0",
-      "security_note": "SCM identity boundary — changing this value cannot redirect the client because only exact production and certification tuples are accepted."
+      "security_note": "SCM identity boundary \u2014 changing this value cannot redirect the client because only exact production and certification tuples are accepted."
     },
     {
       "name": "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
@@ -700,7 +701,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account."
+      "security_note": "Per-bearer Codex authentication on loopback \u2014 prevents same-host user-to-user impersonation when multiple users share an OS account."
     },
     {
       "name": "DEFENSECLAW_CODEX_POLICY_ENTRY_PATH",
@@ -889,7 +890,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
+      "security_note": "Managed config path separation \u2014 lets system services read admin-owned policy without making the runtime data directory admin-writable."
     },
     {
       "name": "DEFENSECLAW_CONNECTOR",
@@ -1166,7 +1167,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
+      "security_note": "Immutable managed-mode boundary \u2014 prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) \u2014 the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_DEV",
@@ -1448,7 +1449,7 @@
       "consumers": [
         {
           "location": "internal/config/env_config.go",
-          "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"
+          "description": "trustEnvConfigFile short-circuits when set \u2014 production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"
         },
         {
           "location": "internal/config/env_config_windows.go",
@@ -1582,7 +1583,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Loopback-only enforcement — a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
+      "security_note": "Loopback-only enforcement \u2014 a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
     },
     {
       "name": "DEFENSECLAW_GATEWAY_BIN",
@@ -2054,7 +2055,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
+      "security_note": "Privileged repair authorization \u2014 must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
       "name": "DEFENSECLAW_HOOK_HOME",
@@ -2137,7 +2138,7 @@
     {
       "name": "DEFENSECLAW_HOOK_PATH_TRUSTED",
       "category": "hook_internal",
-      "purpose": "Companion name to DEFENSECLAW_HOOK_PATH that an agent process might set. The hook-hardening preamble explicitly unsets it before locking down PATH, so a compromised agent cannot mark a hostile PATH as trusted. There is no read site — the variable is intentionally stripped.",
+      "purpose": "Companion name to DEFENSECLAW_HOOK_PATH that an agent process might set. The hook-hardening preamble explicitly unsets it before locking down PATH, so a compromised agent cannot mark a hostile PATH as trusted. There is no read site \u2014 the variable is intentionally stripped.",
       "default": "unset (always stripped before PATH lockdown)",
       "accepted_values": [
         "unset"
@@ -2152,7 +2153,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
+      "security_note": "Hook PATH lockdown \u2014 stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
     },
     {
       "name": "DEFENSECLAW_HOOK_SOCKET",
@@ -2430,7 +2431,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer root selection — upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
+      "security_note": "Installer root selection \u2014 upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
     },
     {
       "name": "DEFENSECLAW_INTEGRATION_ENABLED",
@@ -2546,7 +2547,7 @@
         }
       ],
       "since": "0.8.4",
-      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists. Managed Windows also fixes the parent to the trusted Program Files DefenseClaw IPC directory."
+      "security_note": "Local-only socket path override \u2014 managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists. Managed Windows also fixes the parent to the trusted Program Files DefenseClaw IPC directory."
     },
     {
       "name": "DEFENSECLAW_JSONL_DISABLE",
@@ -3259,7 +3260,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed enforcement fail-closed boundary — the value is generated by the privileged hook installer and is not an operator security opt-out."
+      "security_note": "Managed enforcement fail-closed boundary \u2014 the value is generated by the privileged hook installer and is not an operator security opt-out."
     },
     {
       "name": "DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS",
@@ -3279,7 +3280,7 @@
       "consumers": [
         {
           "location": "internal/managed/trust_advisory.go",
-          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it. The walks only ask for the downgrade for ancestors inside PlatformInstallerOwnedRoots — an ancestor outside the Cisco tree (a temp, home, or third-party prefix) keeps its verdicts fatal regardless of this variable"
+          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it. The walks only ask for the downgrade for ancestors inside PlatformInstallerOwnedRoots \u2014 an ancestor outside the Cisco tree (a temp, home, or third-party prefix) keeps its verdicts fatal regardless of this variable"
         },
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
@@ -3299,7 +3300,7 @@
         }
       ],
       "since": "0.8.6",
-      "security_note": "Inverted flag: setting it only hardens. The relaxation it disables is the AIFW-34262 default — an untrusted grant on a shared platform-owned parent no longer fails a managed install, which previously aborted after quiesce had disabled every service and left the endpoint unprotected. Set this on hosts where DefenseClaw owns the whole path chain and an untrusted ancestor must be treated as compromise."
+      "security_note": "Inverted flag: setting it only hardens. The relaxation it disables is the AIFW-34262 default \u2014 an untrusted grant on a shared platform-owned parent no longer fails a managed install, which previously aborted after quiesce had disabled every service and left the endpoint unprotected. Set this on hosts where DefenseClaw owns the whole path chain and an untrusted ancestor must be treated as compromise."
     },
     {
       "name": "DEFENSECLAW_MASTER_KEY",
@@ -3427,7 +3428,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
+      "security_note": "Executable selection \u2014 a non-default value changes which local program the compatibility bridge launches."
     },
     {
       "name": "DEFENSECLAW_OPENCLAW_MAIN",
@@ -3803,7 +3804,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
+      "security_note": "Installer-only override \u2014 treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
       "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
@@ -4470,7 +4471,7 @@
         }
       ],
       "since": "0.8.5",
-      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
+      "security_note": "Uninstaller-only executable override \u2014 uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
     },
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
@@ -5932,7 +5933,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
+      "security_note": "Tight binary-discovery trust list \u2014 prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
     },
     {
       "name": "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
@@ -5953,7 +5954,7 @@
         }
       ],
       "since": "0.7.0",
-      "security_note": "Client-IP attribution — trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
+      "security_note": "Client-IP attribution \u2014 trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
     },
     {
       "name": "DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT",
@@ -6004,7 +6005,7 @@
         }
       ],
       "since": "0.5.0",
-      "security_note": "Codex response guardrail enforcement — prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
+      "security_note": "Codex response guardrail enforcement \u2014 prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
       "replacement_hint": "Leave unset for normal guarded operation; use only while diagnosing proxy incompatibility."
     },
     {
@@ -6030,7 +6031,7 @@
         }
       ],
       "since": "0.8.6",
-      "security_note": "Unix managed-runtime writer identity — a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
+      "security_note": "Unix managed-runtime writer identity \u2014 a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
     },
     {
       "name": "DEFENSECLAW_UNSIGNED_PE",
@@ -6760,7 +6761,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation."
+      "security_note": "Authenticated service evidence \u2014 only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED",
@@ -6785,7 +6786,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective."
+      "security_note": "Authenticated service evidence \u2014 protected local policy bytes alone do not establish which Claude managed-policy source is effective."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED",
@@ -6806,7 +6807,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Compatibility-only service claim — it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
+      "security_note": "Compatibility-only service claim \u2014 it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER",
@@ -6827,7 +6828,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Privileged code-selection boundary — the resolved installer and adjacent module must pass the native trust checks before elevation."
+      "security_note": "Privileged code-selection boundary \u2014 the resolved installer and adjacent module must pass the native trust checks before elevation."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME",
@@ -6851,7 +6852,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Service-identity boundary — changing this value changes which virtual service SID is authorized to read managed runtime secrets."
+      "security_note": "Service-identity boundary \u2014 changing this value changes which virtual service SID is authorized to read managed runtime secrets."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
@@ -6920,7 +6921,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Managed-runtime writer identity — only the installer-pinned gateway service SID may receive the corresponding write grants."
+      "security_note": "Managed-runtime writer identity \u2014 only the installer-pinned gateway service SID may receive the corresponding write grants."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_LOG",
@@ -6945,7 +6946,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Service output path — the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
+      "security_note": "Service output path \u2014 the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_NAME",
@@ -6966,7 +6967,7 @@
         }
       ],
       "since": "0.8.0",
-      "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+      "security_note": "Installer-owned service switch \u2014 production values belong in the protected per-service registry Environment value, not an interactive user environment."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE",
@@ -7177,14 +7178,20 @@
     {
       "name": "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH",
       "category": "runtime_path",
-      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call — internal variable, not intended for user configuration; the entry appears in the generated env-vars catalog for completeness only.",
+      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call \u2014 internal variable, not intended for user configuration; the entry appears in the generated env-vars catalog for completeness only.",
       "default": "unset (set only by DefenseClawAssembler.exe)",
-      "accepted_values": ["<absolute path to Authenticode-signed payload file>", "unset"],
+      "accepted_values": [
+        "<absolute path to Authenticode-signed payload file>",
+        "unset"
+      ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
-        {"location": "cmd/windows-avc-assembler/signature.go", "description": "readSignerSubjectCN sets this in cmd.Env before invoking powershell.exe, and the script reads $env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH to feed Get-AuthenticodeSignature -FilePath"}
+        {
+          "location": "cmd/windows-avc-assembler/signature.go",
+          "description": "readSignerSubjectCN sets this in cmd.Env before invoking powershell.exe, and the script reads $env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH to feed Get-AuthenticodeSignature -FilePath"
+        }
       ],
       "since": "0.8.6"
     },
@@ -7235,6 +7242,637 @@
       ],
       "since": "1.0.1",
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
+    },
+    {
+      "name": "DCLAW_FLEET_API_TOKEN",
+      "category": "fleet",
+      "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/api.go",
+          "description": "Fleet API authentication reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_TENANT_TOKENS",
+      "category": "fleet",
+      "purpose": "Comma-separated tenant-scoped tokens (token:tid,... format).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/api.go",
+          "description": "Fleet API authentication reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_BROKER_URL",
+      "category": "fleet",
+      "purpose": "MQTT broker address for fleet bridge (host:port).",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Fleet MQTT broker URL"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_USER",
+      "category": "fleet",
+      "purpose": "MQTT broker username.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "MQTT broker credentials"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_MQTT_PASS",
+      "category": "fleet",
+      "purpose": "MQTT broker password.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "MQTT broker credentials"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_EMERGENCY_KEY",
+      "category": "fleet",
+      "purpose": "Separate nonzero 32-byte hex HMAC key required for emergency commands and lockdown release; no OTA-key fallback.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/policy/signer.go",
+          "description": "Sign emergency commands with separate HMAC secret"
+        },
+        {
+          "location": "edge-connector/src/comms/ota_receiver.c",
+          "description": "Verify emergency commands"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_KEY",
+      "category": "fleet",
+      "purpose": "Fleet-wide device HMAC key (hex-encoded, 32 bytes). Per-device keys override.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Device HMAC signing key"
+        },
+        {
+          "location": "edge-connector/src/comms/verdict_protocol.c",
+          "description": "Device verdict HMAC key"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_AUTO_REGISTER",
+      "category": "fleet",
+      "purpose": "Allow devices to self-register via MQTT heartbeat.",
+      "default": "",
+      "accepted_values": [
+        "string"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Auto-register unknown devices"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_PRODUCTION",
+      "category": "fleet",
+      "purpose": "Force production Fleet MQTT security checks when set to 1 or true; production checks are already the default.",
+      "default": "",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Production key requirements"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEV_MODE",
+      "category": "fleet",
+      "purpose": "On unmanaged hosts only, ON explicitly enables legacy development Fleet MQTT behavior; unset defaults to production checks. C has a separate compile-time option of the same name.",
+      "default": "",
+      "accepted_values": [
+        "ON",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Development mode for bridge"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_AUDIT_KEY",
+      "category": "fleet",
+      "purpose": "Nonzero 32-byte hex HMAC key for signed local audit records.",
+      "default": "",
+      "accepted_values": [
+        "64-hex-chars"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/persist/audit_ring.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_BROKER_URL",
+      "category": "fleet",
+      "purpose": "Device MQTT broker URL; use mqtts:// and a trusted CA in production.",
+      "default": "",
+      "accepted_values": [
+        "mqtt://host:port, mqtts://host:port"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/persist/config_store.c",
+          "description": "Device MQTT broker URL"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_CA_CERT_PATH",
+      "category": "fleet",
+      "purpose": "Path to a PEM CA certificate used to verify the MQTT broker in production.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "MQTT broker certificate verification"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_CRL_PATH",
+      "category": "fleet",
+      "purpose": "Optional certificate revocation list for edge MQTT TLS peer validation; an explicit unreadable or invalid CRL aborts TLS initialization.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_CERT_PATH",
+      "category": "fleet",
+      "purpose": "Path to the edge device client TLS certificate.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_ID",
+      "category": "fleet",
+      "purpose": "Numeric edge device identifier assigned by Fleet registration.",
+      "default": "",
+      "accepted_values": [
+        "uint64"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_KEY_PATH",
+      "category": "fleet",
+      "purpose": "Path to the edge device client TLS private key.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLASH_PATH",
+      "category": "fleet",
+      "purpose": "Override path to edge device emulated flash storage.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_API_URL",
+      "category": "fleet",
+      "purpose": "Fleet API URL used by the remote device installer.",
+      "default": "",
+      "accepted_values": [
+        "URL"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_edge_install.py",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_ID",
+      "category": "fleet",
+      "purpose": "Numeric Fleet identifier assigned to the edge device.",
+      "default": "",
+      "accepted_values": [
+        "uint32"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_ALLOWED_GID",
+      "category": "fleet",
+      "purpose": "Allowed local group ID for the edge IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "integer"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        },
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_ALLOWED_UID",
+      "category": "fleet",
+      "purpose": "Allowed local user ID for the edge IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "integer"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        },
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_SOCKET_PATH",
+      "category": "fleet",
+      "purpose": "Path of the edge connector Unix IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_OTA_HMAC_KEY",
+      "category": "fleet",
+      "purpose": "Explicit nonzero 32-byte hex shared secret for OTA policy HMAC; C production also requires DCLAW_ALLOW_HMAC_OTA=ON at build time.",
+      "default": "",
+      "accepted_values": [
+        "64-hex-chars"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/policy/signer.go",
+          "description": "Sign OTA policies with the explicit secret"
+        },
+        {
+          "location": "edge-connector/src/comms/ota_receiver.c",
+          "description": "Verify HMAC OTA policies"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_REQUIRE_TLS",
+      "category": "fleet",
+      "purpose": "Require TLS for the Go Fleet MQTT client.",
+      "default": "",
+      "accepted_values": [
+        "1, unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "Go Fleet MQTT TLS requirement"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_STRICT_MODE",
+      "category": "fleet",
+      "purpose": "Require strict edge connector behavior on policy and verdict failures.",
+      "default": "",
+      "accepted_values": [
+        "0, 1"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/dclaw_core.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TENANT_ID",
+      "category": "fleet",
+      "purpose": "Numeric Fleet tenant identifier assigned to the edge device.",
+      "default": "",
+      "accepted_values": [
+        "uint16"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CA_CERT",
+      "category": "fleet",
+      "purpose": "CA certificate path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CLIENT_CERT",
+      "category": "fleet",
+      "purpose": "Client certificate path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CLIENT_KEY",
+      "category": "fleet",
+      "purpose": "Client private-key path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_INSECURE",
+      "category": "fleet",
+      "purpose": "Development-only switch to allow TLS without a trusted CA; rejected by production C builds.",
+      "default": "",
+      "accepted_values": [
+        "1, unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Development TLS certificate verification override"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_SKIP_VERIFY",
+      "category": "fleet",
+      "purpose": "Skip Go Fleet MQTT broker certificate verification only in explicit unmanaged development mode; production and managed hosts enforce verification.",
+      "default": "",
+      "accepted_values": [
+        "1, unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Active MQTT TLS certificate verification override"
+        }
+      ],
+      "since": "1.1.0"
     }
   ]
 }

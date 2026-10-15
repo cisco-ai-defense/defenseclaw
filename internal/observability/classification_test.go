@@ -44,14 +44,34 @@ func TestAuditActionClassificationsMatchSourceConstantsAndRegistry(t *testing.T)
 	}
 	sort.Strings(registry)
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerAuditAction))
-	if len(sourceConstants) != 220 {
-		t.Fatalf("audit Action source constants = %d, want 220", len(sourceConstants))
+	if len(sourceConstants) != 234 {
+		t.Fatalf("audit Action source constants = %d, want 234", len(sourceConstants))
 	}
 	if !reflect.DeepEqual(registry, sourceConstants) {
 		t.Fatalf("audit.AllActions registry differs from typed source constants\nregistry: %v\nsource: %v", registry, sourceConstants)
 	}
 	if !reflect.DeepEqual(got, sourceConstants) {
 		t.Fatalf("audit classifications differ from typed source constants\nclassifications: %v\nsource: %v", got, sourceConstants)
+	}
+}
+
+func TestFleetCredentialPreCommitActionsHaveDistinctComplianceIdentities(t *testing.T) {
+	for _, action := range []audit.Action{
+		audit.ActionFleetDeviceCredentialProvisionAuthorized,
+		audit.ActionFleetDeviceDecommissionAuthorized,
+	} {
+		classification, ok := observability.AuditActionClassification(observability.ProducerKey(action))
+		if !ok {
+			t.Fatalf("missing classification for %s", action)
+		}
+		resolved, err := classification.Resolve(observability.ClassificationContext{RawSeverity: "INFO"})
+		if err != nil {
+			t.Fatalf("resolve %s: %v", action, err)
+		}
+		if resolved.Identity.Bucket != observability.BucketComplianceActivity ||
+			resolved.Identity.Name != observability.EventName(action) {
+			t.Fatalf("%s misclassified as %+v", action, resolved.Identity)
+		}
 	}
 }
 

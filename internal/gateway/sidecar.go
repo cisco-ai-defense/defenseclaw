@@ -45,6 +45,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/fleet"
+	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	fleetmqtt "github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
+	fleetpolicy "github.com/defenseclaw/defenseclaw/internal/fleet/policy"
+	fleetverdict "github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -61,6 +66,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -263,6 +269,12 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
 		return nil, fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
+	}
+	// Fleet credential provisioning and decommission authorization require a
+	// durable audit emitter. Reject a partially functional Fleet API before
+	// opening its stores or starting the MQTT subscriber.
+	if cfg.Fleet.Enabled && (store == nil || logger == nil) {
+		return nil, fmt.Errorf("sidecar: fleet.enabled requires a durable audit store and emitter")
 	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
@@ -7906,6 +7918,201 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
+	// Wire the Edge Connector fleet management API only when explicitly enabled.
+	fleetEnabled := s.currentConfig().Fleet.Enabled
+	if fleetEnabled {
+		fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
+			// Stderr line for immediate local visibility (unchanged).
+			fmt.Fprintf(os.Stderr, "[fleet-alert] type=%s device=%d severity=%s: %s\n",
+				alert.Type, alert.DeviceID, alert.Severity, alert.Message)
+
+			// Route through the gateway's audit pipeline so fleet alerts
+			// reach SQLite, Splunk, OTLP, JSONL, and webhooks automatically.
+			if s.logger != nil {
+				severity := strings.ToUpper(alert.Severity)
+				if severity == "" {
+					severity = "WARN"
+				}
+				_ = s.logger.LogAlert("fleet", severity,
+					fmt.Sprintf("fleet.%s device=%d: %s", alert.Type, alert.DeviceID, alert.Message),
+					map[string]any{
+						"alert_type": string(alert.Type),
+						"device_id":  alert.DeviceID,
+						"severity":   alert.Severity,
+					})
+			}
+
+			// Dispatch to webhook endpoints so external integrations
+			// (PagerDuty, Slack, SIEM) receive fleet events in real time.
+			if webhooks := s.webhooksSnapshot(); webhooks != nil {
+				webhooks.Dispatch(audit.Event{
+					Timestamp: alert.Timestamp,
+					Action:    string(audit.ActionFleetAlert),
+					Target:    fmt.Sprintf("%d", alert.DeviceID),
+					Actor:     "fleet-manager",
+					Details:   fmt.Sprintf("type=%s severity=%s: %s", alert.Type, alert.Severity, alert.Message),
+					Severity:  strings.ToUpper(alert.Severity),
+				})
+			}
+		})
+		// Persist Fleet state to SQLite. Device keys, decommission tombstones,
+		// and boot replay baselines are security state: Fleet cannot start if
+		// they cannot be loaded durably.
+		fleetDataDir := filepath.Join(s.currentConfig().DataDir, "fleet")
+		var fleetDirErr error
+		if runtime.GOOS == "windows" {
+			// Create with a private DACL before SQLite can create device-key
+			// WAL/SHM files, even under an elevated token whose inherited ACL
+			// would otherwise grant Users read access.
+			fleetDirErr = safefile.ProtectDirectory(fleetDataDir)
+		} else {
+			fleetDirErr = os.MkdirAll(fleetDataDir, 0o700)
+		}
+		if fleetDirErr != nil {
+			return fmt.Errorf("fleet data dir: %w", fleetDirErr)
+		}
+		deviceStore, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db"))
+		if err != nil {
+			return fmt.Errorf("fleet SQLite device store: %w", err)
+		}
+		defer deviceStore.Close()
+		fleetMgr.SetStore(deviceStore)
+		if n, err := fleetMgr.LoadFromStore(); err != nil {
+			return fmt.Errorf("fleet load from device store: %w", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
+			// Initialize Prometheus metrics from restored device state so
+			// gauges reflect reality immediately after a gateway restart
+			// instead of showing 0 until the next heartbeat cycle.
+			devices := fleetMgr.ListDevices()
+			for _, d := range devices {
+				switch d.Status {
+				case fleetmanager.StatusOnline:
+					fleet.GlobalMetrics.DevicesOnline.Add(1)
+				case fleetmanager.StatusOffline:
+					fleet.GlobalMetrics.DevicesOffline.Add(1)
+				case fleetmanager.StatusDegraded:
+					fleet.GlobalMetrics.DevicesDegraded.Add(1)
+				case fleetmanager.StatusLockdown:
+					fleet.GlobalMetrics.DevicesLockdown.Add(1)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet metrics initialized from %d restored devices\n", len(devices))
+		}
+		fleetCache := fleetverdict.NewCache(s.currentConfig().Fleet.EffectiveVerdictCacheSize(), func(tenantID, fleetID uint16, h [32]byte) (fleetverdict.Action, uint8) {
+			// Default-deny: unknown tool hashes must not be auto-allowed
+			// when no cloud inspection pipeline is configured.
+			return fleetverdict.ActionBlock, 3 // severity=3 (high)
+		})
+		fleet.WireMetrics(fleetMgr, fleetCache, nil)
+
+		// Wire the policy service so policy endpoints (push, emergency, versions)
+		// are functional instead of returning 501.
+		otaKeyHex, keyErr := s.currentConfig().Fleet.ResolvedOTAHMACKey()
+		var policySigner fleetpolicy.Signer
+		var signerErr error
+		if keyErr != nil {
+			signerErr = keyErr
+		} else {
+			resolvedSigner, err := fleetpolicy.NewHMACSignerFromKeyHex(otaKeyHex)
+			signerErr = err
+			if err == nil {
+				policySigner = resolvedSigner
+			}
+		}
+		if signerErr != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] WARNING: policy signer unavailable: %v — policy push/emergency will fail\n", signerErr)
+		}
+		sqlPS, err := fleetpolicy.NewSQLitePolicyStore(filepath.Join(fleetDataDir, "policies.db"))
+		if err != nil {
+			return fmt.Errorf("fleet SQLite policy store: %w", err)
+		}
+		defer sqlPS.Close()
+		var policyStore fleetpolicy.PolicyStore = sqlPS
+		var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
+		var fleetBridge *fleetmqtt.Bridge    // nil until a real broker is configured
+
+		// Start the MQTT bridge if a broker URL is configured. The bridge
+		// subscribes to heartbeat and verdict-request topics from edge devices
+		// and routes them to the fleet manager / verdict cache.
+		if brokerURL := s.currentConfig().Fleet.EffectiveMQTTBrokerURL(); brokerURL != "" {
+			clientID, err := newFleetMQTTClientID()
+			if err != nil {
+				return fmt.Errorf("generate Fleet MQTT client ID: %w", err)
+			}
+			tcpClient := fleetmqtt.NewPahoClient(brokerURL, clientID, s.currentConfig().Fleet.MQTTRequireTLS)
+			tcpClient.SetCredentials(
+				s.currentConfig().Fleet.ResolvedMQTTUser(),
+				s.currentConfig().Fleet.ResolvedMQTTPass(),
+			)
+
+			fleetMQTTClient = tcpClient
+			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			fleetBridge = bridge
+			// Wire block metric so BLOCK verdicts increment the Prometheus counter
+			bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
+			bridge.SetOnAllow(func() { fleet.GlobalMetrics.AllowsTotal.Add(1) })
+			// Wire per-device key resolution from the SQLite store so the
+			// bridge verifies/computes verdict HMACs with the correct key
+			// instead of falling back to the fleet-wide shared key.
+			if deviceStore != nil {
+				bridge.SetDeviceKeyStore(deviceStore)
+				if ids, err := deviceStore.LoadDecommissioned(); err != nil {
+					return fmt.Errorf("fleet load decommission tombstones: %w", err)
+				} else if len(ids) > 0 {
+					for _, id := range ids {
+						bridge.MarkDecommissioned(id)
+					}
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet restored %d decommission tombstones\n", len(ids))
+				}
+			}
+			fleetCfg := s.currentConfig().Fleet
+			if fleetCfg.AutoRegister || strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
+				bridge.AllowAutoRegistration = true
+				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration requested; bridge permits it only in explicit unmanaged development mode")
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
+		}
+
+		policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, &fleetpolicy.Config{
+			CompilerPath:    s.currentConfig().Fleet.PolicyCompilerPath,
+			EmergencyKeyHex: s.currentConfig().Fleet.ResolvedEmergencyKey(),
+		})
+		if fleetBridge != nil {
+			// Configure catch-up before subscriptions can receive a registration:
+			// clean MQTT sessions lose OTA messages while a device is offline.
+			fleetBridge.SetReplayForDevice(policySvc.ReplayLatestForDevice)
+			go func() {
+				if err := fleetBridge.Start(ctx); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+				}
+			}()
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", s.currentConfig().Fleet.EffectiveMQTTBrokerURL())
+		}
+
+		fleetSettings := fleet.FleetSettings{
+			APIToken:          s.currentConfig().Fleet.ResolvedAPIToken(),
+			TenantTokens:      s.currentConfig().Fleet.ResolvedTenantTokens(),
+			AllowKeyOverHTTP:  s.currentConfig().Fleet.AllowKeyOverHTTP,
+			TrustProxyHeaders: s.currentConfig().Fleet.TrustProxyHeaders,
+		}
+		fleetOpts := []fleet.APIOption{
+			fleet.WithPolicyService(policySvc),
+			fleet.WithFleetSettings(fleetSettings),
+		}
+		if fleetBridge != nil {
+			fleetOpts = append(fleetOpts, fleet.WithMQTTBridge(fleetBridge))
+		}
+		if s.logger != nil {
+			fleetOpts = append(fleetOpts, fleet.WithAuditEmitter(s.logger))
+		}
+		if deviceStore != nil {
+			fleetOpts = append(fleetOpts, fleet.WithDeviceKeyStore(deviceStore))
+			fleetOpts = append(fleetOpts, fleet.WithDecommissionStore(deviceStore))
+		}
+		api.SetFleetAPI(fleet.NewAPI(ctx, fleetMgr, fleetCache, fleetOpts...))
+	} // end fleetEnabled
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token
@@ -7930,6 +8137,17 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		return rt.run(ctx, api.Run)
 	}
 	return api.Run(ctx)
+}
+
+// MQTT 3.1.1 guarantees support for 23-character client IDs. Random bytes
+// keep separate gateway containers (often both PID 1) from evicting each
+// other at the broker; clean sessions do not require a persistent identity.
+func newFleetMQTTClientID() (string, error) {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("dclaw-%x", id[:8]), nil
 }
 
 // subscribeToSessions subscribes the connection to the session events of the

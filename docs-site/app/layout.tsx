@@ -1,22 +1,22 @@
 import './global.css';
 import type { Metadata, Viewport } from 'next';
-import { JetBrains_Mono, Inter } from 'next/font/google';
+import localFont from 'next/font/local';
 import { canonicalUrl, siteUrl, defaultKeywords, site } from '@/lib/site';
 import { OrganizationSchema, WebSiteSchema, SoftwareSourceCodeSchema } from '@/components/structured-data';
 import ClientRootProvider from '@/components/root-provider';
 
-// Self-hosted via next/font so we never hit a runtime CDN — both for
-// privacy (no third-party calls from end-user browsers) and to keep
-// CWV stable. The `display: 'swap'` keeps text rendering before the
-// custom face is ready, avoiding a FOIT cliff on the landing page.
-const inter = Inter({
-  subsets: ['latin'],
+// Pin local WOFF2 assets so static builds and browsers never depend on
+// Google Fonts. `swap` renders text while each font loads.
+const inter = localFont({
+  src: '../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2',
+  weight: '100 900',
   display: 'swap',
   variable: '--font-sans',
 });
 
-const mono = JetBrains_Mono({
-  subsets: ['latin'],
+const mono = localFont({
+  src: '../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2',
+  weight: '100 800',
   display: 'swap',
   variable: '--font-mono',
 });

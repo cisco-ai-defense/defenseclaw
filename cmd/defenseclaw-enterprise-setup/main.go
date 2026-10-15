@@ -66,7 +66,7 @@ const (
 const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
 
 // enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
-var enterpriseSetupPayloadLoader = loadEmbeddedEnterprisePayload
+var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
 
 // enterpriseSetupInvalidArguments marks a command-line error without changing
 // its text. The standalone Setup reports it as 1639 so an MDM does not retry
@@ -92,8 +92,8 @@ var requiredPayloadFiles = []string{
 
 // standalonePayloadFiles is the standalone flavor's inventory: the Secure
 // Client set without the CMID credential broker, plus the scanner runtime
-// (skill, MCP and plugin scanners) the standalone lifecycle installs into
-// its own root.
+// (skill, MCP and plugin scanners) and Fleet policy compiler the standalone
+// lifecycle installs into its own root.
 var standalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
 	"defenseclaw-acp.exe",
@@ -103,6 +103,7 @@ var standalonePayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
+	"policy_compiler.py",
 }
 
 func isStandaloneFlavor(flavor string) bool {

@@ -20,6 +20,39 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+func TestProcessExistsRejectsUnreapedZombie(t *testing.T) {
+	if !processExists(os.Getpid()) {
+		t.Fatal("live test process was classified as stopped")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Wait() })
+	statPath := filepath.Join("/proc", strconv.Itoa(cmd.Process.Pid), "stat")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		stat, err := os.ReadFile(statPath)
+		if err != nil {
+			t.Fatalf("read child status: %v", err)
+		}
+		endComm := strings.LastIndexByte(string(stat), ')')
+		if endComm >= 0 && endComm+2 < len(stat) && stat[endComm+2] == 'Z' {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child did not reach unreaped zombie state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processExists(cmd.Process.Pid) {
+		t.Fatal("unreaped zombie was classified as running")
+	}
+	if !waitForProcessExit(cmd.Process, cmd.Process.Pid, 100*time.Millisecond) {
+		t.Fatal("stop wait timed out on an unreaped zombie")
+	}
+}
+
 func TestDeletedExecutableStopsOnlyThroughAuthenticatedShutdown(t *testing.T) {
 	t.Setenv(EnvDaemon, "")
 	source, err := os.Executable()

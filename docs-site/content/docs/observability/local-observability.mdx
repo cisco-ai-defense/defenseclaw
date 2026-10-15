@@ -199,7 +199,7 @@ this gateway sends.
 
 ## Bundled Grafana dashboards
 
-The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
+The bundle ships 19 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
 
 <Files>
   <Folder name="grafana/dashboards" defaultOpen>
@@ -221,6 +221,7 @@ The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/das
     <File name="defenseclaw-ai-runtime.json" />
     <File name="defenseclaw-identity.json" />
     <File name="defenseclaw-sandboxes.json" />
+    <File name="defenseclaw-fleet.json" />
   </Folder>
 </Files>
 
@@ -243,6 +244,7 @@ The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/das
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
 | **Sandboxes** (`defenseclaw-sandboxes`) | OpenShell sandboxes: active count, phase changes, egress by source and outcome, top blocked and allowed hosts, bytes per destination, shadow-AI findings, integration health. `$sandbox` reads Loki structured metadata added by the Collector. |
 | **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. On Linux with Tetragon: the kernel-controls fleet table, the burn-in table, and the events of your own Tetragon policies. |
+| **IoT Fleet** (`defenseclaw-fleet`) | Registered edge devices, heartbeat and verdict rates, Fleet alerts, cache health, and rollbacks. Requires the [optional authenticated Fleet scrape](/docs/edge-connector/install#grafana-dashboard). |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
 for the owner and purpose of every board, the drill-down map, backend usage,

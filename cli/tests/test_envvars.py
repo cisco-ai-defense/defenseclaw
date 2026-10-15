@@ -120,7 +120,10 @@ class RegistryStructureTests(unittest.TestCase):
                 mock.patch.object(envvars_module, "__file__", str(module)),
                 mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}),
             ):
-                self.assertEqual(envvars_module._registry_path(), bundled)
+                self.assertEqual(
+                    envvars_module._registry_path().resolve(),
+                    bundled.resolve(),
+                )
 
     def test_new_windows_envvar_contract_is_pinned(self) -> None:
         expected_registry = {
@@ -266,8 +269,8 @@ class RegistryStructureTests(unittest.TestCase):
             if e.name == "MIGRATION_DEFENSECLAW_HOME":
                 continue
             self.assertTrue(
-                e.name.startswith("DEFENSECLAW_"),
-                f"{e.name} must start with DEFENSECLAW_",
+                e.name.startswith("DEFENSECLAW_") or e.name.startswith("DCLAW_"),
+                f"{e.name} must start with DEFENSECLAW_ or DCLAW_",
             )
 
     def test_high_impact_security_optouts_surface_in_doctor(self) -> None:
