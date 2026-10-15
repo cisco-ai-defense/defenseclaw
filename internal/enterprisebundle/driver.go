@@ -147,7 +147,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	res, err := Verify(ctx, VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: d.Platform, Now: d.now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: d.ProductVersion, HostPlatform: d.Platform, DeviceLayout: d.DeviceLayout, SecretPresent: d.SecretPresent,
+		ProductVersion: d.ProductVersion, DeviceLayout: d.DeviceLayout, SecretPresent: d.SecretPresent,
 		Stage:    func(*Bundle) (string, error) { return staging, nil },
 		Digester: d.Digester,
 	})

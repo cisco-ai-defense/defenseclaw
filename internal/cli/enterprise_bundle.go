@@ -116,8 +116,16 @@ directory: /var/lib/defenseclaw on Linux, /opt/cisco/defenseclaw/runtime on
 macOS, or the registered ProgramData\Cisco\DefenseClaw\runtime on Windows.
 /var/lib/defenseclaw-enterprise holds lifecycle receipts, not gateway data.
 An explicit Windows data_dir is signable only when it equals the standard
-C:\ProgramData\Cisco\DefenseClaw\runtime path. A different ProgramData root
-cannot be predicted offline and its device reports digest_unverifiable.
+C:\ProgramData\Cisco\DefenseClaw\runtime path. A device under another
+ProgramData root also computes the digest for the standard layout and refuses
+a signed digest that differs from it (digest_mismatch); it reports
+digest_layout_unverifiable only when the signed digest equals that
+standard-layout digest but its own root changes its digest.
+
+Each device recomputes the digest for its platform. When the signer ran the
+device's product version, on any OS, a different digest refuses the bundle
+(digest_mismatch); a signer of another product version leaves the digest
+digest_unverifiable. Sign with the release the devices run.
 
 For an HSM or KMS key, run sign with --emit-digest to write the unsigned
 bundle and print the SHA-256 to sign (ecdsa-p256-sha256; an ed25519 key
@@ -517,7 +525,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	in := enterprisebundle.VerifyInput{
 		Bundle: b, Anchors: anchors, Platform: opts.platform, Now: bundleNow().UTC(),
-		ProductVersion: appVersion, HostPlatform: runtime.GOOS, Digester: bundleDigester,
+		ProductVersion: appVersion, Digester: bundleDigester,
 	}
 	if device {
 		layout, err := enterprisebundle.Layout(opts.platform)

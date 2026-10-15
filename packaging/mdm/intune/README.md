@@ -46,8 +46,10 @@ the base app is installed, build one Win32 app per signed bundle version:
 ```
 
 Verify the bundle offline with `defenseclaw-gateway enterprise bundle verify
---anchors .\bundle-anchors.json --platform windows` before packaging. The
-packager pins the copied bundle and anchors and writes `detect-bundle.ps1`
+--anchors .\bundle-anchors.json --platform windows` before packaging, with the
+release the devices run: a device on the signer's product version refuses a
+bundle whose signed Windows digest it computes differently (`digest_mismatch`)
+on any signing OS. The packager pins the copied bundle and anchors and writes `detect-bundle.ps1`
 beside `content`; upload that file as the bundle app's custom detection script.
 It reads the bundle's manifest-pinned config and refuses a base config with a
 different guardrail policy; only the installed pack path may differ. Use the

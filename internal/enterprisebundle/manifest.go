@@ -91,13 +91,15 @@ func (r SecretRef) Name() string { return strings.TrimPrefix(r.Ref, SecretRefSch
 // the built-in packs of that version).
 type EffectivePolicy struct {
 	ProductVersion string `json:"product_version"`
-	// ComputedOn is the platform bundle sign ran on. A device compares its
-	// own digest only on that platform and product version (otherwise it
-	// reports digest_unverifiable and its own digest).
+	// ComputedOn is the platform bundle sign ran on, for diagnostics. A
+	// device compares its own digest whenever ProductVersion is its own,
+	// on any signing platform; a difference is digest_mismatch. Another
+	// product version reports digest_unverifiable and the device's digest.
 	ComputedOn string            `json:"computed_on"`
 	Digests    map[string]string `json:"digests"`
-	// Components are signed diagnostic sub-digests, sorted by name. Older
-	// bundles may omit them; they do not change the effective digest.
+	// Components are signed diagnostic sub-digests, sorted by name, that
+	// a digest_mismatch refusal names. They are omitted when the digester
+	// reports none; they do not change the effective digest.
 	Components map[string][]DigestComponent `json:"components,omitempty"`
 }
 

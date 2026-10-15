@@ -13,10 +13,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1000,6 +1002,116 @@ func TestWindowsBundleApplyRejectsDifferentEnforcingDigest(t *testing.T) {
 		t.Fatalf("Windows confirmed a different digest: errors=%+v bundle=%+v", result.Errors, result.Bundle)
 	}
 	assertWindowsBundleLockRemoved(t, layout)
+}
+
+// GAP-0113: Setup /ensure BUNDLE= refuses a validly signed bundle whose
+// signed Windows digest this device disproves, also when the manifest says a
+// Linux host computed it: digest_mismatch, a failure exit and the installed
+// anchors unchanged. The same bundle with its true digest, signed on Linux,
+// is compared and verified, with no digest_unverifiable.
+func TestWindowsEnsureRefusesCrossHostDigestMismatch(t *testing.T) {
+	for _, tampered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tampered=%t", tampered), func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			resignBundleManifest(t, e, signed, func(m *enterprisebundle.Manifest) {
+				m.EffectivePolicy.ComputedOn = enterprisebundle.PlatformLinux
+				if tampered {
+					// make-p4-digest-mismatch.py: change the first hex digit.
+					d := m.EffectivePolicy.Digests[enterprisebundle.PlatformWindows]
+					flip := "0"
+					if d[7] == '0' {
+						flip = "1"
+					}
+					m.EffectivePolicy.Digests[enterprisebundle.PlatformWindows] = d[:7] + flip + d[8:]
+				}
+			})
+			layout := stubWindowsBundleHost(t)
+			installed := newWindowsBundleDriver(layout).AnchorsPath
+			if err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(installed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := filepath.Join(e.dir, "candidate-anchors.json")
+			writeBundleTestFile(t, candidate, bytes.Replace(before, []byte(`"min_version":0`), []byte(`"min_version":1`), 1))
+			cmd, out := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: candidate,
+				profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+			done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+			if !tampered {
+				if done || err != nil {
+					t.Fatalf("consistent cross-host bundle: done=%v err=%v output=%s", done, err, out.String())
+				}
+				cleanupPreparedWindowsBundle(t, opts)
+				rc := opts.bundle.prepared.Receipt
+				if !rc.DigestComparable || rc.ExpectedDigest != opts.bundle.prepared.Manifest.EffectivePolicy.Digests[enterprisebundle.PlatformWindows] ||
+					slices.Contains(rc.WarningCodes, enterprisebundle.WarnDigestUnverifiable) {
+					t.Fatalf("consistent cross-host bundle receipt = %+v", rc)
+				}
+				return
+			}
+			var refusal struct {
+				ExitCode    int `json:"exit_code"`
+				LastRefusal struct {
+					ErrorCode string `json:"error_code"`
+				} `json:"last_refusal"`
+			}
+			if decodeErr := json.Unmarshal(out.Bytes(), &refusal); decodeErr != nil {
+				t.Fatalf("decode refusal: %v: %s", decodeErr, out.String())
+			}
+			if !done || commandExitCode(err) != enterprisestatus.WindowsExitFailure || refusal.ExitCode != enterprisestatus.WindowsExitFailure ||
+				refusal.LastRefusal.ErrorCode != string(enterprisebundle.CodeDigestMismatch) ||
+				!strings.Contains(out.String(), "the signer computed the digest on linux") {
+				t.Fatalf("disproved cross-host digest: done=%v err=%v output=%s", done, err, out.String())
+			}
+			after, err := os.ReadFile(installed)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("the refusal changed the installed anchors: read=%v", err)
+			}
+			assertWindowsBundleLockRemoved(t, layout)
+		})
+	}
+}
+
+// resignBundleManifest edits the manifest of the signed bundle at path and
+// re-signs it with the trusted test key, as a holder of that key would.
+func resignBundleManifest(t *testing.T, e *bundleCLIEnv, path string, edit func(*enterprisebundle.Manifest)) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := enterprisebundle.ReadArchive(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := enterprisebundle.DecodeManifest(b.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit(m)
+	if b.Manifest, err = m.Marshal(); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := enterprisebundle.Sign(b.Manifest, e.edKey, "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Signature, err = sig.Marshal(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := enterprisebundle.WriteArchive(&out, b); err != nil {
+		t.Fatal(err)
+	}
+	writeBundleTestFile(t, path, out.Bytes())
 }
 
 func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
