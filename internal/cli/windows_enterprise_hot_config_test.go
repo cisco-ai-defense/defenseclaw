@@ -788,7 +788,8 @@ func TestWindowsConfirmedBundleCompilerMismatchRequiresSetup(t *testing.T) {
 						!strings.Contains(strings.Join(stub.calls[2], " "), `-PolicyCompiler C:\stage\policy_compiler.py`) {
 						t.Fatalf("Setup did not upgrade with compiler: err=%v, calls=%q, result=%+v", err, stub.calls, result)
 					}
-				} else if err == nil || len(stub.calls) != 2 || !windowsBundleHasCode(result.Errors, "fleet_setup_required") {
+				} else if err == nil || len(stub.calls) != 2 || !result.Installed ||
+					!windowsBundleHasCode(result.Errors, "fleet_setup_required") {
 					t.Fatalf("installed CLI did not refuse before mutation: err=%v, calls=%q, result=%+v", err, stub.calls, result)
 				}
 			})

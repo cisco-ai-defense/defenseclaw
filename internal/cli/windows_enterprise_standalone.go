@@ -2566,10 +2566,16 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		if verified {
 			compilerDrift, err = windowsEnterpriseConfirmedBundleCompilerDrift(run)
 			if err != nil {
+				accepted := *verifyReport
+				accepted.OK = true
+				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 				result.AddError("bundle_state_invalid", "cannot verify Fleet compiler state for the confirmed bundle: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			if compilerDrift && strings.TrimSpace(opts.policyCompiler) == "" {
+				accepted := *verifyReport
+				accepted.OK = true
+				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 				result.AddError("fleet_setup_required", "Fleet compiler state differs from the confirmed bundle; use signed standalone Setup to install or remove the compiler")
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
