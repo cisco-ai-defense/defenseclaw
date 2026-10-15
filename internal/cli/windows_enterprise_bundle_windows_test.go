@@ -71,6 +71,27 @@ func TestWindowsBundleHotWriteAttributesAppliedAudit(t *testing.T) {
 
 const windowsBundleTestDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
+func TestWindowsFirstBundleFailureIsRetryableAndNamesBasePolicy(t *testing.T) {
+	result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+	result.AddError("bundle_apply_failed", "the hot apply did not complete")
+	result.Bundle = &enterprisestatus.BundleState{}
+	result.SetBundleSessions(enterprisestatus.SessionRestartStatus{State: "unknown", Reason: "context deadline exceeded"})
+	receipt := &enterprisebundle.Receipt{}
+	recordWindowsBundleSessions(receipt, *result.Bundle.SessionsRestartRequired)
+	if len(receipt.WarningCodes) != 1 || receipt.WarningCodes[0] != "sessions_scan_unknown" {
+		t.Fatalf("unknown scan missing from receipt: %+v", receipt)
+	}
+	if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("retry exit = %d", got)
+	}
+	if got := windowsBundleNotApplied(&enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: "b-01JA0000000000000000000033", Version: 1}}, "apply_failed", false); !strings.Contains(got, "base policy") || strings.Contains(got, "last good") {
+		t.Fatalf("first apply refusal = %q", got)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != "bundle_apply_failed" {
+		t.Fatalf("unknown sessions scan changed apply errors: %+v", result.Errors)
+	}
+}
+
 func TestWindowsBundleDeadlineRecordsSkippedRollback(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()

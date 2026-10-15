@@ -139,8 +139,12 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		res.Bundle = res.LastReceipt.Status(st.Current)
 		switch last := res.LastReceipt; {
 		case last.State == enterprisebundle.StateFailed:
+			message := "the last bundle received failed (" + string(last.ErrorCode) + "); the device remains on its base policy"
+			if st.Current != nil {
+				message = "the last bundle received failed (" + string(last.ErrorCode) + "); the current bundle keeps enforcing"
+			}
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_failed",
-				Message: fmt.Sprintf("the last bundle received failed (%s); the current bundle keeps enforcing", last.ErrorCode)})
+				Message: message})
 		case !enterprisebundle.Finished(last.State):
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_pending",
 				Message: "the last bundle received is " + last.State + " and not confirmed yet; the next lifecycle run settles it"})

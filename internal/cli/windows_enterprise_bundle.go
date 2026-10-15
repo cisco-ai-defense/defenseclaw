@@ -679,7 +679,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		run.warnings = append(run.warnings, prepared.Warnings...)
 	}
 	if err != nil {
-		return refuse(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error()))
+		return refuse(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
 	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
 	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
@@ -730,12 +730,21 @@ func windowsBundleCode(err error, fallback enterprisebundle.Code) enterprisebund
 	return fallback
 }
 
-func windowsBundleNotApplied(p *enterprisebundle.Prepared, message string) string {
-	if p == nil || p.Receipt == nil || p.Receipt.BundleID == "" {
-		return "the policy bundle was not applied: " + message + "; the last good policy keeps enforcing"
+func windowsBundleHasCurrent(store *enterprisebundle.Store) bool {
+	state, err := store.LoadState()
+	return err == nil && state.Current != nil
+}
+
+func windowsBundleNotApplied(p *enterprisebundle.Prepared, message string, hasCurrent bool) string {
+	policy := "the device remains on its base policy"
+	if hasCurrent {
+		policy = "the last good policy keeps enforcing"
 	}
-	return fmt.Sprintf("policy bundle %s version %d was not applied: %s; the last good policy keeps enforcing",
-		p.Receipt.BundleID, p.Receipt.Version, message)
+	if p == nil || p.Receipt == nil || p.Receipt.BundleID == "" {
+		return "the policy bundle was not applied: " + message + "; " + policy
+	}
+	return fmt.Sprintf("policy bundle %s version %d was not applied: %s; %s",
+		p.Receipt.BundleID, p.Receipt.Version, message, policy)
 }
 
 // finishWindowsEnterpriseBundle settles the bundle of a run once its ensure
@@ -764,7 +773,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
 		sessions := platformBundleSessionStatus(run.ctx)
 		run.sessions = &sessions
-		p.Receipt.SessionsRestartRequired = sessions.Count
+		recordWindowsBundleSessions(p.Receipt, sessions)
 		installed := windowsBundleInstalledSHA(run.layout.ConfigPath)
 		var failure []string
 		for _, e := range result.Errors {
@@ -786,7 +795,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed))
 			if !windowsBundleHasCode(result.Errors, code) {
-				result.AddError(code, windowsBundleNotApplied(p, err.Error()))
+				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
 	}
@@ -795,6 +804,13 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		receipt = p.Receipt
 	}
 	attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
+}
+
+func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
+	receipt.SessionsRestartRequired = sessions.Count
+	if sessions.State == "unknown" {
+		receipt.WarningCodes = append(receipt.WarningCodes, "sessions_scan_unknown")
+	}
 }
 
 func windowsBundleRollbackDeadlineExpired(ctx context.Context, receipt *enterprisebundle.Receipt, result *enterprisestatus.Result) bool {
