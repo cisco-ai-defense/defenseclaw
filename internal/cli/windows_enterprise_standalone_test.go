@@ -427,6 +427,29 @@ func TestWindowsEnterpriseCompilerDriftOnlyForFleetEnabled(t *testing.T) {
 	}
 }
 
+func TestWindowsConfirmedBundleCompilerMetadataMatchesFleetMode(t *testing.T) {
+	withCompiler := `{"hashes":{"gateway":"` + strings.Repeat("a", 64) + `","compiler":"` + strings.Repeat("b", 64) + `"}}`
+	withoutCompiler := `{"hashes":{"gateway":"` + strings.Repeat("a", 64) + `"}}`
+	for _, tc := range []struct {
+		name, config, metadata string
+		wantDrift, wantError   bool
+	}{
+		{"Fleet off without compiler", "config_version: 9\nfleet:\n  enabled: false\n", withoutCompiler, false, false},
+		{"Fleet on with compiler", "config_version: 9\nfleet:\n  enabled: true\n", withCompiler, false, false},
+		{"Fleet on missing compiler", "config_version: 9\nfleet:\n  enabled: true\n", withoutCompiler, true, false},
+		{"Fleet off stale compiler", "config_version: 9\nfleet:\n  enabled: false\n", withCompiler, true, false},
+		{"invalid Fleet flag", "config_version: 9\nfleet:\n  enabled: 'true'\n", `{"hashes":{}}`, false, true},
+		{"missing hash map", "config_version: 9\n", `{}`, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := windowsEnterpriseBundleCompilerDriftFromDocuments("bundle-config.yaml", []byte(tc.config), []byte(tc.metadata))
+			if (err != nil) != tc.wantError || (!tc.wantError && got != tc.wantDrift) {
+				t.Fatalf("compiler drift = %t, %v; want %t, error=%t", got, err, tc.wantDrift, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseStandaloneRunner
@@ -888,11 +911,13 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalRunner := windowsEnterpriseStandaloneRunner
 	originalObserver := windowsEnterpriseStandaloneObserver
 	originalDrift := windowsEnterpriseEnsureDriftDetector
+	originalCompilerDrift := windowsEnterpriseConfirmedBundleCompilerDrift
 	originalPolicy := windowsEnterprisePolicyDigest
 	t.Cleanup(func() {
 		windowsEnterpriseStandaloneRunner = originalRunner
 		windowsEnterpriseStandaloneObserver = originalObserver
 		windowsEnterpriseEnsureDriftDetector = originalDrift
+		windowsEnterpriseConfirmedBundleCompilerDrift = originalCompilerDrift
 		windowsEnterprisePolicyDigest = originalPolicy
 	})
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
@@ -906,6 +931,7 @@ func (stub *ensureStub) install(t *testing.T) {
 	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	windowsEnterpriseConfirmedBundleCompilerDrift = func(*windowsBundleRun) (bool, error) { return false, nil }
 	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
 		stub.calls = append(stub.calls, args)
 		if len(stub.replies) == 0 {

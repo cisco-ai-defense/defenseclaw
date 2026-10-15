@@ -730,6 +730,72 @@ func TestWindowsConfirmedBundleReturnsAlreadyAppliedBeforeDriftPlanning(t *testi
 	}
 }
 
+func TestWindowsConfirmedBundleCompilerMismatchRequiresSetup(t *testing.T) {
+	for _, tc := range []struct {
+		name, current string
+	}{
+		{"Fleet on missing compiler hash", "config_version: 9\nfleet:\n  enabled: true\n"},
+		{"Fleet off stale compiler hash", "config_version: 9\nfleet:\n  enabled: false\n"},
+	} {
+		for _, setup := range []bool{false, true} {
+			name := tc.name + " via installed CLI"
+			if setup {
+				name = tc.name + " via Setup"
+			}
+			t.Run(name, func(t *testing.T) {
+				host, opts := newHotConfigHost(t, tc.current, tc.current)
+				if !setup {
+					opts.policyCompiler = ""
+				}
+				opts.bundle = &windowsBundleRun{
+					layout: managed.StandaloneLayout{InstallRoot: filepath.Join(t.TempDir(), "installed"), ConfigPath: host.configPath},
+					driver: &enterprisebundle.Driver{Store: enterprisebundle.NewStore(t.TempDir(), t.TempDir())},
+					prepared: &enterprisebundle.Prepared{
+						AlreadyApplied: true, Config: []byte(tc.current), ConfigSHA256: configwrite.SHA256Hex([]byte(tc.current)),
+					},
+					unlock: func() {},
+				}
+				originalFinder := windowsEnterpriseScriptFinder
+				windowsEnterpriseScriptFinder = func(path string) (string, error) { return path, nil }
+				t.Cleanup(func() { windowsEnterpriseScriptFinder = originalFinder })
+				replies := []map[string]any{installedStatus("status"), installedStatus("verify")}
+				if setup {
+					replies = append(replies, installedStatus("upgrade"))
+				}
+				stub := &ensureStub{t: t, replies: replies}
+				stub.install(t)
+				windowsEnterpriseConfirmedBundleCompilerDrift = func(*windowsBundleRun) (bool, error) { return true, nil }
+				windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+					if !setup {
+						t.Fatal("installed CLI reached drift planning without a compiler source")
+					}
+					return "compiler", nil
+				}
+				command := &cobra.Command{}
+				var stdout bytes.Buffer
+				command.SetOut(&stdout)
+				command.SetErr(&bytes.Buffer{})
+				err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+				var result enterprisestatus.Result
+				if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+					t.Fatalf("decode result: %v: %s", jsonErr, stdout.String())
+				}
+				if result.Noop || len(host.writes) != 0 {
+					t.Fatalf("compiler mismatch was treated as a no-op or wrote config: %+v, writes=%q", result, host.writes)
+				}
+				if setup {
+					if err != nil || len(stub.calls) != 3 || stub.calls[2][1] != "Upgrade" ||
+						!strings.Contains(strings.Join(stub.calls[2], " "), `-PolicyCompiler C:\stage\policy_compiler.py`) {
+						t.Fatalf("Setup did not upgrade with compiler: err=%v, calls=%q, result=%+v", err, stub.calls, result)
+					}
+				} else if err == nil || len(stub.calls) != 2 || !windowsBundleHasCode(result.Errors, "fleet_setup_required") {
+					t.Fatalf("installed CLI did not refuse before mutation: err=%v, calls=%q, result=%+v", err, stub.calls, result)
+				}
+			})
+		}
+	}
+}
+
 func TestWindowsConfirmedBundleRepairsVerifiedInstallDamageWithReason(t *testing.T) {
 	const current = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	host, opts := newHotConfigHost(t, current, current)

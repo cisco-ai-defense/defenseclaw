@@ -152,6 +152,9 @@ var (
 	// no-op.
 	windowsEnterpriseStandaloneFootprint = windowsEnterpriseStandaloneFootprintPresent
 	windowsEnterpriseEnsureDriftDetector = windowsEnterpriseEnsureDrift
+	// A confirmed bundle can skip ordinary drift planning only while the
+	// optional compiler recorded in protected metadata matches Fleet mode.
+	windowsEnterpriseConfirmedBundleCompilerDrift = confirmedWindowsBundleCompilerDrift
 	// windowsEnterpriseEnsureConfigLoader reads the standalone config ensure
 	// enumerates the first guardian manifest from.
 	windowsEnterpriseEnsureConfigLoader = config.LoadFromFile
@@ -2558,7 +2561,20 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		_, drifted := windowsEnterpriseHookRuntimeDrift()
-		if probeErr == nil && windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		compilerDrift := false
+		verified := probeErr == nil && windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == ""
+		if verified {
+			compilerDrift, err = windowsEnterpriseConfirmedBundleCompilerDrift(run)
+			if err != nil {
+				result.AddError("bundle_state_invalid", "cannot verify Fleet compiler state for the confirmed bundle: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			}
+			if compilerDrift && strings.TrimSpace(opts.policyCompiler) == "" {
+				result.AddError("fleet_setup_required", "Fleet compiler state differs from the confirmed bundle; use signed standalone Setup to install or remove the compiler")
+				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+			}
+		}
+		if verified && !compilerDrift {
 			// The module can set ok:false for security_incomplete with no
 			// failed check. Keep its warning, without turning that into a
 			// synthetic not_ready error during result translation.
@@ -2570,9 +2586,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		alreadyAppliedNeedsRepair = true
-		if verifyFailure == "" {
-			verifyFailure = windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)
+		if !compilerDrift {
+			alreadyAppliedNeedsRepair = true
+			if verifyFailure == "" {
+				verifyFailure = windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)
+			}
 		}
 	}
 	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
@@ -3092,6 +3110,45 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		}
 	}
 	return "", nil
+}
+
+// confirmedWindowsBundleCompilerDrift checks the one optional artifact that
+// Verify cannot require solely from metadata: older Fleet-enabled installs
+// may have no compiler hash at all. A confirmed bundle replay must not skip
+// the installer when its Fleet mode and recorded compiler disagree.
+func confirmedWindowsBundleCompilerDrift(run *windowsBundleRun) (bool, error) {
+	if run == nil || run.prepared == nil || len(run.prepared.Config) == 0 {
+		return false, errors.New("confirmed bundle config is missing")
+	}
+	if sha256HexBytes(run.prepared.Config) != run.prepared.ConfigSHA256 {
+		return false, errors.New("confirmed bundle config hash is invalid")
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return false, err
+	}
+	metadata, err := readWindowsEnterpriseBoundedFile(roots.MetadataPath, 1<<20)
+	if err != nil {
+		return false, fmt.Errorf("read standalone deployment metadata: %w", err)
+	}
+	return windowsEnterpriseBundleCompilerDriftFromDocuments(run.layout.ConfigPath, run.prepared.Config, metadata)
+}
+
+func windowsEnterpriseBundleCompilerDriftFromDocuments(configPath string, rawConfig, rawMetadata []byte) (bool, error) {
+	enabled, err := config.FleetEnabledFromSource(configPath, rawConfig)
+	if err != nil {
+		return false, err
+	}
+	var metadata struct {
+		Hashes map[string]string `json:"hashes"`
+	}
+	if err := json.Unmarshal(trimWindowsJSONBOM(rawMetadata), &metadata); err != nil {
+		return false, fmt.Errorf("parse standalone deployment metadata: %w", err)
+	}
+	if metadata.Hashes == nil {
+		return false, errors.New("standalone deployment metadata has no artifact hashes")
+	}
+	return enabled != (strings.TrimSpace(metadata.Hashes["compiler"]) != ""), nil
 }
 
 // windowsEnterpriseCompilerSourceDrift uses the same bounded, duplicate-key
