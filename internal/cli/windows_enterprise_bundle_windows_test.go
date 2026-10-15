@@ -1057,7 +1057,7 @@ func TestWindowsEnsureRefusesCrossHostDigestMismatch(t *testing.T) {
 			})
 			layout := stubWindowsBundleHost(t)
 			installed := newWindowsBundleDriver(layout).AnchorsPath
-			if err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
+			if _, err := installWindowsBundleAnchors(e.anchors, installed); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(installed)

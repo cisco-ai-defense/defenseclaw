@@ -5709,6 +5709,26 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_PWSH",
+      "category": "test_fixture",
+      "purpose": "Test-only path to the PowerShell 7 (pwsh) binary the Intune remediation and rule-pack kit tests run the packaging scripts with; the tests fall back to pwsh on PATH and skip when neither exists.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute file path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cli/tests/test_intune_remediation_bundle.py",
+          "description": "Selects the pwsh binary that runs Remediate-Detect.ps1 and Remediate-Fix.ps1 against the stand-in CLI"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",
       "category": "test_fixture",
       "purpose": "Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path. Consumed only by tests.",
