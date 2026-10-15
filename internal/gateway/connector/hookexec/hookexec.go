@@ -1051,10 +1051,17 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts) {
+		lifecycle := NeutralLifecycleEvent(sp.connector, opts.Event)
+		if !lifecycle &&
+			(sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts)) {
 			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
 		}
 		action = "allow"
+		if lifecycle && managedNativeDecision(opts) && sp.style == stylePluginBridge {
+			// The plugin reads the echoed response itself; make the neutral
+			// lifecycle allow explicit instead of handing it an invalid verdict.
+			body = []byte(`{"action":"allow"}`)
+		}
 	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
@@ -1738,7 +1745,7 @@ const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 // administrator would use. Only the standalone guard sets this reason; the
 // gateway's surface refusal (SurfaceUnverifiedReason) is delivered the
 // same way. A
-// stop or session-end event (foreignHookStopEvent) gets the connector's
+// stop or session-end event (NeutralLifecycleEvent) gets the connector's
 // neutral allow instead, because a block there would keep the agent running;
 // the block is still logged. Every other event gets a block. Commands that do
 // not bind their event (the Cursor, Claude Code and Devin hooks) take it from
@@ -1755,7 +1762,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 			}
 		}
 	}
-	if foreignHookStopEvent(sp.connector, opts.Event) {
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
 		logHookFailure(opts, sp, reason, "policy", "open")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
@@ -1818,61 +1825,8 @@ func foreignHookCursorOpenEvent(connector, event string) bool {
 	return false
 }
 
-// foreignHookStopEvent reports the stop and session-end events of the
-// connectors the foreign-hook guard covers. A block on a stop event denies
-// nothing; it makes the agent go on: Claude Code (Stop, SubagentStop, and
-// TeammateIdle for an agent-team teammate), Codex (Stop, SubagentStop),
-// Devin (Stop) and Copilot (agentStop, subagentStop) continue the turn, and
-// Cursor submits a stop hook's followup_message as the next prompt. So a
-// session the guard blocks would loop until the agent restarts. The
-// session-end events, and Claude Code's StopFailure, cannot be blocked at
-// all. The names are the vendors' exact event names; Cursor's match
-// case-insensitively, like its responses (cursorActionOutput). OpenCode and
-// Amp run the guard on tool calls only.
-func foreignHookStopEvent(connector, event string) bool {
-	event = strings.TrimSpace(event)
-	switch connector {
-	case "claudecode":
-		switch event {
-		case "Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd":
-			return true
-		}
-	case "codex":
-		switch event {
-		case "Stop", "SubagentStop", "SessionEnd":
-			return true
-		}
-	case "cursor":
-		switch strings.ToLower(event) {
-		case "stop", "subagentstop", "sessionend":
-			return true
-		}
-	case "devin":
-		switch event {
-		case "Stop", "SessionEnd":
-			return true
-		}
-	case "copilot":
-		switch event {
-		case "agentStop", "subagentStop", "sessionEnd",
-			// VS Code Local harness (--hook-surface vscode-local).
-			"Stop", "SubagentStop":
-			return true
-		}
-	case "kiro":
-		return event == "Stop" || event == "PostToolUse"
-	case "opencode":
-		switch event {
-		case "session.created", "session.updated", "session.status", "session.idle",
-			"session.compacted", "session.error", "session.deleted", "tool.execute.after":
-			return true
-		}
-	}
-	return false
-}
-
 // managedStandaloneStopEvent reports a stop or session-end event
-// (foreignHookStopEvent) of a Unix standalone managed hook. Failing such an
+// (NeutralLifecycleEvent) of a Unix standalone managed hook. Failing such an
 // event closed denies nothing; it keeps the agent running, and every later
 // turn fails closed and stops again, so the agent loops on model turns until
 // DefenseClaw is back. On the standalone profile every fail-closed reason
@@ -1882,7 +1836,7 @@ func foreignHookStopEvent(connector, event string) bool {
 // closed. Per-user hooks and the Secure Client profile never set
 // ManagedStandalone and keep their results.
 func managedStandaloneStopEvent(opts Options, sp spec) bool {
-	return opts.ManagedEnterprise && opts.ManagedStandalone && foreignHookStopEvent(sp.connector, opts.Event)
+	return opts.ManagedEnterprise && opts.ManagedStandalone && NeutralLifecycleEvent(sp.connector, opts.Event)
 }
 
 // allowManagedStandaloneStop answers a managed standalone stop event that

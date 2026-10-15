@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -1502,7 +1503,7 @@ func (a *APIServer) safeHookPanicResponse(ctx context.Context, profile connector
 	req.ConnectorName = connectorName
 	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.StandaloneEnterprise() &&
 		profile.Capabilities.CanBlock && eventIn(eventName, profile.Capabilities.BlockEvents) &&
-		!hookPanicLifecycleEvent(connectorName, eventName) {
+		!hookexec.NeutralLifecycleEvent(connectorName, eventName) {
 		return agentHookResponseForProfile(profile, req, "block", "block", "WARN",
 			"defenseclaw internal evaluator error", nil, "action", false, profile.Capabilities)
 	}
@@ -1515,29 +1516,6 @@ func (a *APIServer) safeHookPanicResponse(ctx context.Context, profile connector
 		Reason:            "defenseclaw internal evaluator error",
 		AdditionalContext: fmt.Sprintf("DefenseClaw hook evaluator for %s/%s recovered from an internal error; the action was allowed with would_block=true. Operators: check defenseclaw.panics.total and recent audit rows with extra.panic=true.", connectorName, eventName),
 	}
-}
-
-func hookPanicLifecycleEvent(connectorName, eventName string) bool {
-	switch connectorName {
-	case "claudecode", "codex", "devin", "kiro":
-		switch eventName {
-		case "Stop", "SubagentStop", "SessionEnd", "StopFailure", "TeammateIdle":
-			return true
-		}
-	case "copilot":
-		switch eventName {
-		case "agentStop", "subagentStop", "sessionEnd", "Stop", "SubagentStop":
-			return true
-		}
-	case "cursor":
-		switch strings.ToLower(eventName) {
-		case "stop", "subagentstop", "sessionend":
-			return true
-		}
-	case "opencode":
-		return eventName != "tool.execute.before"
-	}
-	return false
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The

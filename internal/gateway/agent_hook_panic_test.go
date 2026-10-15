@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -78,13 +79,13 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	api := &APIServer{scannerCfg: cfg}
 	for _, tc := range []struct {
-		connector, toolEvent, stopEvent, nativeField string
+		connector, toolEvent, nativeField string
 	}{
-		{"cursor", "beforeShellExecution", "stop", "permission"},
-		{"copilot", "preToolUse", "agentStop", "permissionDecision"},
-		{"devin", "PreToolUse", "Stop", "decision"},
-		{"kiro", "PreToolUse", "Stop", "decision"},
-		{"opencode", "tool.execute.before", "session.idle", "decision"},
+		{"cursor", "beforeShellExecution", "permission"},
+		{"copilot", "preToolUse", "permissionDecision"},
+		{"devin", "PreToolUse", "decision"},
+		{"kiro", "PreToolUse", "decision"},
+		{"opencode", "tool.execute.before", "decision"},
 	} {
 		profile := api.hookProfileForRequest(context.Background(), tc.connector)
 		req := agentHookRequest{ConnectorName: tc.connector, HookEventName: tc.toolEvent}
@@ -100,11 +101,52 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 		if _, ok := resp.HookOutput[tc.nativeField]; !ok {
 			t.Errorf("%s: native output = %+v, missing %s", tc.connector, resp.HookOutput, tc.nativeField)
 		}
-		stop := api.safeHookPanicResponse(context.Background(), profile, tc.connector,
-			agentHookRequest{HookEventName: tc.stopEvent})
-		if stop.Action != "allow" {
-			t.Errorf("%s %s: lifecycle panic action = %q, want allow", tc.connector, tc.stopEvent, stop.Action)
+		for _, event := range hookexec.NeutralLifecycleEvents(tc.connector) {
+			stop := api.safeHookPanicResponse(context.Background(), profile, tc.connector,
+				agentHookRequest{HookEventName: event})
+			if stop.Action != "allow" {
+				t.Errorf("%s %s: lifecycle panic action = %q, want allow", tc.connector, event, stop.Action)
+			}
 		}
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		profile := api.hookProfileForRequest(context.Background(), connectorName)
+		for _, event := range hookexec.NeutralLifecycleEvents(connectorName) {
+			resp := api.safeHookPanicResponse(context.Background(), profile, connectorName,
+				agentHookRequest{HookEventName: event})
+			if resp.Action != "allow" {
+				t.Errorf("%s %s: lifecycle panic action = %q, want allow", connectorName, event, resp.Action)
+			}
+		}
+	}
+	kiro := api.safeHookPanicResponse(context.Background(), api.hookProfileForRequest(context.Background(), "kiro"), "kiro",
+		agentHookRequest{HookEventName: "UserPromptSubmit"})
+	if kiro.Action != "block" || kiro.WouldBlock {
+		t.Errorf("Kiro UserPromptSubmit panic = %+v, want native block", kiro)
+	}
+}
+
+func TestSafeHookPanicResponseSecureClientAndPerUserRemainAllow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "secure client", cfg: func() *config.Config {
+			cfg := config.DefaultConfig()
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileSecureClient
+			return cfg
+		}()},
+		{name: "per user", cfg: config.DefaultConfig()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &APIServer{scannerCfg: tc.cfg}
+			resp := api.safeHookPanicResponse(context.Background(), api.hookProfileForRequest(context.Background(), "kiro"), "kiro",
+				agentHookRequest{HookEventName: "UserPromptSubmit"})
+			if resp.Action != "allow" || !resp.WouldBlock {
+				t.Errorf("panic response = %+v, want legacy allow", resp)
+			}
+		})
 	}
 }
 
