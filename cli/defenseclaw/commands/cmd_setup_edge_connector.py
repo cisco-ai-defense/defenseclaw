@@ -46,6 +46,48 @@ from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
 _DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:13400/api/v1/fleet"
 
+
+def _existing_env_value(env_path: Path, name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{name}=") or stripped.startswith(f"export {name}="):
+                return stripped.split("=", 1)[1].strip().strip("'\"")
+    return ""
+
+
+def _hmac_key(env_path: Path, name: str) -> str:
+    value = _existing_env_value(env_path, name) or secrets.token_hex(32)
+    try:
+        key = bytes.fromhex(value)
+    except ValueError as exc:
+        raise click.ClickException(f"{name} must be a nonzero 32-byte hex key") from exc
+    if len(key) != 32 or not any(key):
+        raise click.ClickException(f"{name} must be a nonzero 32-byte hex key")
+    return value
+
+
+def _enable_fleet_config(data_dir: str) -> None:
+    """Commit Fleet configuration before provisioning credentials or reporting success."""
+    cfg_path = str(config_path_for_data_dir(data_dir))
+    try:
+        with locked_config_yaml(cfg_path):
+            raw: dict = {}
+            if os.path.exists(cfg_path):
+                with open(cfg_path) as stream:
+                    raw = yaml.safe_load(stream) or {}
+            fleet_sec = raw.setdefault("fleet", {})
+            fleet_sec["enabled"] = True
+            fleet_sec["api_token_env"] = _TOKEN_ENV
+            fleet_sec["ota_key_env"] = "DCLAW_OTA_HMAC_KEY"
+            write_config_yaml_secure(cfg_path, raw)
+    except Exception as exc:
+        raise click.ClickException(f"Could not update config.yaml; Fleet setup is incomplete: {exc}") from exc
+    ux.ok(f"Updated fleet section in {cfg_path}")
+
 _SAMPLE_POLICY = """\
 # Edge Connector fleet policy -- drop this into your policy directory
 # or apply via `defenseclaw policy load`.
@@ -132,7 +174,7 @@ def edge_connector(
         "\n"
         "  cd edge-connector\n"
         "  mkdir build && cd build\n"
-        "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF\n"
+        "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON\n"
         "  make -j$(nproc)\n"
         "  sudo make install\n"
         "\n"
@@ -172,30 +214,36 @@ def edge_connector(
         else:
             token = secrets.token_urlsafe(32)
 
-    if token:
-        _persist_env_var(env_path, _TOKEN_ENV, token)
-        ux.ok(f"Wrote {_TOKEN_ENV} to {env_path}")
-
-    # --- 2b. Audit key ---------------------------------------------------
-    existing_audit = os.environ.get("DCLAW_AUDIT_KEY", "")
-    if not existing_audit:
-        # Check if already in the env file
-        if env_path.exists():
-            for _line in env_path.read_text().splitlines():
-                if _line.strip().startswith("DCLAW_AUDIT_KEY="):
-                    existing_audit = _line.strip().split("=", 1)[1].strip("'\"")
-                    break
+    if not token or "\n" in token or "\r" in token:
+        raise click.ClickException("Fleet API token must be a nonempty single line")
 
     svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
-
-    if existing_audit:
-        ux.ok("DCLAW_AUDIT_KEY already set.")
-        _persist_svc_env_var(svc_env_path, "DCLAW_AUDIT_KEY", existing_audit)
-    else:
-        audit_key = secrets.token_hex(32)
-        _persist_env_var(env_path, "DCLAW_AUDIT_KEY", audit_key)
-        _persist_svc_env_var(svc_env_path, "DCLAW_AUDIT_KEY", audit_key)
-        ux.ok(f"Generated DCLAW_AUDIT_KEY ({len(audit_key)} hex chars) and wrote to {env_path} and {svc_env_path}")
+    audit_key = _hmac_key(env_path, "DCLAW_AUDIT_KEY")
+    ota_key = _hmac_key(env_path, "DCLAW_OTA_HMAC_KEY")
+    emergency_key = _hmac_key(env_path, "DCLAW_EMERGENCY_KEY")
+    # A managed host can refuse config writes. Check before persisting any
+    # token or key, after validating operator-supplied keys.
+    _enable_fleet_config(ctx.obj.cfg.data_dir)
+    try:
+        for name, value in (
+            (_TOKEN_ENV, token),
+            ("DCLAW_AUDIT_KEY", audit_key),
+            ("DCLAW_OTA_HMAC_KEY", ota_key),
+            ("DCLAW_EMERGENCY_KEY", emergency_key),
+        ):
+            _persist_env_var(env_path, name, value)
+            ux.ok(f"Wrote {name} to {env_path}")
+        for name, value in (
+            ("DCLAW_AUDIT_KEY", audit_key),
+            ("DCLAW_OTA_HMAC_KEY", ota_key),
+            ("DCLAW_EMERGENCY_KEY", emergency_key),
+        ):
+            if not _persist_svc_env_var(svc_env_path, name, value):
+                raise click.ClickException(
+                    f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"
+                )
+    except OSError as exc:
+        raise click.ClickException(f"Could not persist Fleet credentials; setup is incomplete: {exc}") from exc
 
     # --- 3. Fleet API endpoint -------------------------------------------
     if endpoint is None:
@@ -226,91 +274,75 @@ def edge_connector(
         "  Register devices via: defenseclaw edge-connector register <device-id>\n"
         "\n"
         "  Optional environment variables for edge devices:\n"
-        "    DCLAW_OTA_KEY          — Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes)\n"
+        "    DCLAW_OTA_HMAC_KEY     — Shared HMAC-SHA256 secret (hex-encoded, 32 bytes)\n"
+        "    DCLAW_EMERGENCY_KEY    — Separate emergency-command HMAC secret\n"
         "    DCLAW_BROKER_URL       — MQTT broker URL for cloud escalation\n"
     )
 
-    # --- 5. Write fleet section to config.yaml (Source of Truth) -----------
+def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> bool:
+    """Atomically replace the root-owned service env file using sudo."""
+    if "\n" in value or "\r" in value:
+        raise click.ClickException(f"{key} must be a single line")
+
+    temp_path: str | None = None
     try:
-        cfg_path = str(config_path_for_data_dir(ctx.obj.cfg.data_dir))
-        with locked_config_yaml(cfg_path):
-            raw: dict = {}
-            if os.path.exists(cfg_path):
-                with open(cfg_path) as f:
-                    raw = yaml.safe_load(f) or {}
-            fleet_sec = raw.setdefault("fleet", {})
-            fleet_sec["enabled"] = True
-            fleet_sec["api_token_env"] = _TOKEN_ENV
-            if "ota_key_env" not in fleet_sec:
-                fleet_sec["ota_key_env"] = "DCLAW_OTA_KEY"
-            write_config_yaml_secure(cfg_path, raw)
-        ux.ok(f"Updated fleet section in {cfg_path}")
-    except PermissionError as exc:
-        ux.warn(f"Could not update config.yaml (managed device?): {exc}")
-    except Exception as exc:
-        ux.warn(f"Could not update config.yaml: {exc}")
-
-
-def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
-    """Write a KEY=VALUE to the systemd service env file using sudo.
-
-    The service reads /etc/defenseclaw/edge-connector.env via its
-    EnvironmentFile directive.  The CLI user typically cannot write to /etc/
-    directly, so we use sudo tee.
-    """
-    # Read existing content (if any) via sudo
-    existing_lines: list[str] = []
-    if svc_env_path.exists():
-        try:
-            result = subprocess.run(
+        subprocess.run(["sudo", "install", "-d", "-m", "700", str(svc_env_path.parent)], check=True)
+        exists = subprocess.run(
+            ["sudo", "sh", "-c", 'if [ -e "$1" ]; then echo yes; else echo no; fi', "sh", str(svc_env_path)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if exists not in ("yes", "no"):
+            raise OSError("could not determine whether the service env file exists")
+        existing_lines: list[str] = []
+        if exists == "yes":
+            existing_lines = subprocess.run(
                 ["sudo", "cat", str(svc_env_path)],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                existing_lines = result.stdout.splitlines()
-        except OSError:
-            pass
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
 
-    # Update or append the key
-    found = False
-    new_lines: list[str] = []
-    for line in existing_lines:
-        stripped = line.strip()
-        if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+        found = False
+        new_lines: list[str] = []
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+                new_lines.append(f"{key}={value}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
             new_lines.append(f"{key}={value}")
-            found = True
-        else:
-            new_lines.append(line)
-    if not found:
-        new_lines.append(f"{key}={value}")
 
-    content = "\n".join(new_lines) + "\n"
-    target_path = svc_env_path
-    try:
-        subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True)
+        content = "\n".join(new_lines) + "\n"
+        temp_path = subprocess.run(
+            ["sudo", "mktemp", "-p", str(svc_env_path.parent), ".edge-connector.env.XXXXXXXX"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if Path(temp_path).parent != svc_env_path.parent:
+            raise OSError("unexpected service env staging path")
         subprocess.run(
-            ["sudo", "install", "-m", "600", "/dev/null", str(target_path)],
-            check=True,
-        )
-        subprocess.run(
-            ["sudo", "tee", str(target_path)],
+            ["sudo", "tee", temp_path],
             input=content.encode(),
             stdout=subprocess.DEVNULL,
             check=True,
         )
-        write_ok = True
-    except subprocess.CalledProcessError:
-        write_ok = False
-    if write_ok:
+        subprocess.run(["sudo", "chmod", "600", temp_path], check=True)
+        subprocess.run(["sudo", "mv", temp_path, str(svc_env_path)], check=True)
+        temp_path = None
         ux.ok(f"Wrote {key} to {svc_env_path}")
-    else:
-        # The value is already persisted in ~/.defenseclaw/.env.
-        redacted = "<see ~/.defenseclaw/.env>"
+        return True
+    except (OSError, subprocess.CalledProcessError):
         ux.warn(
             f"Could not write {key} to {svc_env_path} (sudo may have been denied).\n"
             f"  The systemd service needs this key in its EnvironmentFile to start.\n"
-            f"  Write it manually: echo '{key}={redacted}' | sudo tee -a {svc_env_path}"
+            f"  Repair the service env file and rerun setup."
         )
+        return False
+    finally:
+        if temp_path:
+            try:
+                subprocess.run(["sudo", "rm", "--", temp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
 
 
 # Register subcommands

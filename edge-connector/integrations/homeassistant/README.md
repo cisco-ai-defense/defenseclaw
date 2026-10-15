@@ -79,6 +79,8 @@ adapter = setup_homeassistant(
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
+The C engine accepts only reviewed tool names in `src/decision/policy_table.c`. This adapter's Python capability map does not authorize additional C tool names; unknown names fail closed. Review and extend the C table before using adapter tools absent from it. Network-capability calls to `homeassistant.local` are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+
 ```yaml
 iot_extensions:
   capability_sequences:
@@ -89,14 +91,8 @@ iot_extensions:
     - sequence: [net_fetch, exec_shell]
       action: block
 
-  rate_limits:
-    tool_calls_per_minute: 60
-    actuations_per_minute: 20
-    network_requests_per_minute: 30
-
   destination_allowlist:
-    - "homeassistant.local"
-    - "api.anthropic.com"
+    - "1.1.1.1" # illustrative public IP; replace with an approved endpoint
 ```
 
 ## Architecture

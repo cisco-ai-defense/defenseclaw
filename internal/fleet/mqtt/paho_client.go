@@ -14,11 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package mqtt — PahoClient implements the mqtt.Client interface using
-// Eclipse Paho Go v2 (github.com/eclipse/paho.golang). This replaces
-// the hand-rolled TCPClient with a battle-tested MQTT 5 / 3.1.1 library
-// that handles packet serialization, QoS 1 inflight tracking, keepalive,
-// and auto-reconnect internally.
+// Package mqtt uses Eclipse Paho Go v2 for MQTT transport, QoS 1 tracking,
+// keepalive, and reconnects.
 //
 // The bridge (bridge.go) and wire-format code (broker.go) are unchanged —
 // they depend only on the mqtt.Client interface.
@@ -51,7 +48,6 @@ type PahoClient struct {
 	mu   sync.RWMutex
 	subs map[string]func(Message)
 
-	connected  bool
 	requireTLS bool
 
 	cfgUser string
@@ -117,7 +113,7 @@ func normalizeBrokerURL(raw string) (*url.URL, error) {
 // Connect establishes a connection to the MQTT broker. The connection is
 // managed by autopaho which handles reconnection automatically.
 func (c *PahoClient) Connect(ctx context.Context) error {
-	// Production TLS enforcement — same policy as TCPClient
+	// Enforce the production MQTT transport policy.
 	if err := c.checkPlaintextMQTT(); err != nil {
 		return err
 	}
@@ -130,7 +126,7 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 		return err
 	}
 
-	// Build TLS config (reuses the same env vars as the old TCPClient)
+	// Build TLS config from the broker certificate settings.
 	var tlsCfg *tls.Config
 	if brokerURL.Scheme == "ssl" || brokerURL.Scheme == "tls" || brokerURL.Scheme == "wss" {
 		tlsCfg, err = buildTLSConfig()
@@ -158,9 +154,6 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 		ConnectRetryDelay:             time.Second,
 		OnConnectionUp: func(cm *autopaho.ConnectionManager, connack *paho.Connack) {
 			log.Printf("[mqtt-paho] connected to %s (session_present=%v)", brokerURL.String(), connack.SessionPresent)
-			c.mu.Lock()
-			c.connected = true
-			c.mu.Unlock()
 
 			// Re-subscribe to all registered topics on (re)connect.
 			// autopaho calls this on every successful connect, including
@@ -226,14 +219,22 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("mqtt connect: %w", err)
 	}
 
-	// Wait for the initial connection (with timeout)
-	connectCtx, connectCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer connectCancel()
-	if err := cm.AwaitConnection(connectCtx); err != nil {
-		return fmt.Errorf("mqtt initial connect timeout: %w", err)
+	// autopaho already retries connection attempts for the lifetime of ctx.
+	// Keep this single manager alive until the broker is available. A separate
+	// 15-second AwaitConnection timeout used to leave its retry goroutine running
+	// while Bridge.Start created another manager with the same client ID.
+	if err := cm.AwaitConnection(ctx); err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if cleanupErr := cm.Disconnect(cleanupCtx); cleanupErr != nil {
+			return fmt.Errorf("mqtt initial connect: %w (manager cleanup: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("mqtt initial connect: %w", err)
 	}
 
+	c.mu.Lock()
 	c.cm = cm
+	c.mu.Unlock()
 	return nil
 }
 
@@ -245,13 +246,16 @@ func (c *PahoClient) Subscribe(ctx context.Context, topicFilter string, qos byte
 	c.subs[topicFilter] = handler
 	c.mu.Unlock()
 
-	if c.cm == nil {
+	c.mu.RLock()
+	cm := c.cm
+	c.mu.RUnlock()
+	if cm == nil {
 		return nil // will subscribe on connect via OnConnectionUp
 	}
 
 	subCtx, subCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer subCancel()
-	_, err := c.cm.Subscribe(subCtx, &paho.Subscribe{
+	_, err := cm.Subscribe(subCtx, &paho.Subscribe{
 		Subscriptions: []paho.SubscribeOptions{{
 			Topic: topicFilter,
 			QoS:   qos,
@@ -263,13 +267,16 @@ func (c *PahoClient) Subscribe(ctx context.Context, topicFilter string, qos byte
 // Publish sends a message to the broker. For QoS 1, autopaho handles
 // PUBACK tracking internally and retries on reconnect.
 func (c *PahoClient) Publish(ctx context.Context, topic string, qos byte, payload []byte) error {
-	if c.cm == nil {
+	c.mu.RLock()
+	cm := c.cm
+	c.mu.RUnlock()
+	if cm == nil {
 		return fmt.Errorf("not connected")
 	}
 
 	pubCtx, pubCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pubCancel()
-	_, err := c.cm.Publish(pubCtx, &paho.Publish{
+	_, err := cm.Publish(pubCtx, &paho.Publish{
 		Topic:   topic,
 		QoS:     qos,
 		Payload: payload,
@@ -279,15 +286,18 @@ func (c *PahoClient) Publish(ctx context.Context, topic string, qos byte, payloa
 
 // Disconnect gracefully closes the connection.
 func (c *PahoClient) Disconnect() error {
-	if c.cm == nil {
+	c.mu.RLock()
+	cm := c.cm
+	c.mu.RUnlock()
+	if cm == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return c.cm.Disconnect(ctx)
+	return cm.Disconnect(ctx)
 }
 
-// --- TLS and production-mode checks (mirroring tcp_client.go policy) ---
+// --- TLS and production-mode checks ---
 
 func (c *PahoClient) checkRequireTLS() error {
 	envTLS := os.Getenv("DCLAW_REQUIRE_TLS")
@@ -306,13 +316,27 @@ func (c *PahoClient) checkPlaintextMQTT() error {
 	if c.isTLS() {
 		return nil
 	}
-	if allow := os.Getenv("DCLAW_ALLOW_PLAINTEXT_MQTT"); allow == "1" {
-		log.Printf("[mqtt-paho] WARNING: Using plaintext MQTT in production (DCLAW_ALLOW_PLAINTEXT_MQTT=1 override active)")
-		return nil
-	}
-	return fmt.Errorf("plaintext MQTT refused in production for broker %q — use mqtts:// or set DCLAW_ALLOW_PLAINTEXT_MQTT=1", c.addr)
+	return fmt.Errorf("plaintext MQTT refused for broker %q — use mqtts://; isolated local development requires DCLAW_DEV_MODE=ON on an unmanaged host", c.addr)
 }
 
 func (c *PahoClient) isTLS() bool {
 	return strings.HasPrefix(c.addr, "mqtts://") || strings.HasPrefix(c.addr, "ssl://")
+}
+
+// mqttTopicMatch performs MQTT topic matching with + and # wildcards.
+func mqttTopicMatch(topic, filter string) bool {
+	if topic == filter {
+		return true
+	}
+	tParts := strings.Split(topic, "/")
+	fParts := strings.Split(filter, "/")
+	for i, fp := range fParts {
+		if fp == "#" {
+			return i == len(fParts)-1
+		}
+		if i >= len(tParts) || (fp != "+" && fp != tParts[i]) {
+			return false
+		}
+	}
+	return len(tParts) == len(fParts)
 }

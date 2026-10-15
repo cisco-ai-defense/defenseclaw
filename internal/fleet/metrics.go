@@ -38,10 +38,7 @@ type Metrics struct {
 	VerdictCacheHits   atomic.Int64
 	VerdictCacheMisses atomic.Int64
 	VerdictCacheSize   atomic.Int64
-	AuditChainBreaks   atomic.Int64
 	PolicyRollbacks    atomic.Int64
-	SpeculativeBlocks  atomic.Int64
-	EmergencySeqGaps   atomic.Int64
 	AlertsTotal        atomic.Int64
 	OTARollbacks       atomic.Int64
 }
@@ -61,10 +58,7 @@ func (m *Metrics) Reset() {
 	m.VerdictCacheHits.Store(0)
 	m.VerdictCacheMisses.Store(0)
 	m.VerdictCacheSize.Store(0)
-	m.AuditChainBreaks.Store(0)
 	m.PolicyRollbacks.Store(0)
-	m.SpeculativeBlocks.Store(0)
-	m.EmergencySeqGaps.Store(0)
 	m.AlertsTotal.Store(0)
 	m.OTARollbacks.Store(0)
 }
@@ -97,10 +91,7 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		{"defenseclaw_fleet_verdict_cache_hits_total", "Verdict cache hits", "counter", GlobalMetrics.VerdictCacheHits.Load()},
 		{"defenseclaw_fleet_verdict_cache_misses_total", "Verdict cache misses", "counter", GlobalMetrics.VerdictCacheMisses.Load()},
 		{"defenseclaw_fleet_verdict_cache_size", "Current cache entries", "gauge", GlobalMetrics.VerdictCacheSize.Load()},
-		{"defenseclaw_fleet_audit_chain_breaks_total", "Audit chain integrity failures", "counter", GlobalMetrics.AuditChainBreaks.Load()},
 		{"defenseclaw_fleet_policy_rollback_total", "Policy canary rollbacks", "counter", GlobalMetrics.PolicyRollbacks.Load()},
-		{"defenseclaw_fleet_speculative_retroactive_blocks_total", "Speculative retroactive blocks", "counter", GlobalMetrics.SpeculativeBlocks.Load()},
-		{"defenseclaw_fleet_emergency_seq_gaps_total", "Emergency sequence gaps detected", "counter", GlobalMetrics.EmergencySeqGaps.Load()},
 		{"defenseclaw_fleet_alerts_total", "Fleet alerts emitted", "counter", GlobalMetrics.AlertsTotal.Load()},
 		{"defenseclaw_fleet_ota_rollbacks_total", "OTA canary rollbacks reported by devices", "counter", GlobalMetrics.OTARollbacks.Load()},
 	}
@@ -113,8 +104,9 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // WireMetrics connects GlobalMetrics to the FleetManager, verdict Cache,
-// and MQTT Bridge via their metrics hook interfaces. Call this once at
-// startup after creating the manager, cache, and bridge.
+// and optional MQTT Bridge via their metrics hook interfaces. Call this once
+// after creating the manager and cache. When the bridge is created later,
+// register its block and allow callbacks at that point.
 func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache, bridge *mqtt.Bridge) {
 	mgr.SetMetricsHooks(
 		func() { // onDeviceRegistered — only called for truly new devices
@@ -172,6 +164,9 @@ func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache, bridge *mqtt.B
 	if bridge != nil {
 		bridge.SetOnBlock(func() {
 			GlobalMetrics.BlocksTotal.Add(1)
+		})
+		bridge.SetOnAllow(func() {
+			GlobalMetrics.AllowsTotal.Add(1)
 		})
 	}
 

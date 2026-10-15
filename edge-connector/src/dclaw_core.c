@@ -56,8 +56,9 @@ extern bool dclaw_audit_key_provisioned(void);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
 #if DCLAW_MQTT_ENABLED
+extern int dclaw_boot_counter_advance(void);
 extern void dclaw_canary_record_block(void);
-extern void dclaw_emergency_load_from_flash(void);
+extern int dclaw_emergency_load_from_flash(void);
 #else
 static inline void dclaw_canary_record_block(void) { /* no-op: canary is part of OTA/MQTT */ }
 #endif
@@ -99,14 +100,35 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.initialized = true;
     dclaw_policy_tables_init();
 
-    dclaw_config_load_brokers();
+    if (dclaw_config_load_brokers() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Cannot load policy partition state; refusing to start.\n");
+        g_state.initialized = false;
+        hal_shutdown();
+        return -1;
+    }
 
 #if DCLAW_MQTT_ENABLED
-    dclaw_policy_reload_from_flash();
+    if (dclaw_boot_counter_advance() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Cannot persist boot generation; refusing to start.\n");
+        g_state.initialized = false;
+        hal_shutdown();
+        return -1;
+    }
+    if (dclaw_policy_reload_from_flash() != 0 && g_state.device.policy_version != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Accepted OTA policy cannot be verified from flash; refusing startup.\n");
+        g_state.initialized = false;
+        hal_shutdown();
+        return -1;
+    }
 #endif
 
 #if DCLAW_MQTT_ENABLED
-    dclaw_emergency_load_from_flash();
+    if (dclaw_emergency_load_from_flash() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Cannot restore emergency anti-replay state; refusing startup.\n");
+        g_state.initialized = false;
+        hal_shutdown();
+        return -1;
+    }
 #endif
 
     uint64_t now = hal_tick_ms();
@@ -166,6 +188,7 @@ dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void) {
 /* Forward declarations for key-material zeroing on shutdown */
 #if DCLAW_MQTT_ENABLED
 extern void dclaw_verdict_protocol_shutdown(void);
+extern void dclaw_mqtt_shutdown(void);
 #endif
 
 void dclaw_shutdown(void) {
@@ -173,6 +196,7 @@ void dclaw_shutdown(void) {
     dclaw_audit_ring_shutdown();
 #if DCLAW_MQTT_ENABLED
     /* Zero device key material to prevent leakage in core dumps */
+    dclaw_mqtt_shutdown();
     dclaw_verdict_protocol_shutdown();
 #endif
     /* Zero boot nonce and any other sensitive state */
@@ -291,6 +315,14 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * a malicious caller could submit CAP_SENSOR_READ for exec_shell to
      * bypass rate limiting and correlation checks. */
     uint8_t trusted_cap_flags = dclaw_policy_lookup_capability(req->tool_name);
+    if (trusted_cap_flags == DCLAW_CAP_UNKNOWN) {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
+                          target_hash, req->session_id);
+        g_state.eval_denied_count++;
+        dclaw_canary_record_block();
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
+                            DCLAW_VERDICT_SYNC);
+    }
 
     static bool in_eval = false;
     if (in_eval) {
@@ -375,9 +407,16 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     }
 
     /* Step 5: Destination allow/deny + SSRF check (if network capability) */
-    if ((req->cap_flags & (DCLAW_CAP_NET_FETCH | DCLAW_CAP_SEND_MSG)) &&
-        req->destination[0] != '\0') {
-#if DCLAW_CONTENT_SCAN
+    if (req->cap_flags & (DCLAW_CAP_NET_FETCH | DCLAW_CAP_SEND_MSG)) {
+        if (req->destination[0] == '\0') {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
+                              target_hash, req->session_id);
+            g_state.eval_denied_count++;
+            dclaw_canary_record_block();
+            in_eval = false;
+            return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
+                                DCLAW_VERDICT_SYNC);
+        }
         if (dclaw_ssrf_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                               target_hash, req->session_id);
@@ -387,7 +426,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                                 DCLAW_VERDICT_SYNC);
         }
-#endif
         if (dclaw_policy_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);

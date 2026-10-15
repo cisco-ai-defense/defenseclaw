@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // DeviceKeyProvider resolves the signing key for a given device.
@@ -57,26 +58,30 @@ type DeviceKeyChecker interface {
 }
 
 // storeBackedKeyProvider resolves per-device keys from the DeviceKeyStore.
-// Falls back to the fleet-wide DCLAW_DEVICE_KEY env var or zero key
-// when no per-device key is found (for backward compatibility during rollout).
+// Falls back to a fleet-wide key, or to a zero key only in explicit development mode.
 type storeBackedKeyProvider struct {
 	store       DeviceKeyLookup
 	fallbackKey []byte
 }
 
 func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
-	fallback := make([]byte, 32)
+	var fallback []byte
 	raw := os.Getenv("DCLAW_DEVICE_KEY")
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
-		if err == nil && len(decoded) == 32 {
+		if err == nil && nonzeroDeviceKey(decoded) {
 			fallback = decoded
 		} else {
-			log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
+			log.Printf("[mqtt-bridge] ERROR: DCLAW_DEVICE_KEY is invalid (want 64 hex chars / 32 bytes)")
 		}
-	} else if isProductionMode() {
-		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — zero-key fallback disabled")
-		fallback = nil
+	}
+	if fallback == nil {
+		if isProductionMode() {
+			log.Printf("[mqtt-bridge] ERROR: no valid fleet device key; per-device key lookup is required")
+		} else {
+			fallback = make([]byte, 32)
+			log.Printf("[mqtt-bridge] WARNING: explicit development mode is using an all-zero device key")
+		}
 	}
 	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
 }
@@ -94,6 +99,10 @@ func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint64) []byte {
 			return nil
 		}
 		if key != nil {
+			if !nonzeroDeviceKey(key) {
+				log.Printf("[mqtt-bridge] ERROR: invalid per-device key for device %d", deviceID)
+				return nil
+			}
 			return key
 		}
 	}
@@ -125,10 +134,10 @@ func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 	raw := os.Getenv("DCLAW_DEVICE_KEY")
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
-		if err == nil && len(decoded) == 32 {
+		if err == nil && nonzeroDeviceKey(decoded) {
 			return &envDeviceKeyProvider{key: decoded}
 		}
-		log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
+		log.Printf("[mqtt-bridge] ERROR: DCLAW_DEVICE_KEY is invalid (want 64 hex chars / 32 bytes)")
 	}
 	if isProductionMode() {
 		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — HMAC verification will reject all messages")
@@ -137,18 +146,29 @@ func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 	return &envDeviceKeyProvider{key: make([]byte, 32)}
 }
 
-// isProductionMode returns true when the env var DCLAW_PRODUCTION is set to
-// "true" or "1", OR when DCLAW_DEV_MODE is "OFF", "0", or "false".
+func nonzeroDeviceKey(key []byte) bool {
+	if len(key) != 32 {
+		return false
+	}
+	for _, b := range key {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isProductionMode defaults to fail-closed. Explicit development mode is
+// honored only on unmanaged hosts and never overrides DCLAW_PRODUCTION=true.
 func isProductionMode() bool {
+	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) || managed.IsStandaloneManagedHost() {
+		return true
+	}
 	v := os.Getenv("DCLAW_PRODUCTION")
 	if v == "true" || v == "1" {
 		return true
 	}
-	devMode := strings.ToLower(os.Getenv("DCLAW_DEV_MODE"))
-	if devMode == "off" || devMode == "0" || devMode == "false" {
-		return true
-	}
-	return false
+	return !strings.EqualFold(os.Getenv("DCLAW_DEV_MODE"), "ON")
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -181,7 +201,14 @@ type Bridge struct {
 	decommissionedMu sync.RWMutex
 
 	// Metrics hooks (set externally to avoid circular imports)
+	onAllow func()
 	onBlock func()
+	// replayForDevice republishes durable OTA state after a signed device
+	// registration or accepted heartbeat. The signed wire carries the durable
+	// emergency sequence actually applied by the device.
+	replayForDevice func(context.Context, uint64, uint64, uint16, uint32) (uint32, error)
+	replayMu        sync.Mutex
+	replayState     map[uint64]deviceReplayState
 
 	heartbeatMinInterval time.Duration
 	lastHeartbeat        map[uint64]time.Time
@@ -200,6 +227,12 @@ type Bridge struct {
 	rateLimitDrops      uint64
 }
 
+type deviceReplayState struct {
+	bootCounter uint32
+	uptimeSec   uint32
+	inFlight    bool
+}
+
 // DecommissionChecker is the narrow interface for checking if a device
 type DecommissionChecker interface {
 	IsDecommissioned(fullDeviceID uint64) (bool, error)
@@ -215,6 +248,11 @@ type verdictRateEntry struct {
 // per second. Exceeding this drops the request with a warning log.
 const verdictRateLimit = 20
 
+// SetOnAllow configures a callback that fires for an authenticated ALLOW verdict.
+func (b *Bridge) SetOnAllow(fn func()) {
+	b.onAllow = fn
+}
+
 // SetOnBlock configures a callback that fires when a verdict request
 // results in a BLOCK action.  Used by WireMetrics to increment the
 // fleet-level blocks counter without a circular import.
@@ -222,19 +260,12 @@ func (b *Bridge) SetOnBlock(fn func()) {
 	b.onBlock = fn
 }
 
-// BridgeConfig holds configuration for the MQTT bridge.
-type BridgeConfig struct {
-	// BrokerURL is the MQTT broker address (e.g. "tcp://localhost:1883").
-	BrokerURL string
-
-	// ClientID identifies this fleet manager to the broker.
-	ClientID string
-
-	// HeartbeatQoS is the QoS for heartbeat subscriptions (default 0).
-	HeartbeatQoS byte
-
-	// VerdictQoS is the QoS for verdict request subscriptions (default 1).
-	VerdictQoS byte
+// SetReplayForDevice supplies the durable policy/emergency catch-up callback.
+// Configure it before Start. It is called only after signed 68-byte frames
+// pass HMAC and freshness checks; unsigned development frames cannot trigger
+// a fleet-wide OTA broadcast.
+func (b *Bridge) SetReplayForDevice(fn func(context.Context, uint64, uint64, uint16, uint32) (uint32, error)) {
+	b.replayForDevice = fn
 }
 
 // NewBridge creates a new MQTT bridge.
@@ -250,6 +281,7 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		heartbeatMinInterval: time.Second, // 1 heartbeat/sec default
 		lastHeartbeat:        make(map[uint64]time.Time),
 		verdictRateMap:       make(map[uint64]*verdictRateEntry),
+		replayState:          make(map[uint64]deviceReplayState),
 	}
 }
 
@@ -262,6 +294,9 @@ func (b *Bridge) MarkDecommissioned(fullDeviceID uint64) {
 	b.decommissionedMu.Lock()
 	b.decommissioned[fullDeviceID] = time.Now()
 	b.decommissionedMu.Unlock()
+	b.replayMu.Lock()
+	delete(b.replayState, fullDeviceID)
+	b.replayMu.Unlock()
 }
 
 // isDecommissioned checks if a device has been decommissioned.
@@ -279,6 +314,9 @@ func (b *Bridge) ClearDecommissioned(fullDeviceID uint64) {
 	b.decommissionedMu.Lock()
 	delete(b.decommissioned, fullDeviceID)
 	b.decommissionedMu.Unlock()
+	b.replayMu.Lock()
+	delete(b.replayState, fullDeviceID)
+	b.replayMu.Unlock()
 }
 
 // SetDeviceKeyStore configures per-device key resolution via a persistent store.
@@ -301,6 +339,8 @@ func (b *Bridge) SetDecommissionStore(ds DecommissionChecker) {
 // It blocks until the context is cancelled or Stop() is called.
 func (b *Bridge) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer b.stopOnce.Do(func() { close(b.stopped) })
 	b.cancelMu.Lock()
 	b.cancel = cancel
 	b.cancelMu.Unlock()
@@ -423,7 +463,6 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 	_ = b.client.Disconnect()
 	b.wg.Wait()
-	b.stopOnce.Do(func() { close(b.stopped) })
 	return nil
 }
 
@@ -479,12 +518,6 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 
 	if err := validateTopicIDs(parts); err != nil {
 		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — %v", err)
-		b.incErrors()
-		return
-	}
-
-	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
-		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()
 		return
 	}
@@ -554,6 +587,7 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 	hb := &manager.Heartbeat{
 		DeviceID:       hw.DeviceID,
 		UptimeSec:      hw.UptimeSec,
+		BootCounter:    hw.BootCounter,
 		PolicyVersion:  hw.PolicyVersion,
 		FWVersion:      hw.FWVersion,
 		DeniedCount:    uint32(hw.DeniedCount),
@@ -567,17 +601,54 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		Capabilities:   hw.Capabilities,
 	}
 
-	b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb)
+	if !b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb) {
+		b.incErrors()
+		return
+	}
 
 	b.mu.Lock()
 	b.heartbeatsProcessed++
 	b.mu.Unlock()
+	b.maybeReplayForDevice(fullID, parts, hw, hw.Signed)
+}
+
+func (b *Bridge) maybeReplayForDevice(fullID uint64, parts *TopicParts, hw *HeartbeatWire, signed bool) {
+	if !signed || b.replayForDevice == nil {
+		return
+	}
+	b.replayMu.Lock()
+	state := b.replayState[fullID]
+	// A captured signed packet must not become a fleet-wide publish amplifier.
+	if state.inFlight || hw.BootCounter < state.bootCounter ||
+		(hw.BootCounter == state.bootCounter && hw.UptimeSec <= state.uptimeSec) {
+		b.replayMu.Unlock()
+		return
+	}
+	state.bootCounter = hw.BootCounter
+	state.uptimeSec = hw.UptimeSec
+	state.inFlight = true
+	b.replayState[fullID] = state
+	b.replayMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err := b.replayForDevice(ctx, uint64(parts.TenantID), uint64(parts.FleetID), hw.PolicyVersion, hw.LastEmergencySeq)
+	cancel()
+
+	b.replayMu.Lock()
+	state = b.replayState[fullID]
+	state.inFlight = false
+	b.replayState[fullID] = state
+	b.replayMu.Unlock()
+	if err != nil {
+		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", parts.DeviceID, err)
+		b.incErrors()
+	}
 }
 
 // handleRegistration processes a registration message from an edge device.
-// The payload uses the same 32-byte heartbeat wire format. Registration is
-// idempotent: if the device already exists, RegisterDevice updates safe fields
-// and returns ErrDeviceExists, which we silently ignore.
+// The payload uses the same signed heartbeat wire format. Re-registration is
+// idempotent: a valid duplicate never changes an enrolled device's metadata,
+// so a replayed packet cannot roll back firmware or capabilities.
 func (b *Bridge) handleRegistration(msg Message) {
 	if !b.tryAcquire() {
 		return
@@ -593,12 +664,6 @@ func (b *Bridge) handleRegistration(msg Message) {
 
 	if err := validateTopicIDs(parts); err != nil {
 		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — %v", err)
-		b.incErrors()
-		return
-	}
-
-	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
-		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()
 		return
 	}
@@ -636,9 +701,8 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
-	//
-	// Check if the device already exists first — re-registration of known
-	// devices is always allowed (idempotent update of safe fields).
+	// Check whether this is an already enrolled device. A registration from a
+	// reconnect must not overwrite inventory with a replayed older payload.
 	dev, existsAlready := b.fleet.GetDevice(manager.ComposeID(
 		parts.TenantID, parts.FleetID, parts.DeviceID))
 
@@ -649,15 +713,26 @@ func (b *Bridge) handleRegistration(msg Message) {
 			b.incErrors()
 			return
 		}
+		// The inventory's durable heartbeat baseline rejects captured older
+		// registrations; same-boot reconnects can still catch up when uptime
+		// has advanced since the last accepted heartbeat.
+		if hw.Signed && (hw.BootCounter < dev.BootCounter ||
+			(hw.BootCounter == dev.BootCounter && hw.UptimeSec <= dev.LastUptime)) {
+			b.logger.Printf("[mqtt-bridge] stale registration ignored for device %d", parts.DeviceID)
+			return
+		}
+		b.logger.Printf("[mqtt-bridge] device %d re-registered (authenticated no-op)", parts.DeviceID)
+		b.maybeReplayForDevice(fullID, parts, hw, hw.Signed)
+		return
 	}
 
-	if !existsAlready && !b.AllowAutoRegistration {
-		b.logger.Printf("[mqtt-bridge] WARNING: auto-registration denied for unknown device %d (tenant=%d fleet=%d) — set DCLAW_FLEET_AUTO_REGISTER=true or register via CLI/API",
+	if !existsAlready && (!b.AllowAutoRegistration || isProductionMode()) {
+		b.logger.Printf("[mqtt-bridge] WARNING: auto-registration denied for unknown device %d (tenant=%d fleet=%d) — allowed only in explicit unmanaged development mode; register via CLI/API in production",
 			parts.DeviceID, parts.TenantID, parts.FleetID)
 		return
 	}
 
-	_, regErr := b.fleet.RegisterDevice(
+	_, regErr := b.fleet.RegisterDeviceIfAbsent(
 		parts.TenantID, parts.FleetID, parts.DeviceID,
 		"mqtt-registered",
 		fmt.Sprintf("%d", hw.FWVersion),
@@ -672,11 +747,12 @@ func (b *Bridge) handleRegistration(msg Message) {
 	}
 
 	if regErr == manager.ErrDeviceExists {
-		b.logger.Printf("[mqtt-bridge] device %d re-registered (idempotent)", parts.DeviceID)
+		b.logger.Printf("[mqtt-bridge] device %d re-registered (authenticated no-op)", parts.DeviceID)
 	} else {
 		b.logger.Printf("[mqtt-bridge] device %d registered via MQTT (tenant=%d fleet=%d fw=%d policy=%d)",
 			parts.DeviceID, parts.TenantID, parts.FleetID, hw.FWVersion, hw.PolicyVersion)
 	}
+	b.maybeReplayForDevice(fullID, parts, hw, hw.Signed)
 }
 
 // handleVerdictRequest processes a verdict request from an edge device.
@@ -697,12 +773,6 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 
 	if err := validateTopicIDs(parts); err != nil {
 		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — %v", err)
-		b.incErrors()
-		return
-	}
-
-	if msg.ClientID != "" && !AuthorizePublish(msg.ClientID, msg.Topic) {
-		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — client %s not authorized for topic %s", msg.ClientID, msg.Topic)
 		b.incErrors()
 		return
 	}
@@ -838,7 +908,10 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// Tenant/fleet scoping ensures verdicts are isolated across tenants.
 	action, severity := b.cache.Evaluate(parts.TenantID, parts.FleetID, vr.ToolHash)
 
-	// Wire block count metric
+	// Count verdicts only after the request has been authenticated and decoded.
+	if action == verdict.ActionAllow && b.onAllow != nil {
+		b.onAllow()
+	}
 	if action == verdict.ActionBlock && b.onBlock != nil {
 		b.onBlock()
 	}
@@ -971,7 +1044,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 // ~50-line HMAC verification block.
 func (b *Bridge) verifyMessageHMAC(msg Message, parts *TopicParts, hw *HeartbeatWire) error {
 	if b.keyProvider == nil {
-		return nil
+		return fmt.Errorf("device key provider is not configured")
 	}
 
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
@@ -987,13 +1060,16 @@ func (b *Bridge) verifyMessageHMAC(msg Message, parts *TopicParts, hw *Heartbeat
 		// valid signed heartbeat cannot be replayed on the /register topic.
 		mac := hmac.New(sha256.New, deviceKey)
 		mac.Write([]byte(msg.Topic))
-		mac.Write(msg.Payload[:32])
+		mac.Write(msg.Payload[:40])
 		expected := mac.Sum(nil)
 
 		if !hmac.Equal(expected, hw.HMACTag) {
 			return fmt.Errorf("HMAC verification failed for device %d (possible spoofing attempt)", parts.DeviceID)
 		}
 	} else {
+		if isProductionMode() {
+			return fmt.Errorf("unsigned heartbeat/registration from device %d rejected in production", parts.DeviceID)
+		}
 		// Unsigned (legacy) message: check whether this device has a
 		// per-device key provisioned. If it does, reject -- an attacker
 		// could bypass HMAC by sending a shorter (unsigned) payload.

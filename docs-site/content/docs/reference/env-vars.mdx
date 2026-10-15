@@ -1,6 +1,6 @@
 ---
 title: Environment variables
-description: Every environment variable DefenseClaw reads, grouped by category, with defaults, accepted values, and the files that read each one.
+description: Supported DefenseClaw and Fleet environment variables, with defaults, accepted values, and source readers.
 keywords:
   - DefenseClaw env vars
   - DEFENSECLAW_LLM_KEY
@@ -9,7 +9,7 @@ keywords:
   - DefenseClaw configuration
 ---
 
-This is the canonical list of every environment variable DefenseClaw reads. The list is generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json); CI fails if any callsite references a `DEFENSECLAW_*` var not declared in the registry.
+This is the supported environment-variable catalog generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json). CI checks all `DEFENSECLAW_*` references and direct Fleet/Edge `DCLAW_*` readers against the registry.
 
 <Callout title="Config v8 observability policy lives in YAML">
 V8 does not use ambient `DEFENSECLAW_OTEL_*`, standard
@@ -23,7 +23,7 @@ scope at each such row.
 </Callout>
 
 <Callout title="See live what's active">
-`defenseclaw doctor` surfaces any **active security override** in real time. Operators with no overrides set see a single "none active" pass row; if you've left a debug toggle on, doctor flags it loudly.
+`defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
 </Callout>
 
 ## Managed hosts and the environment
@@ -32,15 +32,20 @@ On a per-user install the environment is yours, and DefenseClaw reads the
 variables below as written. A **managed standalone** host is different: a
 device on `deployment_mode: managed_enterprise` with `enterprise.profile:
 standalone`, where an administrator owns `config.yaml` and that file is the
-policy. A user's shell or `.env` must not be able to weaken it, so every
-variable in the registry carries a managed-host policy. It is the **Managed
-host** line of each row below. Per-user installs and the Secure Client profile
-read the raw environment, so the line does not apply to them.
+policy. The core `DEFENSECLAW_*` registry policies prevent user-controlled
+opt-outs from weakening managed configuration. Every row has a **Managed host**
+policy. Per-user installs and the Secure Client profile read the raw environment,
+so that policy does not apply to them.
+
+Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C
+service process. Some can weaken security, such as TLS verification overrides.
+Administrators must control the service environment; the CLI cannot inspect a
+separate systemd service's environment through `defenseclaw doctor`.
 
 | Managed host | What a managed standalone host does with the value |
 | --- | --- |
-| `allow` | Uses it. These are runtime paths, credentials, and values that DefenseClaw's own hook scripts set for themselves. |
-| `ignore` | Treats it as unset. This covers every security opt-out except `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`, the debug switches, most telemetry inputs, discovery probes, the Splunk bridge variables, test fixtures, `DEFENSECLAW_REPO`, `DEFENSECLAW_NO_UPDATE_CHECK`, most upgrade-internal variables, and the two deployment pins described below. |
+| `allow` | Uses it. This includes runtime paths, credentials, hook-script values, and Fleet service variables. Restrict access to service environments containing Fleet secrets or TLS overrides. |
+| `ignore` | Treats it as unset. This covers core `DEFENSECLAW_*` security opt-outs except `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`, the debug switches, most telemetry inputs, discovery probes, the Splunk bridge variables, test fixtures, `DEFENSECLAW_REPO`, `DEFENSECLAW_NO_UPDATE_CHECK`, most upgrade-internal variables, and the two deployment pins described below. |
 | `tighten_only` | Uses it only when it makes the host stricter: `DEFENSECLAW_FAIL_MODE` counts only as `closed`, `DEFENSECLAW_STRICT_AVAILABILITY` can only force fail-closed, and `DEFENSECLAW_HOOK_MAX_BODY` can lower the hook body cap but never raise it. |
 
 - **`.env` follows the same rule.** The gateway and the CLI load
@@ -210,17 +215,6 @@ read the raw environment, so the line does not apply to them.
 | `DEFENSECLAW_LOG_TIMESTAMPS`<br/>Default: `unset` (lines are stamped)<br/>Values: `0`, `unset`<br/>Managed host: `ignore` | Set to 0 to turn off the RFC 3339 UTC time stamps the gateway and the background watchdog put on each line of their log files.<br/>**Read by:** `internal/daemon/logstamp.go` |
 | `DEFENSECLAW_NO_UPDATE_CHECK`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Turns off the once-a-day 'new release available' notice in the CLI and TUI; the config.yaml equivalent is update.check: false.<br/>**Read by:** `cli/defenseclaw/update_notice.py` |
 | `DEFENSECLAW_SIDECAR_DIAG`<br/>Impact: low<br/>Default: `unset`<br/>Values: `1`, `true`, `unset`<br/>Managed host: `ignore` | Extra sidecar boot-time diagnostics (config dump, env presence).<br/>**Read by:** `internal/cli/sidecar.go` |
-| `DEFENSECLAW_TRAINING_ALGORITHM`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | GRPO training algorithm.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_BACKEND`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Training compute backend.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_CATEGORY`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Guardrail category for training.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_GROUP_SIZE`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | GRPO group size.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_KL_COEF`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | KL divergence coefficient.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_LORA_RANK`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | LoRA adapter rank.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_MAX_GEN_LENGTH`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Maximum generation token length.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_MAX_STEPS`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Maximum training steps.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_MEMORY_MODE`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | GPU memory optimization mode.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_POLICY_GGUF`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | GGUF model path for policy training.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
-| `DEFENSECLAW_TRAINING_REWARD_FUNCS`<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Comma-separated reward functions.<br/>**Read by:** `cli/defenseclaw/commands/cmd_training.py` |
 | `DEFENSECLAW_TUI_SKIP_FIRST_RUN_PROMPT`<br/>Default: `unset` (prompt shown on a TTY)<br/>Values: `1`, `true`, `yes`, `unset`<br/>Managed host: `ignore` | Skip the interactive first-run setup wizard prompt when launching the TUI, proceeding directly without asking whether to run setup.<br/>**Read by:** `cli/defenseclaw/tui/__init__.py` |
 | `DEFENSECLAW_WEBHOOK_DEBUG`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Webhook dispatcher dumps full request bodies (including secrets) to stderr.<br/>**Read by:** `internal/gateway/webhook.go` |
 
@@ -335,6 +329,43 @@ read the raw environment, so the line does not apply to them.
 | `DEFENSECLAW_SOURCETYPE`<br/>Default: defenseclaw:json<br/>Values: `splunk-sourcetype`<br/>Managed host: `ignore` | Splunk-bridge sourcetype.<br/>**Read by:** `bundles/splunk_local_bridge/env/.env.example` |
 | `DEFENSECLAW_SPLUNK_O11Y_DASHBOARDS_WORK_DIR`<br/>Default: `<data_dir>/splunk_o11y_dashboards/terraform`<br/>Values: `absolute directory path`, `unset`<br/>Managed host: `ignore` | Terraform working directory for Splunk Observability dashboard provisioning.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py` |
 | `DEFENSECLAW_TERRAFORM_PLUGIN_DIR`<br/>Default: `unset` (no -plugin-dir passed to terraform init)<br/>Values: `absolute directory path`, `unset`<br/>Managed host: `ignore` | Optional Terraform provider plugin directory for offline / cached provider installs when running 'defenseclaw setup splunk-o11y-dashboards'.<br/>**Read by:** `cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py` |
+
+## Fleet management (Edge Connector)
+
+| Variable | What it does |
+| --- | --- |
+| `DCLAW_AUDIT_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `64-hex-chars`<br/>Managed host: `allow` | Nonzero 32-byte hex HMAC key for signed local audit records.<br/>**Read by:** `edge-connector/src/persist/audit_ring.c` |
+| `DCLAW_BROKER_URL`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `mqtt://host:port, mqtts://host:port`<br/>Managed host: `allow` | Device MQTT broker URL; use mqtts:// and a trusted CA in production.<br/>**Read by:** `edge-connector/src/persist/config_store.c` |
+| `DCLAW_CA_CERT_PATH`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Path to a PEM CA certificate used to verify the MQTT broker in production.<br/>**Read by:** `edge-connector/src/comms/tls_engine.c` |
+| `DCLAW_CRL_PATH`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Optional certificate revocation list for edge MQTT TLS peer validation; an explicit unreadable or invalid CRL aborts TLS initialization.<br/>**Read by:** `edge-connector/src/comms/tls_engine.c` |
+| `DCLAW_DEVICE_CERT_PATH`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Path to the edge device client TLS certificate.<br/>**Read by:** `edge-connector/src/comms/tls_engine.c` |
+| `DCLAW_DEVICE_ID`<br/>Impact: low<br/>Default: `unset`<br/>Values: `uint64`<br/>Managed host: `allow` | Numeric edge device identifier assigned by Fleet registration.<br/>**Read by:** `edge-connector/src/main.c` |
+| `DCLAW_DEVICE_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Fleet-wide device HMAC key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/mqtt/bridge.go`, `edge-connector/src/comms/verdict_protocol.c` |
+| `DCLAW_DEVICE_KEY_PATH`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Path to the edge device client TLS private key.<br/>**Read by:** `edge-connector/src/comms/tls_engine.c` |
+| `DCLAW_DEV_MODE`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `ON`, `unset`<br/>Managed host: `ignore` | On unmanaged hosts only, ON explicitly enables legacy development Fleet MQTT behavior; unset defaults to production checks.<br/>**Read by:** `internal/fleet/mqtt/bridge.go` |
+| `DCLAW_EMERGENCY_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Separate nonzero 32-byte hex HMAC key required for emergency commands and lockdown release; no OTA-key fallback.<br/>**Read by:** `internal/fleet/policy/signer.go`, `edge-connector/src/comms/ota_receiver.c` |
+| `DCLAW_FLASH_PATH`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Override path to edge device emulated flash storage.<br/>**Read by:** `edge-connector/src/platform/hal_linux.c` |
+| `DCLAW_FLEET_API_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.<br/>**Read by:** `internal/fleet/api.go` |
+| `DCLAW_FLEET_API_URL`<br/>Impact: low<br/>Default: `unset`<br/>Values: `URL`<br/>Managed host: `allow` | Fleet API URL used by the remote device installer.<br/>**Read by:** `cli/defenseclaw/commands/cmd_edge_install.py` |
+| `DCLAW_FLEET_AUTO_REGISTER`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow devices to self-register via MQTT heartbeat.<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_FLEET_ID`<br/>Impact: low<br/>Default: `unset`<br/>Values: `uint32`<br/>Managed host: `allow` | Numeric Fleet identifier assigned to the edge device.<br/>**Read by:** `edge-connector/src/main.c` |
+| `DCLAW_FLEET_TENANT_TOKENS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Comma-separated tenant-scoped tokens (token:tid,... format).<br/>**Read by:** `internal/fleet/api.go` |
+| `DCLAW_IPC_ALLOWED_GID`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `integer`<br/>Managed host: `allow` | Allowed local group ID for the edge IPC socket.<br/>**Read by:** `edge-connector/src/main.c`, `edge-connector/src/platform/hal_linux.c` |
+| `DCLAW_IPC_ALLOWED_UID`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `integer`<br/>Managed host: `allow` | Allowed local user ID for the edge IPC socket.<br/>**Read by:** `edge-connector/src/main.c`, `edge-connector/src/platform/hal_linux.c` |
+| `DCLAW_IPC_SOCKET_PATH`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Path of the edge connector Unix IPC socket.<br/>**Read by:** `edge-connector/src/main.c` |
+| `DCLAW_MQTT_BROKER_URL`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker address for fleet bridge (host:port).<br/>**Read by:** `internal/gateway/sidecar.go` |
+| `DCLAW_MQTT_PASS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker password.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
+| `DCLAW_MQTT_USER`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker username.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
+| `DCLAW_OTA_HMAC_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `64-hex-chars`<br/>Managed host: `allow` | Explicit nonzero 32-byte hex shared secret for OTA policy HMAC; C production also requires DCLAW_ALLOW_HMAC_OTA=ON at build time.<br/>**Read by:** `internal/fleet/policy/signer.go`, `edge-connector/src/comms/ota_receiver.c` |
+| `DCLAW_PRODUCTION`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1`, `true`, `unset`<br/>Managed host: `allow` | Force production Fleet MQTT security checks when set to 1 or true; production checks are already the default.<br/>**Read by:** `internal/fleet/mqtt/bridge.go` |
+| `DCLAW_REQUIRE_TLS`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `1, unset`<br/>Managed host: `allow` | Require TLS for the Go Fleet MQTT client.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
+| `DCLAW_STRICT_MODE`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `0, 1`<br/>Managed host: `allow` | Require strict edge connector behavior on policy and verdict failures.<br/>**Read by:** `edge-connector/src/dclaw_core.c` |
+| `DCLAW_TENANT_ID`<br/>Impact: low<br/>Default: `unset`<br/>Values: `uint16`<br/>Managed host: `allow` | Numeric Fleet tenant identifier assigned to the edge device.<br/>**Read by:** `edge-connector/src/main.c` |
+| `DCLAW_TLS_CA_CERT`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | CA certificate path for the active Go Fleet MQTT TLS client.<br/>**Read by:** `internal/fleet/mqtt/tls_config.go` |
+| `DCLAW_TLS_CLIENT_CERT`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Client certificate path for the active Go Fleet MQTT TLS client.<br/>**Read by:** `internal/fleet/mqtt/tls_config.go` |
+| `DCLAW_TLS_CLIENT_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `path`<br/>Managed host: `allow` | Client private-key path for the active Go Fleet MQTT TLS client.<br/>**Read by:** `internal/fleet/mqtt/tls_config.go` |
+| `DCLAW_TLS_INSECURE`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1, unset`<br/>Managed host: `allow` | Development-only switch to allow TLS without a trusted CA; rejected by production C builds.<br/>**Read by:** `edge-connector/src/comms/tls_engine.c` |
+| `DCLAW_TLS_SKIP_VERIFY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `1, unset`<br/>Managed host: `ignore` | Skip Go Fleet MQTT broker certificate verification only in explicit unmanaged development mode; production and managed hosts enforce verification.<br/>**Read by:** `internal/fleet/mqtt/tls_config.go` |
 
 ## Test fixtures (test-only)
 
@@ -480,24 +511,6 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 </Accordion>
 </Accordions>
 
-## Fleet management (Edge Connector)
-
-| Variable | What it does |
-| --- | --- |
-| `DCLAW_ALLOW_KEY_OVER_HTTP`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow device key delivery over plaintext HTTP (testing only).<br/>**Read by:** `internal/fleet/api.go` |
-| `DCLAW_DEVICE_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Fleet-wide device HMAC key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/mqtt/bridge.go` |
-| `DCLAW_DEV_MODE`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Enable development mode (relaxed key requirements).<br/>**Read by:** `internal/fleet/mqtt/broker.go` |
-| `DCLAW_EMERGENCY_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Emergency command signing key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/policy/policy.go` |
-| `DCLAW_FLEET_API_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Fleet management API bearer token (hex-encoded).<br/>**Read by:** `internal/gateway/sidecar.go` |
-| `DCLAW_FLEET_AUTO_REGISTER`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Allow devices to self-register via MQTT heartbeat.<br/>**Read by:** `internal/gateway/sidecar.go` |
-| `DCLAW_FLEET_TENANT_TOKENS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Comma-separated tenant-scoped tokens (token:tid,... format).<br/>**Read by:** `internal/gateway/sidecar.go` |
-| `DCLAW_MQTT_BROKER_URL`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker address for fleet bridge (host:port).<br/>**Read by:** `internal/gateway/sidecar.go` |
-| `DCLAW_MQTT_PASS`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker password.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
-| `DCLAW_MQTT_USER`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | MQTT broker username.<br/>**Read by:** `internal/fleet/mqtt/paho_client.go` |
-| `DCLAW_OTA_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | OTA policy signing key (hex-encoded, 32 bytes).<br/>**Read by:** `internal/fleet/policy/signer.go` |
-| `DCLAW_PRODUCTION`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Enable production mode (reject zero keys, require TLS).<br/>**Read by:** `internal/fleet/mqtt/broker.go` |
-| `DCLAW_TRUST_PROXY_HEADERS`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `string`<br/>Managed host: `allow` | Trust X-Forwarded-Proto from reverse proxies.<br/>**Read by:** `internal/fleet/api.go` |
-
 {/* AUTOGEN-END: env-vars */}
 
 ## Managed enterprise deployments
@@ -530,7 +543,7 @@ in an elevated PowerShell first. See
 
 ## When in doubt
 
-Run `defenseclaw doctor`. The doctor walks the same env-var resolution code paths as the running gateway and surfaces effective values plus any active opt-outs.
+Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`; doctor cannot read another process's effective environment.
 
 ```bash
 defenseclaw doctor

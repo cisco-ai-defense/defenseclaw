@@ -205,7 +205,8 @@ int dclaw_tls_init(void) {
                 size_t crl_len = 0;
                 unsigned char *crl_buf = read_file_alloc(crl_path, &crl_len);
                 if (!crl_buf) {
-                    fprintf(stderr, "[DCLAW-TLS] WARNING: Failed to read CRL file: %s\n", crl_path);
+                    fprintf(stderr, "[DCLAW-TLS] ERROR: Failed to read configured CRL file: %s\n", crl_path);
+                    goto fail;
                 } else {
                     ret = mbedtls_x509_crl_parse(&tls_crl, crl_buf, crl_len);
                     dclaw_secure_zero(crl_buf, crl_len);
@@ -213,8 +214,9 @@ int dclaw_tls_init(void) {
                     if (ret != 0) {
                         char errbuf[128];
                         mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-                        fprintf(stderr, "[DCLAW-TLS] WARNING: CRL parse failed: %s (0x%04x)\n",
+                        fprintf(stderr, "[DCLAW-TLS] ERROR: Configured CRL parse failed: %s (0x%04x)\n",
                                 errbuf, (unsigned)-ret);
+                        goto fail;
                     } else {
                         crl_ptr = &tls_crl;
                         fprintf(stderr, "[DCLAW-TLS] CRL loaded from %s\n", crl_path);

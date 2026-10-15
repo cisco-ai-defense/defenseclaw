@@ -278,6 +278,7 @@ int cycle(MQTTClient* c, Timer* timer)
         {
             MQTTString topicName;
             MQTTMessage msg;
+            Timer ack_timer;
             int intQoS;
             msg.payloadlen = 0; /* this is a size_t, but deserialize publish sets this as int */
             if (MQTTDeserialize_publish(&msg.dup, &intQoS, &msg.retained, &msg.id, &topicName,
@@ -287,6 +288,11 @@ int cycle(MQTTClient* c, Timer* timer)
             deliverMessage(c, &topicName, &msg);
             if (msg.qos != QOS0)
             {
+                /* The application callback can validate and durably apply an OTA
+                 * policy.  Its work may outlast MQTTYield's short receive poll.
+                 * Give the protocol ACK a fresh, bounded send deadline. */
+                TimerInit(&ack_timer);
+                TimerCountdownMS(&ack_timer, c->command_timeout_ms);
                 if (msg.qos == QOS1)
                     len = MQTTSerialize_ack(c->buf, c->buf_size, PUBACK, 0, msg.id);
                 else if (msg.qos == QOS2)
@@ -294,7 +300,7 @@ int cycle(MQTTClient* c, Timer* timer)
                 if (len <= 0)
                     rc = FAILURE;
                 else
-                    rc = sendPacket(c, len, timer);
+                    rc = sendPacket(c, len, &ack_timer);
                 if (rc == FAILURE)
                     goto exit; // there was a problem
             }

@@ -19,13 +19,14 @@ package fleet
 import (
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/sqliteperms"
 
 	_ "modernc.org/sqlite" // pure Go SQLite driver
 )
@@ -36,17 +37,15 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+// ErrDeviceDecommissioned means registration encountered a tombstone inside
+// its transaction. The caller must request forced re-registration to clear it.
+var ErrDeviceDecommissioned = errors.New("device is decommissioned")
+
 // NewSQLiteStore opens (or creates) a SQLite database at the given path
 // and initializes the devices table.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	if info, err := os.Stat(dbPath); os.IsNotExist(err) {
-		f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			return nil, fmt.Errorf("create sqlite %s: %w", dbPath, err)
-		}
-		f.Close()
-	} else if err == nil && info.Mode().Perm()&0077 != 0 {
-		_ = os.Chmod(dbPath, 0600)
+	if err := sqliteperms.Prepare(dbPath); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -78,6 +77,10 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := sqliteperms.Secure(dbPath); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return &SQLiteStore{db: db}, nil
 }
@@ -104,6 +107,7 @@ func createTable(db *sql.DB) error {
 			escalated_total INTEGER NOT NULL DEFAULT 0,
 			flash_writes    INTEGER NOT NULL DEFAULT 0,
 			last_uptime     INTEGER NOT NULL DEFAULT 0,
+			boot_counter    INTEGER NOT NULL DEFAULT 0,
 			prev_denied     INTEGER NOT NULL DEFAULT 0,
 			prev_allowed    INTEGER NOT NULL DEFAULT 0,
 			prev_warned     INTEGER NOT NULL DEFAULT 0,
@@ -117,6 +121,7 @@ func createTable(db *sql.DB) error {
 
 	for _, col := range []string{
 		"ALTER TABLE devices ADD COLUMN last_uptime INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN boot_counter INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN prev_denied INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN prev_allowed INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN warned_total INTEGER NOT NULL DEFAULT 0",
@@ -171,17 +176,25 @@ func createTable(db *sql.DB) error {
 }
 
 func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
+	return saveDeviceWith(s.db, dev)
+}
+
+type sqliteExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 	hmacHex := hex.EncodeToString(dev.LastAuditHMAC)
 
-	_, err := s.db.Exec(`
+	_, err := exec.Exec(`
 		INSERT INTO devices (
 			device_id, tenant_id, fleet_id, hw_profile, fw_version,
 			policy_version, capabilities, status, last_heartbeat,
 			last_audit_hmac, site_id, registered_at, flags,
 			denied_total, allowed_total, warned_total, escalated_total,
-			flash_writes, last_uptime, prev_denied, prev_allowed,
+			flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
 			prev_warned, prev_escalated, boot_epoch
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
 			hw_profile      = excluded.hw_profile,
 			fw_version      = excluded.fw_version,
@@ -198,6 +211,7 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 			escalated_total = excluded.escalated_total,
 			flash_writes    = excluded.flash_writes,
 			last_uptime     = excluded.last_uptime,
+			boot_counter    = excluded.boot_counter,
 			prev_denied     = excluded.prev_denied,
 			prev_allowed    = excluded.prev_allowed,
 			prev_warned     = excluded.prev_warned,
@@ -211,11 +225,49 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 		hmacHex, dev.SiteID, dev.RegisteredAt.Format(time.RFC3339),
 		dev.Flags, dev.DeniedTotal, dev.AllowedTotal,
 		dev.WarnedTotal, dev.EscalatedTotal,
-		dev.FlashWrites, dev.LastUptime, dev.PrevDenied, dev.PrevAllowed,
+		dev.FlashWrites, dev.LastUptime, dev.BootCounter, dev.PrevDenied, dev.PrevAllowed,
 		dev.PrevWarned, dev.PrevEscalated, dev.BootEpoch,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device %d: %w", dev.DeviceID, err)
+	}
+	return nil
+}
+
+// SaveDeviceRegistration persists metadata, a fresh signing key, and any
+// tombstone removal atomically. Failure keeps the previous credential valid
+// and the previous device metadata and tombstone intact, including across a
+// gateway restart.
+func (s *SQLiteStore) SaveDeviceRegistration(dev *manager.Device, key []byte, allowRecommission bool) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin device registration %d: %w", dev.DeviceID, err)
+	}
+	defer tx.Rollback()
+	if err := saveDeviceWith(tx, dev); err != nil {
+		return err
+	}
+	if err := saveDeviceKeyWith(tx, dev.DeviceID, key); err != nil {
+		return err
+	}
+	var tombstone int
+	err = tx.QueryRow("SELECT 1 FROM decommissioned_devices WHERE device_id = ?", dev.DeviceID).Scan(&tombstone)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check decommission tombstone %d: %w", dev.DeviceID, err)
+	}
+	if err == nil && !allowRecommission {
+		return ErrDeviceDecommissioned
+	}
+	if err == nil {
+		if _, err := tx.Exec("DELETE FROM decommissioned_devices WHERE device_id = ?", dev.DeviceID); err != nil {
+			return fmt.Errorf("delete decommission tombstone %d: %w", dev.DeviceID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit device registration %d: %w", dev.DeviceID, err)
 	}
 	return nil
 }
@@ -228,7 +280,7 @@ func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*ma
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
-		       flash_writes, last_uptime, prev_denied, prev_allowed,
+		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
 		       prev_warned, prev_escalated, boot_epoch
 		FROM devices WHERE device_id = ?
 	`, fullID)
@@ -242,7 +294,7 @@ func (s *SQLiteStore) ListDevices() ([]*manager.Device, error) {
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
-		       flash_writes, last_uptime, prev_denied, prev_allowed,
+		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
 		       prev_warned, prev_escalated, boot_epoch
 		FROM devices ORDER BY device_id
 	`)
@@ -271,14 +323,51 @@ func (s *SQLiteStore) DeleteDevice(tenantID, fleetID uint16, deviceID uint32) er
 	return nil
 }
 
+// DeleteDeviceKeyAndTombstone decommissions a device in one SQLite
+// transaction. A failed delete or tombstone write rolls back the device,
+// signing key, and tombstone together.
+func (s *SQLiteStore) DeleteDeviceKeyAndTombstone(tenantID, fleetID uint16, deviceID uint32) error {
+	fullID := manager.ComposeID(tenantID, fleetID, deviceID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin decommission %d: %w", fullID, err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("DELETE FROM devices WHERE device_id = ?", fullID)
+	if err != nil {
+		return fmt.Errorf("delete device %d: %w", fullID, err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check device deletion %d: %w", fullID, err)
+	}
+	if deleted != 1 {
+		return fmt.Errorf("device %d missing from persistent store", fullID)
+	}
+	if _, err := tx.Exec("DELETE FROM device_keys WHERE device_id = ?", fullID); err != nil {
+		return fmt.Errorf("delete device key %d: %w", fullID, err)
+	}
+	if _, err := tx.Exec("INSERT OR IGNORE INTO decommissioned_devices (device_id) VALUES (?)", fullID); err != nil {
+		return fmt.Errorf("save decommission tombstone %d: %w", fullID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit decommission %d: %w", fullID, err)
+	}
+	return nil
+}
+
 // SaveDeviceKey persists a per-device HMAC signing key (32 bytes).
 // The key is stored hex-encoded. Upsert semantics: replaces existing key.
 func (s *SQLiteStore) SaveDeviceKey(deviceID uint64, key []byte) error {
+	return saveDeviceKeyWith(s.db, deviceID, key)
+}
+
+func saveDeviceKeyWith(exec sqliteExecer, deviceID uint64, key []byte) error {
 	if len(key) != 32 {
 		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
 	}
 	keyHex := hex.EncodeToString(key)
-	_, err := s.db.Exec(`
+	_, err := exec.Exec(`
 		INSERT INTO device_keys (device_id, key_hex, created_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
@@ -401,7 +490,7 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		&registeredAt, &dev.Flags,
 		&dev.DeniedTotal, &dev.AllowedTotal,
 		&dev.WarnedTotal, &dev.EscalatedTotal,
-		&dev.FlashWrites, &dev.LastUptime,
+		&dev.FlashWrites, &dev.LastUptime, &dev.BootCounter,
 		&dev.PrevDenied, &dev.PrevAllowed,
 		&dev.PrevWarned, &dev.PrevEscalated,
 		&dev.BootEpoch,

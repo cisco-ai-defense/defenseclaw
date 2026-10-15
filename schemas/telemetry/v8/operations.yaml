@@ -12871,6 +12871,27 @@ groups:
     - enforced_outcome
     compatibility_profiles:
     - local-observability-v1
+- id: log.fleet.device.credential_provision_authorized
+  type: log
+  brief: Pre-commit audit authorization to provision a fleet device credential; no credential issuance is implied.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.compliance.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.credential_provision_authorized
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.fleet.device.decommission
   type: log
   brief: Edge connector device decommissioned and removed from the fleet.
@@ -12888,6 +12909,27 @@ groups:
     outcome_requirement: required
     allowed_outcomes:
     - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.decommission_authorized
+  type: log
+  brief: Pre-commit audit authorization to decommission a fleet device; no device removal is implied.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.compliance.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.decommission_authorized
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
     route_selector: true
     mandatory_floor: []
     compatibility_profiles:
@@ -15255,11 +15297,21 @@ producer_identity_sets:
   - event_name: fleet.device.command
     bucket: enforcement.action
     family: log.fleet.device.command
+- id: identity_set.fleet_device_credential_provision_authorized
+  identities:
+  - event_name: fleet.device.credential_provision_authorized
+    bucket: compliance.activity
+    family: log.fleet.device.credential_provision_authorized
 - id: identity_set.fleet_device_decommission
   identities:
   - event_name: fleet.device.decommission
     bucket: asset.lifecycle
     family: log.fleet.device.decommission
+- id: identity_set.fleet_device_decommission_authorized
+  identities:
+  - event_name: fleet.device.decommission_authorized
+    bucket: compliance.activity
+    family: log.fleet.device.decommission_authorized
 - id: identity_set.fleet_device_heartbeat
   identities:
   - event_name: fleet.device.heartbeat
@@ -19346,6 +19398,36 @@ producer_mappings:
   source: internal/audit/actions.go
   event_name_policy: context_required
   allowed_context_identity_set: identity_set.fleet_device_decommission
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.credential_provision_authorized
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device_credential_provision_authorized
+  default_identity:
+    event_name: fleet.device.credential_provision_authorized
+    bucket: compliance.activity
+    family: log.fleet.device.credential_provision_authorized
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.decommission_authorized
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device_decommission_authorized
+  default_identity:
+    event_name: fleet.device.decommission_authorized
+    bucket: compliance.activity
+    family: log.fleet.device.decommission_authorized
   severity_policy: canonical_or_info
   mandatory_rules: []
   companion_rules: []

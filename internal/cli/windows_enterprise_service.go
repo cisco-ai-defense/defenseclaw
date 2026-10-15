@@ -52,6 +52,7 @@ type windowsEnterpriseLifecycleOptions struct {
 	acpBinary          string
 	hookBinary         string
 	sensorHelperBinary string
+	policyCompiler     string
 	cliBinary          string
 	configPath         string
 	manifestPath       string
@@ -252,6 +253,7 @@ func init() {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsSecureClientFleetPreflightCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
@@ -284,6 +286,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.acpBinary, "acp-binary", "", "source defenseclaw-acp.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
 	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
+	flags.StringVar(&opts.policyCompiler, "policy-compiler", "", "standalone source policy_compiler.py")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
 	flags.StringVar(&opts.configPath, "config", "", "administrator-approved managed config.yaml")
 	flags.StringVar(&opts.manifestPath, "manifest", "", "administrator-approved guardian targets.yaml")
@@ -346,7 +349,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 // windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
 // verify leave out of their help.
 var windowsEnterpriseInspectionHiddenFlags = []string{
-	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "cli-binary",
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
 	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
 	"certification-codex-home", "core-hardening-certification",
 	"attest-agent-application-control", "attest-claude-effective-policy",
@@ -893,6 +896,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-ACPBinary", opts.acpBinary)
 	appendValue("-HookBinary", opts.hookBinary)
 	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
+	appendValue("-PolicyCompiler", opts.policyCompiler)
 	appendValue("-CLIBinary", opts.cliBinary)
 	appendValue("-Config", opts.configPath)
 	appendValue("-Manifest", opts.manifestPath)
@@ -1669,6 +1673,31 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("data-dir")
+	return cmd
+}
+
+// The signed enterprise module calls this on its authenticated source config
+// before changing the installed tree or SCM services. It shares the gateway's
+// bounded YAML parser, while avoiding asset checks that require installation.
+func newWindowsSecureClientFleetPreflightCommand() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "preflight-secure-client-fleet",
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := managed.ValidateTrustedFilePath(configPath, "Secure Client config"); err != nil {
+				return fmt.Errorf("Secure Client config source is untrusted: %w", err)
+			}
+			raw, err := readConfigV8Source(configPath)
+			if err != nil {
+				return err
+			}
+			return config.CheckSecureClientFleetSource(configPath, raw)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")
+	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 

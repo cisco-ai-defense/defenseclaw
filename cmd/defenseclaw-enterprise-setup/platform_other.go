@@ -11,6 +11,10 @@ import (
 	"io"
 )
 
+func loadTrustedEnterprisePayload() (enterprisePayload, error) {
+	return loadEmbeddedEnterprisePayload()
+}
+
 func executeEnterpriseSetup(
 	_ context.Context,
 	_ enterpriseSetupOptions,

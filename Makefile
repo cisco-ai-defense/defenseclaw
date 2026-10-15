@@ -1358,6 +1358,12 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
+	@rm -rf cli/defenseclaw/_data/edge-connector
+	@mkdir -p cli/defenseclaw/_data/edge-connector
+	cp edge-connector/CMakeLists.txt cli/defenseclaw/_data/edge-connector/
+	cp -R edge-connector/src edge-connector/include edge-connector/generated \
+		edge-connector/third_party edge-connector/tools edge-connector/policies \
+		edge-connector/packaging cli/defenseclaw/_data/edge-connector/
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm

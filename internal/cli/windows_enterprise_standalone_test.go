@@ -876,7 +876,8 @@ func ensureTestOptions() *windowsEnterpriseLifecycleOptions {
 		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", trustMode: "authenticode",
 		gatewayBinary: `C:\stage\defenseclaw-gateway.exe`, acpBinary: `C:\stage\defenseclaw-acp.exe`,
 		hookBinary: `C:\stage\defenseclaw-hook.exe`, sensorHelperBinary: `C:\stage\defenseclaw-sensor-helper.exe`,
-		configPath: `C:\stage\config.yaml`, manifestPath: `C:\stage\targets.yaml`,
+		policyCompiler: `C:\stage\policy_compiler.py`,
+		configPath:     `C:\stage\config.yaml`, manifestPath: `C:\stage\targets.yaml`,
 		noStart: true, jsonOutput: true,
 	}
 }

@@ -65,6 +65,8 @@ export ESPCLAW_HOST=192.168.1.42
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
+The C engine accepts only reviewed tool names in `src/decision/policy_table.c`; this adapter's Python capability map cannot authorize an unknown C tool name. Review and extend the C table for the tools used here before deployment. Network-capability calls to a private ESP32 address are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+
 ```yaml
 iot_extensions:
   # Block download-then-execute on microcontrollers
@@ -74,15 +76,8 @@ iot_extensions:
     - sequence: [net_fetch, actuate]
       action: block
 
-  # Limit OTA and Lua execution
-  rate_limits:
-    tool_calls_per_minute: 30
-    actuations_per_minute: 5
-
-  # Only allow MQTT to your broker
   destination_allowlist:
-    - "mqtt.your-company.com"
-    - "api.anthropic.com"
+    - "1.1.1.1" # illustrative public IP; replace with an approved endpoint
 ```
 
 ## Architecture

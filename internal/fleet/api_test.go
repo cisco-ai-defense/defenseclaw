@@ -18,7 +18,6 @@ package fleet
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,20 +98,20 @@ func TestPushThreatIntel(t *testing.T) {
 	api := setupAPIWithT(t)
 	// Use valid 64-char hex strings (32 bytes decoded)
 	hash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-	body := `{"new_deny_hashes":["abc123"],"revoke_allow_hashes":["` + hash + `"],"emergency":false}`
+	body := `{"revoke_allow_hashes":["` + hash + `"],"emergency":false}`
 	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", w.Code)
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want 207 while device emergency publisher is unavailable; body: %s", w.Code, w.Body.String())
 	}
 }
 
 func TestPushThreatIntelInvalidHex(t *testing.T) {
 	api := setupAPIWithT(t)
-	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["not-valid-hex"],"emergency":false}`
+	body := `{"revoke_allow_hashes":["not-valid-hex"],"emergency":false}`
 	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
@@ -126,7 +125,7 @@ func TestPushThreatIntelInvalidHex(t *testing.T) {
 func TestPushThreatIntelWrongLength(t *testing.T) {
 	api := setupAPIWithT(t)
 	// Valid hex but only 4 bytes, not 32
-	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["deadbeef"],"emergency":false}`
+	body := `{"revoke_allow_hashes":["deadbeef"],"emergency":false}`
 	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
@@ -134,102 +133,6 @@ func TestPushThreatIntelWrongLength(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for wrong hash length", w.Code)
-	}
-}
-
-func TestSendCommand(t *testing.T) {
-	api := setupAPIWithT(t)
-	// Device 42 in tenant=1, fleet=1 has composite ID = ComposeID(1, 1, 42)
-	devID := manager.ComposeID(1, 1, 42)
-	body := `{"command":"reboot"}`
-	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
-	w := httptest.NewRecorder()
-
-	api.Handler().ServeHTTP(w, req)
-
-	// Without an MQTT client, the command cannot be dispatched.
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestSendCommandNotFound(t *testing.T) {
-	api := setupAPIWithT(t)
-	body := `{"command":"reboot"}`
-	req := authedRequest("POST", "/devices/999/command", strings.NewReader(body))
-	w := httptest.NewRecorder()
-
-	api.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
-}
-
-func TestSendCommandInvalid(t *testing.T) {
-	api := setupAPIWithT(t)
-	devID := manager.ComposeID(1, 1, 42)
-	body := `{"command":"self-destruct"}`
-	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
-	w := httptest.NewRecorder()
-
-	api.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestSendCommandEmpty(t *testing.T) {
-	api := setupAPIWithT(t)
-	devID := manager.ComposeID(1, 1, 42)
-	body := `{"command":""}`
-	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
-	w := httptest.NewRecorder()
-
-	api.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestSendCommandWithMQTT(t *testing.T) {
-	t.Setenv("DCLAW_FLEET_API_TOKEN", testFleetToken)
-	mgr := manager.New(nil)
-	mgr.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 5, 0xFF)
-
-	cache := verdict.NewCache(100, func(_, _ uint16, h [32]byte) (verdict.Action, uint8) {
-		return verdict.ActionAllow, 0
-	})
-
-	mc := &apiMockMQTTClient{}
-	api := NewAPI(context.Background(), mgr, cache, WithMQTTClient(mc))
-
-	devID := manager.ComposeID(1, 1, 42)
-	body := `{"command":"diagnostics"}`
-	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
-	w := httptest.NewRecorder()
-
-	api.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202; body: %s", w.Code, w.Body.String())
-	}
-
-	mc.mu.Lock()
-	pubs := len(mc.published)
-	mc.mu.Unlock()
-	if pubs != 1 {
-		t.Fatalf("published messages = %d, want 1", pubs)
-	}
-
-	mc.mu.Lock()
-	topic := mc.published[0].Topic
-	mc.mu.Unlock()
-	expected := "defenseclaw/1/1/42/cmd/request"
-	if topic != expected {
-		t.Fatalf("topic = %q, want %q", topic, expected)
 	}
 }
 
@@ -244,7 +147,7 @@ func TestDecommissionBatch(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	api := NewAPI(context.Background(), mgr, cache)
+	api := NewAPI(context.Background(), mgr, cache, WithAuditEmitter(&passingCredentialAudit{}))
 
 	body := `{"devices":[{"tenant_id":1,"fleet_id":1,"device_id":10},{"tenant_id":1,"fleet_id":1,"device_id":20},{"tenant_id":1,"fleet_id":1,"device_id":999}]}`
 	req := authedRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
@@ -342,7 +245,9 @@ func setupAPIWithPolicyT(t *testing.T) *API {
 	mc := &apiMockMQTTClient{}
 	store := policy.NewMemoryPolicyStore()
 	signer, _ := policy.NewHMACSigner([]byte("test-key-for-api-tests-32bytes!!"))
-	svc := policy.NewService(store, signer, mc, nil)
+	svc := policy.NewService(store, signer, mc, &policy.Config{
+		EmergencyKeyHex: strings.Repeat("ab", 32),
+	})
 
 	return NewAPI(context.Background(), mgr, cache, WithPolicyService(svc))
 }

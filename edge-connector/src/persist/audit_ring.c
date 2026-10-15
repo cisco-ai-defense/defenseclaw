@@ -506,6 +506,14 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 
     if (action == DCLAW_ACTION_BLOCK) {
         if (flush_buffer_to_flash(w) != 0) {
+            /* A transient failure flushing earlier WARN entries must not
+             * discard the security-relevant BLOCK. Its HMAC was chained to
+             * the last buffered entry above, so retain that ordering for
+             * the next flush attempt. */
+            if (w->count < DCLAW_AUDIT_RAM_BUFFER_SIZE + 1)
+                w->buffer[w->count++] = entry;
+            else
+                fprintf(stderr, "[DCLAW-AUDIT] ERROR: RAM audit buffer full; BLOCK event could not be retained.\n");
             return -1;
         }
 
@@ -524,7 +532,7 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
             ring_head = 0;
         }
         if (hal_flash_write(write_offset, &entry, sizeof(dclaw_audit_entry_t)) != 0) {
-            if (w->count < DCLAW_AUDIT_RAM_BUFFER_SIZE) {
+            if (w->count < DCLAW_AUDIT_RAM_BUFFER_SIZE + 1) {
                 w->buffer[w->count++] = entry;
             }
             return -1;

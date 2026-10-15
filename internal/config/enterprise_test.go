@@ -33,8 +33,13 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 		wantErr string
 	}{
 		{name: "secure client default keeps today's posture", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
+		{name: "windows secure client rejects unsupported Fleet", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Fleet: FleetConfig{Enabled: true}}, wantErr: "fleet.enabled is unsupported for the Secure Client"},
 		{name: "darwin default", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileSecureClient},
+		{name: "macos secure client rejects unsupported Fleet", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Fleet: FleetConfig{Enabled: true}}, wantErr: "fleet.enabled is unsupported for the Secure Client"},
 		{name: "linux default", goos: "linux", cfg: Config{DeploymentMode: "managed_enterprise"}, want: managed.ProfileStandalone},
+		{name: "windows standalone accepts Fleet", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, Fleet: FleetConfig{Enabled: true}}, want: managed.ProfileStandalone},
+		{name: "macos standalone accepts Fleet", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, Fleet: FleetConfig{Enabled: true}}, want: managed.ProfileStandalone},
+		{name: "per-user Windows accepts Fleet", goos: "windows", cfg: Config{Fleet: FleetConfig{Enabled: true}}, want: ""},
 		{name: "pinned standalone", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}, pinned: "standalone", want: managed.ProfileStandalone},
 		{name: "pinned standalone needs a declared profile on windows", goos: "windows", cfg: Config{DeploymentMode: "managed_enterprise"}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
 		{name: "pinned standalone needs a declared profile on darwin", goos: "darwin", cfg: Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Inspection: EnterpriseInspectionConfig{AIDefense: EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}}}}, pinned: "standalone", wantErr: "enterprise.profile must be set to standalone"},
@@ -70,6 +75,54 @@ func TestResolveEnterpriseConfigProfiles(t *testing.T) {
 			}
 			if got, want := cfg.DeclaredEnterpriseProfile(), managed.NormalizeEnterpriseProfile(tc.cfg.Enterprise.Profile); managed.IsManagedEnterprise(tc.cfg.DeploymentMode) && got != want {
 				t.Fatalf("DeclaredEnterpriseProfile() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestSecureClientFleetRejectedFromRuntimeConfigSource(t *testing.T) {
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\nfleet:\n  enabled: true\n")
+	for _, tc := range []struct {
+		goos       string
+		configPath string
+		dataDir    string
+	}{
+		{"windows", `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\config.yaml`, `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`},
+		{"darwin", "/opt/cisco/secureclient/defenseclaw/etc/config.yaml", "/opt/cisco/secureclient/defenseclaw/runtime"},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			_, err := LoadRuntimeV8InspectionCandidateForLayout(tc.configPath, raw, tc.dataDir, tc.goos)
+			if err == nil || !strings.Contains(err.Error(), "fleet.enabled is unsupported for the Secure Client") {
+				t.Fatalf("Secure Client runtime config loader accepted unsupported Fleet: %v", err)
+			}
+		})
+	}
+}
+
+func TestSecureClientFleetSourcePreflight(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"v8 disabled", "config_version: 8\nfleet:\n  enabled: false\n", ""},
+		{"v9 omitted", "config_version: 9\ndeployment_mode: managed_enterprise\n", ""},
+		{"v8 enabled", "config_version: 8\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
+		{"v9 enabled", "config_version: 9\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
+		{"string enabled", "config_version: 8\nfleet:\n  enabled: 'true'\n", "fleet.enabled must be a boolean"},
+		{"duplicate enabled", "config_version: 8\nfleet:\n  enabled: false\n  enabled: true\n", "duplicate"},
+		{"malformed fleet", "config_version: 8\nfleet: true\n", "fleet must be a mapping"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckSecureClientFleetSource(tc.name+".yaml", []byte(tc.raw))
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("preflight rejected valid source: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("preflight error = %v, want %q", err, tc.want)
 			}
 		})
 	}

@@ -74,14 +74,37 @@ typedef struct {
 
 static mqtt_context_t mqtt_ctx;
 
-/*
- * For the rollback flag (which signals a safety-critical canary
- * rollback), keep the flag set for ROLLBACK_CLEAR_AFTER consecutive successful
- * heartbeat sends before clearing, so the information is transmitted at least
- * that many times for redundancy. Heartbeats use QoS 1 for broker ACK.
- */
-#define ROLLBACK_CLEAR_AFTER 3
-static uint8_t rollback_send_count = 0;
+/* Paho's readPacket discards a partially read MQTT packet when its short
+ * MQTTYield timer expires. Keep one bounded deadline across the header,
+ * variable-length size, and payload so a split TCP/TLS record is read whole. */
+typedef enum {
+    MQTT_FRAME_HEADER,
+    MQTT_FRAME_LENGTH,
+    MQTT_FRAME_PAYLOAD,
+} mqtt_frame_phase_t;
+
+static mqtt_frame_phase_t mqtt_frame_phase;
+static uint64_t mqtt_frame_deadline_ms;
+static uint32_t mqtt_frame_length;
+static uint32_t mqtt_frame_multiplier;
+static unsigned mqtt_frame_length_bytes;
+static bool mqtt_frame_failed;
+static char mqtt_password[256];
+static bool mqtt_password_loaded;
+static bool mqtt_context_initialized;
+
+static void mqtt_frame_reset(void) {
+    mqtt_frame_phase = MQTT_FRAME_HEADER;
+    mqtt_frame_deadline_ms = 0;
+    mqtt_frame_length = 0;
+    mqtt_frame_multiplier = 1;
+    mqtt_frame_length_bytes = 0;
+    mqtt_frame_failed = false;
+}
+
+/* Canary rollback remains in the signed heartbeat and registration until a
+ * newer policy is durably installed. The flag is persisted with partition
+ * metadata so fleet status cannot silently return to compliant after reboot. */
 
 /*
  * Pending request tracking table — ring-buffer of {request_id, tool_hash} pairs.
@@ -154,7 +177,7 @@ extern int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
 extern int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
 extern void dclaw_cache_flush_all(void);
-extern void dclaw_emergency_persist(void);
+extern int dclaw_emergency_persist(void);
 
 /* === Paho Network I/O callbacks === */
 
@@ -164,29 +187,34 @@ extern void dclaw_emergency_persist(void);
  * Paho calls this in a loop until it has the full packet.
  */
 int dclaw_paho_read(Network *net, unsigned char *buf, int len, int timeout_ms) {
-#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
-    if (net->tls_active) {
-        int ret = dclaw_tls_read(buf, (size_t)len, timeout_ms);
-        if (ret == -2) return 0;
-        return (ret > 0) ? ret : -1;
-    }
-#endif
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t deadline_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000
-                           + (uint64_t)timeout_ms;
+    if (len <= 0 || mqtt_frame_failed) return -1;
+
+    uint64_t now_ms = hal_tick_ms();
+    uint64_t deadline_ms = mqtt_frame_phase == MQTT_FRAME_HEADER
+        ? now_ms + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0)
+        : mqtt_frame_deadline_ms;
 
     int bytes = 0;
     while (bytes < len) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+        now_ms = hal_tick_ms();
+        if (now_ms >= deadline_ms) break;
         int remaining = (int)(deadline_ms - now_ms);
-        if (remaining <= 0) break;
+
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+        if (net->tls_active) {
+            int n = dclaw_tls_read(buf + bytes, (size_t)(len - bytes), remaining);
+            if (n == -2) continue;
+            if (n <= 0) { mqtt_frame_failed = true; return -1; }
+            bytes += n;
+            continue;
+        }
+#endif
 
         struct pollfd pfd = { .fd = net->my_socket, .events = POLLIN };
         int rc = poll(&pfd, 1, remaining);
         if (rc < 0) {
             if (errno == EINTR) continue;
+            mqtt_frame_failed = true;
             return -1;
         }
         if (rc == 0) break;
@@ -195,10 +223,45 @@ int dclaw_paho_read(Network *net, unsigned char *buf, int len, int timeout_ms) {
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             if (errno == EINTR) continue;
+            mqtt_frame_failed = true;
             return -1;
         }
-        if (n == 0) return -1;
+        if (n == 0) { mqtt_frame_failed = true; return -1; }
         bytes += (int)n;
+    }
+
+    if (bytes != len) {
+        if (mqtt_frame_phase != MQTT_FRAME_HEADER) mqtt_frame_failed = true;
+        return bytes;
+    }
+
+    if (mqtt_frame_phase == MQTT_FRAME_HEADER) {
+        mqtt_frame_phase = MQTT_FRAME_LENGTH;
+        mqtt_frame_deadline_ms = hal_tick_ms() + MQTT_COMMAND_TIMEOUT;
+        mqtt_frame_length = 0;
+        mqtt_frame_multiplier = 1;
+        mqtt_frame_length_bytes = 0;
+    } else if (mqtt_frame_phase == MQTT_FRAME_LENGTH) {
+        /* Paho asks for one variable-length byte per callback. */
+        for (int i = 0; i < bytes; i++) {
+            if (++mqtt_frame_length_bytes > 4) {
+                mqtt_frame_failed = true;
+                return -1;
+            }
+            mqtt_frame_length += (uint32_t)(buf[i] & 0x7f) * mqtt_frame_multiplier;
+            mqtt_frame_multiplier *= 128;
+            if (!(buf[i] & 0x80)) {
+                mqtt_frame_phase = mqtt_frame_length ? MQTT_FRAME_PAYLOAD : MQTT_FRAME_HEADER;
+                break;
+            }
+        }
+    } else {
+        if ((uint32_t)bytes > mqtt_frame_length) {
+            mqtt_frame_failed = true;
+            return -1;
+        }
+        mqtt_frame_length -= (uint32_t)bytes;
+        if (!mqtt_frame_length) mqtt_frame_phase = MQTT_FRAME_HEADER;
     }
     return bytes;
 }
@@ -331,6 +394,7 @@ static int tcp_connect(const char *host, uint16_t port) {
 /* === MQTT message routing === */
 
 static void mqtt_mark_disconnected(void) {
+    mqtt_frame_reset();
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
     if (mqtt_ctx.net.tls_active) {
         dclaw_tls_shutdown();
@@ -437,9 +501,11 @@ static void paho_message_handler(MessageData *data) {
 
 int dclaw_mqtt_init(void) {
     memset(&mqtt_ctx, 0, sizeof(mqtt_ctx));
+    mqtt_frame_reset();
     mqtt_ctx.connected = false;
     mqtt_ctx.backoff_ms = 1000;
     mqtt_ctx.net.my_socket = -1;
+    mqtt_context_initialized = true;
 
     NetworkInit(&mqtt_ctx.net);
     MQTTClientInit(&mqtt_ctx.paho, &mqtt_ctx.net,
@@ -449,8 +515,16 @@ int dclaw_mqtt_init(void) {
     return 0;
 }
 
+void dclaw_mqtt_shutdown(void) {
+    if (mqtt_context_initialized) mqtt_mark_disconnected();
+    dclaw_secure_zero(mqtt_password, sizeof(mqtt_password));
+    mqtt_password_loaded = false;
+    mqtt_context_initialized = false;
+}
+
 int dclaw_mqtt_connect(void) {
     if (mqtt_ctx.connected) return 0;
+    mqtt_frame_reset();
 
     const char *broker_url = dclaw_config_get_broker(mqtt_ctx.broker_index);
     if (!broker_url) {
@@ -517,10 +591,21 @@ int dclaw_mqtt_connect(void) {
     /* Step 3: MQTT CONNECT via Paho */
     dclaw_state_t *s = dclaw_get_state();
     char client_id[32];
-    snprintf(client_id, sizeof(client_id), "dclaw-%u", s->device.device_id);
+    snprintf(client_id, sizeof(client_id), "dclaw-%u-%u-%u", s->device.tenant_id,
+             s->device.fleet_id, s->device.device_id);
 
     const char *mqtt_user = getenv("DCLAW_MQTT_USER");
-    const char *mqtt_pass = getenv("DCLAW_MQTT_PASS");
+    if (!mqtt_password_loaded) {
+        const char *configured_pass = getenv("DCLAW_MQTT_PASS");
+        if (configured_pass && strlen(configured_pass) >= sizeof(mqtt_password)) {
+            fprintf(stderr, "[DCLAW-MQTT] MQTT password exceeds 255 bytes.\n");
+            mqtt_mark_disconnected();
+            return -1;
+        }
+        if (configured_pass) memcpy(mqtt_password, configured_pass, strlen(configured_pass) + 1);
+        mqtt_password_loaded = true;
+        dclaw_scrub_env("DCLAW_MQTT_PASS");
+    }
 
     MQTTPacket_connectData opts = MQTTPacket_connectData_initializer;
     opts.clientID.cstring = client_id;
@@ -530,8 +615,8 @@ int dclaw_mqtt_connect(void) {
 
     if (mqtt_user && mqtt_user[0])
         opts.username.cstring = (char *)mqtt_user;
-    if (mqtt_pass && mqtt_pass[0])
-        opts.password.cstring = (char *)mqtt_pass;
+    if (mqtt_password[0])
+        opts.password.cstring = mqtt_password;
 
     if (MQTTConnect(&mqtt_ctx.paho, &opts) != SUCCESS) {
         fprintf(stderr, "[DCLAW-MQTT] CONNECT/CONNACK handshake failed\n");
@@ -570,15 +655,16 @@ int dclaw_mqtt_connect(void) {
         return -1;
     }
 
-    /* Best-effort scrub MQTT password from environment */
-    dclaw_scrub_env("DCLAW_MQTT_PASS");
-
     /* Set socket to non-blocking for the event loop.
      * Paho's read callback uses poll() internally so this is safe. */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0)
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
+    /* A clean MQTT session may miss a threat-intel revocation while this
+     * device is offline. Recheck cached verdicts against Fleet after every
+     * new broker session, before resuming online tool decisions. */
+    dclaw_cache_flush_all();
     mqtt_ctx.connected = true;
     dclaw_get_state()->online = true;
 
@@ -587,7 +673,7 @@ int dclaw_mqtt_connect(void) {
 
     /* Step 5: Publish registration message (HMAC-signed if key is provisioned) */
     {
-        uint8_t reg_buf[64];
+        uint8_t reg_buf[72];
         size_t reg_len;
         if (dclaw_cbor_encode_heartbeat(reg_buf, &reg_len, sizeof(reg_buf)) == 0) {
             char reg_topic[128];
@@ -604,22 +690,22 @@ int dclaw_mqtt_connect(void) {
                         mbedtls_md_setup(&rctx, rmd, 1);
                         mbedtls_md_hmac_starts(&rctx, rk, rk_len);
                         mbedtls_md_hmac_update(&rctx, (const uint8_t *)reg_topic, strlen(reg_topic));
-                        mbedtls_md_hmac_update(&rctx, reg_buf, 32);
+                        mbedtls_md_hmac_update(&rctx, reg_buf, reg_len);
                         mbedtls_md_hmac_finish(&rctx, reg_hmac);
                         mbedtls_md_free(&rctx);
 #else
                         {
                             size_t rt_len = strlen(reg_topic);
-                            uint8_t rtmp[128 + 32];
-                            if (rt_len + 32 <= sizeof(rtmp)) {
+                            uint8_t rtmp[128 + 40];
+                            if (rt_len + reg_len <= sizeof(rtmp)) {
                                 memcpy(rtmp, reg_topic, rt_len);
-                                memcpy(rtmp + rt_len, reg_buf, 32);
-                                dclaw_hmac_sha256(rk, rk_len, rtmp, rt_len + 32, reg_hmac);
+                                memcpy(rtmp + rt_len, reg_buf, reg_len);
+                                dclaw_hmac_sha256(rk, rk_len, rtmp, rt_len + reg_len, reg_hmac);
                             }
                         }
 #endif
-                        memcpy(reg_buf + 32, reg_hmac, 32);
-                        reg_len = 64;
+                        memcpy(reg_buf + reg_len, reg_hmac, 32);
+                        reg_len += 32;
                     }
                 }
 
@@ -687,7 +773,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
     };
 
     int rc = MQTTPublish(&mqtt_ctx.paho, topic, &msg);
-    if (rc != SUCCESS) {
+    if (rc != SUCCESS || mqtt_frame_failed) {
         fprintf(stderr, "[DCLAW-MQTT] Publish failed (rc=%d), marking disconnected\n", rc);
         mqtt_mark_disconnected();
         return -1;
@@ -701,8 +787,9 @@ int dclaw_mqtt_poll(int timeout_ms) {
     /* MQTTYield handles: read packets, dispatch to message handlers,
      * send PUBACK for QoS 1, keepalive PINGREQ/PINGRESP */
     int rc = MQTTYield(&mqtt_ctx.paho, timeout_ms);
-    if (rc != SUCCESS) {
-        fprintf(stderr, "[DCLAW-MQTT] Connection lost (yield rc=%d)\n", rc);
+    if (rc != SUCCESS || mqtt_frame_failed) {
+        fprintf(stderr, "[DCLAW-MQTT] Connection lost (yield rc=%d, partial_frame=%d)\n",
+                rc, mqtt_frame_failed ? 1 : 0);
         mqtt_mark_disconnected();
         return -1;
     }
@@ -742,7 +829,7 @@ int dclaw_mqtt_send_heartbeat(void) {
         return 0;
     mqtt_ctx.last_heartbeat_tick = now;
 
-    uint8_t hb_buf[64];
+    uint8_t hb_buf[72];
     size_t hb_len;
     if (dclaw_cbor_encode_heartbeat(hb_buf, &hb_len, sizeof(hb_buf)) != 0) return -1;
 
@@ -762,43 +849,28 @@ int dclaw_mqtt_send_heartbeat(void) {
             mbedtls_md_setup(&ctx, md_info, 1);
             mbedtls_md_hmac_starts(&ctx, device_key, key_len);
             mbedtls_md_hmac_update(&ctx, (const uint8_t *)topic, strlen(topic));
-            mbedtls_md_hmac_update(&ctx, hb_buf, 32);
+            mbedtls_md_hmac_update(&ctx, hb_buf, hb_len);
             mbedtls_md_hmac_finish(&ctx, hmac_tag);
             mbedtls_md_free(&ctx);
 #else
             {
                 size_t topic_len = strlen(topic);
-                uint8_t tmp[128 + 32];
-                if (topic_len + 32 <= sizeof(tmp)) {
+                uint8_t tmp[128 + 40];
+                if (topic_len + hb_len <= sizeof(tmp)) {
                     memcpy(tmp, topic, topic_len);
-                    memcpy(tmp + topic_len, hb_buf, 32);
-                    dclaw_hmac_sha256(device_key, key_len, tmp, topic_len + 32, hmac_tag);
+                    memcpy(tmp + topic_len, hb_buf, hb_len);
+                    dclaw_hmac_sha256(device_key, key_len, tmp, topic_len + hb_len, hmac_tag);
                 } else {
                     return -1;
                 }
             }
 #endif
-            memcpy(hb_buf + 32, hmac_tag, 32);
-            hb_len = 64;
+            memcpy(hb_buf + hb_len, hmac_tag, 32);
+            hb_len += 32;
         }
     }
 
-    int rc = dclaw_mqtt_publish(topic, hb_buf, hb_len, 1);
-
-    if (rc == 0) {
-        dclaw_state_t *st = dclaw_get_state();
-        if (st->rollback_pending) {
-            rollback_send_count++;
-            if (rollback_send_count >= ROLLBACK_CLEAR_AFTER) {
-                st->rollback_pending = false;
-                rollback_send_count = 0;
-            }
-        }
-    } else {
-        rollback_send_count = 0;
-    }
-
-    return rc;
+    return dclaw_mqtt_publish(topic, hb_buf, hb_len, 1);
 }
 
 /* Verdict request publish.

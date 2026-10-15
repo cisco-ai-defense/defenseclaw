@@ -126,14 +126,16 @@ static size_t cbor_decode_uint(const uint8_t *buf, size_t buf_len, uint64_t *val
     return 0; /* error */
 }
 
-/* === Heartbeat Encoder (32 bytes output) === */
+/* === Heartbeat Encoder (40 bytes output) === */
+
+extern uint32_t dclaw_boot_counter_get(void);
 
 int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) {
     dclaw_state_t *s = dclaw_get_state();
-    if (buf_size < 32) return -1;
+    if (buf_size < 40) return -1;
 
-    /* Heartbeat is a fixed 32-byte binary blob, not CBOR-wrapped for efficiency.
-     * Wire format matches proposal §7.2 exactly. */
+    /* Fixed binary body. The final four bytes are a durable boot generation,
+     * authenticated with the rest of the heartbeat and registration. */
     size_t pos = 0;
 
     /* device_id (4 bytes, big-endian) */
@@ -210,7 +212,18 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     /* capabilities (1 byte) — device capability bitmap */
     buf[pos++] = s->device.capabilities;
 
-    *out_len = 32;
+    uint32_t boot_counter = dclaw_boot_counter_get();
+    buf[pos++] = (uint8_t)(boot_counter >> 24);
+    buf[pos++] = (uint8_t)(boot_counter >> 16);
+    buf[pos++] = (uint8_t)(boot_counter >> 8);
+    buf[pos++] = (uint8_t)boot_counter;
+    uint32_t emergency_seq = s->emergency.last_seen_seq;
+    buf[pos++] = (uint8_t)(emergency_seq >> 24);
+    buf[pos++] = (uint8_t)(emergency_seq >> 16);
+    buf[pos++] = (uint8_t)(emergency_seq >> 8);
+    buf[pos++] = (uint8_t)emergency_seq;
+
+    *out_len = pos;
     return 0;
 }
 

@@ -17,6 +17,7 @@
 package policy
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -32,6 +33,35 @@ type PolicyRecord struct {
 	Signature   []byte    `json:"signature"`
 	CreatedAt   time.Time `json:"created_at"`
 	Distributed bool      `json:"distributed"`
+}
+
+// EmergencyRecord is the last signed command for one tenant/fleet. Its exact
+// bytes are retained so a device that was offline can receive the same
+// authenticated command after reconnecting.
+type EmergencyRecord struct {
+	Sequence uint32
+	Message  []byte
+}
+
+func validateEmergencyChain(sequence, predecessor uint32, message []byte) error {
+	if len(message) != EmergencyMsgSize {
+		return fmt.Errorf("emergency message must be %d bytes, got %d", EmergencyMsgSize, len(message))
+	}
+	if got := binary.BigEndian.Uint32(message[0:4]); got != sequence {
+		return fmt.Errorf("emergency message sequence %d disagrees with record %d", got, sequence)
+	}
+	if got := binary.BigEndian.Uint32(message[44:48]); got != predecessor {
+		return fmt.Errorf("emergency predecessor %d disagrees with fleet predecessor %d", got, predecessor)
+	}
+	if sequence <= predecessor {
+		return fmt.Errorf("emergency sequence %d is not newer than fleet predecessor %d", sequence, predecessor)
+	}
+	for _, b := range message[80:112] {
+		if b != 0 {
+			return fmt.Errorf("emergency signature has nonzero reserved tail")
+		}
+	}
+	return nil
 }
 
 // PolicyStore persists policy versions for audit and rollback.
@@ -61,6 +91,13 @@ type PolicyStore interface {
 	// SetEmergencySeq persists the emergency broadcast sequence number so it
 	// survives gateway restarts (REQ-31 anti-replay).
 	SetEmergencySeq(seq uint32) error
+
+	// SaveEmergency atomically advances the global sequence and appends the
+	// fleet's signed command. A broker PUBACK is not device delivery.
+	SaveEmergency(tenantID, fleetID uint64, seq uint32, signedMessage []byte) error
+	GetLastEmergency(tenantID, fleetID uint64) (*EmergencyRecord, error)
+	// GetEmergenciesAfter returns an ordered, bounded page for device catch-up.
+	GetEmergenciesAfter(tenantID, fleetID uint64, afterSeq uint32, limit int) ([]EmergencyRecord, error)
 }
 
 // fleetKey builds a composite key for the tenant+fleet pair.
@@ -73,12 +110,14 @@ type MemoryPolicyStore struct {
 	mu           sync.RWMutex
 	policies     map[string][]PolicyRecord // keyed by "tenantID:fleetID"
 	emergencySeq uint32
+	emergencies  map[string][]EmergencyRecord
 }
 
 // NewMemoryPolicyStore creates an empty in-memory store.
 func NewMemoryPolicyStore() *MemoryPolicyStore {
 	return &MemoryPolicyStore{
-		policies: make(map[string][]PolicyRecord),
+		policies:    make(map[string][]PolicyRecord),
+		emergencies: make(map[string][]EmergencyRecord),
 	}
 }
 
@@ -211,4 +250,65 @@ func (s *MemoryPolicyStore) SetEmergencySeq(seq uint32) error {
 	defer s.mu.Unlock()
 	s.emergencySeq = seq
 	return nil
+}
+
+func (s *MemoryPolicyStore) SaveEmergency(tenantID, fleetID uint64, seq uint32, signedMessage []byte) error {
+	if len(signedMessage) != EmergencyMsgSize {
+		return fmt.Errorf("emergency message must be %d bytes, got %d", EmergencyMsgSize, len(signedMessage))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seq <= s.emergencySeq {
+		return fmt.Errorf("emergency sequence %d is not newer than %d", seq, s.emergencySeq)
+	}
+	key := fleetKey(tenantID, fleetID)
+	var previous uint32
+	if records := s.emergencies[key]; len(records) != 0 {
+		previous = records[len(records)-1].Sequence
+	}
+	if err := validateEmergencyChain(seq, previous, signedMessage); err != nil {
+		return err
+	}
+	s.emergencySeq = seq
+	s.emergencies[key] = append(s.emergencies[key], EmergencyRecord{
+		Sequence: seq, Message: append([]byte(nil), signedMessage...),
+	})
+	return nil
+}
+
+func (s *MemoryPolicyStore) GetLastEmergency(tenantID, fleetID uint64) (*EmergencyRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	records := s.emergencies[fleetKey(tenantID, fleetID)]
+	if len(records) == 0 {
+		return nil, nil
+	}
+	record := records[len(records)-1]
+	record.Message = append([]byte(nil), record.Message...)
+	return &record, nil
+}
+
+func (s *MemoryPolicyStore) GetEmergenciesAfter(tenantID, fleetID uint64, afterSeq uint32, limit int) ([]EmergencyRecord, error) {
+	if limit < 1 || limit > 32 {
+		return nil, fmt.Errorf("emergency replay page limit must be 1..32")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	records := s.emergencies[fleetKey(tenantID, fleetID)]
+	page := make([]EmergencyRecord, 0, limit)
+	previous := afterSeq
+	for _, record := range records {
+		if record.Sequence <= afterSeq {
+			continue
+		}
+		if err := validateEmergencyChain(record.Sequence, previous, record.Message); err != nil {
+			return nil, err
+		}
+		page = append(page, EmergencyRecord{Sequence: record.Sequence, Message: append([]byte(nil), record.Message...)})
+		previous = record.Sequence
+		if len(page) == limit {
+			break
+		}
+	}
+	return page, nil
 }

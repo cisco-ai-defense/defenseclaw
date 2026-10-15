@@ -24,6 +24,8 @@
 #include <assert.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
+extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
+                              dclaw_severity_t severity);
 
 static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const char *dest) {
     dclaw_tool_request_t req;
@@ -66,12 +68,10 @@ static void test_sync_block_cap_blocks(void) {
 }
 
 static void test_destination_deny(void) {
-    /* H-6 fix: hostname destinations are SSRF-blocked when offline. Set online
-     * so the SSRF check allows the hostname through to the policy destination
-     * deny check, which is what this test exercises. */
+    /* Public literal outside the signed allowlist exercises DEST_DENY. */
     dclaw_get_state()->online = true;
 
-    dclaw_tool_request_t req = make_request("curl", DCLAW_CAP_NET_FETCH, "evil.attacker.io");
+    dclaw_tool_request_t req = make_request("curl", DCLAW_CAP_NET_FETCH, "9.9.9.9");
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_DEST_DENY);
@@ -81,11 +81,43 @@ static void test_destination_deny(void) {
     dclaw_get_state()->online = false;
 }
 
+static void test_network_destination_required(void) {
+    dclaw_tool_request_t missing = make_request("curl", DCLAW_CAP_NET_FETCH, NULL);
+    dclaw_verdict_t verdict = dclaw_evaluate(&missing);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_DEST_DENY);
+
+    dclaw_tool_request_t hostname = make_request("curl", DCLAW_CAP_NET_FETCH,
+                                                "http://localhost.localdomain/");
+    verdict = dclaw_evaluate(&hostname);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_SSRF_BLOCK);
+
+    dclaw_tool_request_t private_ip = make_request("curl", DCLAW_CAP_NET_FETCH,
+                                                  "169.254.169.254");
+    verdict = dclaw_evaluate(&private_ip);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_SSRF_BLOCK);
+    printf("  PASS: missing, hostname, and private network targets block in all profiles\n");
+}
+
+static void test_unknown_tool_cannot_use_cloud_allow(void) {
+    dclaw_tool_request_t unknown = make_request("custom_network_tool", DCLAW_CAP_NET_FETCH,
+                                               "http://127.0.0.1/");
+    /* Simulate a previous cloud ALLOW for the same hash. Unknown names must
+     * stop before the verdict cache or the cloud dispatch path. */
+    dclaw_cache_store(unknown.tool_hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
+    dclaw_verdict_t verdict = dclaw_evaluate(&unknown);
+    assert(verdict.action == DCLAW_ACTION_BLOCK);
+    assert(verdict.reason == DCLAW_REASON_INVALID_INPUT);
+    printf("  PASS: unknown network tool blocks before cached/cloud ALLOW\n");
+}
+
 static void test_allowed_destination(void) {
-    /* H-6 fix: hostname destinations need online=true to pass SSRF check */
+    /* A public literal in the signed allowlist reaches the later decision. */
     dclaw_get_state()->online = true;
 
-    dclaw_tool_request_t req = make_request("api-call", DCLAW_CAP_NET_FETCH, "api.openai.com");
+    dclaw_tool_request_t req = make_request("api-call", DCLAW_CAP_NET_FETCH, "8.8.8.8");
     dclaw_verdict_t v = dclaw_evaluate(&req);
 #if DCLAW_SPECULATIVE_EXECUTION && DCLAW_DEV_MODE
     assert(v.mode == DCLAW_VERDICT_PENDING);
@@ -101,11 +133,11 @@ static void test_allowed_destination(void) {
 }
 
 static void test_capability_sequence_block(void) {
-    /* H-6 fix: hostname destinations need online=true to pass SSRF check */
+    /* Sequence tracking still records an allowed public network destination. */
     dclaw_get_state()->online = true;
 
     /* First: NET_FETCH */
-    dclaw_tool_request_t req1 = make_request("download", DCLAW_CAP_NET_FETCH, "api.openai.com");
+    dclaw_tool_request_t req1 = make_request("download", DCLAW_CAP_NET_FETCH, "8.8.8.8");
     req1.session_id = 50;
     dclaw_evaluate(&req1);
 
@@ -125,7 +157,7 @@ static void test_rate_limit_triggers(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->rate_limiters[0].tokens = 0; /* exhaust global tokens */
 
-    dclaw_tool_request_t req = make_request("test", DCLAW_CAP_READ_FS, NULL);
+    dclaw_tool_request_t req = make_request("read_file", DCLAW_CAP_READ_FS, NULL);
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_RATE_LIMIT);
@@ -161,22 +193,6 @@ static void test_content_scan_blocks_secret_in_pipeline(void) {
     assert(v.reason == DCLAW_REASON_CONTENT_BLOCK);
     (void)v;
     printf("  PASS: content scan blocks secret in pipeline\n");
-}
-
-static void test_ssrf_blocks_private_ip_in_pipeline(void) {
-    dclaw_tool_request_t req;
-    memset(&req, 0, sizeof(req));
-    strncpy(req.tool_name, "fetch_url", DCLAW_TOOL_NAME_MAX);
-    dclaw_sha256((const uint8_t *)"fetch_url", strlen("fetch_url"), req.tool_hash);
-    req.cap_flags = DCLAW_CAP_NET_FETCH;
-    req.session_id = 100;
-    strncpy(req.destination, "169.254.169.254", DCLAW_DESTINATION_MAX);
-
-    dclaw_verdict_t v = dclaw_evaluate(&req);
-    assert(v.action == DCLAW_ACTION_BLOCK);
-    assert(v.reason == DCLAW_REASON_SSRF_BLOCK);
-    (void)v;
-    printf("  PASS: SSRF blocks metadata IP in pipeline\n");
 }
 
 static void test_no_content_field_backward_compat(void) {
@@ -221,20 +237,21 @@ int main(void) {
     test_allowed_local_decision();
     test_sync_block_cap_blocks();
     test_destination_deny();
+    test_network_destination_required();
+    test_unknown_tool_cannot_use_cloud_allow();
     test_allowed_destination();
     test_capability_sequence_block();
     test_rate_limit_triggers();
     test_invalid_input_blocks();
 #if DCLAW_CONTENT_SCAN
     test_content_scan_blocks_secret_in_pipeline();
-    test_ssrf_blocks_private_ip_in_pipeline();
     test_no_content_field_backward_compat();
 #endif
     test_hash_mismatch_blocks();
 #if DCLAW_CONTENT_SCAN
-    printf("  ALL PASSED (11 tests)\n");
+    printf("  ALL PASSED (12 tests)\n");
 #else
-    printf("  ALL PASSED (8 tests)\n");
+    printf("  ALL PASSED (10 tests)\n");
 #endif
 
     dclaw_shutdown();

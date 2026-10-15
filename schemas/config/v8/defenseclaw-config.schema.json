@@ -5896,10 +5896,6 @@
           "maximum": 1000000,
           "default": 4096
         },
-        "require_client_id": {
-          "type": "boolean",
-          "default": false
-        },
         "policy_compiler_path": {
           "type": "string",
           "maxLength": 4096

@@ -18,13 +18,13 @@ keywords:
 
 ## Build from source
 
-Required: `gcc`, `cmake` (3.22+), `make`.
+Required: `gcc`, `cmake` (3.22+), `make`, and mbedTLS 3.x development libraries for production MQTT over TLS.
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw/edge-connector
 mkdir build && cd build
-cmake .. -DDCLAW_PROFILE=STANDARD
+cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON
 make -j$(nproc)
 ```
 
@@ -34,7 +34,7 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-11 test suites covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-17).
+Run the unit and acceptance suites for your selected build profile. The exact test count may change as suites are added.
 
 ### Install system-wide
 
@@ -42,15 +42,17 @@ ctest --output-on-failure
 sudo make install
 ```
 
+CMake installs the binary and support files. For a managed Linux service, also install the shipped [systemd unit](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/packaging/edge-connector.service) and provision its required environment file as shown in the [repository installation guide](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/INSTALL.md#production-deployment).
+
 ### Build profiles
 
 ```bash
-cmake .. -DDCLAW_PROFILE=MINIMAL   # ~22KB — MCUs, ultra-constrained devices
-cmake .. -DDCLAW_PROFILE=STANDARD  # ~68KB — Raspberry Pi, Jetson, SBCs
-cmake .. -DDCLAW_PROFILE=EDGE      # ~131KB — Edge gateways with bloom filter
+cmake .. -DDCLAW_PROFILE=MINIMAL   # no MQTT; constrained builds
+cmake .. -DDCLAW_PROFILE=STANDARD  # Raspberry Pi, Jetson, SBCs
+cmake .. -DDCLAW_PROFILE=EDGE      # edge gateways with bloom filter
 ```
 
-> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
+Binary size depends on the target toolchain, linked TLS libraries, and build flags. Measure the installed binary for your target.
 
 ## Configure the policy
 
@@ -86,64 +88,19 @@ iot_extensions:
       action: block
 
   destination_allowlist:
-    - "api.openai.com"
-    - "api.anthropic.com"
-    - "*.your-company.com"
+    - "1.1.1.1" # illustrative public IP; replace with one approved for your service
 
-  rate_limits:
-    tool_calls_per_minute: 60
-    network_requests_per_minute: 30
-    actuations_per_minute: 10
-
-  escalation_mode:
-    sensor_read: speculative    # allow immediately
-    read_fs: speculative
-    net_fetch: speculative      # allow if dest in allowlist
-    actuate: sync_block         # BLOCK without cloud
-    exec_shell: sync_block      # BLOCK without cloud
-    write_fs: sync_block        # BLOCK without cloud
 ```
 
-### Step 2 — Configure content inspection
+### Step 2 — Check built-in protection
 
-```yaml title="~/.defenseclaw/policy.yaml (continued)"
-  content_inspection:
-    enabled: true
-    categories:
-      secret:              # API keys, tokens, private keys
-        enabled: true
-        severity: high
-        action: block
-      pii:                 # SSN, credit cards, emails
-        enabled: true
-        severity: high
-        action: block
-      credential:          # AWS keys, GCP service accounts
-        enabled: true
-        severity: high
-        action: block
-      exfil:               # Base64 blobs, hex dumps
-        enabled: true
-        severity: high
-        action: block
-      injection:           # Prompt injection, jailbreaks
-        enabled: true
-        severity: critical
-        action: block
-      command:             # Shell commands, SQL, code exec
-        enabled: true
-        severity: critical
-        action: block
-
-  ssrf_protection:
-    enabled: true
-    block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
-    block_cloud_metadata: true     # 169.254.169.254
-```
+Content patterns, rate limits (60 tool calls, 30 network requests, 10 actuations per minute), and the SSRF guard are built into this C release. The policy compiler rejects unsupported `content_inspection`, `ssrf_protection`, custom regex, `destination_denylist`, `rate_limits`, and `escalation_mode` settings. Production uses synchronous Fleet escalation by default; OTA policy cannot change this mode. Network tools require a nonempty destination. Hostnames, private IPs, and numeric aliases are blocked across profiles; an approved destination must be a canonical public IPv4 or bracketed globally scoped IPv6 literal in `destination_allowlist`. The parser does not prove external routability. Replace the illustrative `1.1.1.1` address with the approved endpoint for your service.
 
 ### Step 3 — Compile (optional)
 
 Only needed when you change the policy. Pre-built binaries include the default policy.
+
+The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup includes the compiler and an admitted Python/PyYAML scanner runtime.
 
 ```bash
 cd edge-connector
@@ -153,6 +110,8 @@ python3 tools/policy_compiler.py \
   --output-header generated/policy_tables.h \
   --output-binary dist/policy.bin
 ```
+
+The command's binary output has a development stub signature when no signing key is supplied; production devices will reject it as an OTA update. Use the Fleet policy-push API with matching `DCLAW_OTA_HMAC_KEY` secrets to compile and sign production OTA updates. The compiler's Ed25519 `--signing-key` output is not accepted by this C receiver.
 
 ## Integrate with your AI agent
 
@@ -175,7 +134,7 @@ if verdict.blocked:
     print(f"Blocked: {verdict.reason}")
 ```
 
-Auto-detects FFI (ctypes) first, falls back to Unix socket. Configure fail-open/fail-closed with `DCLAW_FAIL_OPEN=1`.
+Auto-detects FFI (ctypes) first, then falls back to the Unix socket. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
 
 ### MCP proxy (Model Context Protocol)
 
@@ -344,7 +303,7 @@ Query the daemon from any process:
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
   "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/tmp/defenseclaw.sock
+}}' | socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
 ```
 
 ## Tool-to-capability mapping
@@ -375,74 +334,86 @@ cat > mosquitto.conf <<'EOF'
 listener 1883 0.0.0.0
 allow_anonymous true
 EOF
+chmod 0644 mosquitto.conf
 
-docker run -d --name mosquitto -p 1883:1883 \
-  -v ./mosquitto.conf:/mosquitto/config/mosquitto.conf \
+docker run -d --name mosquitto -p 127.0.0.1:1883:1883 \
+  -v "$PWD/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
   eclipse-mosquitto:2
 ```
 
 <Callout type="warn">
-`allow_anonymous true` is acceptable for quick-start testing only. For production, configure a `password_file` or use an authentication plugin. See the Mosquitto documentation for details.
+`allow_anonymous true` is for isolated local testing only. Bind the published Docker port to loopback (`-p 127.0.0.1:1883:1883`) and remove the container after testing. Production MQTT requires TLS with broker certificate verification and topic ACLs, including per-device publish permissions.
 </Callout>
 
-**Authenticated setup (recommended for production):**
+**Authenticated local test setup:**
 
 ```bash
-# Create the mqtt directory first (prevents Docker from creating it as root)
-mkdir -p mqtt
-
-# Create a password file with a broker user (runs as current user to avoid
-# root-owned files that the non-root broker process cannot read — P2-16 fix)
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v ./mqtt:/mosquitto/config eclipse-mosquitto \
-  mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
-# 0640 lets owner (UID 1883 after chown) read/write; the Docker container
-# runs as UID 1883, so the file must be readable by that user.
-chmod 0640 mqtt/passwd
+# Mosquitto's container runs as UID/GID 1883. Make its bind mount readable.
+sudo install -d -o 1883 -g 1883 -m 0700 mqtt
+docker run --rm -it --user 1883:1883 \
+  -v "$PWD/mqtt:/mosquitto/config" --entrypoint mosquitto_passwd \
+  eclipse-mosquitto:2 -c /mosquitto/config/passwd dclaw
 
 # Create a config that requires authentication
-cat > mqtt/mosquitto.conf <<'EOF'
+sudo tee mqtt/mosquitto.conf >/dev/null <<'EOF'
 listener 1883 0.0.0.0
 allow_anonymous false
 password_file /mosquitto/config/passwd
 EOF
+sudo chown 1883:1883 mqtt/mosquitto.conf
+sudo chmod 0600 mqtt/mosquitto.conf mqtt/passwd
 
-docker run -d --name mosquitto -p 1883:1883 \
-  -v ./mqtt:/mosquitto/config \
+docker run -d --name mosquitto -p 127.0.0.1:1883:1883 \
+  -v "$PWD/mqtt:/mosquitto/config:ro" \
   eclipse-mosquitto:2
 ```
 
-Set the broker credentials on both sides using environment variables (the Go and C MQTT clients do not parse userinfo from the broker URL):
+For this local test, set credentials on both sides using environment variables (the Go and C MQTT clients do not parse userinfo from the broker URL):
 
 ```bash
+# Generate one nonzero test HMAC key; copy it securely to the device when it runs elsewhere.
+export DCLAW_DEVICE_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+
 # Gateway (Go fleet server)
-export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+export DCLAW_MQTT_BROKER_URL=tcp://127.0.0.1:1883
 export DCLAW_MQTT_USER=dclaw
-export DCLAW_MQTT_PASS=yourpassword
+export DCLAW_MQTT_PASS='<password entered above>'
 
 # Edge devices (C edge connector)
-export DCLAW_BROKER_URL=mqtt://broker-host:1883
+export DCLAW_BROKER_URL=mqtt://127.0.0.1:1883
 export DCLAW_MQTT_USER=dclaw
-export DCLAW_MQTT_PASS=yourpassword
+export DCLAW_MQTT_PASS='<password entered above>'
 ```
 
 <Callout type="warn">
-MQTT transport is currently plaintext only (`mqtt://`). TLS/mTLS support (`mqtts://`) is planned for Phase 2. Deploy the MQTT broker on a trusted network or use a VPN tunnel.
+The local example uses plaintext only on the same host and requires a separate C development build (`-DDCLAW_DEV_MODE=ON`); the production build at the start of this guide rejects plaintext MQTT. For production, configure a TLS listener and per-device topic ACLs on the broker. Set the gateway broker URL to `ssl://broker-host:8883` (with `fleet.mqtt_require_tls: true`) and the C connector URL to `mqtts://broker-host:8883`. Provision `DCLAW_CA_CERT_PATH` on each device; also set `DCLAW_DEVICE_CERT_PATH` and `DCLAW_DEVICE_KEY_PATH` when the broker requires mutual TLS. Verify broker hostname and certificate chain before deployment.
 </Callout>
 
 **Configure the gateway (Go fleet server):**
 
 ```bash
-export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+export DCLAW_MQTT_BROKER_URL=tcp://127.0.0.1:1883
 ```
 
 **Configure edge devices (C edge connector):**
 
 ```bash
-export DCLAW_BROKER_URL=mqtt://broker-host:1883
+export DCLAW_BROKER_URL=mqtt://127.0.0.1:1883
 ```
 
-Both sides must point to the same broker. The gateway publishes commands and policy updates; devices publish heartbeats and escalation requests.
+Both sides must point to the same broker. Enable the Fleet subsystem explicitly in `~/.defenseclaw/config.yaml`:
+
+```yaml
+fleet:
+  enabled: true
+  mqtt_broker_url: tcp://127.0.0.1:1883 # local test only
+```
+
+The gateway publishes policy updates; devices publish heartbeats and escalation requests. Use [per-device broker topic ACLs](https://github.com/cisco-ai-defense/defenseclaw/blob/main/edge-connector/integrations/mqtt-broker/README.md), because the gateway subscriber cannot infer a verified publisher ClientID from an MQTT PUBLISH packet.
+
+**Upgrade together:** Heartbeat and registration messages now carry a durable 4-byte boot counter and 4-byte last-applied emergency sequence. Keyed C devices send a 40-byte payload plus a 32-byte HMAC (72 bytes total); the gateway rejects older 64- and 68-byte signed frames. Upgrade the Edge Connector on each device with the Fleet gateway, and confirm heartbeats resume before relying on device status or policy distribution. The gateway replays missed emergency commands in signed predecessor order from durable history, up to 32 per signed registration or heartbeat; later heartbeats request the next page. A history gap or unavailable durable store fails closed. Broker publication alone does not prove device application.
+
+The gateway rejects missing or invalid device HMAC keys by default. Pre-register every production device through the authenticated Fleet API; MQTT auto-registration is for unmanaged local development only. An unmanaged development host can opt into the legacy zero-key behavior only with `DCLAW_DEV_MODE=ON`; managed deployments never permit that fallback. For multiple devices, use registration-issued per-device keys rather than the one shared test key above. The C device binds its durable emergency sequence to tenant/fleet identity; moving it requires trusted flash reset and reprovisioning, because a new identity with the prior emergency state refuses startup.
 
 ## Environment variables
 
@@ -451,8 +422,12 @@ Both sides must point to the same broker. The gateway publishes commands and pol
 | Variable | Required | Description |
 | --- | --- | --- |
 | `DCLAW_FLEET_API_TOKEN` | yes | Bearer token for authenticating Fleet API requests. If unset, all API requests are rejected. |
-| `DCLAW_MQTT_BROKER_URL` | yes | MQTT broker connection URI (e.g., `tcp://broker-host:1883`). Used for command dispatch, policy distribution, and heartbeat ingestion. |
-| `DCLAW_OTA_KEY` | yes | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Used to sign OTA policy updates. Must match the key configured on devices. |
+| `DCLAW_MQTT_BROKER_URL` | if `fleet.mqtt_broker_url` is unset | MQTT broker URI. Use TLS and `fleet.mqtt_require_tls: true` in production. |
+| `DCLAW_TLS_CA_CERT` | for private broker CAs | PEM CA file used by the Go Fleet MQTT client; otherwise it uses the system trust store. |
+| `DCLAW_TLS_CLIENT_CERT`, `DCLAW_TLS_CLIENT_KEY` | for broker mTLS | Client PEM certificate and private key for the Go Fleet MQTT client. |
+| `DCLAW_OTA_HMAC_KEY` | for OTA push | Nonzero 32-byte hex HMAC secret for policy signing. Must match the device secret. |
+| `DCLAW_EMERGENCY_KEY` | for emergency commands | Separate nonzero 32-byte hex signing secret. Must match the device secret. |
+| `DCLAW_DEVICE_KEY` | if no per-device key store | Nonzero 32-byte hex fallback HMAC key for a one-device test; production fleets should provision per-device keys. An unset or invalid key fails closed by default. |
 
 ### Device-side (C edge connector and Python hooks)
 
@@ -461,11 +436,16 @@ Both sides must point to the same broker. The gateway publishes commands and pol
 | `DCLAW_TENANT_ID` | (none) | Tenant identifier for this device. |
 | `DCLAW_FLEET_ID` | (none) | Fleet identifier for this device. |
 | `DCLAW_DEVICE_ID` | (none) | Unique device identifier within the fleet. |
-| `DCLAW_BROKER_URL` | (none) | MQTT broker URI (e.g., `mqtt://broker-host:1883`). Used for heartbeats and cloud escalation. |
-| `DCLAW_OTA_KEY` | (none) | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Must match the key configured on the server. |
+| `DCLAW_BROKER_URL` | (none) | MQTT broker URI. Production builds require `mqtts://broker-host:8883`. |
+| `DCLAW_OTA_HMAC_KEY` | (none) | Nonzero 32-byte hex shared secret. Production HMAC OTA also requires `-DDCLAW_ALLOW_HMAC_OTA=ON`. |
+| `DCLAW_EMERGENCY_KEY` | (none) | Separate nonzero 32-byte hex secret for emergency commands. |
+| `DCLAW_CA_CERT_PATH` | (none) | Broker CA PEM file for TLS server verification. |
+| `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | (none) | Client PEM certificate and private key when broker mTLS is enabled. |
+| `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. |
+| `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Local IPC socket path. |
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
-| `DCLAW_AUDIT_KEY` | (none) | HMAC key for the tamper-evident audit chain. If unset, audit entries are not cryptographically chained. |
+| `DCLAW_AUDIT_KEY` | (none) | Nonzero 32-byte hex audit HMAC key. Production builds refuse to start without it. |
 
 ### Compile-time constants
 
@@ -474,31 +454,33 @@ Set in `CMakeLists.txt`; changing these requires rebuilding the C library:
 | Constant | Default | Description |
 | --- | --- | --- |
 | `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables compiled into binary via `policy_tables.h` |
-| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory (CMake variable) |
+| `DCLAW_DEV_MODE` | `OFF` | Development-only build flag. Keep `OFF` in production. |
 | `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Max content snippet size for cloud escalation (set in `config.h.in`) |
 
 ## Grafana dashboard
 
-A pre-built Grafana dashboard is included at `edge-connector/dashboards/fleet-dashboard.json`. It visualizes device status, verdict rates, cache performance, and alert history.
+The [Fleet dashboard](http://localhost:3000/d/defenseclaw-fleet) is provisioned with the bundled local observability stack. Its source JSON is at `edge-connector/dashboards/fleet-dashboard.json`. It shows registered device status, heartbeats, block and allow verdicts, Fleet alerts, cache activity, and rollback counters. The dashboard is empty until Prometheus scrapes the [authenticated Fleet metrics endpoint](/docs/edge-connector/api-reference#prometheus-metrics).
 
-**Import the dashboard:**
+Fleet is disabled by default. Enable `fleet.enabled: true` on the gateway and set its admin `DCLAW_FLEET_API_TOKEN` in the environment. The bundled Prometheus intentionally has no Fleet scrape target until you opt in, because the gateway API normally listens only on `127.0.0.1:18970` and containers cannot reach that address through the Linux host gateway. Tenant-scoped tokens cannot scrape global Fleet metrics.
 
-1. Open Grafana and go to **Dashboards** > **Import**.
-2. Click **Upload JSON file** and select `edge-connector/dashboards/fleet-dashboard.json`, or paste the file contents directly.
-3. When prompted, select your Prometheus data source for the `DS_PROMETHEUS` variable.
-4. Click **Import**.
+For a local Docker stack, enable the optional scrape after confirming `host.docker.internal:18970` reaches your gateway **from a container**. Docker Desktop on macOS provides this host name. On Linux, set `gateway.api_bind` to the Docker bridge's host IP only if your firewall restricts access to the Docker network; this changes the bind for the entire gateway REST API. Managed enterprise installs require loopback and cannot use that bind change. For those hosts, run Prometheus on the host or provide a separately secured metrics-only proxy. Keep the gateway API bearer token secret and use TLS for any nonlocal access.
 
-<Callout type="warn">
-The dashboard expects the `DS_PROMETHEUS` datasource variable to be configured. It queries the Prometheus metrics exposed by the fleet gateway at `GET /api/v1/fleet/metrics` (see the [API reference](/docs/edge-connector/api-reference#prometheus-metrics)). Ensure your Prometheus instance is scraping the fleet gateway endpoint with the correct `Authorization` header.
-</Callout>
+```bash
+cd bundles/local_observability_stack
+test -n "$DCLAW_FLEET_API_TOKEN" || { echo 'Fleet API token is empty' >&2; exit 1; }
+install -d -m 0700 "$HOME/.defenseclaw/fleet-secrets"
+printf '%s' "$DCLAW_FLEET_API_TOKEN" > "$HOME/.defenseclaw/fleet-secrets/metrics-token"
+chgrp "$(id -g)" "$HOME/.defenseclaw/fleet-secrets/metrics-token"
+chmod 0640 "$HOME/.defenseclaw/fleet-secrets/metrics-token"
+cp prometheus/examples/fleet.yml prometheus/scrape.d/fleet.yml
+chmod 0755 prometheus/scrape.d
+chmod 0644 prometheus/scrape.d/fleet.yml # Prometheus runs as a non-root user
+export FLEET_METRICS_TOKEN_FILE="$HOME/.defenseclaw/fleet-secrets/metrics-token"
+export FLEET_METRICS_TOKEN_GID="$(id -g)"
+docker compose -f docker-compose.yml -f docker-compose.fleet.yml up -d
+```
 
-The dashboard includes panels for:
-- Devices online/offline/degraded/lockdown (gauge)
-- Heartbeat rate (time series)
-- Block vs. allow verdict rates (time series)
-- Verdict cache hit ratio (stat)
-- Audit chain integrity (alert panel)
-- Policy rollback and emergency command counters
+Keep the private `fleet-secrets` directory outside the bundle so wheel staging and bundle upgrades cannot copy the token. The token file needs group-read permission because the Prometheus container runs as a non-root user; the optional Compose file grants only this file's group to that container. Verify **Status → Targets** in Prometheus at `http://127.0.0.1:9090/targets`: `defenseclaw-fleet` must be **UP**. A `401` means the token is wrong; `connection refused` means the gateway bind/target is unreachable. Remove `prometheus/scrape.d/fleet.yml` and restart Compose to disable the scrape. When using another Prometheus instance, import the JSON and point its `defenseclaw-prometheus` data source at that instance. On an existing managed stack, the normal refresh preserves Grafana and Prometheus operator configuration; use `--refresh-config` only after backing up custom files, or copy the Fleet dashboard and scrape settings into the installed bundle by hand.
 
 ## Benchmark
 
@@ -507,15 +489,15 @@ cd edge-connector/build
 ./tests/bench_latency
 ```
 
-Expected on ARM Cortex-A: &lt;5μs decisions, &gt;100K/sec throughput.
+Measure latency and throughput on your own target hardware and selected build profile.
 
 ## Troubleshooting
 
 | Problem | Solution |
 | --- | --- |
 | `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
-| All tools blocked | Check `TOOL_CAP_MAP` — unknown tools default to `SENSOR_READ` (safe); tools with dangerous keywords (`exec`, `shell`, `bash`, `run`, `write`, `delete`, `rm`) upgrade to `EXEC_SHELL` |
+| All tools blocked | Check the C capability table (`src/decision/policy_table.c`). Unknown tool names fail closed before cache or Fleet escalation. A custom name needs a reviewed C mapping; a Python adapter mapping alone cannot authorize it. |
 | `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
-| `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` |
-| `CONTENT_BLOCK` false positives | Disable the offending category or add an exception pattern |
-| `SSRF_BLOCK` on internal services | Add trusted hosts to `ssrf_protection.private_ip_allowlist` |
+| `DEST_DENY` on a public IP | Add that public IP to `destination_allowlist` |
+| `CONTENT_BLOCK` false positives | Review or disable the offending built-in category; custom exception patterns are not implemented |
+| `SSRF_BLOCK` on hostnames or private addresses | Use an approved public numeric IP. Hostname destinations are blocked until a controlled egress resolver/proxy is available; private destinations have no policy bypass |

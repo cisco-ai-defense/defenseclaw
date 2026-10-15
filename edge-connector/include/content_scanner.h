@@ -68,13 +68,13 @@ dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx,
                                                dclaw_content_scope_t scope);
 
 /**
- * Initialize SSRF detection DFA tables (called once at agent init).
+ * Initialize the local SSRF guard (currently no runtime state).
  */
 void dclaw_ssrf_init_tables(void);
 
 /**
- * Check if a destination matches SSRF patterns.
- * Returns BLOCK if suspicious, ALLOW otherwise.
+ * Accept only canonical public IP literals for network destinations.
+ * Hostnames require a future enforced egress proxy and are blocked here.
  */
 dclaw_action_t dclaw_ssrf_check_destination(const char *dest);
 

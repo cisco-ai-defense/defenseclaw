@@ -391,17 +391,29 @@ static void test_ssrf_blocks_rfc1918(void) {
 }
 
 static void test_ssrf_allows_public(void) {
-    /* H-6 fix: hostname-based destinations are blocked when offline to prevent
-     * SSRF bypass via DNS names while disconnected from the cloud. Set online
-     * flag so hostname checks go through the normal allow path. */
-    extern dclaw_state_t *dclaw_get_state(void);
-    dclaw_get_state()->online = true;
-
     assert(dclaw_ssrf_check_destination("8.8.8.8") == DCLAW_ACTION_ALLOW);
-    assert(dclaw_ssrf_check_destination("api.openai.com") == DCLAW_ACTION_ALLOW);
-    printf("  PASS: SSRF allows public addresses\n");
+    assert(dclaw_ssrf_check_destination("http://8.8.8.8:443/path") == DCLAW_ACTION_ALLOW);
+    assert(dclaw_ssrf_check_destination("https://[2001:4860:4860::8888]:443/") == DCLAW_ACTION_ALLOW);
+    assert(dclaw_ssrf_check_destination(NULL) == DCLAW_ACTION_ALLOW);
+    assert(dclaw_ssrf_check_destination("") == DCLAW_ACTION_ALLOW);
+    printf("  PASS: canonical public literals and non-network empty destinations\n");
+}
 
-    dclaw_get_state()->online = false;
+static void test_ssrf_rejects_ambiguous_targets(void) {
+    const char *blocked[] = {
+        "localhost.", "localhost.localdomain", "api.openai.com",
+        "https://api.openai.com/path", "http://[::1]/",
+        "http://[::ffff:127.0.0.1]/", "http://[fe80::1]/",
+        "http://[fc00::1]/", "http://[2001:db8::1]/",
+        "http://0177.0.0.1/", "0x7f000001", "2130706433",
+        "http://8.8.8.8:bad", "http://8.8.8.8:65536",
+        "http://8.8.8.8:0", "http://8.8.8.8@1.1.1.1/",
+        "gopher://8.8.8.8/", "http://8.8.8.8\\@localhost/",
+    };
+    for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
+        assert(dclaw_ssrf_check_destination(blocked[i]) == DCLAW_ACTION_BLOCK);
+    }
+    printf("  PASS: names, private IPv6, encoded IPv4, and malformed authority block\n");
 }
 
 static void test_ssrf_blocks_inline_credentials(void) {
@@ -476,12 +488,13 @@ int main(void) {
     test_ssrf_blocks_metadata();
     test_ssrf_blocks_rfc1918();
     test_ssrf_allows_public();
+    test_ssrf_rejects_ambiguous_targets();
     test_ssrf_blocks_inline_credentials();
 
     /* Worst action tests */
     test_high_severity_returns_block();
     test_medium_severity_returns_warn();
 
-    printf("  ALL PASSED (28 tests)\n");
+    printf("  ALL PASSED (29 tests)\n");
     return 0;
 }

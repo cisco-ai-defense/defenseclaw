@@ -183,11 +183,11 @@ _Static_assert(sizeof(dclaw_audit_entry_t) == 32, "audit entry must be 32 bytes"
 
 _Static_assert(DCLAW_CONTENT_MAX <= UINT16_MAX,
                "DCLAW_CONTENT_MAX must fit in uint16_t content_len");
-_Static_assert(DCLAW_AUDIT_RAM_BUFFER_SIZE <= 255,
-               "DCLAW_AUDIT_RAM_BUFFER_SIZE must fit in uint8_t count");
+_Static_assert(DCLAW_AUDIT_RAM_BUFFER_SIZE < 255,
+               "DCLAW_AUDIT_RAM_BUFFER_SIZE plus BLOCK reserve must fit in uint8_t count");
 
 typedef struct {
-    dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
+    dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE + 1]; /* reserve one BLOCK slot */
     uint8_t  count;
     uint64_t last_flush_tick;
     uint32_t total_flash_writes;

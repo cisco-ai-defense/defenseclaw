@@ -1,89 +1,247 @@
 {
-  "dashboard": {
-    "id": null,
-    "uid": "dclaw-fleet-001",
-    "title": "DefenseClaw IoT Fleet",
-    "schemaVersion": 39,
-    "timezone": "browser",
-    "templating": {
-      "list": [
+  "id": null,
+  "uid": "defenseclaw-fleet",
+  "title": "DefenseClaw IoT Fleet",
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "title": "Devices Online",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
         {
-          "name": "DS_PROMETHEUS",
-          "type": "datasource",
-          "query": "prometheus",
-          "current": {},
-          "hide": 0,
-          "includeAll": false,
-          "multi": false,
-          "options": [],
-          "refresh": 1,
-          "regex": "",
-          "skipUrlSync": false
+          "expr": "defenseclaw_fleet_devices_total{status=\"online\"}",
+          "refId": "A"
         }
-      ]
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "id": 1
     },
-    "annotations": {
-      "list": []
+    {
+      "title": "Devices Offline",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_devices_total{status=\"offline\"}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "id": 2
     },
-    "panels": [
-      {
-        "title": "Devices Online",
-        "type": "stat",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "defenseclaw_fleet_devices_total{status=\"online\"}"}],
-        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4}
+    {
+      "title": "Fleet Alerts (5m)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
-      {
-        "title": "Devices Offline",
-        "type": "stat",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "defenseclaw_fleet_devices_total{status=\"offline\"}"}],
-        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4}
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_fleet_alerts_total[5m]))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
-      {
-        "title": "Active Alerts",
-        "type": "stat",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "increase(defenseclaw_fleet_audit_chain_breaks_total[5m]) + increase(defenseclaw_fleet_emergency_seq_gaps_total[5m])"}],
-        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4}
+      "id": 3
+    },
+    {
+      "title": "Block Rate",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
-      {
-        "title": "Block Rate",
-        "type": "stat",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum(rate(defenseclaw_fleet_blocks_total[5m]))"}],
-        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4}
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_fleet_blocks_total[5m]))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
-      {
-        "title": "Block Rate Over Time (24h)",
-        "type": "graph",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum(rate(defenseclaw_fleet_blocks_total[5m]))"}],
-        "gridPos": {"x": 0, "y": 4, "w": 24, "h": 8}
+      "id": 4
+    },
+    {
+      "title": "Verdict Rates Over Time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
-      {
-        "title": "Verdict Cache Hit Rate",
-        "type": "gauge",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) / (sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) + sum(rate(defenseclaw_fleet_verdict_cache_misses_total[5m]))) or vector(0)"}],
-        "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6}
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_fleet_blocks_total[5m]))",
+          "refId": "A",
+          "legendFormat": "BLOCK/s"
+        },
+        {
+          "expr": "sum(rate(defenseclaw_fleet_allows_total[5m]))",
+          "refId": "B",
+          "legendFormat": "ALLOW/s"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
       },
-      {
-        "title": "Device Status Distribution",
-        "type": "piechart",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum by (status) (defenseclaw_fleet_devices_total)"}],
-        "gridPos": {"x": 8, "y": 12, "w": 8, "h": 6}
+      "id": 5
+    },
+    {
+      "title": "Verdict Cache Hit Rate",
+      "type": "gauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
-      {
-        "title": "Policy Rollbacks",
-        "type": "stat",
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum(defenseclaw_fleet_policy_rollback_total)"}],
-        "gridPos": {"x": 16, "y": 12, "w": 8, "h": 6}
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) / (sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) + sum(rate(defenseclaw_fleet_verdict_cache_misses_total[5m])))",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 8,
+        "h": 6
+      },
+      "id": 6
+    },
+    {
+      "title": "Device Status Distribution",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (defenseclaw_fleet_devices_total)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 8,
+        "y": 12,
+        "w": 8,
+        "h": 6
+      },
+      "id": 7
+    },
+    {
+      "title": "Policy Rollbacks",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(defenseclaw_fleet_policy_rollback_total)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 6
+      },
+      "id": 8
+    },
+    {
+      "id": 9,
+      "title": "Heartbeat Rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "rate(defenseclaw_fleet_heartbeats_received_total[5m])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 6
       }
-    ],
-    "time": {"from": "now-24h", "to": "now"},
-    "refresh": "30s"
-  }
+    },
+    {
+      "id": 10,
+      "title": "Verdict Cache Entries",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_verdict_cache_size",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 6
+      }
+    }
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "description": "Fleet device health, signed verdicts, heartbeats, cache activity, and policy canary rollbacks. Requires an authenticated Fleet metrics scrape.",
+  "links": [
+    {
+      "title": "Security",
+      "type": "link",
+      "url": "/d/defenseclaw-security?${__url_time_range}",
+      "icon": "external link"
+    }
+  ]
 }

@@ -35,13 +35,14 @@ Implements REQ-41 through REQ-44.
 
 import argparse
 import hashlib
+import ipaddress
 import logging
 import os
-import re
 import struct
 import sys
 from collections import deque
 from pathlib import Path
+from typing import Optional, Tuple
 
 logger = logging.getLogger("defenseclaw.policy_compiler")
 
@@ -100,27 +101,32 @@ ESCALATION_MAP = {
     "speculative": 1,
 }
 
-# Content category name → enum value
-CONTENT_CATEGORY_MAP = {
-    "secret": 1,
-    "pii": 2,
-    "credential": 3,
-    "exfil": 4,
-    "injection": 5,
-    "command": 6,
-}
-
-# Only alphanumeric, dot, hyphen, and wildcard star are allowed in destinations.
-HOSTNAME_SAFE_RE = re.compile(r'^[a-zA-Z0-9.*\-]+$')
-
-
 def validate_destination(dest: str) -> str:
-    """Validate destination string against hostname-safe pattern."""
-    if not HOSTNAME_SAFE_RE.match(dest):
-        raise ValueError(
-            f"Destination '{dest}' contains unsafe characters. "
-            f"Only [a-zA-Z0-9.*-] are allowed.")
+    """The local SSRF guard can enforce only explicit public IP literals."""
+    if not isinstance(dest, str):
+        raise ValueError("destination allowlist entries must be strings")
+    try:
+        address = ipaddress.ip_address(dest)
+    except ValueError as exc:
+        raise ValueError(f"Destination '{dest}' must be a public IP literal; "
+                         "hostnames require an enforced egress proxy") from exc
+    if not address.is_global or (address.version == 6 and not dest.startswith(('2', '3'))):
+        raise ValueError(f"Destination '{dest}' must be a public IP literal")
     return dest
+
+
+def validate_policy_extensions(policy: dict) -> None:
+    """Reject IoT options that this compiler/device would silently ignore."""
+    extensions = policy.get("iot_extensions", {})
+    if not isinstance(extensions, dict):
+        raise ValueError("iot_extensions must be a mapping")
+    supported = {"capability_sequences", "destination_allowlist", "canary"}
+    unknown = set(extensions) - supported
+    if unknown:
+        raise ValueError(f"unsupported iot_extensions: {', '.join(sorted(unknown))}")
+    canary = extensions.get("canary", {})
+    if not isinstance(canary, dict) or set(canary) - {"baseline_blocks_per_min"}:
+        raise ValueError("canary supports only baseline_blocks_per_min")
 
 
 def escape_c_string(s: str) -> str:
@@ -406,90 +412,11 @@ def extract_canary_baseline(policy: dict) -> int:
     return canary.get("baseline_blocks_per_min", 5)
 
 
-def extract_content_inspection(policy: dict) -> dict:
-    """Extract content inspection configuration from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    content_inspection = iot_ext.get("content_inspection", {})
-
-    result = {
-        "enabled": content_inspection.get("enabled", False),
-        "rules": []
-    }
-
-    if not result["enabled"]:
-        return result
-
-    categories = content_inspection.get("categories", {})
-    for cat_name, config in categories.items():
-        if not config.get("enabled", False):
-            continue
-
-        cat_val = CONTENT_CATEGORY_MAP.get(cat_name)
-        if cat_val is None:
-            print(f"WARNING: unknown content category '{cat_name}', skipping",
-                  file=sys.stderr)
-            continue
-
-        sev_val = SEVERITY_MAP.get(config.get("severity", "high"), 3)
-        act_val = ACTION_MAP.get(config.get("action", "block"), 1)
-
-        result["rules"].append({
-            "category": cat_val,
-            "severity": sev_val,
-            "action": act_val,
-            "enabled": 1
-        })
-
-    result["rules"].sort(key=lambda x: x["category"])
-    return result
-
-
-def extract_ssrf_protection(policy: dict) -> dict:
-    """Extract SSRF protection configuration from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    ssrf = iot_ext.get("ssrf_protection", {})
-
-    return {
-        "enabled": ssrf.get("enabled", False),
-        "block_private_ranges": ssrf.get("block_private_ranges", False),
-        "block_loopback": ssrf.get("block_loopback", False),
-        "block_link_local": ssrf.get("block_link_local", False),
-        "block_cloud_metadata": ssrf.get("block_cloud_metadata", False),
-    }
-
-
-def extract_cloud_escalation(policy: dict) -> dict:
-    """Extract cloud escalation configuration from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    cloud_esc = iot_ext.get("cloud_escalation", {})
-
-    return {
-        "max_payload_bytes": cloud_esc.get("max_payload_bytes", 1024),
-        "include_content": cloud_esc.get("include_content", True),
-        "include_local_findings": cloud_esc.get("include_local_findings", True),
-    }
-
-
-def extract_trust_boundaries(policy: dict) -> dict:
-    """Extract trust boundary configuration from iot_extensions."""
-    iot_ext = policy.get("iot_extensions", {})
-    trust = iot_ext.get("trust_boundaries", {})
-
-    return {
-        "infer_from_context": trust.get("infer_from_context", True),
-        "strict_user_input": trust.get("strict_user_input", True),
-        "user_input_block_threshold": SEVERITY_MAP.get(
-            trust.get("user_input_block_threshold", "medium"), 2),
-        "system_block_threshold": SEVERITY_MAP.get(
-            trust.get("system_block_threshold", "high"), 3),
-    }
-
-
 def generate_c_header(policy: dict, version: int) -> str:
     """Generate C header with compiled policy tables."""
     # Version is emitted as uint16_t in the C header
-    if version > 65535:
-        raise ValueError(f"Policy version {version} exceeds uint16 max (65535)")
+    if version > 65534:
+        raise ValueError(f"Policy version {version} exceeds OTA maximum (65534; 65535 is reserved)")
     if version < 0:
         raise ValueError(f"Policy version {version} must be non-negative")
 
@@ -498,11 +425,6 @@ def generate_c_header(policy: dict, version: int) -> str:
     dest_allowlist = extract_dest_allowlist(policy)
     rate_limits = extract_rate_limits(policy)
     escalation_modes = extract_escalation_modes(policy)
-    canary_baseline = extract_canary_baseline(policy)
-    content_inspection = extract_content_inspection(policy)
-    ssrf_protection = extract_ssrf_protection(policy)
-    cloud_escalation = extract_cloud_escalation(policy)
-    trust_boundaries = extract_trust_boundaries(policy)
 
     lines = [
         '#ifndef DCLAW_POLICY_TABLES_H',
@@ -513,6 +435,11 @@ def generate_c_header(policy: dict, version: int) -> str:
         f' * Policy version: {version}',
         ' * DO NOT EDIT MANUALLY',
         ' */',
+        '',
+        '#ifdef __GNUC__',
+        '#pragma GCC diagnostic push',
+        '#pragma GCC diagnostic ignored "-Wunused-variable"',
+        '#endif',
         '',
         '#include "defenseclaw.h"',
         '',
@@ -591,59 +518,11 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append(f'DCLAW_UNUSED static const size_t escalation_table_count = {len(escalation_modes)};')
     lines.append('')
 
-    # Canary baseline
-    lines.append('/* === Canary Baseline === */')
-    lines.append(f'DCLAW_UNUSED static const uint16_t policy_canary_baseline_blocks_per_min = {canary_baseline};')
-    lines.append('')
-
     # Rate limits
     lines.append('/* === Rate Limit Defaults === */')
     lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_tool_calls_per_min = {rate_limits.get("tool_calls_per_minute", 60)};')
     lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
     lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
-    lines.append('')
-
-    # Content inspection rules
-    lines.append('/* === Content Inspection Categories === */')
-    lines.append('')
-    lines.append('typedef struct {')
-    lines.append('    uint8_t category;')
-    lines.append('    uint8_t severity;')
-    lines.append('    uint8_t action;')
-    lines.append('    uint8_t enabled;')
-    lines.append('} dclaw_content_rule_t;')
-    lines.append('')
-    lines.append('DCLAW_UNUSED')
-    lines.append('static const dclaw_content_rule_t content_rules[] = {')
-    for rule in content_inspection["rules"]:
-        lines.append(f'    {{ {rule["category"]}, {rule["severity"]}, {rule["action"]}, {rule["enabled"]} }},')
-    lines.append('};')
-    lines.append(f'DCLAW_UNUSED static const size_t content_rules_count = {len(content_inspection["rules"])};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t content_inspection_enabled = {1 if content_inspection["enabled"] else 0};')
-    lines.append('')
-
-    # SSRF protection
-    lines.append('/* === SSRF Protection === */')
-    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_enabled = {1 if ssrf_protection["enabled"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_private = {1 if ssrf_protection["block_private_ranges"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_loopback = {1 if ssrf_protection["block_loopback"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_link_local = {1 if ssrf_protection["block_link_local"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_cloud_metadata = {1 if ssrf_protection["block_cloud_metadata"] else 0};')
-    lines.append('')
-
-    # Cloud escalation
-    lines.append('/* === Cloud Escalation === */')
-    lines.append(f'DCLAW_UNUSED static const uint16_t escalation_max_payload = {cloud_escalation["max_payload_bytes"]};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t escalation_include_content = {1 if cloud_escalation["include_content"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t escalation_include_findings = {1 if cloud_escalation["include_local_findings"] else 0};')
-    lines.append('')
-
-    # Trust boundaries
-    lines.append('/* === Trust Boundaries === */')
-    lines.append(f'DCLAW_UNUSED static const uint8_t trust_infer_from_context = {1 if trust_boundaries["infer_from_context"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t trust_strict_user_input = {1 if trust_boundaries["strict_user_input"] else 0};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t trust_user_input_block_threshold = {trust_boundaries["user_input_block_threshold"]};')
-    lines.append(f'DCLAW_UNUSED static const uint8_t trust_system_block_threshold = {trust_boundaries["system_block_threshold"]};')
     lines.append('')
 
     # ── Aho-Corasick Content DFA ─────────────────────────────────────────
@@ -740,6 +619,11 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append('#define DCLAW_AC_DFA_AVAILABLE 1')
     lines.append('')
 
+    lines.append('#ifdef __GNUC__')
+    lines.append('#pragma GCC diagnostic pop')
+    lines.append('#endif')
+    lines.append('')
+
     lines.append('#endif /* DCLAW_POLICY_TABLES_H */')
     lines.append('')
 
@@ -749,8 +633,8 @@ def generate_c_header(policy: dict, version: int) -> str:
 def generate_binary_blob(policy: dict, version: int) -> bytes:
     """Generate signed binary policy blob for OTA delivery."""
     # struct.pack('>H', ...) silently truncates values exceeding uint16
-    if version > 65535:
-        raise ValueError(f"Policy version {version} exceeds uint16 max (65535)")
+    if version > 65534:
+        raise ValueError(f"Policy version {version} exceeds OTA maximum (65534; 65535 is reserved)")
     if version < 0:
         raise ValueError(f"Policy version {version} must be non-negative")
 
@@ -758,8 +642,6 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     sequence_rules = extract_sequence_rules(policy)
     dest_allowlist = extract_dest_allowlist(policy)
     canary_baseline = extract_canary_baseline(policy)
-    content_inspection = extract_content_inspection(policy)
-    ssrf_protection = extract_ssrf_protection(policy)
 
     if canary_baseline > 65535:
         raise ValueError(f"Canary baseline {canary_baseline} exceeds uint16 max (65535)")
@@ -810,27 +692,6 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
         payload.append(len(encoded))
         payload.extend(encoded)
 
-    # Content inspection rules
-    payload.append(1 if content_inspection["enabled"] else 0)
-    payload.append(len(content_inspection["rules"]))
-    for rule in content_inspection["rules"]:
-        payload.extend(struct.pack('BBBB', rule["category"], rule["severity"],
-                                   rule["action"], rule["enabled"]))
-
-    # SSRF protection flags
-    ssrf_flags = 0
-    if ssrf_protection["enabled"]:
-        ssrf_flags |= 0x01
-    if ssrf_protection["block_private_ranges"]:
-        ssrf_flags |= 0x02
-    if ssrf_protection["block_loopback"]:
-        ssrf_flags |= 0x04
-    if ssrf_protection["block_link_local"]:
-        ssrf_flags |= 0x08
-    if ssrf_protection["block_cloud_metadata"]:
-        ssrf_flags |= 0x10
-    payload.append(ssrf_flags)
-
     # Header: version(2) + payload_len(2) + canary_baseline(2) + reserved(2)
     header = struct.pack('>HHHxx', version, len(payload), canary_baseline)
     blob = header + payload
@@ -838,7 +699,7 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     return bytes(blob)
 
 
-def sign_blob(blob: bytes, key_path: str) -> tuple[bytes, bool]:
+def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
     """Sign blob with Ed25519. Returns (signature, is_unsigned) tuple.
 
     The signature is 65 bytes: 1-byte type marker + 64-byte signature.
@@ -905,7 +766,7 @@ def sign_blob(blob: bytes, key_path: str) -> tuple[bytes, bool]:
 
 
 def compute_size_report(c_header: str, binary_blob: bytes, profile: str,
-                        profile_limits: dict | None = None) -> str:
+                        profile_limits: Optional[dict] = None) -> str:
     """Generate size validation report."""
     _limits = profile_limits if profile_limits is not None else PROFILE_LIMITS
     limit = _limits.get(profile, 4096)
@@ -976,24 +837,36 @@ def main():
     if args.target_partition_size > 0:
         limits[args.profile] = args.target_partition_size
 
-    # Parse policy
-    policy = parse_policy(Path(args.input))
+    # Invalid input has a distinct exit status so API callers can return a
+    # client error without misclassifying missing tools or filesystem faults.
+    try:
+        policy = parse_policy(Path(args.input))
+        if not isinstance(policy, dict):
+            raise ValueError("policy root must be a YAML mapping")
+        validate_policy_extensions(policy)
+        c_header = generate_c_header(policy, args.version)
+        blob = generate_binary_blob(policy, args.version)
+    except (yaml.YAMLError, ValueError, TypeError, AttributeError) as exc:
+        print(f"Invalid policy: {exc}", file=sys.stderr)
+        return 65  # EX_DATAERR
+
+    partition_limit = limits[args.profile]
+    if len(blob) > partition_limit - 64:
+        print(f"Invalid policy: blob plus 64-byte signature exceeds {args.profile} partition limit "
+              f"({len(blob)} + 64 > {partition_limit} bytes)", file=sys.stderr)
+        return 65
+
     print(f"Parsed policy: {policy.get('name', 'unnamed')}")
-
-    # Generate C header
-    c_header = generate_c_header(policy, args.version)
-    os.makedirs(os.path.dirname(args.output_header) or '.', exist_ok=True)
-    with open(args.output_header, 'w') as f:
-        f.write(c_header)
-    print(f"Generated C header: {args.output_header} ({len(c_header)} bytes)")
-
-    # Generate binary blob
-    blob = generate_binary_blob(policy, args.version)
     signature, is_unsigned = sign_blob(blob, args.signing_key)
     signed_blob = blob + signature
     if is_unsigned:
         # Callers detect dev-stub blobs via the SIGNATURE_TYPE_DEV marker byte
         logger.info("Policy blob is unsigned (dev stub signature)")
+
+    os.makedirs(os.path.dirname(args.output_header) or '.', exist_ok=True)
+    with open(args.output_header, 'w') as f:
+        f.write(c_header)
+    print(f"Generated C header: {args.output_header} ({len(c_header)} bytes)")
 
     os.makedirs(os.path.dirname(args.output_binary) or '.', exist_ok=True)
     with open(args.output_binary, 'wb') as f:
@@ -1007,13 +880,6 @@ def main():
     if args.output_report:
         with open(args.output_report, 'w') as f:
             f.write(report)
-
-    # Fail if oversized
-    partition_limit = limits[args.profile]
-    if len(blob) > partition_limit:
-        print(f"\nFATAL: Policy blob exceeds {args.profile} partition limit!",
-              file=sys.stderr)
-        return 1
 
     return 0
 

@@ -37,17 +37,24 @@ type Signer interface {
 	Verify(data, signature []byte) error
 }
 
-// HMACSigner implements HMAC-SHA256 signing, matching the C-side fallback
-// verification path in ota_receiver.c.
+// HMACSigner implements HMAC-SHA256 signing for the explicitly provisioned
+// OTA HMAC mode in ota_receiver.c.
 type HMACSigner struct {
 	key []byte
 }
 
 // NewHMACSigner creates a signer from the given key bytes.
-// The key should be at least 32 bytes for adequate security.
+// The wire protocol requires an independent, nonzero 32-byte secret.
 func NewHMACSigner(key []byte) (*HMACSigner, error) {
-	if len(key) < 32 {
-		return nil, fmt.Errorf("HMAC key must be at least 32 bytes, got %d", len(key))
+	if len(key) != 32 {
+		return nil, fmt.Errorf("HMAC key must be exactly 32 bytes, got %d", len(key))
+	}
+	allZero := true
+	for _, b := range key {
+		allZero = allZero && b == 0
+	}
+	if allZero {
+		return nil, errors.New("HMAC key must not be all zero")
 	}
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
@@ -55,43 +62,34 @@ func NewHMACSigner(key []byte) (*HMACSigner, error) {
 }
 
 // NewHMACSignerFromEnv creates a signer using the hex-encoded key from the
-// DCLAW_OTA_KEY environment variable (matching the C-side ota_receiver.c).
-// Falls back to a 32-byte all-zero key if the env var is not set, matching
-// the C-side development fallback for interoperability.
+// DCLAW_OTA_HMAC_KEY environment variable. DCLAW_OTA_KEY is reserved for an
+// Ed25519 public verify key and must never be treated as an HMAC secret.
 func NewHMACSignerFromEnv() (*HMACSigner, error) {
-	keyHex := os.Getenv("DCLAW_OTA_KEY")
+	keyHex := os.Getenv("DCLAW_OTA_HMAC_KEY")
 	if keyHex == "" {
-		prod := os.Getenv("DCLAW_PRODUCTION")
-		if prod == "true" || prod == "1" {
-			return nil, errors.New("DCLAW_OTA_KEY not set and DCLAW_PRODUCTION=true — zero-key fallback is disabled in production")
-		}
-		// Development fallback — all-zero key, matching C-side ota_receiver.c
-		// get_ota_ca_key() which memsets to zero when DCLAW_OTA_KEY is unset.
-		devKey := make([]byte, 32)
-		return &HMACSigner{key: devKey}, nil
+		return nil, errors.New("DCLAW_OTA_HMAC_KEY is required for HMAC policy signing")
 	}
 
 	key, err := decodeHex(keyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid DCLAW_OTA_KEY: %w", err)
+		return nil, fmt.Errorf("invalid DCLAW_OTA_HMAC_KEY: %w", err)
 	}
 	return NewHMACSigner(key)
 }
 
 // NewEmergencySignerFromEnv creates a signer using the hex-encoded key from the
-// DCLAW_EMERGENCY_KEY environment variable. Falls back to DCLAW_OTA_KEY if
-// DCLAW_EMERGENCY_KEY is not set, so existing deployments work without change.
+// DCLAW_EMERGENCY_KEY environment variable. It must be independently
+// provisioned to prevent an OTA signing key from authorizing emergencies.
 func NewEmergencySignerFromEnv() (*HMACSigner, error) {
 	keyHex := os.Getenv("DCLAW_EMERGENCY_KEY")
-	if keyHex != "" {
-		key, err := decodeHex(keyHex)
-		if err != nil {
-			return nil, fmt.Errorf("invalid DCLAW_EMERGENCY_KEY: %w", err)
-		}
-		return NewHMACSigner(key)
+	if keyHex == "" {
+		return nil, errors.New("DCLAW_EMERGENCY_KEY is required for emergency signing")
 	}
-	// Fall back to DCLAW_OTA_KEY when no separate emergency key is provisioned.
-	return NewHMACSignerFromEnv()
+	key, err := decodeHex(keyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DCLAW_EMERGENCY_KEY: %w", err)
+	}
+	return NewHMACSigner(key)
 }
 
 // Sign produces a 32-byte HMAC-SHA256 signature over the data.
@@ -113,31 +111,27 @@ func (s *HMACSigner) Verify(data, signature []byte) error {
 }
 
 // NewHMACSignerFromKeyHex creates a signer from a hex-encoded key resolved
-// from config.yaml. Falls back to NewHMACSignerFromEnv when keyHex is empty,
-// maintaining backward compatibility with env-var-only deployments.
+// from config.yaml. Falls back to the dedicated environment variable when empty.
 func NewHMACSignerFromKeyHex(keyHex string) (*HMACSigner, error) {
 	if keyHex == "" {
 		return NewHMACSignerFromEnv()
 	}
 	key, err := decodeHex(keyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid OTA key from config: %w", err)
+		return nil, fmt.Errorf("invalid OTA HMAC key from config: %w", err)
 	}
 	return NewHMACSigner(key)
 }
 
-// NewEmergencySignerFromKeyHex creates an emergency signer from config.
-// Falls back to env vars when empty.
-func NewEmergencySignerFromKeyHex(keyHex, otaKeyHex string) (*HMACSigner, error) {
+// NewEmergencySignerFromKeyHex creates an emergency signer from config,
+// falling back only to the separate emergency environment variable.
+func NewEmergencySignerFromKeyHex(keyHex string) (*HMACSigner, error) {
 	if keyHex != "" {
 		key, err := decodeHex(keyHex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid emergency key from config: %w", err)
 		}
 		return NewHMACSigner(key)
-	}
-	if otaKeyHex != "" {
-		return NewHMACSignerFromKeyHex(otaKeyHex)
 	}
 	return NewEmergencySignerFromEnv()
 }

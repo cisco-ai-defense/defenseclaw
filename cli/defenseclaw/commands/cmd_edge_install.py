@@ -23,10 +23,10 @@ either locally or on a remote device via SSH.
 from __future__ import annotations
 
 import os
-import secrets
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import click
@@ -37,16 +37,16 @@ from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
 def _find_edge_connector_source() -> Path | None:
-    """Locate the edge-connector source tree relative to the repo checkout."""
-    # Walk up from the CLI package to find the repo root.
-    cli_pkg = Path(__file__).resolve().parent.parent  # .../cli/defenseclaw
-    candidates = [
-        cli_pkg.parent.parent / "edge-connector",       # repo root
-        cli_pkg.parent.parent.parent / "edge-connector", # one level higher
-        Path.cwd() / "edge-connector",                   # working directory
-    ]
+    """Locate a trusted source tree from this checkout or the installed wheel."""
+    cli_pkg = Path(__file__).resolve().parent.parent
+    candidates = []
+    # Editable source checkout: its CLI package must be directly below cli/.
+    if cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
+        candidates.append(cli_pkg.parent.parent / "edge-connector")
+    # Published wheels bundle precisely the C sources used for this release.
+    candidates.append(cli_pkg / "_data" / "edge-connector")
     for candidate in candidates:
-        if (candidate / "CMakeLists.txt").is_file():
+        if (candidate / "CMakeLists.txt").is_file() and (candidate / "src" / "main.c").is_file():
             return candidate
     return None
 
@@ -65,7 +65,7 @@ def _validate_ssh_identifier(value: str, label: str) -> str:
     injection when embedded in shell commands or rsync/scp arguments.
     """
     import re
-    if not re.match(r'^[a-zA-Z0-9._@\-]+$', value):
+    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9._-]*', value):
         raise click.ClickException(
             f"Invalid {label}: {value!r} — only alphanumeric, dot, hyphen, "
             f"and underscore characters are allowed."
@@ -133,13 +133,14 @@ def _copy_source(source: Path, target: str, user: str) -> str:
     rsync = shutil.which("rsync")
     if rsync:
         _run([
-            "rsync", "-az", "--delete",
+            "rsync", "-az", "--delete", "-e", "ssh -o StrictHostKeyChecking=yes",
             "--exclude", "build/", "--exclude", "build-*/",
             f"{source}/", f"{user}@{target}:{remote_dir}/",
         ])
     else:
         _run([
-            "scp", "-r", str(source), f"{user}@{target}:{remote_dir}",
+            "scp", "-o", "StrictHostKeyChecking=yes", "-r",
+            f"{source}/.", f"{user}@{target}:{remote_dir}/",
         ])
     ux.ok(f"Source copied to {target}:{remote_dir}")
     return remote_dir
@@ -154,7 +155,8 @@ def _build_remote(target: str, user: str, remote_dir: str, profile: str) -> bool
     build_script = (
         f"cd {safe_dir} && "
         f"mkdir -p build && cd build && "
-        f"cmake .. -DDCLAW_PROFILE={safe_profile} -DDCLAW_DEV_MODE=OFF && "
+        f"cmake .. -DDCLAW_PROFILE={safe_profile} -DDCLAW_DEV_MODE=OFF "
+        "-DDCLAW_ALLOW_HMAC_OTA=ON -DDCLAW_BUILD_TESTS=OFF && "
         f"make -j$(nproc) && "
         f"sudo make install"
     )
@@ -215,32 +217,49 @@ def _configure_remote_env(
     if mqtt_pass:
         env_lines += f"DCLAW_MQTT_PASS={shlex.quote(mqtt_pass)}\n"
 
-    # Provision OTA signing key from the operator's local .env
-    ota_key = _load_local_env_value("DCLAW_OTA_KEY")
-    if ota_key:
-        env_lines += f"DCLAW_OTA_KEY={shlex.quote(ota_key)}\n"
+    # The gateway and device must share the OTA/emergency keys. Generate each
+    # once on the operator machine and retain it for gateway provisioning.
+    from defenseclaw.commands.cmd_setup_edge_connector import _hmac_key
 
-    audit_key = _load_local_env_value("DCLAW_AUDIT_KEY")
-    if not audit_key:
-        audit_key = secrets.token_hex(32)
-        ux.echo(f"  Generated random audit key ({len(audit_key)} hex chars)")
-    env_lines += f"DCLAW_AUDIT_KEY={shlex.quote(audit_key)}\n"
+    cli_env = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
+    try:
+        audit_key = _hmac_key(cli_env, "DCLAW_AUDIT_KEY")
+        ota_key = _hmac_key(cli_env, "DCLAW_OTA_HMAC_KEY")
+        emergency_key = _hmac_key(cli_env, "DCLAW_EMERGENCY_KEY")
+        for name, value in (
+            ("DCLAW_AUDIT_KEY", audit_key),
+            ("DCLAW_OTA_HMAC_KEY", ota_key),
+            ("DCLAW_EMERGENCY_KEY", emergency_key),
+        ):
+            _persist_env_var(cli_env, name, value)
+            env_lines += f"{name}={shlex.quote(value)}\n"
+    except (OSError, ValueError) as exc:
+        ux.err(f"Could not save Edge keys locally: {exc}")
+        return False
 
+    # SSH command arguments are visible in process listings and often logged.
+    # Stream credentials on stdin and replace the existing file only after a
+    # complete write, with the temporary file private from creation onward.
+    install_script = (
+        "umask 077; "
+        "tmp=$(mktemp /etc/defenseclaw/.edge-connector.env.XXXXXXXX) || exit 1; "
+        "trap 'rm -f \"$tmp\"' EXIT; "
+        "cat > \"$tmp\" && chmod 600 \"$tmp\" && "
+        "mv -f \"$tmp\" /etc/defenseclaw/edge-connector.env && "
+        "trap - EXIT"
+    )
     configure_cmd = (
-        "sudo mkdir -p /etc/defenseclaw && "
-        f"printf %s {shlex.quote(env_lines)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
-        "sudo chmod 600 /etc/defenseclaw/edge-connector.env"
+        "sudo mkdir -p /etc/defenseclaw && sudo sh -c "
+        + shlex.quote(install_script)
     )
     result = subprocess.run(
         _ssh_cmd(target, user, configure_cmd),
-        text=True, timeout=60,
+        input=env_lines, text=True, timeout=60,
     )
     if result.returncode == 0:
         ux.ok("Device environment configured at /etc/defenseclaw/edge-connector.env")
         if not mqtt_user:
             ux.warn("DCLAW_MQTT_USER not found in ~/.defenseclaw/.env -- configure manually on the device.")
-        if not ota_key:
-            ux.warn("DCLAW_OTA_KEY not found in ~/.defenseclaw/.env -- configure manually on the device.")
         return True
     else:
         ux.err("Failed to write env file on remote device. The device cannot start without it.")
@@ -482,88 +501,36 @@ def _start_remote_daemon(target: str, user: str) -> bool:
     return False
 
 
-def _provision_local_service_env(broker_url: str) -> None:
-    """Write DCLAW_AUDIT_KEY (and other vars) to both
-    ~/.defenseclaw/.env (for CLI use) and /etc/defenseclaw/edge-connector.env
-    (for the systemd service).
+def _provision_local_service_env(broker_url: str) -> bool:
+    """Provision required independent secrets for the local C service."""
+    from defenseclaw.commands.cmd_setup_edge_connector import _hmac_key, _persist_svc_env_var
 
-    On local install the service env file was never written, so the
-    edge-connector built with -DDCLAW_DEV_MODE=OFF would refuse to start
-    because DCLAW_AUDIT_KEY was missing from its EnvironmentFile.
-    """
     cli_env = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
     svc_env = Path("/etc/defenseclaw/edge-connector.env")
-
     ux.echo()
     ux.section("Provisioning service environment")
-
-    # Generate or reuse audit key
-    audit_key = _load_local_env_value("DCLAW_AUDIT_KEY")
-    if not audit_key:
-        audit_key = secrets.token_hex(32)
-        ux.echo(f"  Generated random audit key ({len(audit_key)} hex chars)")
-    else:
-        ux.echo(f"  Reusing existing audit key ({len(audit_key)} hex chars)")
-
-    # Write to CLI env (~/.defenseclaw/.env)
-    _persist_env_var(cli_env, "DCLAW_AUDIT_KEY", audit_key)
-    ux.ok(f"Wrote DCLAW_AUDIT_KEY to {cli_env}")
-
-    # Write to service env (/etc/defenseclaw/edge-connector.env) -- needs sudo
-    env_lines: list[str] = []
-
-    # Preserve existing lines from the service env if present
-    if svc_env.exists():
-        try:
-            existing = subprocess.run(
-                ["sudo", "cat", str(svc_env)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if existing.returncode == 0:
-                for line in existing.stdout.splitlines():
-                    s = line.strip()
-                    # Skip keys we are about to write fresh
-                    if any(s.startswith(f"{k}=") for k in (
-                        "DCLAW_AUDIT_KEY", "DCLAW_BROKER_URL",
-                        "DCLAW_MQTT_USER", "DCLAW_MQTT_PASS",
-                    )):
-                        continue
-                    env_lines.append(line)
-        except OSError:
-            pass
-
-    env_lines.append(f"DCLAW_AUDIT_KEY={audit_key}")
-    env_lines.append(f"DCLAW_BROKER_URL={broker_url}")
-
-    # Also propagate MQTT creds if available
-    mqtt_user = _load_local_env_value("DCLAW_MQTT_USER")
-    mqtt_pass = _load_local_env_value("DCLAW_MQTT_PASS")
-    if mqtt_user:
-        env_lines.append(f"DCLAW_MQTT_USER={mqtt_user}")
-    if mqtt_pass:
-        env_lines.append(f"DCLAW_MQTT_PASS={mqtt_pass}")
-
-    env_content = "\n".join(env_lines) + "\n"
-    svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
+    if "\n" in broker_url or "\r" in broker_url:
+        raise click.ClickException("Broker URL must be a single line")
+    values = {
+        "DCLAW_AUDIT_KEY": _hmac_key(cli_env, "DCLAW_AUDIT_KEY"),
+        "DCLAW_OTA_HMAC_KEY": _hmac_key(cli_env, "DCLAW_OTA_HMAC_KEY"),
+        "DCLAW_EMERGENCY_KEY": _hmac_key(cli_env, "DCLAW_EMERGENCY_KEY"),
+        "DCLAW_BROKER_URL": broker_url,
+    }
+    for key in ("DCLAW_MQTT_USER", "DCLAW_MQTT_PASS"):
+        value = _load_local_env_value(key)
+        if value:
+            values[key] = value
     try:
-        subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True, timeout=30)
-        subprocess.run(
-            ["sudo", "install", "-m", "600", "/dev/null", str(svc_env_path)],
-            check=True, timeout=30,
-        )
-        subprocess.run(
-            ["sudo", "tee", str(svc_env_path)],
-            input=env_content.encode(),
-            stdout=subprocess.DEVNULL,
-            check=True, timeout=30,
-        )
-        result_ok = True
-    except subprocess.CalledProcessError:
-        result_ok = False
-    if result_ok:
-        ux.ok(f"Wrote DCLAW_AUDIT_KEY to {svc_env}")
-    else:
-        ux.err(f"Failed to write {svc_env}. The service may fail to start without DCLAW_AUDIT_KEY.")
+        for key, value in values.items():
+            _persist_env_var(cli_env, key, value)
+            if not _persist_svc_env_var(svc_env, key, value):
+                ux.err(f"Failed to provision {key} in {svc_env}; service cannot start securely")
+                return False
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"Could not provision Edge service environment: {exc}") from exc
+    ux.ok(f"Required Edge keys provisioned in {cli_env} and {svc_env}")
+    return True
 
 
 def _verify_local_service() -> bool:
@@ -584,12 +551,17 @@ def _build_local(source: Path, profile: str) -> bool:
     """Build the edge connector locally with cmake."""
     ux.echo()
     ux.section("Building edge-connector locally")
-    build_dir = source / "build"
-    build_dir.mkdir(exist_ok=True)
     try:
-        _run(["cmake", "..", f"-DDCLAW_PROFILE={profile}", "-DDCLAW_DEV_MODE=OFF"], cwd=build_dir)
-        _run(["make", f"-j{os.cpu_count() or 1}"], cwd=build_dir)
-        _run(["sudo", "make", "install"], cwd=build_dir)
+        # Wheel package directories may be read-only. Keep build outputs in a
+        # private temporary directory, separate from shipped C sources.
+        with tempfile.TemporaryDirectory(prefix="dclaw-edge-build-") as build_dir:
+            _run(
+                ["cmake", "-S", str(source), "-B", build_dir,
+                 f"-DDCLAW_PROFILE={profile}", "-DDCLAW_DEV_MODE=OFF",
+                 "-DDCLAW_ALLOW_HMAC_OTA=ON", "-DDCLAW_BUILD_TESTS=OFF"],
+            )
+            _run(["cmake", "--build", build_dir, "--parallel", str(os.cpu_count() or 1)])
+            _run(["sudo", "cmake", "--install", build_dir])
     except subprocess.CalledProcessError:
         ux.err("Local build failed. Check the output above for details.")
         return False
@@ -633,8 +605,8 @@ def edge_install(
     if source is None:
         ux.err(
             "Could not locate edge-connector/ source directory.\n"
-            "  Run this command from the DefenseClaw repo root, or ensure\n"
-            "  the edge-connector directory is present alongside the CLI."
+            "  Install a CLI wheel built with 'make dist-cli', or run from\n"
+            "  a complete DefenseClaw source checkout."
         )
         raise SystemExit(1)
 
@@ -733,7 +705,8 @@ def edge_install(
         if not _build_local(source, profile):
             raise SystemExit(1)
 
-        _provision_local_service_env(broker_url)
+        if not _provision_local_service_env(broker_url):
+            raise SystemExit(1)
 
         # Try to install the systemd service locally
         svc_ok = _install_local_systemd_unit()

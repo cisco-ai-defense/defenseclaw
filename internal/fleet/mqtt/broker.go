@@ -23,17 +23,15 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 )
 
 // Message represents an MQTT message received from a broker.
 type Message struct {
-	Topic    string
-	Payload  []byte
-	QoS      byte
-	ClientID string // populated by brokers that expose publisher identity
+	Topic   string
+	Payload []byte
+	QoS     byte
 }
 
 // Client is the interface for an MQTT client. Implementations may use
@@ -72,46 +70,6 @@ const (
 	// TopicRegister matches: defenseclaw/+/+/+/register
 	TopicRegister = "defenseclaw/+/+/+/register"
 )
-
-// AuthorizePublish validates that the tenant, fleet, and device IDs in the
-// topic match the authenticated client's identity. This prevents a compromised
-// device from publishing to another device's, fleet's, or tenant's topic.
-// Topic format: defenseclaw/{tenant}/{fleet}/{device}/...
-//
-// clientID should be in the composite format "tenant/fleet/device" or just
-func AuthorizePublish(clientID string, topic string) bool {
-	parts := strings.Split(topic, "/")
-	// Topic format: defenseclaw/{tenant}/{fleet}/{device}/...
-	if len(parts) < 4 {
-		return false
-	}
-	topicTenantID := parts[1]
-	topicFleetID := parts[2]
-	topicDeviceID := parts[3]
-
-	clientParts := strings.Split(clientID, "/")
-	if len(clientParts) == 3 {
-		// Full composite clientID — validate all three segments.
-		if clientParts[0] != topicTenantID || clientParts[1] != topicFleetID || clientParts[2] != topicDeviceID {
-			log.Printf("WARN: client %s attempted publish to topic with tenant=%s fleet=%s device=%s",
-				clientID, topicTenantID, topicFleetID, topicDeviceID)
-			return false
-		}
-		return true
-	}
-
-	// Legacy bare device ID — reject in production to prevent tenant/fleet bypass.
-	if isProductionMode() {
-		log.Printf("WARN: client %s using legacy bare device ID rejected in production — use composite tenant/fleet/device format", clientID)
-		return false
-	}
-	log.Printf("[mqtt-broker] DEPRECATED: device %s using legacy bare device ID — will be rejected in a future release", clientID)
-	if clientID != topicDeviceID {
-		log.Printf("WARN: client %s attempted publish to topic with device %s", clientID, topicDeviceID)
-		return false
-	}
-	return true
-}
 
 // ParseTopic extracts tenant_id, fleet_id, device_id and suffix from an
 // MQTT topic string. Returns an error if the topic doesn't match the
@@ -163,24 +121,27 @@ func ParseTopic(topic string) (*TopicParts, error) {
 //	[22:30] audit_head_hmac uint64
 //	[30]    flags           uint8
 //	[31]    capabilities    uint8  (device capability bitmap)
+//	[32:36] boot_counter    uint32 (big-endian, durable device boot number)
 type HeartbeatWire struct {
-	DeviceID       uint32
-	UptimeSec      uint32
-	PolicyVersion  uint16
-	FWVersion      uint16
-	DeniedCount    uint16
-	AllowedCount   uint16
-	WarnedCount    uint16
-	EscalatedCount uint16
-	CacheHitPct    uint8
-	SessionCount   uint8
-	AuditHeadHMAC  uint64
-	Flags          uint8
-	Capabilities   uint8
+	DeviceID         uint32
+	UptimeSec        uint32
+	PolicyVersion    uint16
+	FWVersion        uint16
+	DeniedCount      uint16
+	AllowedCount     uint16
+	WarnedCount      uint16
+	EscalatedCount   uint16
+	CacheHitPct      uint8
+	SessionCount     uint8
+	AuditHeadHMAC    uint64
+	Flags            uint8
+	Capabilities     uint8
+	BootCounter      uint32
+	LastEmergencySeq uint32
 
 	// HMACTag holds the 32-byte HMAC-SHA256 tag appended by signed heartbeats.
-	// Present only when the payload is 64 bytes (32-byte heartbeat + 32-byte HMAC).
-	// When the payload is the legacy 32-byte unsigned format, HMACTag is nil.
+	// Present only when the payload is 72 bytes (40-byte heartbeat + 32-byte HMAC).
+	// An unsigned development payload has no tag.
 	HMACTag []byte
 
 	// Signed indicates whether this heartbeat carried an HMAC signature.
@@ -190,13 +151,13 @@ type HeartbeatWire struct {
 // DecodeHeartbeat decodes a heartbeat payload from an edge device.
 //
 // Accepted formats:
-//   - 32 bytes: legacy unsigned heartbeat (backward compatible)
-//   - 64 bytes: signed heartbeat (32-byte payload + 32-byte HMAC-SHA256 tag)
+//   - 40 bytes: unsigned heartbeat (explicit development only)
+//   - 72 bytes: signed heartbeat (40-byte payload + 32-byte HMAC-SHA256 tag)
 //
 // Any other size is rejected.
 func DecodeHeartbeat(data []byte) (*HeartbeatWire, error) {
-	if len(data) != 32 && len(data) != 64 {
-		return nil, fmt.Errorf("heartbeat must be 32 or 64 bytes, got %d", len(data))
+	if len(data) != 40 && len(data) != 72 {
+		return nil, fmt.Errorf("heartbeat must be 40 or 72 bytes, got %d", len(data))
 	}
 
 	hw := &HeartbeatWire{
@@ -215,9 +176,14 @@ func DecodeHeartbeat(data []byte) (*HeartbeatWire, error) {
 		Capabilities:   data[31],
 	}
 
-	if len(data) == 64 {
+	hw.BootCounter = binary.BigEndian.Uint32(data[32:36])
+	hw.LastEmergencySeq = binary.BigEndian.Uint32(data[36:40])
+	if len(data) == 72 {
+		if hw.BootCounter == 0 {
+			return nil, fmt.Errorf("signed heartbeat has zero boot counter")
+		}
 		hw.HMACTag = make([]byte, 32)
-		copy(hw.HMACTag, data[32:64])
+		copy(hw.HMACTag, data[40:72])
 		hw.Signed = true
 	}
 

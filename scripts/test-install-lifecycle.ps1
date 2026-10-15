@@ -201,6 +201,9 @@ function Assert-Versions([string]$Want) {
     $cli = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw.cmd") @("--version"))
     $gateway = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw-gateway.exe") @("--version"))
     Check ($cli -eq $Want -and $gateway -eq $Want) "expected $Want, got cli=$cli gateway=$gateway"
+    if ($Want -eq $Target) {
+        Check (Test-Path -LiteralPath (Join-Path $DcHome "installer\policy_compiler.py") -PathType Leaf) "Fleet policy compiler was not installed"
+    }
 }
 
 function Get-GatewayPort {

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import socket
+import ssl
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -380,43 +382,6 @@ def health(app: AppContext, as_json: bool) -> None:
         ux.echo(f"  Last check:      {data['last_check']}")
 
 
-@edge_connector_group.command("command")
-@click.argument("device_id")
-@click.argument("cmd", type=click.Choice(["reboot", "policy-refresh", "diagnostics"]))
-@click.option(
-    "--tenant-id",
-    default=1,
-    type=click.IntRange(0, 65535),
-    help="Tenant ID for composing the full device ID (default 1).",
-)
-@click.option(
-    "--fleet-id",
-    default=1,
-    type=click.IntRange(0, 65535),
-    help="Fleet ID for composing the full device ID (default 1).",
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
-@pass_ctx
-def send_command(app: AppContext, device_id: str, cmd: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
-    """Send a command to a device (reboot, policy-refresh, diagnostics)."""
-    full_id = _compose_device_id(device_id, tenant_id, fleet_id)
-    encoded_id = quote(str(full_id), safe="")
-    c = _client(app)
-    try:
-        resp = c.post(f"/devices/{encoded_id}/command", {"command": cmd})
-    except req_lib.ConnectionError:
-        ux.err(_CONN_ERR)
-        raise SystemExit(1)
-    if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found (looked up as {full_id}).")
-        raise SystemExit(1)
-    _check(resp, f"Failed to send '{cmd}' to '{device_id}'")
-    if as_json:
-        click.echo(json.dumps(_body(resp) or {"status": "sent"}, indent=2))
-        return
-    ux.ok(f"Command '{cmd}' sent to device '{full_id}'.")
-
-
 # ---------------------------------------------------------------------------
 # edge connector policy (subgroup)
 # ---------------------------------------------------------------------------
@@ -567,16 +532,67 @@ def _load_env_var(key: str) -> str:
     return ""
 
 
-def _check_broker(url: str) -> bool:
-    """Try a TCP connect to the MQTT broker; return True on success."""
+def _check_broker(url: str, timeout: int = 5) -> bool:
+    """Verify that a broker completes an authenticated MQTT CONNECT."""
     try:
-        # urlparse fails for bare host:port (no scheme) — prepend mqtt:// if needed
         if "://" not in url:
             url = f"mqtt://{url}"
         p = urlparse(url)
-        with socket.create_connection((p.hostname or "127.0.0.1", p.port or 1883), timeout=5):
-            return True
-    except (OSError, ValueError):
+        if p.scheme not in ("mqtt", "tcp", "mqtts", "ssl", "tls") or not p.hostname:
+            return False
+        encrypted = p.scheme in ("mqtts", "ssl", "tls")
+        port = p.port or (8883 if encrypted else 1883)
+        user = _load_env_var("DCLAW_MQTT_USER")
+        password = _load_env_var("DCLAW_MQTT_PASS")
+        if password and not user:
+            return False
+
+        def field(value: str) -> bytes:
+            data = value.encode("utf-8")
+            if len(data) > 65535:
+                raise ValueError("MQTT CONNECT field too large")
+            return len(data).to_bytes(2, "big") + data
+
+        flags = 0x02  # clean session
+        payload = field(f"dclaw-check-{secrets.token_hex(4)}")
+        if user:
+            flags |= 0x80
+            payload += field(user)
+        if password:
+            flags |= 0x40
+            payload += field(password)
+        variable = b"\x00\x04MQTT\x04" + bytes((flags, 0, 5))
+        remaining = len(variable) + len(payload)
+        length = bytearray()
+        while True:
+            digit = remaining % 128
+            remaining //= 128
+            length.append(digit | (0x80 if remaining else 0))
+            if not remaining:
+                break
+        packet = b"\x10" + bytes(length) + variable + payload
+
+        with socket.create_connection((p.hostname, port), timeout=timeout) as raw:
+            raw.settimeout(timeout)
+            if encrypted:
+                ca_path = _load_env_var("DCLAW_CA_CERT_PATH") or None
+                context = ssl.create_default_context(cafile=ca_path)
+                connection = context.wrap_socket(raw, server_hostname=p.hostname)
+            else:
+                connection = raw
+            with connection:
+                connection.sendall(packet)
+                reply = bytearray()
+                while len(reply) < 4:
+                    part = connection.recv(4 - len(reply))
+                    if not part:
+                        return False
+                    reply.extend(part)
+                accepted = reply == b"\x20\x02\x00\x00"
+                if accepted:
+                    connection.sendall(b"\xe0\x00")  # MQTT DISCONNECT
+                return accepted
+    except (OSError, ValueError, ssl.SSLError):
         return False
 
 
@@ -587,12 +603,14 @@ def _heartbeat_age(last_seen: str) -> str:
     try:
         ts = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
         secs = int((datetime.now(timezone.utc) - ts).total_seconds())
+        if secs < -300:
+            return "unknown"
         if secs < 60:
             return f"{secs}s ago"
         if secs < 3600:
             return f"{secs // 60}m ago"
         return f"{secs // 3600}h ago"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "unknown"
 
 
@@ -629,7 +647,7 @@ def _status_line(label: str, passed: bool, detail: str) -> None:
     default=None,
     help="MQTT broker URL (reads DCLAW_MQTT_BROKER_URL from env if omitted).",
 )
-@click.option("--timeout", default=10, type=int, help="Per-check timeout in seconds.")
+@click.option("--timeout", default=10, type=click.IntRange(1, 120), help="Per-check timeout in seconds.")
 @click.option("--json", "as_json", is_flag=True, help="Emit test results as JSON.")
 @pass_ctx
 def test_fleet(
@@ -645,7 +663,7 @@ def test_fleet(
 
     Checks:\n
       1. Gateway fleet API is reachable (GET /health)\n
-      2. MQTT broker accepts TCP connections\n
+      2. MQTT broker accepts an authenticated MQTT connection\n
       3. Devices registered and their count\n
       4. Last heartbeat age for online devices\n
       5. Policy distribution status\n
@@ -666,8 +684,18 @@ def test_fleet(
     try:
         resp = c.get("/health")
         if 200 <= resp.status_code < 300:
-            health_data = _body(resp) or {}
-            results["gateway"] = {"status": "ok", **health_data}
+            body = _body(resp)
+            if isinstance(body, dict) and isinstance(body.get("fleet"), dict):
+                health_data = body
+                fleet = body["fleet"]
+                unhealthy = any(fleet.get(name, 0) for name in ("offline", "degraded", "lockdown"))
+                unhealthy = unhealthy or str(body.get("status", "ok")).lower() != "ok"
+                results["gateway"] = {**body, "status": "degraded" if unhealthy else "ok"}
+                if unhealthy:
+                    all_ok = False
+            else:
+                results["gateway"] = {"status": "invalid_response"}
+                all_ok = False
         else:
             results["gateway"] = {"status": "error", "http_status": resp.status_code}
             all_ok = False
@@ -682,7 +710,7 @@ def test_fleet(
     if broker_url is None:
         broker_url = _load_env_var("DCLAW_MQTT_BROKER_URL") or _load_env_var("DCLAW_BROKER_URL") or ""
     if broker_url:
-        bok = _check_broker(broker_url)
+        bok = _check_broker(broker_url, timeout)
         results["broker"] = {"status": "ok" if bok else "unreachable", "url": broker_url}
         if not bok:
             all_ok = False
@@ -701,20 +729,28 @@ def test_fleet(
             dev_resp = c.get("/devices")
             if 200 <= dev_resp.status_code < 300:
                 raw = _body(dev_resp)
-                devices = raw if isinstance(raw, list) else (raw.get("devices", []) if isinstance(raw, dict) else [])
-                for d in devices:
-                    if str(d.get("status") or "offline").lower() in ("online", "active", "healthy"):
-                        online += 1
-                    else:
-                        offline += 1
-                results["devices"] = {
-                    "status": "ok" if devices else "empty",
-                    "online": online,
-                    "offline": offline,
-                    "total": len(devices),
-                }
-                if not devices:
+                parsed = raw if isinstance(raw, list) else (raw.get("devices") if isinstance(raw, dict) else None)
+                if not isinstance(parsed, list) or any(not isinstance(d, dict) for d in parsed):
+                    results["devices"] = {"status": "invalid_response"}
                     all_ok = False
+                else:
+                    devices = parsed
+                    for d in devices:
+                        if str(d.get("status") or "offline").lower() in ("online", "active", "healthy"):
+                            online += 1
+                        else:
+                            offline += 1
+                    results["devices"] = {
+                        "status": "ok" if devices and not offline else ("empty" if not devices else "degraded"),
+                        "online": online,
+                        "offline": offline,
+                        "total": len(devices),
+                    }
+                    if not devices or offline:
+                        all_ok = False
+            else:
+                results["devices"] = {"status": "error", "http_status": dev_resp.status_code}
+                all_ok = False
         except Exception:  # noqa: BLE001
             results["devices"] = {"status": "error", "detail": "could not query device list"}
             all_ok = False
@@ -724,10 +760,13 @@ def test_fleet(
     if devices:
         for d in devices:
             ls = d.get("last_heartbeat") or d.get("last_seen")
-            if ls and "h ago" in _heartbeat_age(str(ls)):
+            age = _heartbeat_age(str(ls)) if ls else "unknown"
+            if age == "unknown" or "h ago" in age:
                 stale.append(str(d.get("device_id") or d.get("id") or "?"))
         if stale:
             results["devices"]["stale_heartbeats"] = stale
+            results["devices"]["status"] = "stale"
+            all_ok = False
 
     # Specific device check — compose the full 64-bit ID from device_id +
     # tenant_id + fleet_id, consistent with other commands.
@@ -744,7 +783,8 @@ def test_fleet(
                 }
                 all_ok = False
             elif 200 <= dr.status_code < 300:
-                ds = str((_body(dr) or {}).get("status") or "unknown").lower()
+                detail = _body(dr)
+                ds = str(detail.get("status") or "unknown").lower() if isinstance(detail, dict) else "unknown"
                 results["device_check"] = {
                     "status": "online" if ds in ("online", "active", "healthy") else ds,
                     "device_id": device_id,
@@ -752,6 +792,9 @@ def test_fleet(
                 }
                 if ds not in ("online", "active", "healthy"):
                     all_ok = False
+            else:
+                results["device_check"] = {"status": "error", "http_status": dr.status_code}
+                all_ok = False
         except Exception as exc:  # noqa: BLE001
             results["device_check"] = {"status": "error", "detail": str(exc)}
             all_ok = False
@@ -763,23 +806,29 @@ def test_fleet(
             pr = c.get(f"/policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}")
             if 200 <= pr.status_code < 300:
                 pd = _body(pr) or {}
-                versions_list = pd if isinstance(pd, list) else (pd.get("versions", []) if isinstance(pd, dict) else [])
-                if versions_list:
+                versions_list = pd if isinstance(pd, list) else (pd.get("versions") if isinstance(pd, dict) else None)
+                if isinstance(versions_list, list) and versions_list and isinstance(versions_list[0], dict):
                     latest = versions_list[0]
                     ver = latest.get("version") or latest.get("id")
-                    status_str = str(latest.get("status") or "unknown")
+                    distributed = latest.get("distributed") is True or latest.get("status") == "distributed"
+                    status_str = "distributed" if distributed else str(latest.get("status") or "not_distributed")
                     results["policy"] = {
-                        "status": "ok",
+                        "status": "ok" if distributed else "not_distributed",
                         "version": ver,
                         "policy_status": status_str,
                         "total_versions": len(versions_list),
                         "total_devices": len(devices),
                     }
+                    if not distributed:
+                        all_ok = False
                 else:
-                    results["policy"] = {"status": "no_policy"}
+                    results["policy"] = {"status": "invalid_response" if versions_list is None else "no_policy"}
                     all_ok = False
             elif pr.status_code == 404:
                 results["policy"] = {"status": "no_policy"}
+                all_ok = False
+            else:
+                results["policy"] = {"status": "error", "http_status": pr.status_code}
                 all_ok = False
         except Exception:  # noqa: BLE001
             results["policy"] = {"status": "error"}
@@ -787,7 +836,7 @@ def test_fleet(
 
     for section in ("gateway", "broker", "devices", "policy"):
         status = results.get(section, {}).get("status", "unknown")
-        if status not in ("ok", "skipped", "not_configured"):
+        if status != "ok":
             all_ok = False
 
     if as_json:

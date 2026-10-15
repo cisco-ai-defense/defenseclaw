@@ -24,11 +24,13 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +39,6 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
-	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/google/uuid"
@@ -46,11 +47,12 @@ import (
 const (
 	auditDeviceRegistered   = "fleet.device.registered"
 	auditDeviceReregistered = "fleet.device.reregistered"
-	auditDeviceCommand      = "fleet.device.command"
 	auditPolicyPush         = "fleet.policy.push"
 	auditPolicyEmergency    = "fleet.policy.emergency"
 	auditThreatIntel        = "fleet.threat_intel.push"
 	auditDecommission       = "fleet.device.decommission"
+	auditDecommissionAllow  = "fleet.device.decommission_authorized"
+	auditCredentialAllow    = "fleet.device.credential_provision_authorized"
 	auditTokenRotated       = "fleet.token.rotated"
 	auditKeyRotated         = "fleet.device.key_rotated"
 )
@@ -64,7 +66,6 @@ type FleetSettings struct {
 	TenantTokens      string // "token:tid,token:tid,..." format
 	AllowKeyOverHTTP  bool
 	TrustProxyHeaders bool
-	RequireClientID   bool
 }
 
 // AuditEmitter is the narrow interface the fleet API uses to emit events
@@ -94,7 +95,6 @@ type API struct {
 	manager     *manager.FleetManager
 	cache       *verdict.Cache
 	policy      *policy.Service
-	mqttClient  mqtt.Client
 	bridge      MQTTBridge
 	audit       AuditEmitter
 	keyStore    DeviceKeyStore
@@ -110,6 +110,7 @@ type API struct {
 	rotationMu         sync.Mutex
 	lastTokenRotation  time.Time
 	deviceKeyRotations map[uint64]time.Time
+	deviceMutationMu   sync.Mutex // serializes registration/decommission and bridge tombstone updates
 }
 
 // NewAPI creates the fleet API with its dependencies.
@@ -157,13 +158,6 @@ type APIOption func(*API)
 func WithPolicyService(svc *policy.Service) APIOption {
 	return func(a *API) {
 		a.policy = svc
-	}
-}
-
-// WithMQTTClient attaches an MQTT client so the API can publish commands to devices.
-func WithMQTTClient(client mqtt.Client) APIOption {
-	return func(a *API) {
-		a.mqttClient = client
 	}
 }
 
@@ -223,6 +217,15 @@ func (a *API) emitAudit(action, target, details string) {
 	}
 }
 
+// requireCredentialAudit refuses credential changes unless the mandatory
+// audit event was accepted by the durable observability pipeline.
+func (a *API) requireCredentialAudit(action, target, details string) error {
+	if a.audit == nil {
+		return fmt.Errorf("fleet audit emitter unavailable")
+	}
+	return a.audit.LogAction(action, target, details)
+}
+
 // emitAlert is a nil-safe helper that logs a fleet alert through
 // the platform-health pipeline.
 func (a *API) emitAlert(severity, summary string, details map[string]any) {
@@ -277,13 +280,6 @@ func (a *API) authorizedForDevice(r *http.Request, tenantID uint16) bool {
 	return tid == 0 || tid == tenantID
 }
 
-// validDeviceCommands lists the commands accepted by the sendCommand endpoint.
-var validDeviceCommands = map[string]bool{
-	"reboot":         true,
-	"policy-refresh": true,
-	"diagnostics":    true,
-}
-
 // Handler returns the http.Handler for mounting.
 func (a *API) Handler() http.Handler {
 	return a.mux
@@ -305,8 +301,8 @@ func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		authenticated := false
 		a.tenantScopesMu.RLock()
-		for tok := range a.tenantScopes {
-			if tok == "" {
+		for tok, tenantID := range a.tenantScopes {
+			if tok == "" || tenantID == 0 {
 				continue
 			}
 			if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) == 1 {
@@ -361,8 +357,8 @@ func (a *API) registerRoutes() {
 	if tenantTokens != "" {
 		for _, entry := range strings.Split(tenantTokens, ",") {
 			parts := strings.SplitN(strings.TrimSpace(entry), ":", 2)
-			if len(parts) == 2 {
-				if tid, err := strconv.ParseUint(parts[1], 10, 16); err == nil {
+			if len(parts) == 2 && parts[0] != "" && parts[0] != token {
+				if tid, err := strconv.ParseUint(parts[1], 10, 16); err == nil && tid != 0 {
 					a.tenantScopes[parts[0]] = uint16(tid)
 				}
 			}
@@ -376,7 +372,6 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("GET /devices", wrap(a.listDevices))
 	a.mux.HandleFunc("POST /devices", wrap(a.registerDevice))
 	a.mux.HandleFunc("GET /devices/{id}", wrap(a.getDevice))
-	a.mux.HandleFunc("POST /devices/{id}/command", wrap(a.sendCommand))
 	a.mux.HandleFunc("GET /health", wrap(a.getFleetHealth))
 	a.mux.HandleFunc("POST /policy/simulate", wrap(a.simulatePolicy))
 	a.mux.HandleFunc("POST /policy/push", wrap(a.pushPolicy))
@@ -386,7 +381,7 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("POST /devices/decommission-batch", wrap(a.decommissionBatch))
 	a.mux.HandleFunc("POST /token/rotate", wrap(a.rotateToken))
 	a.mux.HandleFunc("POST /devices/{id}/rotate-key", wrap(a.rotateDeviceKey))
-	a.mux.HandleFunc("GET /metrics", wrap(MetricsHandler))
+	a.mux.HandleFunc("GET /metrics", wrap(a.metrics))
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
@@ -409,16 +404,30 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		limit = maxPageSize
 	}
 
-	tid, _ := a.tenantFromRequest(r)
+	tid, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	allDevices := a.manager.ListDevices()
-	health := a.manager.GetFleetHealth()
-
 	filtered := allDevices[:0:0]
+	summary := map[string]int{"total": 0, "online": 0, "offline": 0, "degraded": 0, "lockdown": 0}
 	for _, d := range allDevices {
 		if tid != 0 && d.TenantID != tid {
 			continue
 		}
 		filtered = append(filtered, d)
+		summary["total"]++
+		switch d.Status {
+		case manager.StatusOnline:
+			summary["online"]++
+		case manager.StatusOffline:
+			summary["offline"]++
+		case manager.StatusDegraded:
+			summary["degraded"]++
+		case manager.StatusLockdown:
+			summary["lockdown"]++
+		}
 	}
 
 	total := len(filtered)
@@ -436,13 +445,7 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		"total":   total,
 		"offset":  offset,
 		"limit":   limit,
-		"summary": map[string]any{
-			"total":    health.TotalDevices,
-			"online":   health.Online,
-			"offline":  health.Offline,
-			"degraded": health.Degraded,
-			"lockdown": health.Lockdown,
-		},
+		"summary": summary,
 	})
 }
 
@@ -491,140 +494,92 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	dev, err := a.manager.RegisterDevice(
-		req.TenantID, req.FleetID, req.DeviceID,
-		req.HWProfile, req.FWVersion, req.PolicyVersion, req.Capabilities,
-	)
-	if err == manager.ErrDeviceExists {
-		if a.decommStore != nil {
-			wasDecomm, decommErr := a.decommStore.IsDecommissioned(dev.DeviceID)
-			if decommErr != nil {
-				log.Printf("[fleet-api] decommission store check failed for %d: %v", dev.DeviceID, decommErr)
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-					"error": "decommission store temporarily unavailable",
-				})
-				return
-			}
-			if wasDecomm && !req.ForceReregister {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "device was decommissioned — set force_reregister=true to re-enable",
-				})
-				return
-			}
-		}
-
-		// Clear the decommission tombstone on re-registration so the bridge
-		// stops rejecting MQTT traffic from this device.
-		if a.bridge != nil {
-			a.bridge.ClearDecommissioned(dev.DeviceID)
-		}
-		if a.decommStore != nil {
-			if err := a.decommStore.DeleteDecommissioned(dev.DeviceID); err != nil {
-				log.Printf("[fleet-api] failed to delete decommission tombstone for %d: %v", dev.DeviceID, err)
-			}
-		}
-
-		if r.TLS == nil {
-			fwdProto := r.Header.Get("X-Forwarded-Proto")
-			allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
-			if isProductionMode() && !(isTrustedProxy(r, a.settings) && fwdProto == "https") && !allowHTTP {
-				http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
-				return
-			}
-			w.Header().Set("X-Security-Warning", "key-delivered-over-plaintext")
-		}
-
-		var deviceKeyHex string
-		if a.keyStore != nil {
-			deviceKey := make([]byte, 32)
-			if _, err := rand.Read(deviceKey); err != nil {
-				log.Printf("[fleet-api] failed to generate device key on re-registration: %v", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "failed to generate device key",
-				})
-				return
-			}
-			if err := a.keyStore.SaveDeviceKey(dev.DeviceID, deviceKey); err != nil {
-				log.Printf("[fleet-api] failed to regenerate key on re-registration for %d: %v", dev.DeviceID, err)
-			} else {
-				deviceKeyHex = hex.EncodeToString(deviceKey)
-			}
-		}
-		a.emitAudit(auditDeviceReregistered,
-			fmt.Sprintf("%d", dev.DeviceID),
-			fmt.Sprintf("tenant:%d fleet:%d", req.TenantID, req.FleetID))
-		resp := map[string]any{
-			"device":     dev,
-			"device_key": deviceKeyHex,
-		}
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	if err != nil {
-		log.Printf("[fleet-api] register device failed: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device registration failed"})
-		return
-	}
-
-	// Clear the decommission tombstone on fresh registration too, in case the
-	// device was previously decommissioned and its fleet manager entry was
-	// already cleaned up but the bridge tombstone persists.
-	if a.bridge != nil {
-		a.bridge.ClearDecommissioned(dev.DeviceID)
-	}
+	a.deviceMutationMu.Lock()
+	defer a.deviceMutationMu.Unlock()
+	fullID := manager.ComposeID(req.TenantID, req.FleetID, req.DeviceID)
+	wasDecommissioned := false
 	if a.decommStore != nil {
-		if err := a.decommStore.DeleteDecommissioned(dev.DeviceID); err != nil {
-			log.Printf("[fleet-api] failed to delete decommission tombstone for %d: %v", dev.DeviceID, err)
-		}
-	}
-
-	if r.TLS == nil {
-		fwdProto := r.Header.Get("X-Forwarded-Proto")
-		allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
-		if isProductionMode() && !(isTrustedProxy(r, a.settings) && fwdProto == "https") && !allowHTTP {
-			http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
+		var err error
+		wasDecommissioned, err = a.decommStore.IsDecommissioned(fullID)
+		if err != nil {
+			log.Printf("[fleet-api] decommission store check failed for %d: %v", fullID, err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "decommission store temporarily unavailable"})
 			return
 		}
+		if wasDecommissioned && !req.ForceReregister {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "device was decommissioned — set force_reregister=true to re-enable",
+			})
+			return
+		}
+	}
+	// Validate the credential delivery channel before RegisterDevice can change
+	// in-memory metadata or durable state on either registration path.
+	if !credentialDeliveryAllowed(r, a.settings) {
+		http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
+		return
+	}
+	if a.keyStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "device credential store unavailable"})
+		return
+	}
+	if r.TLS == nil {
 		w.Header().Set("X-Security-Warning", "key-delivered-over-plaintext")
 	}
 
-	// Generate and persist a per-device HMAC signing key (32 random bytes).
-	// The key is returned in the response so the operator can provision it
-	// on the device (via DCLAW_DEVICE_KEY env var or /etc/defenseclaw/device.key).
-	var deviceKeyHex string
-	if a.keyStore != nil {
-		deviceKey := make([]byte, 32)
-		if _, err := rand.Read(deviceKey); err != nil {
-			log.Printf("[fleet-api] failed to generate device key: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to generate device key",
+	// Production Fleet shares one SQLiteStore for manager, credentials, and
+	// tombstones. Reject split stores: rollback could otherwise leave a device
+	// unable to authenticate after changing its key.
+	deviceStore, hasDeviceStore := a.keyStore.(manager.DeviceStore)
+	_, hasAtomicStore := a.keyStore.(manager.DeviceRegistrationStore)
+	tombstoneStore, hasTombstoneStore := a.keyStore.(DecommissionStore)
+	if !hasDeviceStore || !hasAtomicStore || !a.manager.StoreIs(deviceStore) ||
+		(a.decommStore != nil && (!hasTombstoneStore || a.decommStore != tombstoneStore)) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "atomic registration store unavailable"})
+		return
+	}
+	deviceKey := make([]byte, 32)
+	if _, err := rand.Read(deviceKey); err != nil {
+		log.Printf("[fleet-api] failed to generate device key: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate device key"})
+		return
+	}
+	if err := a.requireCredentialAudit(auditCredentialAllow, fmt.Sprintf("%d", fullID),
+		fmt.Sprintf("tenant=%d fleet=%d force_reregister=%t", req.TenantID, req.FleetID, req.ForceReregister)); err != nil {
+		log.Printf("[fleet-api] device registration refused because audit failed for %d: %v", fullID, err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "credential audit unavailable"})
+		return
+	}
+	dev, reregistered, err := a.manager.RegisterDeviceWithCredential(
+		req.TenantID, req.FleetID, req.DeviceID,
+		req.HWProfile, req.FWVersion, req.PolicyVersion, req.Capabilities,
+		deviceKey, req.ForceReregister,
+	)
+	if err != nil {
+		if errors.Is(err, ErrDeviceDecommissioned) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "device was decommissioned — set force_reregister=true to re-enable",
 			})
 			return
 		}
-		if err := a.keyStore.SaveDeviceKey(dev.DeviceID, deviceKey); err != nil {
-			// Key save failed — roll back the device registration so we
-			// don't leave a device without a persisted key.
-			a.manager.DecommissionDevice(req.TenantID, req.FleetID, req.DeviceID)
-			log.Printf("[fleet-api] failed to save device key for %d: %v", dev.DeviceID, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to save device key",
-			})
-			return
-		}
-		deviceKeyHex = hex.EncodeToString(deviceKey)
+		log.Printf("[fleet-api] atomic device registration failed for %d: %v", fullID, err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "device registration store temporarily unavailable"})
+		return
 	}
 
-	a.emitAudit(auditDeviceRegistered,
-		fmt.Sprintf("%d", dev.DeviceID),
+	if a.bridge != nil {
+		a.bridge.ClearDecommissioned(dev.DeviceID)
+	}
+	if reregistered {
+		a.emitAudit(auditDeviceReregistered, fmt.Sprintf("%d", dev.DeviceID),
+			fmt.Sprintf("tenant:%d fleet:%d", req.TenantID, req.FleetID))
+		writeJSON(w, http.StatusOK, map[string]any{"device": dev, "device_key": hex.EncodeToString(deviceKey)})
+		return
+	}
+	a.emitAudit(auditDeviceRegistered, fmt.Sprintf("%d", dev.DeviceID),
 		fmt.Sprintf("tenant=%d fleet=%d hw=%s fw=%s policy_v=%d",
 			req.TenantID, req.FleetID, req.HWProfile, req.FWVersion, req.PolicyVersion))
-
-	resp := map[string]any{
-		"device":     dev,
-		"device_key": deviceKeyHex, // empty string when no key store
-	}
-	writeJSON(w, http.StatusCreated, resp)
+	writeJSON(w, http.StatusCreated, map[string]any{"device": dev, "device_key": hex.EncodeToString(deviceKey)})
 }
 
 func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
@@ -649,105 +604,47 @@ func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dev)
 }
 
-func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
-
-	idStr := r.PathValue("id")
-	deviceFullID, err := strconv.ParseUint(idStr, 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device_id"})
-		return
-	}
-
-	var req struct {
-		Command string `json:"command"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		status := http.StatusBadRequest
-		if err.Error() == "http: request body too large" {
-			status = http.StatusRequestEntityTooLarge
-		}
-		writeJSON(w, status, map[string]string{"error": err.Error()})
-		return
-	}
-
-	if req.Command == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
-		return
-	}
-	if !validDeviceCommands[req.Command] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("unknown command %q: must be one of reboot, policy-refresh, diagnostics", req.Command),
-		})
-		return
-	}
-
-	// Verify the device exists
-	dev, ok := a.manager.GetDevice(deviceFullID)
+func (a *API) getFleetHealth(w http.ResponseWriter, r *http.Request) {
+	tid, ok := a.tenantFromRequest(r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-
-	if !a.authorizedForDevice(r, dev.TenantID) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
-		return
-	}
-
-	commandID := uuid.New().String()
-
-	// MQTT is required to dispatch commands to devices.
-	if a.mqttClient == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "MQTT client not configured — cannot dispatch commands to devices",
+	if tid == 0 {
+		health := a.manager.GetFleetHealth()
+		hits, misses, cacheSize := a.cache.Stats()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"fleet": health, "cache_hits": hits, "cache_misses": misses, "cache_size": cacheSize,
 		})
 		return
 	}
-
-	// Publish to MQTT
-	{
-		topic := fmt.Sprintf("defenseclaw/%d/%d/%d/cmd/request",
-			dev.TenantID, dev.FleetID, uint32(dev.DeviceID))
-
-		payload, _ := json.Marshal(map[string]string{
-			"command_id": commandID,
-			"command":    req.Command,
-			"timestamp":  time.Now().UTC().Format(time.RFC3339),
-		})
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		if err := a.mqttClient.Publish(ctx, topic, 1, payload); err != nil {
-			log.Printf("[fleet-api] MQTT publish to %s failed: %v", topic, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error":  "failed to dispatch command",
-				"detail": "command delivery failed",
-			})
-			return
+	health := manager.FleetHealth{PolicyVersions: make(map[uint16]int)}
+	for _, dev := range a.manager.ListDevices() {
+		if dev.TenantID != tid {
+			continue
+		}
+		health.TotalDevices++
+		health.PolicyVersions[dev.PolicyVersion]++
+		switch dev.Status {
+		case manager.StatusOnline:
+			health.Online++
+		case manager.StatusOffline:
+			health.Offline++
+		case manager.StatusDegraded:
+			health.Degraded++
+		case manager.StatusLockdown:
+			health.Lockdown++
 		}
 	}
-
-	a.emitAudit(auditDeviceCommand,
-		fmt.Sprintf("%d", deviceFullID),
-		fmt.Sprintf("command=%s command_id=%s", req.Command, commandID))
-
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"command_id": commandID,
-		"device_id":  deviceFullID,
-		"command":    req.Command,
-		"status":     "dispatched",
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"fleet": health})
 }
 
-func (a *API) getFleetHealth(w http.ResponseWriter, r *http.Request) {
-	health := a.manager.GetFleetHealth()
-	hits, misses, cacheSize := a.cache.Stats()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"fleet":        health,
-		"cache_hits":   hits,
-		"cache_misses": misses,
-		"cache_size":   cacheSize,
-	})
+func (a *API) metrics(w http.ResponseWriter, r *http.Request) {
+	if tid, ok := a.tenantFromRequest(r); !ok || tid != 0 {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "fleet metrics require admin credentials"})
+		return
+	}
+	MetricsHandler(w, r)
 }
 
 func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
@@ -834,7 +731,11 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := a.tenantFromRequest(r)
+	callerTenant, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	if callerTenant != 0 && callerTenant != req.TenantID {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -855,6 +756,22 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 	signed, version, err := a.policy.CompileSignAndStore([]byte(req.PolicyYAML), req.Profile, uint64(req.TenantID), uint64(req.FleetID))
 	if err != nil {
 		log.Printf("[fleet-api] policy compile/sign failed for tenant=%d fleet=%d: %v", req.TenantID, req.FleetID, err)
+		if errors.Is(err, policy.ErrPolicyVersionExhausted) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "policy version exhausted at 65534; provision a new device policy lineage"})
+			return
+		}
+		if errors.Is(err, policy.ErrPolicyTooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "policy exceeds maximum size of 64KB"})
+			return
+		}
+		if errors.Is(err, policy.ErrMalformedPolicy) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "malformed policy"})
+			return
+		}
+		if errors.Is(err, policy.ErrInvalidPolicy) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid policy or profile"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "policy compilation/signing failed",
 			"detail": "internal policy processing error",
@@ -914,7 +831,11 @@ func (a *API) listPolicyVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := a.tenantFromRequest(r)
+	callerTenant, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	if callerTenant != 0 && callerTenant != uint16(tenantID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -968,7 +889,11 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := a.tenantFromRequest(r)
+	callerTenant, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	if callerTenant != 0 && callerTenant != req.TenantID {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "not authorized for this tenant",
@@ -1037,7 +962,9 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		RevokeAllowHash []string `json:"revoke_allow_hashes"`
 		Emergency       bool     `json:"emergency"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		status := http.StatusBadRequest
 		if err.Error() == "http: request body too large" {
 			status = http.StatusRequestEntityTooLarge
@@ -1046,9 +973,7 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Emergency {
-		a.cache.FlushAll()
-	}
+	var hashes [][32]byte
 	for _, hashHex := range req.RevokeAllowHash {
 		decoded, err := hex.DecodeString(hashHex)
 		if err != nil {
@@ -1065,24 +990,52 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		}
 		var hash [32]byte
 		copy(hash[:], decoded)
+		hashes = append(hashes, hash)
+	}
+	// Validate the full request before changing any gateway cache entry.
+	if req.Emergency {
+		a.cache.FlushAll()
+	}
+	for _, hash := range hashes {
 		a.cache.Invalidate(hash)
 	}
 
-	// Push a REVOKE_SESSIONS emergency command to all affected devices so
-	// their local verdict caches are flushed immediately. Without this, edge
-	// devices keep serving stale ALLOW verdicts from their on-device cache
-	// for up to 24 hours after the cloud cache is invalidated.
-	var deviceCacheFlushErr string
-	if a.policy != nil && (len(req.RevokeAllowHash) > 0 || req.Emergency) {
-		// Known limitation: publishes to tenant=0/fleet=0 which no device
-		// subscribes to. The cloud cache is flushed; edge device caches
-		// expire via TTL (ALLOW: 24h). Per-tenant/fleet iteration is
-		// tracked in the edge-connector roadmap.
-		if err := a.policy.DistributeEmergency(r.Context(), 0, 0, policy.EmergencyRevokeSessions); err != nil {
-			log.Printf("[fleet-api] threat-intel: failed to push device cache flush: %v", err)
-			deviceCacheFlushErr = "device cache flush failed — edge devices may serve stale verdicts"
-		} else {
-			log.Printf("[fleet-api] threat-intel: REVOKE_SESSIONS published to tenant=0/fleet=0 — edge devices rely on TTL expiry for %d revoked hashes", len(req.RevokeAllowHash))
+	// Device subscriptions are scoped to their tenant/fleet. Publish one
+	// REVOKE_SESSIONS for each registered pair, including offline devices that
+	// may reconnect later. Broker publication still does not prove receipt.
+	type fleetTarget struct{ tenant, fleet uint16 }
+	var targets []fleetTarget
+	var failed []string
+	published := 0
+	if len(hashes) > 0 || req.Emergency {
+		seen := make(map[fleetTarget]struct{})
+		for _, dev := range a.manager.ListDevices() {
+			if dev.TenantID == 0 || dev.FleetID == 0 {
+				continue
+			}
+			pair := fleetTarget{dev.TenantID, dev.FleetID}
+			if _, ok := seen[pair]; !ok {
+				seen[pair] = struct{}{}
+				targets = append(targets, pair)
+			}
+		}
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].tenant != targets[j].tenant {
+				return targets[i].tenant < targets[j].tenant
+			}
+			return targets[i].fleet < targets[j].fleet
+		})
+		for _, pair := range targets {
+			if a.policy == nil {
+				failed = append(failed, fmt.Sprintf("%d/%d", pair.tenant, pair.fleet))
+				continue
+			}
+			if err := a.policy.DistributeEmergency(r.Context(), uint64(pair.tenant), uint64(pair.fleet), policy.EmergencyRevokeSessions); err != nil {
+				log.Printf("[fleet-api] threat-intel: device cache flush publish failed for %d/%d: %v", pair.tenant, pair.fleet, err)
+				failed = append(failed, fmt.Sprintf("%d/%d", pair.tenant, pair.fleet))
+				continue
+			}
+			published++
 		}
 	}
 
@@ -1090,14 +1043,17 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("threat-intel-push.%d", len(req.RevokeAllowHash)),
 		fmt.Sprintf("revoked_count:%d emergency:%v", len(req.RevokeAllowHash), req.Emergency))
 
-	resp := map[string]any{
-		"revoked": len(req.RevokeAllowHash),
-	}
-	if deviceCacheFlushErr != "" {
-		resp["warning"] = deviceCacheFlushErr
-	} else if a.policy != nil && (len(req.RevokeAllowHash) > 0 || req.Emergency) {
+	resp := map[string]any{"revoked": len(hashes)}
+	if len(hashes) > 0 || req.Emergency {
+		resp["device_cache_flush_published"] = published
+		resp["device_cache_flush_target_fleets"] = len(targets)
 		resp["device_cache_flushed"] = false
-		resp["warning"] = "emergency broadcast to tenant=0/fleet=0 does not reach devices — devices subscribe to specific tenant/fleet topics"
+		resp["warning"] = "MQTT publication does not confirm device receipt; offline devices may keep cached verdicts until reconnect or TTL expiry"
+	}
+	if len(failed) > 0 {
+		resp["device_cache_flush_failed"] = failed
+		writeJSON(w, http.StatusMultiStatus, resp)
+		return
 	}
 	writeJSON(w, http.StatusAccepted, resp)
 }
@@ -1129,15 +1085,26 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"batch size exceeds maximum of 1000"}`, http.StatusBadRequest)
 		return
 	}
+	a.deviceMutationMu.Lock()
+	defer a.deviceMutationMu.Unlock()
 
 	batchID := uuid.New().String()
 	decommissioned := 0
 	var notFound []uint64
-	var keyDeleteFailed []uint64
+	var persistenceFailed []uint64
+	var auditFailed []uint64
 	deadline := time.Now().Add(30 * time.Second)
 
-	requestTID, _ := a.tenantFromRequest(r)
+	requestTID, ok := a.tenantFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	var tenantDenied []uint64
+	sqliteKeys, keysAreSQLite := a.keyStore.(*SQLiteStore)
+	sqliteTombstones, tombstonesAreSQLite := a.decommStore.(*SQLiteStore)
+	useAtomicStore := keysAreSQLite && tombstonesAreSQLite &&
+		sqliteKeys == sqliteTombstones && a.manager.StoreIs(sqliteKeys)
 
 	for _, d := range req.Devices {
 		if time.Now().After(deadline) {
@@ -1150,29 +1117,50 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 			tenantDenied = append(tenantDenied, uint64(fullID))
 			continue
 		}
-
-		if a.keyStore != nil {
-			var keyErr error
-			for attempt := 0; attempt < 3; attempt++ {
-				if keyErr = a.keyStore.DeleteDeviceKey(fullID); keyErr == nil {
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-			if keyErr != nil {
-				log.Printf("WARN: device key deletion failed for %d, skipping decommission: %v", fullID, keyErr)
-				keyDeleteFailed = append(keyDeleteFailed, fullID)
+		if _, exists := a.manager.GetDevice(fullID); !exists {
+			notFound = append(notFound, fullID)
+			continue
+		}
+		if err := a.requireCredentialAudit(auditDecommissionAllow, fmt.Sprintf("%d", fullID),
+			fmt.Sprintf("batch=%s tenant=%d fleet=%d", batchID, d.TenantID, d.FleetID)); err != nil {
+			log.Printf("[fleet-api] device decommission refused because audit failed for %d: %v", fullID, err)
+			auditFailed = append(auditFailed, fullID)
+			continue
+		}
+		if useAtomicStore {
+			removed, err := a.manager.DecommissionDeviceAtomically(d.TenantID, d.FleetID, d.DeviceID)
+			if err != nil {
+				log.Printf("[fleet-api] atomic decommission failed for %d: %v", fullID, err)
+				persistenceFailed = append(persistenceFailed, fullID)
 				continue
 			}
-		}
-		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
+			if !removed {
+				notFound = append(notFound, fullID)
+				continue
+			}
 			if a.bridge != nil {
 				a.bridge.MarkDecommissioned(fullID)
 			}
-			if a.decommStore != nil {
-				if err := a.decommStore.SaveDecommissioned(fullID); err != nil {
-					log.Printf("[fleet-api] failed to persist decommission tombstone for %d: %v", fullID, err)
-				}
+			decommissioned++
+			continue
+		}
+
+		// Durable device, key, and tombstone state must share an atomic
+		// store. A split-store rollback can fail after key deletion, so only
+		// an entirely in-memory test instance may use the simple path.
+		if a.keyStore != nil || a.decommStore != nil || !a.manager.StoreIs(nil) {
+			persistenceFailed = append(persistenceFailed, fullID)
+			continue
+		}
+		removed, err := a.manager.DecommissionDeviceChecked(d.TenantID, d.FleetID, d.DeviceID)
+		if err != nil {
+			log.Printf("[fleet-api] device persistence delete failed for %d: %v", fullID, err)
+			persistenceFailed = append(persistenceFailed, fullID)
+			continue
+		}
+		if removed {
+			if a.bridge != nil {
+				a.bridge.MarkDecommissioned(fullID)
 			}
 			decommissioned++
 		} else {
@@ -1182,8 +1170,8 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 
 	a.emitAudit(auditDecommission,
 		batchID,
-		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d key_delete_failed:%d",
-			len(req.Devices), decommissioned, len(notFound), len(keyDeleteFailed)))
+		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d persistence_failed:%d audit_failed:%d",
+			len(req.Devices), decommissioned, len(notFound), len(persistenceFailed), len(auditFailed)))
 
 	deadlineExceeded := decommissioned+len(notFound)+len(tenantDenied) < len(req.Devices)
 
@@ -1199,10 +1187,15 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		resp["tenant_denied_count"] = len(tenantDenied)
 	}
 
-	if len(keyDeleteFailed) > 0 {
-		resp["key_delete_failed"] = keyDeleteFailed
+	if len(persistenceFailed) > 0 {
+		resp["persistence_failed"] = persistenceFailed
+	}
+	if len(auditFailed) > 0 {
+		resp["audit_failed"] = auditFailed
+	}
+	if len(persistenceFailed)+len(auditFailed)+len(tenantDenied) > 0 {
 		resp["status"] = "partial_failure"
-		resp["error"] = "some device keys could not be deleted — those devices may still authenticate"
+		resp["error"] = "some devices were not decommissioned"
 		writeJSON(w, http.StatusMultiStatus, resp)
 		return
 	}
@@ -1227,9 +1220,7 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.TLS == nil {
-		fwdProto := r.Header.Get("X-Forwarded-Proto")
-		allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
-		if isProductionMode() && !(isTrustedProxy(r, a.settings) && fwdProto == "https") && !allowHTTP {
+		if !credentialDeliveryAllowed(r, a.settings) {
 			http.Error(w, `{"error":"token_delivery_requires_tls"}`, http.StatusForbidden)
 			return
 		}
@@ -1254,6 +1245,12 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newTokenHex := hex.EncodeToString(newToken)
+	if err := a.requireCredentialAudit(auditTokenRotated, "DCLAW_FLEET_API_TOKEN",
+		"Fleet API token rotation authorized — old token will be invalidated"); err != nil {
+		log.Printf("[fleet-api] token rotation refused because audit failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "credential audit unavailable"})
+		return
+	}
 
 	a.tenantScopesMu.Lock()
 	for tok, tid := range a.tenantScopes {
@@ -1267,9 +1264,6 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 	a.currentToken.Store(&newTokenHex)
 	a.lastTokenRotation = time.Now()
 	log.Printf("INFO: fleet API token rotated (in-memory only, env var DCLAW_FLEET_API_TOKEN not updated)")
-
-	a.emitAudit(auditTokenRotated, "DCLAW_FLEET_API_TOKEN",
-		"Fleet API token rotated — old token is now invalid")
 
 	if r.TLS == nil {
 		w.Header().Set("X-Security-Warning", "token-delivered-over-plaintext")
@@ -1290,9 +1284,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = callerTID
 	if r.TLS == nil {
-		fwdProto := r.Header.Get("X-Forwarded-Proto")
-		allowHTTP := a.settings.AllowKeyOverHTTP || os.Getenv("DCLAW_ALLOW_KEY_OVER_HTTP") == "1"
-		if isProductionMode() && !(isTrustedProxy(r, a.settings) && fwdProto == "https") && !allowHTTP {
+		if !credentialDeliveryAllowed(r, a.settings) {
 			http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
 			return
 		}
@@ -1342,6 +1334,14 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if err := a.requireCredentialAudit(auditKeyRotated,
+		fmt.Sprintf("%d", deviceID),
+		"Device key rotation authorized — old key will be invalidated"); err != nil {
+		a.rotationMu.Unlock()
+		log.Printf("[fleet-api] device key rotation refused because audit failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "credential audit unavailable"})
+		return
+	}
 
 	if err := a.keyStore.SaveDeviceKey(deviceID, newKey); err != nil {
 		a.rotationMu.Unlock()
@@ -1355,10 +1355,6 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	a.deviceKeyRotations[deviceID] = time.Now()
 	a.rotationMu.Unlock()
 	newKeyHex := hex.EncodeToString(newKey)
-
-	a.emitAudit(auditKeyRotated,
-		fmt.Sprintf("%d", deviceID),
-		"Device key rotated — old key is now invalid")
 
 	if r.TLS == nil {
 		w.Header().Set("X-Security-Warning", "key-delivered-over-plaintext")
@@ -1438,27 +1434,24 @@ func sanitizeString(s string, maxLen int) string {
 }
 
 // isTrustedProxy returns true if the request comes from a trusted proxy.
-// Checks config.yaml fleet.trust_proxy_headers first, env var fallback.
+// Only a configured local reverse proxy may attest to the outer TLS hop.
 func isTrustedProxy(r *http.Request, settings FleetSettings) bool {
-	if settings.TrustProxyHeaders || os.Getenv("DCLAW_TRUST_PROXY_HEADERS") == "1" {
-		return true
+	if !settings.TrustProxyHeaders {
+		return false
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
-// isProductionMode returns true when DCLAW_PRODUCTION is "true"/"1" or
-func isProductionMode() bool {
-	v := os.Getenv("DCLAW_PRODUCTION")
-	if v == "true" || v == "1" {
-		return true
-	}
-	devMode := strings.ToLower(os.Getenv("DCLAW_DEV_MODE"))
-	if devMode == "off" || devMode == "0" || devMode == "false" {
-		return true
-	}
-	return false
+// credentialDeliveryAllowed requires a private transport unless the gateway's
+// resolved Fleet settings explicitly permit plaintext credential delivery.
+func credentialDeliveryAllowed(r *http.Request, settings FleetSettings) bool {
+	return r.TLS != nil || settings.AllowKeyOverHTTP ||
+		(isTrustedProxy(r, settings) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -8,9 +8,14 @@ StartLimitIntervalSec=60
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/edge-connector
-EnvironmentFile=-/etc/defenseclaw/edge-connector.env
+EnvironmentFile=/etc/defenseclaw/edge-connector.env
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=defenseclaw
+RuntimeDirectoryMode=0750
+StateDirectory=defenseclaw
+StateDirectoryMode=0700
+UMask=0077
 
 # Hardening
 User=defenseclaw

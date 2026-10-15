@@ -360,18 +360,20 @@ const (
 	// device registration, heartbeat processing, verdict decisions,
 	// policy pushes, emergency commands, decommissioning, and device
 	// alerts detected by the fleet manager's anomaly monitor.
-	ActionFleetDeviceRegistered   Action = "fleet.device.registered"
-	ActionFleetDeviceHeartbeat    Action = "fleet.device.heartbeat"
-	ActionFleetDeviceOffline      Action = "fleet.device.offline"
-	ActionFleetDeviceDecommission Action = "fleet.device.decommission"
-	ActionFleetDeviceCommand      Action = "fleet.device.command"
-	ActionFleetPolicyPush         Action = "fleet.policy.push"
-	ActionFleetPolicyEmergency    Action = "fleet.policy.emergency"
-	ActionFleetThreatIntel        Action = "fleet.threat_intel.push"
-	ActionFleetAlert              Action = "fleet.alert"
-	ActionFleetDeviceReregistered Action = "fleet.device.reregistered"
-	ActionFleetTokenRotated       Action = "fleet.token.rotated"
-	ActionFleetDeviceKeyRotated   Action = "fleet.device.key_rotated"
+	ActionFleetDeviceRegistered                    Action = "fleet.device.registered"
+	ActionFleetDeviceHeartbeat                     Action = "fleet.device.heartbeat"
+	ActionFleetDeviceOffline                       Action = "fleet.device.offline"
+	ActionFleetDeviceDecommission                  Action = "fleet.device.decommission"
+	ActionFleetDeviceCommand                       Action = "fleet.device.command"
+	ActionFleetPolicyPush                          Action = "fleet.policy.push"
+	ActionFleetPolicyEmergency                     Action = "fleet.policy.emergency"
+	ActionFleetThreatIntel                         Action = "fleet.threat_intel.push"
+	ActionFleetAlert                               Action = "fleet.alert"
+	ActionFleetDeviceReregistered                  Action = "fleet.device.reregistered"
+	ActionFleetTokenRotated                        Action = "fleet.token.rotated"
+	ActionFleetDeviceKeyRotated                    Action = "fleet.device.key_rotated"
+	ActionFleetDeviceCredentialProvisionAuthorized Action = "fleet.device.credential_provision_authorized"
+	ActionFleetDeviceDecommissionAuthorized        Action = "fleet.device.decommission_authorized"
 )
 
 // AllActions returns every registered audit action. Used by
@@ -611,6 +613,8 @@ func AllActions() []Action {
 		ActionFleetDeviceReregistered,
 		ActionFleetTokenRotated,
 		ActionFleetDeviceKeyRotated,
+		ActionFleetDeviceCredentialProvisionAuthorized,
+		ActionFleetDeviceDecommissionAuthorized,
 	}
 }
 

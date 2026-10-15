@@ -43,16 +43,6 @@ _MOSQUITTO_IMAGE = "eclipse-mosquitto:2"
 _CONTAINER_NAME = "defenseclaw-mqtt"
 _ENV_KEY = "DCLAW_MQTT_BROKER_URL"
 
-_MOSQUITTO_CONF_TEMPLATE = """\
-# DefenseClaw MQTT broker configuration
-listener 1883
-allow_anonymous false
-password_file /mosquitto/config/passwd
-persistence false
-log_dest stdout
-"""
-
-
 def _validate_path_within_home(path: Path) -> None:
     """Reject paths that resolve outside ~/.defenseclaw/."""
     resolved = path.resolve()
@@ -64,19 +54,61 @@ def _validate_path_within_home(path: Path) -> None:
         )
 
 
-def _tcp_check(host: str, port: int, timeout: float = 5.0) -> bool:
-    """Try a TCP connect to verify the broker is accepting connections."""
+def _mqtt_check(
+    host: str, port: int, username: str = "", password: str = "", timeout: float = 5.0,
+) -> bool:
+    """Require an accepted MQTT 3.1.1 CONNACK, including configured auth."""
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (OSError, TimeoutError):
+        if password and not username:
+            return False
+
+        def field(value: str) -> bytes:
+            encoded = value.encode("utf-8")
+            if len(encoded) > 65535:
+                raise ValueError("MQTT field too large")
+            return len(encoded).to_bytes(2, "big") + encoded
+
+        flags = 0x02
+        payload = field(f"dclaw-setup-{secrets.token_hex(4)}")
+        if username:
+            flags |= 0x80
+            payload += field(username)
+        if password:
+            flags |= 0x40
+            payload += field(password)
+        body = b"\x00\x04MQTT\x04" + bytes((flags, 0, 5)) + payload
+        size = len(body)
+        remaining = bytearray()
+        while True:
+            digit = size % 128
+            size //= 128
+            remaining.append(digit | (0x80 if size else 0))
+            if not size:
+                break
+
+        with socket.create_connection((host, port), timeout=timeout) as connection:
+            connection.settimeout(timeout)
+            connection.sendall(b"\x10" + bytes(remaining) + body)
+            reply = bytearray()
+            while len(reply) < 4:
+                part = connection.recv(4 - len(reply))
+                if not part:
+                    return False
+                reply.extend(part)
+            if reply == b"\x20\x02\x00\x00":
+                connection.sendall(b"\xe0\x00")
+                return True
+            return False
+    except (OSError, TimeoutError, ValueError):
         return False
 
 
-def _wait_for_broker(host: str, port: int, retries: int = 6) -> bool:
-    """Poll the broker with exponential backoff until it accepts connections."""
+def _wait_for_broker(
+    host: str, port: int, username: str = "", password: str = "", retries: int = 6,
+) -> bool:
+    """Poll until the broker accepts the configured MQTT credentials."""
     for attempt in range(retries):
-        if _tcp_check(host, port):
+        if _mqtt_check(host, port, username, password):
             return True
         wait = 0.5 * (2 ** attempt)
         ux.echo(f"  Waiting for broker ({attempt + 1}/{retries})...")
@@ -284,6 +316,7 @@ def _setup_docker_inner(
         [
             "docker", "run", "-d",
             "--name", staging_name,
+            "--user", f"{current_uid}:{current_gid}",
             "-p", f"{staging_port}:1883",
             "-v", f"{staging_dir}:/mosquitto/config",
             "-v", f"{staging_data}:/mosquitto/data",
@@ -406,7 +439,7 @@ def _setup_docker_inner(
 
 
 def _setup_systemd(port: int) -> bool:
-    """Enable and start the system mosquitto service."""
+    """Enable and start an already configured local Mosquitto service."""
     ux.section("Systemd MQTT Broker Setup")
 
     mosquitto = shutil.which("mosquitto")
@@ -443,22 +476,34 @@ def _setup_systemd(port: int) -> bool:
             return False
 
     ux.ok("mosquitto.service enabled and started")
+    ux.warn(
+        "Systemd mode manages an existing Mosquitto configuration only. "
+        "Configure a remote listener, TLS, credentials, and per-device topic ACLs separately."
+    )
     return True
 
 
 @click.command("mqtt-broker")
 @click.option("--port", default=1883, type=click.IntRange(1, 65535), help="MQTT listener port.")
-@click.option("--docker", "mode", flag_value="docker", default=True, help="Run broker in Docker (default).")
-@click.option("--systemd", "mode", flag_value="systemd", help="Use system mosquitto via systemd.")
+@click.option(
+    "--docker", "mode", flag_value="docker", default=True,
+    help="Run a local development broker in Docker (default).",
+)
+@click.option(
+    "--systemd", "mode", flag_value="systemd",
+    help="Start an existing, preconfigured local Mosquitto service.",
+)
 @pass_ctx
 def mqtt_broker(app, port: int, mode: str) -> None:
     """Set up an MQTT broker for edge-connector fleet communication.
 
-    By default, runs ``eclipse-mosquitto:2`` in Docker. Use ``--systemd``
-    to manage a native mosquitto package instead.
+    By default, runs ``eclipse-mosquitto:2`` with a password-protected local
+    plaintext listener. ``--systemd`` only starts an existing Mosquitto
+    configuration. Remote devices need a separately configured reachable
+    listener, TLS, and per-device topic ACLs.
 
     After setup, persists DCLAW_MQTT_BROKER_URL to ~/.defenseclaw/.env
-    and verifies the broker is accepting TCP connections.
+    and verifies the broker accepts an MQTT connection.
     """
     if mode == "docker":
         result = _setup_docker(port)
@@ -467,6 +512,16 @@ def mqtt_broker(app, port: int, mode: str) -> None:
     else:
         ok = _setup_systemd(port)
         creds = {}
+        if ok:
+            from defenseclaw.commands.cmd_edge_install import _load_local_env_value
+
+            username = os.environ.get("DCLAW_MQTT_USER") or _load_local_env_value("DCLAW_MQTT_USER")
+            password = os.environ.get("DCLAW_MQTT_PASS") or _load_local_env_value("DCLAW_MQTT_PASS")
+            if bool(username) != bool(password):
+                raise click.ClickException(
+                    "Set both DCLAW_MQTT_USER and DCLAW_MQTT_PASS to probe the configured broker"
+                )
+            creds = {"mqtt_user": username, "mqtt_pass": password} if username else {}
 
     if not ok:
         raise SystemExit(1)
@@ -474,15 +529,16 @@ def mqtt_broker(app, port: int, mode: str) -> None:
     # Verify the broker is accepting connections
     ux.echo()
     ux.section("Verifying broker connectivity")
-    if _wait_for_broker("127.0.0.1", port):
-        ux.ok(f"Broker accepting connections on localhost:{port}")
+    if _wait_for_broker("127.0.0.1", port, creds.get("mqtt_user", ""), creds.get("mqtt_pass", "")):
+        ux.ok(f"Broker accepting MQTT connections on localhost:{port}")
     else:
-        ux.warn(
-            f"Could not connect to broker on port {port} after several attempts.\n"
-            "  The broker may still be starting. Check with:\n"
+        ux.err(
+            f"Broker did not accept MQTT on port {port} after several attempts.\n"
+            "  Check service logs and retry:\n"
             + (f"    docker logs {_CONTAINER_NAME}" if mode == "docker"
                else "    journalctl -u mosquitto -f")
         )
+        raise SystemExit(1)
 
     # Persist broker URLs in the correct format for each consumer:
     #   DCLAW_MQTT_BROKER_URL = host:port  (Go bridge uses net.Dial)
@@ -490,18 +546,6 @@ def mqtt_broker(app, port: int, mode: str) -> None:
     go_broker_url = f"localhost:{port}"
     c_broker_url = f"mqtt://localhost:{port}"
     env_path = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
-    _persist_env_var(env_path, _ENV_KEY, go_broker_url)
-    ux.ok(f"Wrote {_ENV_KEY}={go_broker_url} to {env_path}")
-
-    _persist_env_var(env_path, "DCLAW_BROKER_URL", c_broker_url)
-    ux.ok(f"Wrote DCLAW_BROKER_URL={c_broker_url} to {env_path}")
-
-    # Persist MQTT credentials if generated
-    if creds:
-        _persist_env_var(env_path, "DCLAW_MQTT_USER", creds["mqtt_user"])
-        _persist_env_var(env_path, "DCLAW_MQTT_PASS", creds["mqtt_pass"])
-        ux.ok(f"Wrote DCLAW_MQTT_USER and DCLAW_MQTT_PASS to {env_path}")
-
     # Write fleet section to config.yaml (Source of Truth)
     try:
         import yaml as _yaml
@@ -527,24 +571,36 @@ def mqtt_broker(app, port: int, mode: str) -> None:
                 fleet_sec["mqtt_pass_env"] = "DCLAW_MQTT_PASS"
             write_config_yaml_secure(cfg_path, raw)
         ux.ok("Updated fleet.mqtt_broker_url in config.yaml")
-    except PermissionError as exc:
-        ux.warn(f"Could not update config.yaml (managed device?): {exc}")
     except Exception as exc:
-        ux.warn(f"Could not update config.yaml: {exc}")
+        raise click.ClickException(f"Could not update config.yaml; MQTT setup is incomplete: {exc}") from exc
+
+    try:
+        _persist_env_var(env_path, _ENV_KEY, go_broker_url)
+        ux.ok(f"Wrote {_ENV_KEY}={go_broker_url} to {env_path}")
+        _persist_env_var(env_path, "DCLAW_BROKER_URL", c_broker_url)
+        ux.ok(f"Wrote DCLAW_BROKER_URL={c_broker_url} to {env_path}")
+        if creds:
+            _persist_env_var(env_path, "DCLAW_MQTT_USER", creds["mqtt_user"])
+            _persist_env_var(env_path, "DCLAW_MQTT_PASS", creds["mqtt_pass"])
+            ux.ok(f"Wrote DCLAW_MQTT_USER and DCLAW_MQTT_PASS to {env_path}")
+    except OSError as exc:
+        raise click.ClickException(f"Could not persist MQTT environment; setup is incomplete: {exc}") from exc
 
     # Summary
     ux.echo()
     ux.section("Next Steps")
     ux.echo(
-        f"  Broker URL (Go):  {go_broker_url}\n"
-        f"  Broker URL (C):   {c_broker_url}\n"
+        f"  Gateway/local broker URL: {go_broker_url}\n"
+        f"  Local Edge URL:           {c_broker_url}\n"
+        "  The gateway reads fleet.mqtt_broker_url from config.yaml.\n"
         "\n"
-        "  Use this URL when installing edge connectors:\n"
-        f"    defenseclaw setup edge-connector install --broker-url {c_broker_url} --target <device-ip>\n"
+        "  These localhost addresses work only on this host. For remote devices,\n"
+        "  configure a reachable TLS listener and per-device topic ACLs, then use:\n"
+        "    defenseclaw setup edge-connector install --broker-url mqtts://<broker-host>:8883 --target <device-ip>\n"
         "\n"
-        "  Or configure the gateway to use it:\n"
-        "    The gateway reads fleet.mqtt_broker_url from config.yaml (or DCLAW_MQTT_BROKER_URL from .env).\n"
-        "\n"
-        "  Test the full pipeline:\n"
-        "    defenseclaw edge-connector test\n"
+        "  Test the local pipeline: defenseclaw edge-connector test\n"
     )
+    if mode == "systemd":
+        ux.warn("Systemd setup verified localhost only; remote-device readiness was not tested.")
+    else:
+        ux.warn("Docker setup uses a plaintext local listener; configure TLS and ACLs before remote production use.")

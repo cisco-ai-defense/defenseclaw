@@ -27,18 +27,18 @@
 /*
  * OTA Policy + Emergency Broadcast Handler.
  * Implements:
- * - REQ-33: Ed25519 signature verification on policy blobs
+ * - REQ-33: explicit HMAC-SHA256 verification on policy blobs
  * - REQ-34: A/B flash partition write
  * - REQ-35: 10-minute canary health-check window with auto-rollback
  * - REQ-36: Monotonic version anti-rollback
- * - REQ-30: Emergency broadcast Ed25519 verification
+ * - REQ-30: emergency broadcast HMAC-SHA256 verification
  * - REQ-31: Emergency sequence anti-replay
  * - REQ-32: Gap detection + replay request on reconnect
  */
 
 extern dclaw_state_t *dclaw_get_state(void);
 extern uint8_t dclaw_config_active_policy_partition(void);
-extern void dclaw_config_switch_policy_partition(uint16_t policy_version);
+extern int dclaw_config_switch_policy_partition(uint16_t policy_version);
 extern void dclaw_cache_flush_all(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint32_t target_hash, uint16_t session_id);
@@ -48,8 +48,8 @@ void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
 int dclaw_policy_reload_from_flash(void);
-void dclaw_emergency_persist(void);
-void dclaw_emergency_load_from_flash(void);
+int dclaw_emergency_persist(void);
+int dclaw_emergency_load_from_flash(void);
 
 /* Policy blob header format (first 8 bytes of blob) */
 typedef struct {
@@ -59,230 +59,73 @@ typedef struct {
     uint16_t _reserved;
 } dclaw_policy_header_t;
 
-#define ED25519_SIG_LEN  64
-#define ED25519_PUBKEY_LEN 32
+#define OTA_KEY_LEN 32
+#define OTA_SIGNATURE_LEN 64
 
-/*
- * OTA signature verification.
- * When DCLAW_HAS_MBEDTLS=1 + HAVE_TWEETNACL: uses Ed25519.
- * When DCLAW_HAS_MBEDTLS=1 without TweetNaCl: falls back to HMAC-SHA256.
- * When DCLAW_HAS_MBEDTLS=0: HMAC-SHA256 (requires DCLAW_ALLOW_HMAC_OTA in production).
- */
-#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
-
-
-#if defined(HAVE_TWEETNACL)
-/*
- * TweetNaCl Ed25519 verification.
- * Only available when TweetNaCl is linked (HAVE_TWEETNACL defined).
- */
-extern int crypto_sign_ed25519_verify_detached(const uint8_t *sig,
-                                               const uint8_t *msg,
-                                               uint64_t msg_len,
-                                               const uint8_t *pk);
-
-static bool verify_ed25519(const uint8_t *message, size_t msg_len,
-                           const uint8_t *signature,
-                           const uint8_t *pubkey) {
-    return crypto_sign_ed25519_verify_detached(signature, message,
-                                               (uint64_t)msg_len,
-                                               pubkey) == 0;
-}
-
-#else /* HAVE_TWEETNACL not defined — fall through to HMAC-SHA256 path */
-
-/*
- * When mbedTLS is enabled but TweetNaCl is not linked, Ed25519
- * verification is unavailable. Fall through to the HMAC-SHA256
- * path which provides integrity verification with a pre-shared key.
- */
-#pragma message "mbedTLS enabled but TweetNaCl not linked — using HMAC-SHA256 for OTA verification."
-
-#include "hmac_sha256.h"
-
-static bool verify_ed25519(const uint8_t *message, size_t msg_len,
-                           const uint8_t *signature,
-                           const uint8_t *pubkey) {
-#if !DCLAW_DEV_MODE && !DCLAW_ALLOW_HMAC_OTA
-    fprintf(stderr, "[DCLAW] ERROR: HMAC-SHA256 OTA verification rejected in production "
-            "(TweetNaCl not linked). Build with HAVE_TWEETNACL for Ed25519.\n");
-    return false;
-#elif DCLAW_ALLOW_HMAC_OTA && !DCLAW_DEV_MODE
-    /* DCLAW_ALLOW_HMAC_OTA: HMAC-SHA256 accepted in production via explicit opt-in. */
-    fprintf(stderr, "[DCLAW] WARNING: HMAC-SHA256 OTA verification enabled in production "
-            "(DCLAW_ALLOW_HMAC_OTA=1). Use Ed25519 for stronger security.\n");
+/* Ed25519 verification is not linked in this connector. HMAC is a distinct,
+ * explicit mode: a public DCLAW_OTA_KEY is never interpreted as a secret. */
+#ifndef DCLAW_ALLOW_HMAC_OTA
+#define DCLAW_ALLOW_HMAC_OTA 0
 #endif
-    const uint8_t *hmac_key = pubkey;
-    size_t hmac_key_len = ED25519_PUBKEY_LEN;
-    uint8_t ota_hmac_key[32];
-    const char *env_key = getenv("DCLAW_OTA_HMAC_KEY");
-    if (env_key && strlen(env_key) == 64) {
-        if (dclaw_hex_decode(env_key, ota_hmac_key, 32) == 0) {
-            hmac_key = ota_hmac_key; hmac_key_len = 32;
-            /* Best-effort scrub DCLAW_OTA_HMAC_KEY from env */
-            dclaw_scrub_env("DCLAW_OTA_HMAC_KEY");
-        }
-    }
-#if !DCLAW_DEV_MODE
-    /* In production, reject if still using the compiled-in fallback pubkey.
-     * Provisioned keys (via DCLAW_OTA_KEY or DCLAW_OTA_HMAC_KEY env vars)
-     * are acceptable since they are operator-supplied secrets. */
-    {
-        bool is_zero_key = true;
-        for (size_t zk = 0; zk < hmac_key_len; zk++) {
-            if (hmac_key[zk] != 0) { is_zero_key = false; break; }
-        }
-        if (is_zero_key) {
-            fprintf(stderr, "[DCLAW] ERROR: OTA HMAC key is all-zero in production. "
-                    "Set DCLAW_OTA_KEY or DCLAW_OTA_HMAC_KEY.\n");
-            dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
-            return false;
-        }
-    }
-#endif
-    uint8_t expected[32];
-    dclaw_hmac_sha256(hmac_key, hmac_key_len, message, msg_len, expected);
-    dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
-    return ct_compare(signature, expected, 32);
-}
 
-#endif /* HAVE_TWEETNACL */
+static uint8_t ota_hmac_key[OTA_KEY_LEN];
+static bool ota_hmac_key_loaded = false;
+static bool ota_hmac_key_provisioned = false;
 
-#else /* Built-in HMAC-SHA256 verification — no external library required */
-
-/*
- * HMAC-SHA256 fallback for OTA verification. In production builds
- * (DCLAW_DEV_MODE=0), HMAC is unconditionally rejected — no runtime override.
- * Tests opt in to HMAC via env var; production rejects it by default.
- */
-#include "hmac_sha256.h"
-
-static bool verify_ed25519(const uint8_t *message, size_t msg_len,
-                           const uint8_t *signature,
-                           const uint8_t *pubkey) {
-#if !DCLAW_DEV_MODE && !DCLAW_ALLOW_HMAC_OTA
-    fprintf(stderr, "[DCLAW] ERROR: HMAC-SHA256 OTA verification rejected in production "
-            "(Ed25519 unavailable). Build with DCLAW_HAS_MBEDTLS=1.\n");
-    return false;
-#elif DCLAW_ALLOW_HMAC_OTA && !DCLAW_DEV_MODE
-    /* DCLAW_ALLOW_HMAC_OTA: HMAC-SHA256 accepted in production via explicit opt-in. */
-    fprintf(stderr, "[DCLAW] WARNING: HMAC-SHA256 OTA verification enabled in production "
-            "(DCLAW_ALLOW_HMAC_OTA=1). Use Ed25519 for stronger security.\n");
-#endif
-    const uint8_t *hmac_key = pubkey;
-    size_t hmac_key_len = ED25519_PUBKEY_LEN;
-    uint8_t ota_hmac_key[32];
-    const char *env_key = getenv("DCLAW_OTA_HMAC_KEY");
-    if (env_key && strlen(env_key) == 64) {
-        if (dclaw_hex_decode(env_key, ota_hmac_key, 32) == 0) {
-            hmac_key = ota_hmac_key; hmac_key_len = 32;
-            /* Best-effort scrub DCLAW_OTA_HMAC_KEY from env */
-            dclaw_scrub_env("DCLAW_OTA_HMAC_KEY");
-        }
-    }
-#if !DCLAW_DEV_MODE
-    /* In production, reject if still using the compiled-in fallback pubkey.
-     * Provisioned keys (via DCLAW_OTA_KEY or DCLAW_OTA_HMAC_KEY env vars)
-     * are acceptable since they are operator-supplied secrets. */
-    {
-        bool is_zero_key = true;
-        for (size_t zk = 0; zk < hmac_key_len; zk++) {
-            if (hmac_key[zk] != 0) { is_zero_key = false; break; }
-        }
-        if (is_zero_key) {
-            fprintf(stderr, "[DCLAW] ERROR: OTA HMAC key is all-zero in production. "
-                    "Set DCLAW_OTA_KEY or DCLAW_OTA_HMAC_KEY.\n");
-            dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
-            return false;
-        }
-    }
-#endif
-    uint8_t expected[32];
-    dclaw_hmac_sha256(hmac_key, hmac_key_len, message, msg_len, expected);
-    dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
-    return ct_compare(signature, expected, 32);
-}
-
-#endif /* DCLAW_HAS_MBEDTLS */
-
-/*
- * OTA CA key — loaded from DCLAW_OTA_KEY env var (hex-encoded 32 bytes)
- * at first use, falling back to a zero key with a warning.
- *
- * When DCLAW_HAS_MBEDTLS=1 this is the Ed25519 public key.
- * When DCLAW_HAS_MBEDTLS=0 this is the HMAC-SHA256 pre-shared key.
- *
- * NOTE: A single fleet-wide OTA key is used for all devices.
- * Key compromise affects the entire fleet. Operators should rotate
- * DCLAW_OTA_KEY periodically and redeploy via
- * `defenseclaw setup edge-connector install`.
- */
-static uint8_t ota_ca_key[ED25519_PUBKEY_LEN];
-static bool    ota_ca_key_loaded = false;
-static bool    ota_ca_key_provisioned = false;  /* true only when a real (non-zero) key is loaded */
-
-/* Reset key state — allows tests to force re-reading from env */
 void dclaw_ota_reset_key_state(void) {
-    ota_ca_key_loaded = false;
-    ota_ca_key_provisioned = false;
-    dclaw_secure_zero(ota_ca_key, sizeof(ota_ca_key));
+    ota_hmac_key_loaded = false;
+    ota_hmac_key_provisioned = false;
+    dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
 }
 
-/* hex_char_to_nibble moved to dclaw_hex_decode() in hmac_sha256.c */
-
-static const uint8_t *get_ota_ca_key(void) {
-    if (ota_ca_key_loaded) return ota_ca_key;
-    ota_ca_key_loaded = true;
-    ota_ca_key_provisioned = false;
-
-    const char *env = getenv("DCLAW_OTA_KEY");
-    if (env != NULL && strlen(env) == 64) {
-        /* Parse 64 hex characters into 32 bytes */
-        bool valid = (dclaw_hex_decode(env, ota_ca_key, 32) == 0);
-        if (valid) {
-            /* Check that the key is not all zeros */
-            bool all_zero = true;
-            for (int i = 0; i < ED25519_PUBKEY_LEN; i++) {
-                if (ota_ca_key[i] != 0) { all_zero = false; break; }
-            }
-            if (!all_zero) {
-                ota_ca_key_provisioned = true;
-                /* Best-effort scrub DCLAW_OTA_KEY from env */
-                dclaw_scrub_env("DCLAW_OTA_KEY");
-                return ota_ca_key;
-            }
-            fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY is all zeros — "
-                    "OTA updates will be REJECTED until a real key is provisioned.\n");
-            return ota_ca_key;
-        }
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY has invalid hex — "
-                "OTA updates will be REJECTED until a valid key is provisioned.\n");
-    } else if (env != NULL) {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY must be 64 hex chars (32 bytes) — "
-                "OTA updates will be REJECTED until a valid key is provisioned.\n");
-    } else {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY not set — "
-                "OTA updates will be REJECTED until a key is provisioned.\n");
-    }
-
-    memset(ota_ca_key, 0, sizeof(ota_ca_key));
-    return ota_ca_key;
+static bool key_is_nonzero(const uint8_t key[OTA_KEY_LEN]) {
+    uint8_t bits = 0;
+    for (size_t i = 0; i < OTA_KEY_LEN; i++) bits |= key[i];
+    return bits != 0;
 }
 
-/*
- * Verify signature only when a real (non-zero) OTA key has been provisioned.
- * When no key is provisioned, ALL signatures are rejected to prevent attackers
- * from forging updates against a known-zero key.
- */
-static bool verify_signature(const uint8_t *message, size_t msg_len,
-                             const uint8_t *signature) {
-    const uint8_t *key = get_ota_ca_key();
-    if (!ota_ca_key_provisioned) {
-        fprintf(stderr, "[DCLAW] REJECT: OTA signature verification failed — "
-                "no key provisioned. Set DCLAW_OTA_KEY to accept updates.\n");
+static bool load_ota_hmac_key(void) {
+    if (ota_hmac_key_loaded) return ota_hmac_key_provisioned;
+    ota_hmac_key_loaded = true;
+    const char *env = getenv("DCLAW_OTA_HMAC_KEY");
+    if (!env || strlen(env) != OTA_KEY_LEN * 2 ||
+        dclaw_hex_decode(env, ota_hmac_key, OTA_KEY_LEN) != 0 ||
+        !key_is_nonzero(ota_hmac_key)) {
+        dclaw_secure_zero(ota_hmac_key, sizeof(ota_hmac_key));
+        fprintf(stderr, "[DCLAW] REJECT: DCLAW_OTA_HMAC_KEY must be a nonzero 32-byte hex secret. "
+                        "DCLAW_OTA_KEY is not an HMAC key.\n");
         return false;
     }
-    return verify_ed25519(message, msg_len, signature, key);
+    ota_hmac_key_provisioned = true;
+    dclaw_scrub_env("DCLAW_OTA_HMAC_KEY");
+    return true;
+}
+
+/* Both policy and emergency messages reserve 64 signature bytes. HMAC mode
+ * uses the first 32 bytes and requires the other 32 to be zero so a wire
+ * message cannot be ambiguously interpreted as an Ed25519 signature. */
+static bool verify_hmac_signature(const uint8_t *message, size_t msg_len,
+                                  const uint8_t *signature,
+                                  const uint8_t key[OTA_KEY_LEN]) {
+    uint8_t tail_bits = 0;
+    for (size_t i = OTA_KEY_LEN; i < OTA_SIGNATURE_LEN; i++)
+        tail_bits |= signature[i];
+    uint8_t expected[OTA_KEY_LEN];
+    dclaw_hmac_sha256(key, OTA_KEY_LEN, message, msg_len, expected);
+    bool valid = (tail_bits == 0) && ct_compare(signature, expected, OTA_KEY_LEN);
+    dclaw_secure_zero(expected, sizeof(expected));
+    return valid;
+}
+
+static bool verify_signature(const uint8_t *message, size_t msg_len,
+                             const uint8_t *signature) {
+    if (!DCLAW_DEV_MODE && !DCLAW_ALLOW_HMAC_OTA) {
+        fprintf(stderr, "[DCLAW] REJECT: OTA HMAC disabled in production; "
+                        "rebuild with explicit DCLAW_ALLOW_HMAC_OTA=ON.\n");
+        return false;
+    }
+    if (!load_ota_hmac_key()) return false;
+    return verify_hmac_signature(message, msg_len, signature, ota_hmac_key);
 }
 
 /* === Policy OTA (REQ-33 through REQ-36) === */
@@ -292,10 +135,10 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     dclaw_state_t *s = dclaw_get_state();
 
     if (blob_len < sizeof(dclaw_policy_header_t)) return -1;
-    if (blob_len > HAL_FLASH_POLICY_A_SIZE) return -1;
+    if (blob_len > HAL_FLASH_POLICY_A_SIZE - OTA_SIGNATURE_LEN) return -1;
 
-    /* REQ-33: Verify Ed25519 signature (or HMAC-SHA256 when mbedTLS unavailable).
-     * Rejects ALL updates when no OTA key is provisioned. */
+    /* REQ-33: Explicit HMAC mode with a separately provisioned secret.
+     * Unsupported Ed25519 configurations fail closed. */
     if (!verify_signature(blob, blob_len, signature)) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, 0, 0);
         return -1;
@@ -306,6 +149,10 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     hdr.version = ((uint16_t)blob[0] << 8) | blob[1];
     hdr.payload_len = ((uint16_t)blob[2] << 8) | blob[3];
     hdr.canary_baseline = ((uint16_t)blob[4] << 8) | blob[5];
+
+    /* 0xFFFF is the erased-flash sentinel in the persisted version record.
+     * Accepting it would reset the anti-rollback watermark on reboot. */
+    if (hdr.version == 0 || hdr.version == UINT16_MAX) return -2;
 
     {
         uint32_t expected_total = (uint32_t)sizeof(dclaw_policy_header_t)
@@ -332,6 +179,11 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                 blob_len, target_offset);
         return -3;
     }
+    if (hal_flash_write(target_offset + HAL_FLASH_POLICY_A_SIZE - OTA_SIGNATURE_LEN,
+                        signature, OTA_SIGNATURE_LEN) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Flash write failed for policy signature.\n");
+        return -3;
+    }
 
     if (hal_flash_sync() != 0) {
         fprintf(stderr, "[DCLAW] ERROR: hal_flash_sync() failed after policy write — "
@@ -339,28 +191,37 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
         return -3;
     }
 
-    /* Verify written data (read-back check) */
-    uint8_t verify_buf[8];
-    if (hal_flash_read(target_offset, verify_buf, 8) != 0) {
+    /* Read back every policy byte and the signed trailer before committing
+     * the partition switch. A matching header alone cannot detect payload
+     * corruption that changes an allow/deny rule. */
+    static uint8_t verify_buf[HAL_FLASH_POLICY_A_SIZE];
+    if (hal_flash_read(target_offset, verify_buf, blob_len) != 0 ||
+        hal_flash_read(target_offset + HAL_FLASH_POLICY_A_SIZE - OTA_SIGNATURE_LEN,
+                       verify_buf + HAL_FLASH_POLICY_A_SIZE - OTA_SIGNATURE_LEN,
+                       OTA_SIGNATURE_LEN) != 0) {
         return -3;
     }
-    if (memcmp(verify_buf, blob, 8) != 0) {
+    if (memcmp(verify_buf, blob, blob_len) != 0 ||
+        memcmp(verify_buf + HAL_FLASH_POLICY_A_SIZE - OTA_SIGNATURE_LEN,
+               signature, OTA_SIGNATURE_LEN) != 0) {
         return -3;
     }
 
-    dclaw_config_switch_policy_partition(hdr.version);
+    if (dclaw_config_switch_policy_partition(hdr.version) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: OTA policy partition switch could not be persisted.\n");
+        return -3;
+    }
     s->device.policy_version = hdr.version;
 
     /* Flush verdict cache — policy changed, cached verdicts may be stale */
     dclaw_cache_flush_all();
 
-    /* Reload policy tables from the new flash contents.
-     * The compiled-in policy tables (deny_hashes, dest_allowlist, etc.) are
-     * static const arrays generated at build time and cannot be replaced at
-     * runtime without a restart. Log a warning so operators know a restart
-     * is needed for the new policy tables to take full effect.
-     * The version, cache flush, and canary protection ARE applied immediately. */
-    dclaw_policy_reload_from_flash();
+    /* Reload the mutable policy tables from the new flash contents. */
+    if (dclaw_policy_reload_from_flash() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Persisted policy failed validation after switch; rolling back.\n");
+        dclaw_policy_rollback();
+        return -3;
+    }
 
     /* REQ-35: Enter canary window */
     s->canary.canary_active = true;
@@ -378,21 +239,16 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
 }
 
 /* Canary tick — called periodically from event loop */
-void dclaw_canary_tick(void) {
+void dclaw_canary_tick_at(uint64_t now_ms) {
     dclaw_state_t *s = dclaw_get_state();
     if (!s->canary.canary_active) return;
 
-    uint64_t elapsed = hal_tick_ms() - s->canary.canary_started_at;
-
-    /* Check if canary window has expired (10 minutes) */
-    if (elapsed >= (uint64_t)DCLAW_CANARY_WINDOW_SEC * 1000) {
-        s->canary.canary_active = false;
-        return;
-    }
+    if (now_ms < s->canary.canary_started_at) return;
+    uint64_t elapsed = now_ms - s->canary.canary_started_at;
 
     /* Advance minute counter */
-    uint8_t current_min = (uint8_t)(elapsed / 60000);
-    if (current_min != s->canary.canary_minute && current_min < 10) {
+    uint8_t current_min = (uint8_t)(elapsed / 60000 > 10 ? 10 : elapsed / 60000);
+    if (current_min != s->canary.canary_minute && current_min <= 10) {
         s->canary.canary_minute = current_min;
 
         /* Check spike: blocks in previous minute vs baseline */
@@ -409,8 +265,15 @@ void dclaw_canary_tick(void) {
         /* REQ-35: Auto-rollback if 3 consecutive spike minutes */
         if (s->canary.spike_streak >= DCLAW_CANARY_SPIKE_CONSEC) {
             dclaw_policy_rollback();
+            return;
         }
     }
+    if (elapsed >= (uint64_t)DCLAW_CANARY_WINDOW_SEC * 1000)
+        s->canary.canary_active = false;
+}
+
+void dclaw_canary_tick(void) {
+    dclaw_canary_tick_at(hal_tick_ms());
 }
 
 /* Record a BLOCK event for canary tracking */
@@ -441,10 +304,16 @@ void dclaw_policy_rollback(void) {
             }
         }
     }
-    dclaw_config_switch_policy_partition(prev_version);
-    if (prev_version > 0) {
-        s->device.policy_version = prev_version;
+    /* Keep the highest signed version as the anti-rollback watermark. The
+     * active partition can return to an older policy, but that rejected
+     * release must not become replayable after reboot. */
+    if (dclaw_config_switch_policy_partition(0) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Canary rollback partition switch could not be persisted.\n");
+        return;
     }
+    fprintf(stderr, "[DCLAW] Canary rollback restored partition policy version %u; "
+                    "anti-rollback watermark remains %u.\n",
+            prev_version, s->device.policy_version);
     s->canary.canary_active = false;
     s->rollback_pending = true;
     dclaw_cache_flush_all();
@@ -461,13 +330,10 @@ void dclaw_policy_rollback(void) {
 /* === Emergency Broadcast (REQ-30 through REQ-32) === */
 
 /*
- * Separate emergency key for emergency command verification.
- * Loaded from DCLAW_EMERGENCY_KEY env var (hex-encoded 32 bytes).
- * Falls back to DCLAW_OTA_KEY if not set, so existing deployments
- * work without change. Operators can rotate OTA and emergency keys
- * independently once DCLAW_EMERGENCY_KEY is provisioned.
+ * Separate HMAC key for emergency command verification. There is no fallback
+ * to the OTA key: that may be a public Ed25519 key or a different secret.
  */
-static uint8_t emergency_ca_key[ED25519_PUBKEY_LEN];
+static uint8_t emergency_ca_key[OTA_KEY_LEN];
 static bool    emergency_ca_key_loaded = false;
 static bool    emergency_ca_key_provisioned = false;
 
@@ -487,7 +353,7 @@ static const uint8_t *get_emergency_ca_key(void) {
         bool valid = (dclaw_hex_decode(env, emergency_ca_key, 32) == 0);
         if (valid) {
             bool all_zero = true;
-            for (int i = 0; i < ED25519_PUBKEY_LEN; i++) {
+            for (int i = 0; i < OTA_KEY_LEN; i++) {
                 if (emergency_ca_key[i] != 0) { all_zero = false; break; }
             }
             if (!all_zero) {
@@ -500,28 +366,15 @@ static const uint8_t *get_emergency_ca_key(void) {
         }
     }
 
-#if !DCLAW_DEV_MODE
-    fprintf(stderr, "[DCLAW] WARNING: No DCLAW_EMERGENCY_KEY set in production mode — "
-            "emergency commands will be REJECTED. Set DCLAW_EMERGENCY_KEY to accept "
-            "emergency broadcasts.\n");
-    memset(emergency_ca_key, 0, sizeof(emergency_ca_key));
+    fprintf(stderr, "[DCLAW] REJECT: DCLAW_EMERGENCY_KEY must be a nonzero 32-byte hex secret.\n");
+    dclaw_secure_zero(emergency_ca_key, sizeof(emergency_ca_key));
     emergency_ca_key_provisioned = false;
     return emergency_ca_key;
-#else
-    /* Dev mode: fall back to OTA key for backward compatibility. */
-    const uint8_t *ota_key = get_ota_ca_key();
-    memcpy(emergency_ca_key, ota_key, ED25519_PUBKEY_LEN);
-    emergency_ca_key_provisioned = ota_ca_key_provisioned;
-    if (emergency_ca_key_provisioned) {
-        fprintf(stderr, "[DCLAW] No DCLAW_EMERGENCY_KEY set — using DCLAW_OTA_KEY for emergency verification (dev mode).\n");
-    }
-    return emergency_ca_key;
-#endif
 }
 
 const uint8_t *dclaw_emergency_get_key(size_t *out_len) {
     const uint8_t *key = get_emergency_ca_key();
-    *out_len = emergency_ca_key_provisioned ? ED25519_PUBKEY_LEN : 0;
+    *out_len = emergency_ca_key_provisioned ? OTA_KEY_LEN : 0;
     return key;
 }
 
@@ -530,10 +383,10 @@ static bool verify_emergency_signature(const uint8_t *message, size_t msg_len,
     const uint8_t *key = get_emergency_ca_key();
     if (!emergency_ca_key_provisioned) {
         fprintf(stderr, "[DCLAW] REJECT: Emergency signature verification failed — "
-                "no key provisioned. Set DCLAW_EMERGENCY_KEY (or DCLAW_OTA_KEY in dev mode).\n");
+                "no key provisioned. Set DCLAW_EMERGENCY_KEY.\n");
         return false;
     }
-    return verify_ed25519(message, msg_len, signature, key);
+    return verify_hmac_signature(message, msg_len, signature, key);
 }
 
 typedef struct {
@@ -543,47 +396,40 @@ typedef struct {
     uint8_t  scope;
     uint8_t  payload[32];
     uint8_t  _reserved[2];
+    uint32_t prev_fleet_seq;
     uint8_t  signature[64];
 } __attribute__((packed)) dclaw_emergency_msg_t;
 
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     dclaw_state_t *s = dclaw_get_state();
 
-    if (msg_len < sizeof(dclaw_emergency_msg_t)) return -1;
+    if (msg_len != sizeof(dclaw_emergency_msg_t)) return -1;
 
     /* Parse fields in big-endian wire format */
     uint32_t seq = ((uint32_t)msg[0] << 24) | ((uint32_t)msg[1] << 16) |
                    ((uint32_t)msg[2] << 8) | msg[3];
     uint8_t command = msg[8];
-    const uint8_t *signature = msg + 44;
+    uint32_t prev_fleet_seq = ((uint32_t)msg[44] << 24) | ((uint32_t)msg[45] << 16) |
+                              ((uint32_t)msg[46] << 8) | msg[47];
+    const uint8_t *signature = msg + 48;
 
-    /* REQ-30: Verify signature over first 44 bytes using the emergency key.
-     * Uses DCLAW_EMERGENCY_KEY if set, otherwise falls back to DCLAW_OTA_KEY.
-     * Rejects ALL emergency messages when no key is provisioned. */
-    if (!verify_emergency_signature(msg, 44, signature)) {
+    /* REQ-30: Verify signature over first 44 bytes using the separate
+     * DCLAW_EMERGENCY_KEY. Reject when no key is provisioned. */
+    if (!verify_emergency_signature(msg, 48, signature)) {
         return -1;
     }
 
-    /* REQ-31: Anti-replay — sequence must be strictly increasing.
-     * On first message (initialized==false), accept any sequence to bootstrap. */
-    if (!s->emergency.initialized) {
-        s->emergency.last_seen_seq = seq;
-        s->emergency.initialized = true;
-    } else {
-        if (seq <= s->emergency.last_seen_seq) {
-            return -2;
-        }
+    /* The authenticated predecessor is the last command in this fleet's
+     * signed chain. A global sequence may jump when other fleets receive
+     * commands, but a missed BLOCK must not be hidden by a later FORCE_SYNC. */
+    if (seq == 0 || (s->emergency.initialized && seq <= s->emergency.last_seen_seq))
+        return -2;
+    if (prev_fleet_seq != s->emergency.last_seen_seq)
+        return -3;
+    if (command < 0x01 || command > 0x05) return -4;
 
-        /* REQ-31: Jump attack detection — reject delta > 10.
-         * An attacker who compromises the OTA signing key can forge at most
-         * 10 forward-sequence emergency messages before the device rejects
-         * further jumps. At 1 msg/min, a gap of 10 covers ~10 minutes of
-         * missed messages during a network outage before the device requires
-         * a re-bootstrap. */
-        if (seq - s->emergency.last_seen_seq > 10) {
-            return -3;
-        }
-    }
+    dclaw_emergency_state_t prior = s->emergency;
+    s->emergency.initialized = true;
 
     /* Apply command */
     switch (command) {
@@ -632,10 +478,17 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         return -4;
     }
 
-    /* Update sequence counter */
+    /* A command is acknowledged only after the checked emergency state has
+     * at least one durable copy. In RAM, persistence errors leave lockdown
+     * active until an operator repairs storage and the command is replayed. */
     s->emergency.last_seen_seq = seq;
-
-    dclaw_emergency_persist();
+    if (dclaw_emergency_persist() != 0) {
+        s->emergency = prior;
+        s->emergency.block_all_active = true;
+        s->emergency.last_was_lockdown = true;
+        dclaw_cache_flush_all();
+        return -3;
+    }
 
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK, 0, 0);
     return 0;
@@ -681,9 +534,17 @@ int dclaw_policy_reload_from_flash(void) {
     /* Parse header */
     if (max_size < 8) return 1;
     uint16_t payload_len = ((uint16_t)flash_buf[2] << 8) | flash_buf[3];
-    if (payload_len == 0 || (uint32_t)(8 + payload_len) > max_size) {
+    if (payload_len == 0 || (uint32_t)(8 + payload_len) >
+                            max_size - OTA_SIGNATURE_LEN) {
         fprintf(stderr, "[DCLAW] INFO: No OTA policy in flash (payload_len=%u). "
                 "Compiled-in defaults remain active.\n", payload_len);
+        return 1;
+    }
+    /* The trailer is the original wire signature. Recheck it on every boot
+     * and rollback so a modified flash payload cannot become live policy. */
+    if (!verify_signature(flash_buf, (size_t)8 + payload_len,
+                          flash_buf + max_size - OTA_SIGNATURE_LEN)) {
+        fprintf(stderr, "[DCLAW] ERROR: Stored policy signature invalid; refusing flash policy.\n");
         return 1;
     }
 
@@ -825,7 +686,8 @@ parse_done:
 /* REQ-32: Check for emergency sequence gap on reconnect */
 bool dclaw_emergency_has_gap(uint32_t cloud_current_seq) {
     dclaw_state_t *s = dclaw_get_state();
-    if (cloud_current_seq > s->emergency.last_seen_seq + 1) {
+    if (cloud_current_seq > s->emergency.last_seen_seq &&
+        cloud_current_seq - s->emergency.last_seen_seq > 1) {
         s->emergency.gap_start = s->emergency.last_seen_seq + 1;
         s->emergency.replay_requested = true;
         return true;
@@ -848,14 +710,19 @@ void dclaw_lockdown_timeout_check(void) {
 
     uint64_t elapsed_sec = (now_ms - s->emergency.lockdown_timestamp) / 1000;
     if (elapsed_sec >= DCLAW_LOCKDOWN_TIMEOUT_SEC) {
+        dclaw_emergency_state_t prior = s->emergency;
         fprintf(stderr, "[DCLAW] WARNING: Lockdown auto-cleared after 24 hours (elapsed=%llu sec). "
                 "Normal policy evaluation resumed. Investigate the original lockdown cause.\n",
                 (unsigned long long)elapsed_sec);
         s->emergency.block_all_active = false;
         s->emergency.last_was_lockdown = false;
         s->emergency.lockdown_timestamp = 0;
+        if (dclaw_emergency_persist() != 0) {
+            s->emergency = prior;
+            fprintf(stderr, "[DCLAW] ERROR: Lockdown auto-clear could not be persisted; remaining locked.\n");
+            return;
+        }
         dclaw_cache_flush_all();
-        dclaw_emergency_persist();
         dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CLOUD_BLOCK, 0xFFFE, 0);
     }
 }
@@ -866,110 +733,287 @@ int dclaw_ipc_release_lockdown(void) {
         return -1;
     }
     fprintf(stderr, "[DCLAW] Lockdown released via local IPC command.\n");
+    dclaw_emergency_state_t prior = s->emergency;
     s->emergency.block_all_active = false;
     s->emergency.last_was_lockdown = false;
     s->emergency.lockdown_timestamp = 0;
+    if (dclaw_emergency_persist() != 0) {
+        s->emergency = prior;
+        fprintf(stderr, "[DCLAW] ERROR: Local release could not be persisted; remaining locked.\n");
+        return -1;
+    }
     dclaw_cache_flush_all();
-    dclaw_emergency_persist();
     dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CLOUD_BLOCK, 0xFFFD, 0);
     return 0;
 }
 
 
-/*
- * Emergency state is stored in the first 16 bytes of the config partition
- * (HAL_FLASH_CONFIG_OFFSET). Layout:
- *   [0..1]   magic marker (0xDC, 0xE9)
- *   [2]      block_all_active (0x00 or 0x01)
- *   [3]      last_was_lockdown (0x00 or 0x01)
- *   [4..7]   last_seen_seq  (big-endian uint32)
- *   [8..15]  lockdown_timestamp (big-endian uint64)
- *
- * The 2-byte magic ensures we don't misinterpret stale/uninitialized flash
- * (which reads as all-zeros or all-0xFF) as a valid emergency state.
- */
+/* The first 16 config bytes hold the legacy state or a migration marker.
+ * Two checked records at +96/+128 preserve sequence, lockdown, identity and
+ * generation across partial writes. They do not overlap policy, release or
+ * boot counters. A valid record from a different fleet refuses startup;
+ * re-enrolment requires trusted flash provisioning, never silent reset. */
 #define EMERGENCY_FLASH_OFFSET  HAL_FLASH_CONFIG_OFFSET
 #define EMERGENCY_FLASH_SIZE    16
 #define EMERGENCY_MAGIC_0       0xDC
 #define EMERGENCY_MAGIC_1       0xE9
+#define EMERGENCY_MIGRATED      0xEA
+#define EMERGENCY_RECORD_A      (HAL_FLASH_CONFIG_OFFSET + 96)
+#define EMERGENCY_RECORD_B      (HAL_FLASH_CONFIG_OFFSET + 128)
+#define EMERGENCY_RECORD_SIZE   28
+static uint32_t emergency_generation;
 
-#define LOCKDOWN_RELEASE_SEQ_OFFSET (HAL_FLASH_CONFIG_OFFSET + 32)
+#define LOCKDOWN_RELEASE_SEQ_A (HAL_FLASH_CONFIG_OFFSET + 32)
+#define LOCKDOWN_RELEASE_SEQ_B (HAL_FLASH_CONFIG_OFFSET + 48)
+#define LOCKDOWN_RELEASE_SEQ_RECORD_SIZE 12
+#define LOCKDOWN_RELEASE_SEQ_MAX 99999999U /* IPC decimal parser accepts 8 digits */
+
+/* Each copy contains magic, big-endian sequence, its inverse, and CRC16.
+ * The two copies are written B then A with sync and readback per copy. */
+static uint16_t release_crc16(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xffff;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int bit = 0; bit < 8; bit++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
+static uint32_t release_be32(const uint8_t *data) {
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) | data[3];
+}
+
+static void release_put_be32(uint8_t *data, uint32_t value) {
+    data[0] = (uint8_t)(value >> 24);
+    data[1] = (uint8_t)(value >> 16);
+    data[2] = (uint8_t)(value >> 8);
+    data[3] = (uint8_t)value;
+}
+
+static bool release_record_valid(const uint8_t *record, uint32_t *sequence) {
+    if (record[0] != 0xdc || record[1] != 0x52) return false;
+    uint32_t value = release_be32(record + 2);
+    if (value > LOCKDOWN_RELEASE_SEQ_MAX ||
+        release_be32(record + 6) != ~value ||
+        (((uint16_t)record[10] << 8) | record[11]) != release_crc16(record, 10))
+        return false;
+    *sequence = value;
+    return true;
+}
+
+static bool release_blank(const uint8_t *record, uint8_t fill) {
+    for (size_t i = 0; i < LOCKDOWN_RELEASE_SEQ_RECORD_SIZE; i++)
+        if (record[i] != fill) return false;
+    return true;
+}
 
 uint32_t dclaw_load_lockdown_release_seq(void) {
-    uint8_t buf[4];
-    if (hal_flash_read(LOCKDOWN_RELEASE_SEQ_OFFSET, buf, 4) != 0) return 0;
-    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
+    uint8_t a[LOCKDOWN_RELEASE_SEQ_RECORD_SIZE];
+    uint8_t b[LOCKDOWN_RELEASE_SEQ_RECORD_SIZE];
+    if (hal_flash_read(LOCKDOWN_RELEASE_SEQ_A, a, sizeof(a)) != 0 ||
+        hal_flash_read(LOCKDOWN_RELEASE_SEQ_B, b, sizeof(b)) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Cannot read lockdown release counter; signed release disabled.\n");
+        return UINT32_MAX;
+    }
+    uint32_t seq_a = 0, seq_b = 0;
+    bool valid_a = release_record_valid(a, &seq_a);
+    bool valid_b = release_record_valid(b, &seq_b);
+    if (valid_a || valid_b) return seq_a > seq_b ? seq_a : seq_b;
+
+    if ((release_blank(a, 0) && release_blank(b, 0)) ||
+        (release_blank(a, 0xff) && release_blank(b, 0xff))) return 0;
+
+    /* Upgrade from the earlier unprotected single uint32 record. It was
+     * stored at +32 with zero-filled trailing bytes. Preserve its sequence
+     * until the next successful write creates both checked records. */
+    uint32_t legacy = release_be32(a);
+    bool legacy_shape = release_blank(b, 0);
+    for (size_t i = 4; i < sizeof(a); i++) legacy_shape &= (a[i] == 0);
+    if (legacy_shape && legacy <= LOCKDOWN_RELEASE_SEQ_MAX) return legacy;
+
+    fprintf(stderr, "[DCLAW] ERROR: Both lockdown release counter records invalid; "
+                    "signed release disabled until flash is repaired.\n");
+    return UINT32_MAX;
 }
 
-void dclaw_store_lockdown_release_seq(uint32_t seq) {
-    uint8_t buf[4] = {
-        (uint8_t)(seq >> 24), (uint8_t)(seq >> 16),
-        (uint8_t)(seq >> 8), (uint8_t)seq
-    };
-    hal_flash_write(LOCKDOWN_RELEASE_SEQ_OFFSET, buf, 4);
-    hal_flash_sync();
+static int release_write_record(uint32_t offset, const uint8_t *record) {
+    uint8_t previous[LOCKDOWN_RELEASE_SEQ_RECORD_SIZE];
+    uint8_t verify[LOCKDOWN_RELEASE_SEQ_RECORD_SIZE];
+    if (hal_flash_read(offset, previous, sizeof(previous)) != 0) return -1;
+    if (hal_flash_write(offset, record, LOCKDOWN_RELEASE_SEQ_RECORD_SIZE) != 0 ||
+        hal_flash_sync() != 0 ||
+        hal_flash_read(offset, verify, sizeof(verify)) != 0 ||
+        memcmp(record, verify, sizeof(verify)) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Lockdown release counter persistence failed at 0x%x.\n",
+                (unsigned)offset);
+        /* The release has not been acknowledged. Best-effort rollback keeps a
+         * transient short write from stranding the device in lockdown. If
+         * rollback also fails, the next boot rejects the corrupt record. */
+        if (hal_flash_write(offset, previous, sizeof(previous)) != 0 ||
+            hal_flash_sync() != 0 ||
+            hal_flash_read(offset, verify, sizeof(verify)) != 0 ||
+            memcmp(previous, verify, sizeof(verify)) != 0)
+            fprintf(stderr, "[DCLAW] ERROR: Lockdown release counter rollback failed; flash repair may be required.\n");
+        return -1;
+    }
+    return 0;
 }
 
-void dclaw_emergency_persist(void) {
+int dclaw_store_lockdown_release_seq(uint32_t seq) {
+    uint32_t last = dclaw_load_lockdown_release_seq();
+    if (last == UINT32_MAX || seq <= last || seq > LOCKDOWN_RELEASE_SEQ_MAX) return -1;
+    uint8_t record[LOCKDOWN_RELEASE_SEQ_RECORD_SIZE] = {0xdc, 0x52};
+    release_put_be32(record + 2, seq);
+    release_put_be32(record + 6, ~seq);
+    uint16_t crc = release_crc16(record, 10);
+    record[10] = (uint8_t)(crc >> 8);
+    record[11] = (uint8_t)crc;
+    if (release_write_record(LOCKDOWN_RELEASE_SEQ_B, record) != 0) return -1;
+    if (release_write_record(LOCKDOWN_RELEASE_SEQ_A, record) != 0) return -1;
+    return 0;
+}
+
+static bool emergency_blank(const uint8_t *bytes, size_t len) {
+    bool zero = true, erased = true;
+    for (size_t i = 0; i < len; i++) {
+        zero &= bytes[i] == 0;
+        erased &= bytes[i] == 0xff;
+    }
+    return zero || erased;
+}
+
+static uint64_t emergency_be64(const uint8_t *bytes) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; i++) value = (value << 8) | bytes[i];
+    return value;
+}
+
+static void emergency_put_be64(uint8_t *bytes, uint64_t value) {
+    for (int i = 7; i >= 0; i--) {
+        bytes[i] = (uint8_t)value;
+        value >>= 8;
+    }
+}
+
+static bool emergency_record_valid(const uint8_t *bytes) {
+    uint16_t expected = ((uint16_t)bytes[26] << 8) | bytes[27];
+    return bytes[0] == EMERGENCY_MAGIC_0 && bytes[1] == EMERGENCY_MIGRATED &&
+           bytes[2] <= 1 && bytes[3] <= 1 &&
+           release_be32(bytes + 8) != 0 &&
+           bytes[24] == 0 && bytes[25] == 0 &&
+           expected == release_crc16(bytes, 26);
+}
+
+static bool emergency_record_identity_matches(const uint8_t *bytes,
+                                              const dclaw_state_t *s) {
+    uint16_t tenant = ((uint16_t)bytes[20] << 8) | bytes[21];
+    uint16_t fleet = ((uint16_t)bytes[22] << 8) | bytes[23];
+    return tenant == s->device.tenant_id && fleet == s->device.fleet_id;
+}
+
+static int emergency_write_record(uint32_t offset, const uint8_t *record) {
+    uint8_t verify[EMERGENCY_RECORD_SIZE];
+    if (hal_flash_write(offset, record, sizeof(verify)) != 0 ||
+        hal_flash_sync() != 0 ||
+        hal_flash_read(offset, verify, sizeof(verify)) != 0 ||
+        memcmp(record, verify, sizeof(verify)) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Emergency state write/sync/readback failed at 0x%x.\n",
+                (unsigned)offset);
+        return -1;
+    }
+    return 0;
+}
+
+int dclaw_emergency_persist(void) {
     dclaw_state_t *s = dclaw_get_state();
-    uint8_t buf[EMERGENCY_FLASH_SIZE];
+    if (emergency_generation == UINT32_MAX) return -1;
+    uint8_t record[EMERGENCY_RECORD_SIZE] = {EMERGENCY_MAGIC_0, EMERGENCY_MIGRATED};
+    record[2] = s->emergency.block_all_active ? 1 : 0;
+    record[3] = s->emergency.last_was_lockdown ? 1 : 0;
+    release_put_be32(record + 4, s->emergency.last_seen_seq);
+    release_put_be32(record + 8, emergency_generation + 1);
+    emergency_put_be64(record + 12, s->emergency.lockdown_timestamp);
+    record[20] = (uint8_t)(s->device.tenant_id >> 8);
+    record[21] = (uint8_t)s->device.tenant_id;
+    record[22] = (uint8_t)(s->device.fleet_id >> 8);
+    record[23] = (uint8_t)s->device.fleet_id;
+    uint16_t crc = release_crc16(record, 26);
+    record[26] = (uint8_t)(crc >> 8);
+    record[27] = (uint8_t)crc;
+    bool stored_b = emergency_write_record(EMERGENCY_RECORD_B, record) == 0;
+    bool stored_a = emergency_write_record(EMERGENCY_RECORD_A, record) == 0;
+    if (!stored_a && !stored_b) return -1;
 
-    buf[0] = EMERGENCY_MAGIC_0;
-    buf[1] = EMERGENCY_MAGIC_1;
-    buf[2] = s->emergency.block_all_active ? 0x01 : 0x00;
-    buf[3] = s->emergency.last_was_lockdown ? 0x01 : 0x00;
-    buf[4] = (uint8_t)(s->emergency.last_seen_seq >> 24);
-    buf[5] = (uint8_t)(s->emergency.last_seen_seq >> 16);
-    buf[6] = (uint8_t)(s->emergency.last_seen_seq >> 8);
-    buf[7] = (uint8_t)(s->emergency.last_seen_seq);
-    buf[8]  = (uint8_t)(s->emergency.lockdown_timestamp >> 56);
-    buf[9]  = (uint8_t)(s->emergency.lockdown_timestamp >> 48);
-    buf[10] = (uint8_t)(s->emergency.lockdown_timestamp >> 40);
-    buf[11] = (uint8_t)(s->emergency.lockdown_timestamp >> 32);
-    buf[12] = (uint8_t)(s->emergency.lockdown_timestamp >> 24);
-    buf[13] = (uint8_t)(s->emergency.lockdown_timestamp >> 16);
-    buf[14] = (uint8_t)(s->emergency.lockdown_timestamp >> 8);
-    buf[15] = (uint8_t)(s->emergency.lockdown_timestamp);
-
-    if (hal_flash_write(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
-        fprintf(stderr, "[DCLAW] WARNING: Failed to persist emergency state to flash.\n");
+    /* Mark the legacy slot as migrated so a loss of both new copies cannot
+     * silently resurrect an old, unauthenticated single record. */
+    uint8_t marker[2] = {EMERGENCY_MAGIC_0, EMERGENCY_MIGRATED}, verify[2];
+    if (hal_flash_write(EMERGENCY_FLASH_OFFSET, marker, sizeof(marker)) != 0 ||
+        hal_flash_sync() != 0 ||
+        hal_flash_read(EMERGENCY_FLASH_OFFSET, verify, sizeof(verify)) != 0 ||
+        memcmp(marker, verify, sizeof(marker)) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Emergency migration marker not durable.\n");
+        return -1;
     }
-    hal_flash_sync();
+    if (!stored_a || !stored_b)
+        fprintf(stderr, "[DCLAW] WARNING: Emergency state redundancy degraded.\n");
+    emergency_generation++;
+    return 0;
 }
 
-void dclaw_emergency_load_from_flash(void) {
+int dclaw_emergency_load_from_flash(void) {
     dclaw_state_t *s = dclaw_get_state();
-    uint8_t buf[EMERGENCY_FLASH_SIZE];
-
-    if (hal_flash_read(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
-        return; /* Flash read failed — start fresh */
+    uint8_t a[EMERGENCY_RECORD_SIZE], b[EMERGENCY_RECORD_SIZE];
+    uint8_t legacy[EMERGENCY_FLASH_SIZE];
+    if (hal_flash_read(EMERGENCY_RECORD_A, a, sizeof(a)) != 0 ||
+        hal_flash_read(EMERGENCY_RECORD_B, b, sizeof(b)) != 0 ||
+        hal_flash_read(EMERGENCY_FLASH_OFFSET, legacy, sizeof(legacy)) != 0)
+        return -1;
+    bool valid_a = emergency_record_valid(a), valid_b = emergency_record_valid(b);
+    if ((valid_a && !emergency_record_identity_matches(a, s)) ||
+        (valid_b && !emergency_record_identity_matches(b, s))) {
+        fprintf(stderr, "[DCLAW] ERROR: Emergency history belongs to another tenant/fleet; trusted reprovisioning required.\n");
+        return -1;
     }
-
-    /* Verify magic marker — rejects uninitialized flash (all 0x00 or 0xFF) */
-    if (buf[0] != EMERGENCY_MAGIC_0 || buf[1] != EMERGENCY_MAGIC_1) {
-        return; /* No valid persisted emergency state */
+    if (valid_a || valid_b) {
+        const uint8_t *chosen = valid_a ? a : b;
+        if (valid_a && valid_b) {
+            uint32_t ga = release_be32(a + 8), gb = release_be32(b + 8);
+            if (ga == gb && memcmp(a, b, sizeof(a)) != 0) return -1;
+            if (gb > ga) chosen = b;
+        }
+        emergency_generation = release_be32(chosen + 8);
+        s->emergency.block_all_active = chosen[2] == 1;
+        s->emergency.last_was_lockdown = chosen[3] == 1;
+        s->emergency.last_seen_seq = release_be32(chosen + 4);
+        s->emergency.lockdown_timestamp = emergency_be64(chosen + 12);
+        s->emergency.initialized = s->emergency.last_seen_seq != 0;
+    } else {
+        emergency_generation = 0;
+        if (!emergency_blank(a, sizeof(a)) || !emergency_blank(b, sizeof(b))) {
+            fprintf(stderr, "[DCLAW] ERROR: Both checked emergency records are corrupt.\n");
+            return -1;
+        }
+        if (emergency_blank(legacy, sizeof(legacy))) return 0;
+        if (legacy[0] != EMERGENCY_MAGIC_0 || legacy[1] != EMERGENCY_MAGIC_1 ||
+            legacy[2] > 1 || legacy[3] > 1) {
+            fprintf(stderr, "[DCLAW] ERROR: Legacy emergency state is corrupt.\n");
+            return -1;
+        }
+        s->emergency.block_all_active = legacy[2] == 1;
+        s->emergency.last_was_lockdown = legacy[3] == 1;
+        s->emergency.last_seen_seq = release_be32(legacy + 4);
+        s->emergency.lockdown_timestamp = emergency_be64(legacy + 8);
+        s->emergency.initialized = true;
+        if (dclaw_emergency_persist() != 0) return -1;
     }
-
-    s->emergency.block_all_active = (buf[2] == 0x01);
-    s->emergency.last_was_lockdown = (buf[3] == 0x01);
-    s->emergency.last_seen_seq = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
-                                 ((uint32_t)buf[6] << 8) | (uint32_t)buf[7];
-    s->emergency.lockdown_timestamp = ((uint64_t)buf[8] << 56) | ((uint64_t)buf[9] << 48) |
-                                      ((uint64_t)buf[10] << 40) | ((uint64_t)buf[11] << 32) |
-                                      ((uint64_t)buf[12] << 24) | ((uint64_t)buf[13] << 16) |
-                                      ((uint64_t)buf[14] << 8) | (uint64_t)buf[15];
-    s->emergency.initialized = true;
-
     if (s->emergency.block_all_active) {
-        /* Reset lockdown_timestamp to the current monotonic tick so the
-         * 24-hour auto-clear countdown restarts from this boot. The
-         * persisted value is from the previous boot's monotonic clock
-         * which resets on reboot — using the stale value would cause
-         * the timeout check (now_ms < lockdown_timestamp) to always
-         * return true, preventing auto-clear forever. */
+        /* Monotonic timestamps from prior processes cannot be compared after
+         * reboot. Restart the 24-hour lockdown window from this process. */
         s->emergency.lockdown_timestamp = hal_tick_ms();
-        fprintf(stderr, "[DCLAW] Emergency lockdown state restored from flash "
-                "(24h timeout restarted from boot).\n");
+        fprintf(stderr, "[DCLAW] Emergency lockdown restored (24h timer restarted).\n");
     }
+    return 0;
 }

@@ -29,11 +29,11 @@ keywords:
 ┌─────────────────────────────────────────────────────────┐
 │  Edge Connector Engine (libdclaw_core.so)               │
 │                                                         │
-│  8-Stage Pipeline (~2–3μs on ARM):                      │
+│  8-Stage Pipeline:                                      │
 │  1. Input validation    5. Dest filtering + SSRF        │
 │  2. Rate limiting       6. Sequence correlation         │
 │  3. Content scanning    7. Verdict cache                │
-│  4. Hash deny-list      8. Cloud escalation (enriched)  │
+│  4. Hash deny-list      8. Fleet hash verdict request   │
 │                                                         │
 │  → ALLOW / BLOCK / WARN / PENDING                       │
 └─────────────────────────────────────────────────────────┘
@@ -43,7 +43,7 @@ keywords:
 
 ### Stage 1 — Input validation
 
-Rejects malformed requests at the IPC boundary. Validates JSON-RPC structure, required fields (`tool_name`, `capabilities`, `destination`, `session_id`), and value ranges before any policy logic runs.
+Rejects malformed requests at the IPC boundary. Validates JSON-RPC structure, required fields (`tool_name`, `capabilities`, `destination`, `session_id`), and value ranges before any policy logic runs. An unknown tool name also fails closed before the verdict cache or Fleet escalation, even if the caller declares a known capability. Add a reviewed C capability mapping before using a custom tool name; a Python adapter mapping alone cannot authorize the C daemon.
 
 ### Stage 2 — Rate limiting
 
@@ -70,19 +70,17 @@ When the `content` field is present in the evaluation request, the scanner runs 
 | `injection` | Prompt injection, jailbreak attempts, system prompt overrides |
 | `commands` | Shell commands, SQL statements, code execution patterns |
 
-Content findings can elevate a verdict from ALLOW to WARN or BLOCK depending on severity and policy configuration. The `direction` field controls which patterns apply — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage.
+Content findings can elevate a verdict from ALLOW to WARN or BLOCK based on the built-in severity mapping. The `direction` field controls which fixed patterns apply — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage. OTA policy cannot configure these patterns.
 
 ### Stage 4 — Hash deny-list
 
-Checks the tool call against a precompiled set of known-bad hashes from threat intelligence feeds. The hash table is compiled into the policy binary by the policy compiler, so lookup is O(1).
+The runtime has a tool-hash deny-list lookup, but the shipped policy compiler currently emits zero entries and exposes no YAML hash feed. This stage cannot block a new hash through the documented policy configuration. The gateway's verdict cache separately evaluates tool hashes received over MQTT.
 
 ### Stage 5 — Destination filtering + SSRF validation
 
-Two checks run in sequence:
+For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or bracketed globally scoped IPv6 literals can pass to the allowlist; this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the current policy compiler does not implement `destination_denylist`.
 
-**Allowlist/denylist** — wildcard domain matching against the policy's `destination_allowlist` and `destination_denylist`. A tool call to a denied or unlisted destination is blocked with reason `DEST_DENY`.
-
-**SSRF validation** — when enabled, blocks requests targeting:
+**Built-in SSRF validation** blocks requests targeting:
 - Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)
 - Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
 - Link-local addresses (`fe80::/10`)
@@ -97,24 +95,13 @@ An LRU cache with configurable TTL stores recent verdicts. Repeated identical re
 
 ### Stage 8 — Cloud escalation
 
-When local policy cannot decide (e.g., the tool is not in any deny/allow list and no content pattern matches), the Edge Connector escalates to a cloud DefenseClaw instance via MQTT 3.1.1. The escalation payload includes:
+When local policy cannot decide, the Edge Connector sends a verdict request to the Fleet gateway via MQTT 3.1.1. The wire payload includes:
 
 - Tool name, capability, destination
 - Truncated content snippet (up to `DCLAW_ESCALATION_PAYLOAD_MAX`)
-- Local evaluation results from stages 1–7
-- Device identity and session context
+- Session risk/capability metadata and request nonces
 
-The cloud instance can run additional analysis that is too expensive for the device. The escalation mode (`speculative` vs `sync_block`) determines whether the tool call proceeds optimistically or waits for the cloud verdict.
-
-## Trust boundary inference
-
-The Edge Connector automatically determines trust level from three signals:
-
-1. **Capability flags** — `SENSOR_READ` is inherently lower risk than `EXEC_SHELL`
-2. **Destination** — an allowlisted domain is more trusted than an unknown one
-3. **Content risk** — content scanner findings elevate the risk score
-
-These signals combine to select the escalation mode even when the policy does not explicitly configure one for a given capability.
+The current gateway evaluates the request by tool hash through its verdict cache; it does not pass the content snippet or destination into a separate model pipeline. Unknown hashes default to BLOCK. The `findings` wire field is currently a zero placeholder. In `sync_block` mode the device blocks pending a gateway verdict and stays blocked on timeout. In `speculative` mode it can allow immediately, even if the MQTT publish fails; a later gateway BLOCK cannot undo that action. Select the mode to match the consequence of the tool call.
 
 ## Audit trail
 
@@ -139,7 +126,7 @@ The evaluation request uses JSON-RPC over Unix socket or stdio:
   "params": {
     "tool_name": "call_api",
     "capabilities": 8,
-    "destination": "api.example.com",
+    "destination": "1.1.1.1",
     "session_id": 1,
     "direction": 0,
     "content": "Authorization: Bearer sk-proj-abc123..."
@@ -172,5 +159,5 @@ The fleet management and verdict cache run as Go services alongside the main Def
 Policy updates are distributed over MQTT with:
 - **HMAC-SHA256 signatures** — every update is cryptographically signed
 - **Anti-rollback** — monotonic version counter prevents downgrade attacks
-- **Canary deployment** — new policies are tested on a subset of devices before fleet-wide rollout
+- **Local canary window** — each receiving device monitors its block rate for ten minutes and can restore its previous policy partition after a sustained spike
 - **Sequence replay protection** — duplicate or out-of-order updates are rejected

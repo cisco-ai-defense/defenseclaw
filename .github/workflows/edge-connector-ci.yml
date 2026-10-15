@@ -6,11 +6,25 @@ on:
     paths:
       - 'edge-connector/**'
       - 'internal/fleet/**'
+      - 'internal/gateway/**'
+      - 'internal/config/**'
+      - 'internal/enterpriseunix/**'
+      - '.goreleaser.yaml'
+      - 'scripts/build-release-assets.sh'
+      - 'scripts/install.sh'
+      - 'scripts/install.ps1'
       - '.github/workflows/edge-connector-ci.yml'
   pull_request:
     paths:
       - 'edge-connector/**'
       - 'internal/fleet/**'
+      - 'internal/gateway/**'
+      - 'internal/config/**'
+      - 'internal/enterpriseunix/**'
+      - '.goreleaser.yaml'
+      - 'scripts/build-release-assets.sh'
+      - 'scripts/install.sh'
+      - 'scripts/install.ps1'
       - '.github/workflows/edge-connector-ci.yml'
 
 permissions:
@@ -41,6 +55,50 @@ jobs:
         run: ctest --test-dir build --output-on-failure
         working-directory: edge-connector
 
+  build-c-production:
+    name: Build C Engine (production TLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: Mbed-TLS/mbedtls
+          ref: e185d7fd85499c8ce5ca2a54f5cf8fe7dbe3f8df # mbedtls-3.6.5
+          path: .deps/mbedtls
+          persist-credentials: false
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - name: Build mbedTLS 3.6.5
+        run: |
+          cmake -S .deps/mbedtls -B .deps/mbedtls-build \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/mbedtls" \
+            -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=ON
+          cmake --build .deps/mbedtls-build --parallel 2
+          cmake --install .deps/mbedtls-build
+      - name: Configure production engine
+        run: |
+          sudo install -d -m 0755 /var/lib/defenseclaw
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /var/lib/defenseclaw/ctest
+          cmake -S edge-connector -B edge-connector/build-production \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/mbedtls" \
+            -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF \
+            -DDCLAW_ALLOW_HMAC_OTA=ON \
+            -DDCLAW_TEST_FLASH_DIR=/var/lib/defenseclaw/ctest
+      - name: Build and test production engine
+        env:
+          LD_LIBRARY_PATH: ${{ runner.temp }}/mbedtls/lib
+        run: |
+          cmake --build edge-connector/build-production --parallel 2
+          ctest --test-dir edge-connector/build-production --output-on-failure
+          ldd edge-connector/build-production/edge-connector | tee "$RUNNER_TEMP/production-ldd.txt"
+          grep -q 'libmbedtls' "$RUNNER_TEMP/production-ldd.txt"
+          ! grep -q 'not found' "$RUNNER_TEMP/production-ldd.txt"
+
   go-fleet-tests:
     name: Go Fleet Tests
     runs-on: ubuntu-latest
@@ -54,3 +112,5 @@ jobs:
           go-version-file: go.mod
       - name: Run fleet tests with race detector
         run: go test ./internal/fleet/... -count=1 -race -timeout 15m
+      - name: Run gateway and configuration tests
+        run: go test ./internal/gateway/... ./internal/config/... ./internal/enterpriseunix/... -count=1 -timeout 15m

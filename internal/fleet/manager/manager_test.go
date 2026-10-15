@@ -17,8 +17,125 @@
 package manager
 
 import (
+	"sync"
 	"testing"
+	"time"
 )
+
+type blockedHeartbeatStore struct {
+	mu            sync.Mutex
+	devices       map[uint64]Device
+	blockSave     bool
+	saveEntered   chan struct{}
+	releaseSave   chan struct{}
+	deleteEntered chan struct{}
+	once          sync.Once
+}
+
+func (s *blockedHeartbeatStore) SaveDevice(dev *Device) error {
+	s.mu.Lock()
+	block := s.blockSave
+	s.mu.Unlock()
+	if block {
+		s.once.Do(func() { close(s.saveEntered) })
+		<-s.releaseSave
+	}
+	s.mu.Lock()
+	s.devices[dev.DeviceID] = *dev
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockedHeartbeatStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dev, ok := s.devices[ComposeID(tenantID, fleetID, deviceID)]
+	if !ok {
+		return nil, nil
+	}
+	return &dev, nil
+}
+
+func (s *blockedHeartbeatStore) ListDevices() ([]*Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices := make([]*Device, 0, len(s.devices))
+	for _, dev := range s.devices {
+		copy := dev
+		devices = append(devices, &copy)
+	}
+	return devices, nil
+}
+
+func (s *blockedHeartbeatStore) DeleteDevice(tenantID, fleetID uint16, deviceID uint32) error {
+	return s.DeleteDeviceKeyAndTombstone(tenantID, fleetID, deviceID)
+}
+
+func (s *blockedHeartbeatStore) DeleteDeviceKeyAndTombstone(tenantID, fleetID uint16, deviceID uint32) error {
+	close(s.deleteEntered)
+	s.mu.Lock()
+	delete(s.devices, ComposeID(tenantID, fleetID, deviceID))
+	s.mu.Unlock()
+	return nil
+}
+
+func TestDecommissionWaitsForInFlightHeartbeatPersistence(t *testing.T) {
+	store := &blockedHeartbeatStore{
+		devices:       make(map[uint64]Device),
+		saveEntered:   make(chan struct{}),
+		releaseSave:   make(chan struct{}),
+		deleteEntered: make(chan struct{}),
+	}
+	fm := New(nil)
+	fm.SetStore(store)
+	if _, err := fm.RegisterDevice(1, 1, 42, "sbc", "1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.blockSave = true
+	store.mu.Unlock()
+	heartbeatDone := make(chan bool, 1)
+	go func() {
+		heartbeatDone <- fm.ProcessHeartbeat(1, 1, 42, &Heartbeat{
+			DeviceID: 42, BootCounter: 1, UptimeSec: 100,
+		})
+	}()
+	select {
+	case <-store.saveEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat never reached the backing store")
+	}
+	decommissionDone := make(chan error, 1)
+	go func() {
+		removed, err := fm.DecommissionDeviceAtomically(1, 1, 42)
+		if err == nil && !removed {
+			err = ErrDeviceExists // sentinel for the unexpected false result
+		}
+		decommissionDone <- err
+	}()
+	deletedDuringHeartbeat := false
+	select {
+	case <-store.deleteEntered:
+		deletedDuringHeartbeat = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(store.releaseSave)
+	if !<-heartbeatDone {
+		t.Fatal("heartbeat was unexpectedly rejected")
+	}
+	if err := <-decommissionDone; err != nil {
+		t.Fatal(err)
+	}
+	if deletedDuringHeartbeat {
+		t.Fatal("decommission deleted persistent state during in-flight heartbeat write")
+	}
+	if dev, err := store.LoadDevice(1, 1, 42); err != nil || dev != nil {
+		t.Fatalf("heartbeat resurrected decommissioned device: %v, %v", dev, err)
+	}
+	if _, exists := fm.GetDevice(ComposeID(1, 1, 42)); exists {
+		t.Fatal("decommissioned device remains in memory")
+	}
+}
 
 func TestComposeID(t *testing.T) {
 	id := ComposeID(1, 5, 42)
@@ -70,7 +187,7 @@ func TestRegisterDeviceDuplicate(t *testing.T) {
 }
 
 func TestParseHeartbeat(t *testing.T) {
-	data := make([]byte, 32)
+	data := make([]byte, 36)
 	// device_id = 42
 	data[3] = 42
 	// policy_version = 5
@@ -79,6 +196,7 @@ func TestParseHeartbeat(t *testing.T) {
 	data[13] = 3
 	// flags = 0 (online)
 	data[30] = 0
+	data[35] = 7 // persistent boot counter
 
 	hb, err := ParseHeartbeat(data)
 	if err != nil {
@@ -92,6 +210,9 @@ func TestParseHeartbeat(t *testing.T) {
 	}
 	if hb.DeniedCount != 3 {
 		t.Fatalf("denied_count = %d, want 3", hb.DeniedCount)
+	}
+	if hb.BootCounter != 7 {
+		t.Fatalf("boot_counter = %d, want 7", hb.BootCounter)
 	}
 }
 

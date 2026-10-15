@@ -457,7 +457,6 @@ type FleetConfig struct {
 	AllowKeyOverHTTP   bool   `mapstructure:"allow_key_over_http"  yaml:"allow_key_over_http,omitempty"`
 	TrustProxyHeaders  bool   `mapstructure:"trust_proxy_headers"  yaml:"trust_proxy_headers,omitempty"`
 	VerdictCacheSize   int    `mapstructure:"verdict_cache_size"   yaml:"verdict_cache_size,omitempty"`
-	RequireClientID    bool   `mapstructure:"require_client_id"    yaml:"require_client_id,omitempty"`
 	PolicyCompilerPath string `mapstructure:"policy_compiler_path" yaml:"policy_compiler_path,omitempty"`
 }
 
@@ -484,8 +483,11 @@ func (f FleetConfig) ResolvedTenantTokens() string {
 	return f.resolveEnvKey(f.TenantTokensEnv, "DCLAW_FLEET_TENANT_TOKENS")
 }
 
-func (f FleetConfig) ResolvedOTAKey() string {
-	return f.resolveEnvKey(f.OTAKeyEnv, "DCLAW_OTA_KEY")
+func (f FleetConfig) ResolvedOTAHMACKey() (string, error) {
+	if f.OTAKeyEnv == "DCLAW_OTA_KEY" {
+		return "", fmt.Errorf("fleet.ota_key_env names DCLAW_OTA_KEY, which is an Ed25519 public key; use DCLAW_OTA_HMAC_KEY for HMAC policy signing")
+	}
+	return f.resolveEnvKey(f.OTAKeyEnv, "DCLAW_OTA_HMAC_KEY"), nil
 }
 
 func (f FleetConfig) ResolvedEmergencyKey() string {
@@ -516,40 +518,6 @@ func (f FleetConfig) EffectiveVerdictCacheSize() int {
 		return f.VerdictCacheSize
 	}
 	return 4096
-}
-
-func (f FleetConfig) EffectivePolicyCompilerPath() string {
-	if f.PolicyCompilerPath != "" {
-		return f.PolicyCompilerPath
-	}
-	return "edge-connector/tools/policy_compiler.py"
-}
-
-// PrivacyConfig groups privacy/redaction toggles. Today it carries
-// only the redaction kill-switch; future fields (per-sink redaction
-// scope, custom redactor profiles) land here so operators have a
-// single section to audit.
-//
-// Scope: this is a deliberate, persistent operator decision.
-// Defaults match the existing redacting-by-default behavior so a
-// fresh install or a config without a `privacy:` block keeps the
-// historical contract documented in OBSERVABILITY.md.
-type PrivacyConfig struct {
-	// DisableRedaction, when true, instructs the sidecar to bypass
-	// every ForSink* redaction helper at startup — including
-	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Persisted in config so the choice survives
-	// restarts and TUI invocations without per-shell env-var
-	// ceremony.
-	//
-	// WARNING: this violates the unconditional-redaction contract
-	// documented in OBSERVABILITY.md. Only enable on single-tenant
-	// installs where every downstream sink already lives inside
-	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and config loaders emit
-	// a once-per-process warning when they observe the setting so the
-	// runtime state stays auditable without spamming reload loops.
-	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
@@ -3900,7 +3868,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("fleet.api_token_env", "DCLAW_FLEET_API_TOKEN")
 	viper.SetDefault("fleet.mqtt_user_env", "DCLAW_MQTT_USER")
 	viper.SetDefault("fleet.mqtt_pass_env", "DCLAW_MQTT_PASS")
-	viper.SetDefault("fleet.ota_key_env", "DCLAW_OTA_KEY")
+	viper.SetDefault("fleet.ota_key_env", "DCLAW_OTA_HMAC_KEY")
 	viper.SetDefault("fleet.emergency_key_env", "DCLAW_EMERGENCY_KEY")
 	viper.SetDefault("fleet.device_key_env", "DCLAW_DEVICE_KEY")
 	viper.SetDefault("fleet.verdict_cache_size", 4096)

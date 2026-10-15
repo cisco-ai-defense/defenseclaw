@@ -59,6 +59,11 @@ for target in "${TARGETS[@]}"; do
     goarch="${target#*/}"
     stage="${WORK}/stage-${goos}-${goarch}"
     mkdir -p "${stage}"
+    # Match GoReleaser: installed gateways need the same checked-in policy
+    # compiler for Fleet pushes, including offline installer lifecycle tests.
+    mkdir -p "${stage}/edge-connector/tools"
+    cp "${WORK}/src/edge-connector/tools/policy_compiler.py" \
+        "${stage}/edge-connector/tools/policy_compiler.py"
     exe=""
     [[ "${goos}" == windows ]] && exe=".exe"
     ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILT}"
@@ -76,7 +81,7 @@ for target in "${TARGETS[@]}"; do
         GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags} -H=windowsgui" \
             -o "${stage}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook
         (cd "${stage}" && rm -f "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.zip" \
-            && zip -q "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.zip" ./*)
+            && zip -qr "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.zip" ./*)
     else
         COPYFILE_DISABLE=1 tar -czf "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.tar.gz" -C "${stage}" .
     fi

@@ -257,6 +257,8 @@ classes:
       ActionFleetDeviceReregistered: "fleet.device.reregistered"
       ActionFleetTokenRotated: "fleet.token.rotated"
       ActionFleetDeviceKeyRotated: "fleet.device.key_rotated"
+      ActionFleetDeviceCredentialProvisionAuthorized: "fleet.device.credential_provision_authorized"
+      ActionFleetDeviceDecommissionAuthorized: "fleet.device.decommission_authorized"
 
   emitted_metrics:
     items:

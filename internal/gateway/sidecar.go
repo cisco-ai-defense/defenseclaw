@@ -7948,41 +7948,40 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 				})
 			}
 		})
-		// Persist fleet device state to SQLite so data survives gateway
-		// restarts.  Falls back to in-memory (no persistence) if the DB
-		// cannot be opened.
+		// Persist Fleet state to SQLite. Device keys, decommission tombstones,
+		// and boot replay baselines are security state: Fleet cannot start if
+		// they cannot be loaded durably.
 		fleetDataDir := filepath.Join(s.currentConfig().DataDir, "fleet")
 		if err := os.MkdirAll(fleetDataDir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] fleet data dir: %v\n", err)
+			return fmt.Errorf("fleet data dir: %w", err)
 		}
-		var deviceStore *fleet.SQLiteStore // nil when DB cannot be opened
-		if ds, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db")); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] fleet SQLite store: %v (using in-memory)\n", err)
-		} else {
-			deviceStore = ds
-			fleetMgr.SetStore(deviceStore)
-			if n, err := fleetMgr.LoadFromStore(); err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] fleet load from store: %v\n", err)
-			} else if n > 0 {
-				fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
-				// Initialize Prometheus metrics from restored device state so
-				// gauges reflect reality immediately after a gateway restart
-				// instead of showing 0 until the next heartbeat cycle.
-				devices := fleetMgr.ListDevices()
-				for _, d := range devices {
-					switch d.Status {
-					case fleetmanager.StatusOnline:
-						fleet.GlobalMetrics.DevicesOnline.Add(1)
-					case fleetmanager.StatusOffline:
-						fleet.GlobalMetrics.DevicesOffline.Add(1)
-					case fleetmanager.StatusDegraded:
-						fleet.GlobalMetrics.DevicesDegraded.Add(1)
-					case fleetmanager.StatusLockdown:
-						fleet.GlobalMetrics.DevicesLockdown.Add(1)
-					}
+		deviceStore, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db"))
+		if err != nil {
+			return fmt.Errorf("fleet SQLite device store: %w", err)
+		}
+		defer deviceStore.Close()
+		fleetMgr.SetStore(deviceStore)
+		if n, err := fleetMgr.LoadFromStore(); err != nil {
+			return fmt.Errorf("fleet load from device store: %w", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
+			// Initialize Prometheus metrics from restored device state so
+			// gauges reflect reality immediately after a gateway restart
+			// instead of showing 0 until the next heartbeat cycle.
+			devices := fleetMgr.ListDevices()
+			for _, d := range devices {
+				switch d.Status {
+				case fleetmanager.StatusOnline:
+					fleet.GlobalMetrics.DevicesOnline.Add(1)
+				case fleetmanager.StatusOffline:
+					fleet.GlobalMetrics.DevicesOffline.Add(1)
+				case fleetmanager.StatusDegraded:
+					fleet.GlobalMetrics.DevicesDegraded.Add(1)
+				case fleetmanager.StatusLockdown:
+					fleet.GlobalMetrics.DevicesLockdown.Add(1)
 				}
-				fmt.Fprintf(os.Stderr, "[sidecar] fleet metrics initialized from %d restored devices\n", len(devices))
 			}
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet metrics initialized from %d restored devices\n", len(devices))
 		}
 		fleetCache := fleetverdict.NewCache(s.currentConfig().Fleet.EffectiveVerdictCacheSize(), func(tenantID, fleetID uint16, h [32]byte) (fleetverdict.Action, uint8) {
 			// Default-deny: unknown tool hashes must not be auto-allowed
@@ -7993,17 +7992,27 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 
 		// Wire the policy service so policy endpoints (push, emergency, versions)
 		// are functional instead of returning 501.
-		policySigner, signerErr := fleetpolicy.NewHMACSignerFromKeyHex(s.currentConfig().Fleet.ResolvedOTAKey())
+		otaKeyHex, keyErr := s.currentConfig().Fleet.ResolvedOTAHMACKey()
+		var policySigner fleetpolicy.Signer
+		var signerErr error
+		if keyErr != nil {
+			signerErr = keyErr
+		} else {
+			resolvedSigner, err := fleetpolicy.NewHMACSignerFromKeyHex(otaKeyHex)
+			signerErr = err
+			if err == nil {
+				policySigner = resolvedSigner
+			}
+		}
 		if signerErr != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] WARNING: policy signer unavailable: %v — policy push/emergency will fail\n", signerErr)
 		}
-		var policyStore fleetpolicy.PolicyStore
-		if sqlPS, err := fleetpolicy.NewSQLitePolicyStore(filepath.Join(fleetDataDir, "policies.db")); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] policy SQLite store: %v (using in-memory)\n", err)
-			policyStore = fleetpolicy.NewMemoryPolicyStore()
-		} else {
-			policyStore = sqlPS
+		sqlPS, err := fleetpolicy.NewSQLitePolicyStore(filepath.Join(fleetDataDir, "policies.db"))
+		if err != nil {
+			return fmt.Errorf("fleet SQLite policy store: %w", err)
 		}
+		defer sqlPS.Close()
+		var policyStore fleetpolicy.PolicyStore = sqlPS
 		var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
 		var fleetBridge *fleetmqtt.Bridge    // nil until a real broker is configured
 
@@ -8011,7 +8020,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// subscribes to heartbeat and verdict-request topics from edge devices
 		// and routes them to the fleet manager / verdict cache.
 		if brokerURL := s.currentConfig().Fleet.EffectiveMQTTBrokerURL(); brokerURL != "" {
-			clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
+			clientID, err := newFleetMQTTClientID()
+			if err != nil {
+				return fmt.Errorf("generate Fleet MQTT client ID: %w", err)
+			}
 			tcpClient := fleetmqtt.NewPahoClient(brokerURL, clientID, s.currentConfig().Fleet.MQTTRequireTLS)
 			tcpClient.SetCredentials(
 				s.currentConfig().Fleet.ResolvedMQTTUser(),
@@ -8023,13 +8035,14 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			fleetBridge = bridge
 			// Wire block metric so BLOCK verdicts increment the Prometheus counter
 			bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
+			bridge.SetOnAllow(func() { fleet.GlobalMetrics.AllowsTotal.Add(1) })
 			// Wire per-device key resolution from the SQLite store so the
 			// bridge verifies/computes verdict HMACs with the correct key
 			// instead of falling back to the fleet-wide shared key.
 			if deviceStore != nil {
 				bridge.SetDeviceKeyStore(deviceStore)
 				if ids, err := deviceStore.LoadDecommissioned(); err != nil {
-					fmt.Fprintf(os.Stderr, "[sidecar] fleet load decommissioned: %v\n", err)
+					return fmt.Errorf("fleet load decommission tombstones: %w", err)
 				} else if len(ids) > 0 {
 					for _, id := range ids {
 						bridge.MarkDecommissioned(id)
@@ -8040,35 +8053,37 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			fleetCfg := s.currentConfig().Fleet
 			if fleetCfg.AutoRegister || strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
 				bridge.AllowAutoRegistration = true
-				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled")
+				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration requested; bridge permits it only in explicit unmanaged development mode")
 			}
-			go func() {
-				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
-					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
-				}
-			}()
-			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", brokerURL)
 		} else {
 			fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
 		}
 
 		policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, &fleetpolicy.Config{
-			CompilerPath: s.currentConfig().Fleet.EffectivePolicyCompilerPath(),
+			CompilerPath:    s.currentConfig().Fleet.PolicyCompilerPath,
+			EmergencyKeyHex: s.currentConfig().Fleet.ResolvedEmergencyKey(),
 		})
+		if fleetBridge != nil {
+			// Configure catch-up before subscriptions can receive a registration:
+			// clean MQTT sessions lose OTA messages while a device is offline.
+			fleetBridge.SetReplayForDevice(policySvc.ReplayLatestForDevice)
+			go func() {
+				if err := fleetBridge.Start(ctx); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+				}
+			}()
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", s.currentConfig().Fleet.EffectiveMQTTBrokerURL())
+		}
 
 		fleetSettings := fleet.FleetSettings{
 			APIToken:          s.currentConfig().Fleet.ResolvedAPIToken(),
 			TenantTokens:      s.currentConfig().Fleet.ResolvedTenantTokens(),
 			AllowKeyOverHTTP:  s.currentConfig().Fleet.AllowKeyOverHTTP,
 			TrustProxyHeaders: s.currentConfig().Fleet.TrustProxyHeaders,
-			RequireClientID:   s.currentConfig().Fleet.RequireClientID,
 		}
 		fleetOpts := []fleet.APIOption{
 			fleet.WithPolicyService(policySvc),
 			fleet.WithFleetSettings(fleetSettings),
-		}
-		if fleetMQTTClient != nil {
-			fleetOpts = append(fleetOpts, fleet.WithMQTTClient(fleetMQTTClient))
 		}
 		if fleetBridge != nil {
 			fleetOpts = append(fleetOpts, fleet.WithMQTTBridge(fleetBridge))
@@ -8106,6 +8121,17 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		return rt.run(ctx, api.Run)
 	}
 	return api.Run(ctx)
+}
+
+// MQTT 3.1.1 guarantees support for 23-character client IDs. Random bytes
+// keep separate gateway containers (often both PID 1) from evicting each
+// other at the broker; clean sessions do not require a persistent identity.
+func newFleetMQTTClientID() (string, error) {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("dclaw-%x", id[:8]), nil
 }
 
 // subscribeToSessions subscribes the connection to the session events of the

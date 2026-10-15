@@ -343,7 +343,7 @@ int main(int argc, char *argv[]) {
 #if DCLAW_MQTT_ENABLED
                 if (msg_len >= 16 && memcmp(base, "release_lockdown", 16) == 0) {
                     extern uint32_t dclaw_load_lockdown_release_seq(void);
-                    extern void dclaw_store_lockdown_release_seq(uint32_t);
+                    extern int dclaw_store_lockdown_release_seq(uint32_t);
                     static uint32_t lockdown_release_seq = 0;
                     static bool release_seq_loaded = false;
                     if (!release_seq_loaded) {
@@ -354,9 +354,6 @@ int main(int argc, char *argv[]) {
                     if (msg_len == 16) {
 #if DCLAW_DEV_MODE
                         authenticated = true;
-#else
-                        const char *deny = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"HMAC required for lockdown release in production\"},\"id\":null}\n";
-                        if (write(client_fds[i], deny, strlen(deny)) < 0) { /* best-effort */ }
 #endif
                     } else if (msg_len > 17 && base[16] == ':') {
                         char *colon2 = memchr(base + 17, ':', msg_len - 17);
@@ -385,10 +382,13 @@ int main(int argc, char *argv[]) {
                                             uint8_t expected[32];
                                             dclaw_hmac_sha256(ekey, key_len,
                                                 (const uint8_t *)base, prefix_len, expected);
-                                            authenticated = ct_compare(provided, expected, 32);
-                                            if (authenticated) {
-                                                lockdown_release_seq = req_seq;
-                                                dclaw_store_lockdown_release_seq(req_seq);
+                                            if (ct_compare(provided, expected, 32)) {
+                                                if (dclaw_store_lockdown_release_seq(req_seq) == 0) {
+                                                    lockdown_release_seq = req_seq;
+                                                    authenticated = true;
+                                                } else {
+                                                    fprintf(stderr, "[DCLAW] ERROR: IPC lockdown release denied because the replay counter could not be persisted.\n");
+                                                }
                                             } else {
                                                 fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
                                             }
@@ -399,23 +399,6 @@ int main(int argc, char *argv[]) {
                                             req_seq, lockdown_release_seq);
                                 }
                             }
-                        } else if (msg_len == 81) {
-                            uint8_t provided[32];
-                            bool hex_ok = (dclaw_hex_decode(base + 17, provided, 32) == 0);
-                            if (hex_ok) {
-                                extern const uint8_t *dclaw_emergency_get_key(size_t *out_len);
-                                size_t key_len = 0;
-                                const uint8_t *ekey = dclaw_emergency_get_key(&key_len);
-                                if (ekey && key_len == 32) {
-                                    uint8_t expected[32];
-                                    dclaw_hmac_sha256(ekey, key_len,
-                                        (const uint8_t *)"release_lockdown", 16, expected);
-                                    authenticated = ct_compare(provided, expected, 32);
-                                    if (!authenticated) {
-                                        fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
-                                    }
-                                }
-                            }
                         }
                     }
                     if (authenticated) {
@@ -424,6 +407,9 @@ int main(int argc, char *argv[]) {
                         const char *no_resp = "{\"jsonrpc\":\"2.0\",\"result\":{\"released\":false,\"reason\":\"not in lockdown\"},\"id\":null}\n";
                         const char *resp = (rc == 0) ? ok_resp : no_resp;
                         if (write(client_fds[i], resp, strlen(resp)) < 0) { /* best-effort */ }
+                    } else {
+                        const char *deny = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Invalid or replayed lockdown release token\"},\"id\":null}\n";
+                        if (write(client_fds[i], deny, strlen(deny)) < 0) { /* best-effort */ }
                     }
                 } else
 #endif

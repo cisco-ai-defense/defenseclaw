@@ -2944,6 +2944,7 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 		{"--acp-binary", opts.acpBinary},
 		{"--hook-binary", opts.hookBinary},
 		{"--sensor-helper-binary", opts.sensorHelperBinary},
+		{"--policy-compiler", opts.policyCompiler},
 	} {
 		if strings.TrimSpace(source.value) == "" {
 			missing = append(missing, source.flag)
@@ -2961,6 +2962,7 @@ func windowsEnterpriseKeepsInstalledConfig(opts *windowsEnterpriseLifecycleOptio
 func clearWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) {
 	opts.gatewayBinary, opts.acpBinary, opts.hookBinary = "", "", ""
 	opts.sensorHelperBinary, opts.cliBinary = "", ""
+	opts.policyCompiler = ""
 	opts.configPath, opts.manifestPath, opts.mode, opts.connector = "", "", "", ""
 }
 
@@ -2977,6 +2979,7 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 		{&opts.acpBinary, "defenseclaw-acp.exe"},
 		{&opts.hookBinary, "defenseclaw-hook.exe"},
 		{&opts.sensorHelperBinary, "defenseclaw-sensor-helper.exe"},
+		{&opts.policyCompiler, "policy_compiler.py"},
 		{&opts.cliBinary, "defenseclaw.exe"},
 	} {
 		if strings.TrimSpace(*source.value) != "" {
@@ -3022,6 +3025,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		{"acp", opts.acpBinary},
 		{"hook", opts.hookBinary},
 		{"sensor_helper", opts.sensorHelperBinary},
+		{"compiler", opts.policyCompiler},
 		{"cli", opts.cliBinary},
 		{"installer", script},
 		{"module", filepath.Join(filepath.Dir(script), "DefenseClawEnterprise.psm1")},
@@ -3031,6 +3035,9 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		}
 		recorded := strings.ToLower(strings.TrimSpace(metadata.Hashes[source.key]))
 		if recorded == "" {
+			if source.key == "compiler" {
+				return source.key, nil // adopt compiler on upgrades from older deployments
+			}
 			continue
 		}
 		digest, err := windowsEnterpriseFileSHA256(source.path)

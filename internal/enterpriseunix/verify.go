@@ -406,6 +406,11 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	if packageDrift != "" {
 		add("%s", packageDrift)
 	}
+	if _, tracked := record.Files[compilerInstallPath(env.Layout)]; tracked && exists(env.P(compilerInstallPath(env.Layout))) {
+		if err := env.checkInstalledCompiler(compilerInstallPath(env.Layout)); err != nil {
+			add("%v", err)
+		}
+	}
 	skip := ""
 	if hookDamage != nil {
 		skip = env.installedHookPath() // named above

@@ -3316,14 +3316,13 @@ class FleetConfig:
     mqtt_user_env: str = "DCLAW_MQTT_USER"
     mqtt_pass_env: str = "DCLAW_MQTT_PASS"
     mqtt_require_tls: bool = False
-    ota_key_env: str = "DCLAW_OTA_KEY"
+    ota_key_env: str = "DCLAW_OTA_HMAC_KEY"
     emergency_key_env: str = "DCLAW_EMERGENCY_KEY"
     device_key_env: str = "DCLAW_DEVICE_KEY"
     auto_register: bool = False
     allow_key_over_http: bool = False
     trust_proxy_headers: bool = False
     verdict_cache_size: int = 4096
-    require_client_id: bool = False
     policy_compiler_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -3339,7 +3338,7 @@ class FleetConfig:
             if v:
                 d[fld] = v
         for fld in ("mqtt_require_tls", "auto_register", "allow_key_over_http",
-                     "trust_proxy_headers", "require_client_id"):
+                     "trust_proxy_headers"):
             v = getattr(self, fld)
             if v:
                 d[fld] = v
@@ -7402,7 +7401,6 @@ def _merge_fleet(raw: dict[str, Any] | None) -> FleetConfig:
         allow_key_over_http=_coerce_bool(raw.get("allow_key_over_http", False)),
         trust_proxy_headers=_coerce_bool(raw.get("trust_proxy_headers", False)),
         verdict_cache_size=_as_int(raw.get("verdict_cache_size", 4096), 4096),
-        require_client_id=_coerce_bool(raw.get("require_client_id", False)),
         policy_compiler_path=str(raw.get("policy_compiler_path", "") or ""),
     )
 

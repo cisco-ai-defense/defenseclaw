@@ -1,136 +1,44 @@
 # DefenseClaw Edge Connector
 
-Framework-agnostic, sub-microsecond AI agent security enforcement for any device.
+The Edge Connector is a C enforcement engine for Linux edge devices. It evaluates agent tool calls locally and can request hash-based verdicts from a DefenseClaw Fleet gateway over MQTT 3.1.1. The gateway blocks unknown tool hashes by default; it does not run a remote model over the request content. See the [installation guide](INSTALL.md) for production TLS, device keys, broker ACLs, and the Linux service unit.
 
-## Overview
+The C engine recognizes a fixed set of tool names and capabilities. An unknown name fails closed before the verdict cache or Fleet escalation, even when the caller declares a capability. Custom tool names need a reviewed C capability mapping; a Python adapter mapping alone cannot authorize the daemon.
 
-DefenseClaw Edge Connector is a purpose-built C-language enforcement engine (~68KB binary) that
-provides local policy enforcement with AI-aware content inspection, delegating complex analysis
-(YARA, LLM judge, OPA) to a cloud DefenseClaw instance via MQTT 3.1.1. It works with **any AI
-agent framework** — LangChain, LangGraph, FastAPI-based agents, PicoClaw, or your own custom
-framework — through a generic Python adapter, HTTP middleware, or direct FFI/socket calls.
+## Features and limits
 
-Unlike purely rule-based policy engines, the Edge Connector inspects the actual content of tool
-call arguments and LLM responses to detect secrets, PII, credential leakage, data exfiltration,
-prompt injection, and dangerous commands before they leave the device.
+- Local policy checks, rate limiting, sequence correlation, verdict caching, and a tamper-evident audit ring.
+- Built-in content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. The policy YAML cannot change or disable these patterns in this release.
+- An all-profile SSRF guard for network destinations. Network calls need an allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literal; hostnames, private addresses, and numeric aliases are blocked until an enforced egress resolver/proxy exists.
+- MQTT verdict requests to the Fleet gateway. Synchronous escalation blocks on timeout; speculative escalation may allow immediately even if publication fails. A later block cannot undo that action.
+- Policy and emergency OTA with anti-rollback and a local canary window. The current C receiver supports only explicit HMAC policy signing: build with `-DDCLAW_ALLOW_HMAC_OTA=ON` and provision the matching nonzero `DCLAW_OTA_HMAC_KEY`. Ed25519 compiler output is not accepted by this receiver. Emergency commands use a separate `DCLAW_EMERGENCY_KEY`.
+- Signed 72-byte heartbeat and registration frames with a persistent boot counter and last-applied emergency sequence. Upgrade the gateway and devices together; the gateway rejects older 64- and 68-byte keyed frames. Missed emergency commands replay in signed predecessor order from the durable Fleet history.
 
-**Quick start:** Use the generic Python adapter (`tools/generic_hook.py`) — three lines to add
-security enforcement to any agent.
+Measure binary size, memory use, and evaluation latency on your target and build profile. TLS libraries and compiler flags materially affect those values.
 
-**Architecture:** See `docs-site/content/docs/edge-connector/architecture.mdx`  
-**Documentation:** See `docs-site/content/docs/edge-connector/`
-
-## Features
-
-- **8-stage evaluation pipeline** with sub-5us latency on ARM Cortex-A
-- **Content scanning** — detects secrets, PII, credentials, data exfiltration patterns, injection attempts, and dangerous commands in tool arguments and LLM outputs
-- **SSRF validation** — blocks requests to private/internal IP ranges and metadata endpoints before they reach the network
-- **Trust boundary inference** — automatically determines trust level from capability flags, destination, and content risk signals
-- **Enriched cloud escalation** — forwards actual content snippets (truncated to policy limits) to the cloud DefenseClaw instance for deeper analysis
-- **Response interception** — scans LLM responses for leaked secrets, PII, and credential material before they reach the agent
-- **Sequence correlation** — FSM-based detection of dangerous multi-step capability patterns
-- **Rate limiting** — 3 independent token buckets (tool calls, network, actuations)
-- **HMAC-chained audit trail** — tamper-evident ring buffer with write coalescing
-- **Verdict caching** — LRU cache with TTL and clock-trust validation
-- **Destination filtering** — allowlist/denylist with wildcard domain matching
-- **OTA policy updates** — Ed25519-signed, anti-rollback, canary deployment
-
-## Build
+## Build and test
 
 ```bash
 cd edge-connector
 mkdir build && cd build
-cmake .. -DDCLAW_PROFILE=STANDARD
-make
-```
-
-Profiles: `MINIMAL` (~22KB), `STANDARD` (~68KB), `EDGE` (~131KB) — sizes are for stripped Release builds with `-Os -flto`; Debug builds are larger.
-
-## Test
-
-```bash
-cd build
+cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON
+make -j$(nproc)
 ctest --output-on-failure
 ```
 
-11 test suites, 100+ assertions covering:
-- Input validation (IPC boundary)
-- Policy table (hash deny, destination allow/deny, severity)
-- Capability correlator (sequence detection)
-- Content scanner (secrets, PII, credentials, exfil, injection, commands)
-- Audit ring (HMAC chain, write coalescing, BLOCK bypass)
-- Rate limiter (3 token buckets)
-- Verdict cache (TTL, LRU, clock-trust)
-- Full evaluate pipeline (end-to-end, 8 stages)
-- Verdict protocol (HMAC verification, dedup, clock sync)
-- OTA + Emergency (Ed25519, anti-rollback, canary, sequence replay)
-- Acceptance tests (AC-01 through AC-17)
+Production MQTT requires mbedTLS 3.x development libraries and a broker CA. `MINIMAL` has no MQTT; `STANDARD` and `EDGE` include MQTT. Test counts depend on the selected profile. `./tests/bench_latency` measures a local build when that benchmark target is available.
 
-## Benchmark
+## Policy compiler
 
-```bash
-cd build
-./tests/bench_latency
-```
-
-## Policy Compiler
+From the `edge-connector/` directory, with Python 3 and PyYAML installed:
 
 ```bash
 python3 tools/policy_compiler.py \
   --input policies/strict.yaml \
-  --profile standard \
-  --version 1 \
+  --profile standard --version 1 \
   --output-header generated/policy_tables.h \
   --output-binary dist/policy.bin
 ```
 
-The compiler generates DFA tables from capability sequence definitions and content
-pattern rules in the policy YAML, producing both a C header for static linking and
-a binary blob for OTA distribution. DFA table generation converts the sequence
-patterns and regex-based content rules into compact deterministic finite automata
-that can be evaluated in constant time per input symbol.
+The compiler accepts the supported `iot_extensions` fields `capability_sequences`, `destination_allowlist`, and `canary`. Its content DFA is built from fixed compiler constants, not YAML content patterns. It rejects unsupported IoT settings such as `rate_limits`, `escalation_mode`, `content_inspection`, `ssrf_protection`, `destination_denylist`, `trust_boundaries`, `cloud_escalation`, and `broker_fallback`. The compiled rate limits are 60 tool calls, 30 network requests, and 10 actuations per minute; OTA cannot change them. Production uses synchronous escalation by default. Without a signing key, `policy.bin` has a development stub signature and production C devices reject it. For production OTA, use the Fleet policy-push API with matching HMAC secrets.
 
-## Directory Structure
-
-```
-edge-connector/
-├── src/
-│   ├── dclaw_core.c              # Init, evaluate pipeline, state
-│   ├── decision/                 # Policy table, correlator, verdict cache
-│   │   └── content_scanner.c     # Content inspection (secrets, PII, exfil, injection)
-│   ├── enforce/                  # IPC hook, JSON parser, rate limiter
-│   ├── persist/                  # Audit ring, flash, config store
-│   ├── comms/                    # MQTT, CBOR, verdict protocol, OTA
-│   └── platform/                 # HAL (Linux implementation)
-├── include/                      # Public headers (defenseclaw.h, platform.h)
-│   └── content_scanner.h         # Content scanner API and pattern category flags
-├── generated/                    # Compiled policy tables (including DFA tables)
-├── policies/                     # YAML policy files
-├── tools/                        # Adapters and policy compiler
-│   ├── generic_hook.py           # Framework-agnostic Python adapter
-│   ├── langchain_hook.py         # LangChain / LangGraph adapter
-│   ├── http_middleware.py        # FastAPI / Flask HTTP middleware
-│   ├── picoclaw_hook.py          # PicoClaw robot agent hook
-│   └── policy_compiler.py        # Policy YAML → C header / binary
-├── tests/                        # Unit tests, acceptance, benchmark, fuzz
-├── dashboards/                   # Grafana dashboard JSON
-└── CMakeLists.txt                # Build system
-```
-
-## Size
-
-| Profile | Binary | RAM |
-|---------|--------|-----|
-| `MINIMAL` | ~22KB | ~8KB |
-| `STANDARD` | ~68KB | ~14-19KB |
-| `EDGE` | ~131KB | ~64KB |
-
-> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
-
-## Cloud Components
-
-Fleet Manager and Verdict Cache implemented in Go at `internal/fleet/`:
-- `internal/fleet/manager/` — Device registry, heartbeat, anomaly detection
-- `internal/fleet/verdict/` — LRU verdict cache with TTL
-- `internal/fleet/api.go` — REST API (`/api/v1/fleet/`)
-- `internal/fleet/metrics.go` — Prometheus metrics
+The [Edge documentation](../docs-site/content/docs/edge-connector/index.mdx) describes policies, integration adapters, the Fleet API, and observability. The Fleet dashboard source is [fleet-dashboard.json](dashboards/fleet-dashboard.json); the provisioned copy ships in the local observability bundle.

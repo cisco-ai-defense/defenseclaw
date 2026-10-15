@@ -28,6 +28,7 @@ BUNDLE = ROOT / "bundles/local_observability_stack"
 PACKAGED = ROOT / "cli/defenseclaw/_data/local_observability_stack"
 METRIC_MANIFEST = "schemas/telemetry/generated/compatibility/local-observability-v1.json"
 METRIC_EMITTER = ROOT / "internal/telemetry/metrics.go"
+FLEET_METRIC_EMITTER = ROOT / "internal/fleet/metrics.go"
 TELEMETRY_CATALOG = "schemas/telemetry/generated/catalog.json"
 COLLECTOR = BUNDLE / "otel-collector/config.yaml"
 COMPOSE = BUNDLE / "docker-compose.yml"
@@ -62,6 +63,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-connector-detail",
     "defenseclaw-connectors",
     "defenseclaw-findings",
+    "defenseclaw-fleet",
     "defenseclaw-hitl",
     "defenseclaw-identity",
     "defenseclaw-overview",
@@ -341,6 +343,11 @@ def prometheus_inputs(recording_names: set[str]) -> set[str]:
             "defenseclaw_agent_span_duration_milliseconds_count",
         },
     )
+    # Fleet exposes its own Prometheus endpoint instead of sending OTLP
+    # metrics through the v8 collector. Derive the vocabulary from the
+    # endpoint producer so dashboard queries cannot silently reference a
+    # deleted Fleet metric.
+    result.update(re.findall(r"defenseclaw_fleet_[a-z0-9_]+", FLEET_METRIC_EMITTER.read_text()))
     return result
 
 

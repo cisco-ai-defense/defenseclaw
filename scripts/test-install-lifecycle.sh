@@ -188,11 +188,20 @@ installer_copies() {
 }
 
 assert_versions() {
-    local want="$1" cli gateway
+    local want="$1" cli gateway archive entry arch
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
     gateway="$(version_of "$("${HOME}/.local/bin/defenseclaw-gateway" --version 2>/dev/null)")"
     [[ "${cli}" == "${want}" && "${gateway}" == "${want}" ]] \
         || fail "expected ${want}, got cli=${cli:-none} gateway=${gateway:-none}"
+    if [[ "${want}" == "${TARGET}" ]]; then
+        [[ -f "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet policy compiler was not installed"
+        case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
+        archive="${ASSETS}/defenseclaw-${TARGET}-$(uname -s | tr '[:upper:]' '[:lower:]')-${arch}.tar.gz"
+        entry="$(tar -tzf "${archive}" | awk '/(^|\/)edge-connector\/tools\/policy_compiler.py$/ {print; exit}')"
+        [[ -n "${entry}" ]] || fail "release archive has no Fleet policy compiler"
+        tar -xOzf "${archive}" "${entry}" | cmp - "${DC_HOME}/installer/policy_compiler.py" \
+            || fail "installed Fleet policy compiler differs from the release archive"
+    fi
 }
 
 assert_healthy() {

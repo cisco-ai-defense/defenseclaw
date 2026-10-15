@@ -4,6 +4,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +63,64 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 	// accidentally target it.
 	if strings.Contains(assembler, "./cmd/defenseclaw-setup") {
 		t.Fatal("assembler must not target the per-user Setup command")
+	}
+}
+
+func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T) {
+	contains := func(files []string, name string) bool {
+		for _, file := range files {
+			if file == name {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(standalonePayloadFiles, "policy_compiler.py") {
+		t.Fatal("standalone Setup payload omits the Fleet policy compiler")
+	}
+	if contains(requiredPayloadFiles, "policy_compiler.py") {
+		t.Fatal("Secure Client payload unexpectedly includes standalone Fleet compiler")
+	}
+	for _, path := range []string{
+		"packaging/windows/standalone/build-setup.sh",
+		"cmd/windows-avc-assembler/main.go",
+	} {
+		if !strings.Contains(readEnterpriseSetupContractFile(t, path), "policy_compiler.py") {
+			t.Errorf("%s does not carry the standalone compiler", path)
+		}
+	}
+	compiler, err := os.ReadFile(filepath.Join(enterpriseSetupRepositoryRoot(t), "edge-connector", "tools", "policy_compiler.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
+	wantPin := fmt.Sprintf("$script:DefenseClawPolicyCompilerSHA256 = '%x'", sha256.Sum256(compiler))
+	if !strings.Contains(module, wantPin) {
+		t.Fatal("signed Windows enterprise module does not pin the shipped Fleet compiler source")
+	}
+}
+
+func TestSecureClientFleetSourcePreflightRunsBeforeLifecycleMutation(t *testing.T) {
+	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
+	entry := strings.Index(module, "function Invoke-DefenseClawEnterpriseLifecycle {")
+	if entry < 0 {
+		t.Fatal("enterprise lifecycle entry point is missing")
+	}
+	lifecycle := module[entry:]
+	for _, required := range []string{
+		"Assert-DefenseClawSourceDescriptorCurrent -Source $configSource",
+		"Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource",
+		"'preflight-secure-client-fleet'",
+	} {
+		if !strings.Contains(module, required) {
+			t.Fatalf("Secure Client Fleet source preflight omits %q", required)
+		}
+	}
+	current := strings.Index(lifecycle, "Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources")
+	preflight := strings.Index(lifecycle, "Assert-DefenseClawSecureClientFleetSourcePreflight `")
+	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
+	if current < 0 || preflight < current || mutation < preflight {
+		t.Fatalf("Secure Client Fleet source preflight must follow authenticated sources and precede managed-root mutation (source %d, preflight %d, mutation %d)", current, preflight, mutation)
 	}
 }
 

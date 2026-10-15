@@ -85,6 +85,8 @@ Default topics: `bubbaloop/telemetry/system`, `bubbaloop/telemetry/camera`, `bub
 
 Add to your `~/.defenseclaw/policy.yaml`:
 
+The C engine accepts only reviewed tool names in `src/decision/policy_table.c`; this adapter's Python capability map cannot authorize an unknown C tool name. Review and extend the C table for the tools used here before deployment. Network-capability calls to the local Bubbaloop host are blocked by the current SSRF guard; use an approved public numeric destination through a controlled egress path when such calls are needed. OTA cannot change the built-in rate limits.
+
 ```yaml
 iot_extensions:
   capability_sequences:
@@ -93,15 +95,8 @@ iot_extensions:
     - sequence: [sensor_read, net_fetch, actuate]
       action: block
 
-  rate_limits:
-    tool_calls_per_minute: 120
-    actuations_per_minute: 30
-    network_requests_per_minute: 60
-
   destination_allowlist:
-    - "api.anthropic.com"
-    - "mqtt.your-fleet.com"
-    - "*.kornia.ai"
+    - "1.1.1.1" # illustrative public IP; replace with an approved endpoint
 ```
 
 ## Architecture

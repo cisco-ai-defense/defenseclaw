@@ -811,6 +811,39 @@ var (
 	enterpriseSHA256Pattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+const secureClientFleetUnsupported = "fleet.enabled is unsupported for the Secure Client enterprise profile: its managed installers do not ship the Fleet policy compiler and Python runtime; disable Fleet or deploy the standalone profile on a separate host"
+
+// CheckSecureClientFleetSource is the read-only, pre-mutation installer gate.
+// It uses the same bounded, duplicate-key rejecting YAML parser as the
+// gateway, but needs no installed rule packs or runtime state. The gateway's
+// normal profile resolution repeats the check against the decoded config.
+func CheckSecureClientFleetSource(source string, raw []byte) error {
+	document, err := ParseV8YAML(source, raw)
+	if err != nil {
+		return err
+	}
+	rawFleet, exists := document.Plain["fleet"]
+	if !exists {
+		return nil
+	}
+	fleet, ok := rawFleet.(map[string]any)
+	if !ok {
+		return fmt.Errorf("config: fleet must be a mapping")
+	}
+	rawEnabled, exists := fleet["enabled"]
+	if !exists {
+		return nil
+	}
+	enabled, ok := rawEnabled.(bool)
+	if !ok {
+		return fmt.Errorf("config: fleet.enabled must be a boolean")
+	}
+	if enabled {
+		return fmt.Errorf("config: %s", secureClientFleetUnsupported)
+	}
+	return nil
+}
+
 // ValidEnterpriseCredentialName reports whether name is a safe protected
 // credential name (it becomes a file name under the secrets directory).
 func ValidEnterpriseCredentialName(name string) bool {
@@ -844,6 +877,9 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	}
 	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
+	if cfg.SecureClientIntegration() && cfg.Fleet.Enabled {
+		return fmt.Errorf("config: %s", secureClientFleetUnsupported)
+	}
 	if cfg.SecureClientIntegration() {
 		// Secure Client keeps exact-range hook contract gating: an agent
 		// version newer than every tested range stays unknown there.

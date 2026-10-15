@@ -730,6 +730,8 @@ ok "Assets match checksums.txt"
 
 tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${ARCHIVE}"
 [[ -f "${STAGING}/bin/defenseclaw-gateway" ]] || die "${ARCHIVE} has no defenseclaw-gateway"
+[[ -f "${STAGING}/bin/edge-connector/tools/policy_compiler.py" ]] \
+    || die "${ARCHIVE} has no Fleet policy compiler"
 # The sensor helper serves only the Linux sandbox kernel feed.
 [[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"
 for binary in ${MANAGED_BINARIES}; do
@@ -1434,6 +1436,13 @@ swap_in() {
     local binary link target
     info "Installing DefenseClaw ${VERSION}"
     make_venv "${VENV}" || return 1
+    # Snapshot/rollback moves installer/ with the version. Keep the compiler
+    # there so the gateway executes the compiler that shipped in its archive.
+    mkdir -p "${INSTALLER_DIR}" || return 1
+    cp -p "${STAGING}/bin/edge-connector/tools/policy_compiler.py" \
+        "${INSTALLER_DIR}/.policy_compiler.py.new" \
+        && mv -f "${INSTALLER_DIR}/.policy_compiler.py.new" \
+            "${INSTALLER_DIR}/policy_compiler.py" || return 1
     mkdir -p "${BIN_DIR}" || return 1
     private_bin_dir
     for binary in ${MANAGED_BINARIES}; do

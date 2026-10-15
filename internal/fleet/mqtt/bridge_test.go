@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,49 @@ type mockClient struct {
 	connectErr   error
 	subscribeErr error
 	publishErr   error
+}
+
+func newTestBridge(t *testing.T, client Client, fleet *manager.FleetManager, cache *verdict.Cache) *Bridge {
+	t.Helper()
+	// These legacy-wire fixtures deliberately exercise the explicit local
+	// development path; normal gateway mode fails closed on missing keys.
+	t.Setenv("DCLAW_DEV_MODE", "ON")
+	t.Setenv("DCLAW_PRODUCTION", "")
+	return NewBridge(client, fleet, cache)
+}
+
+func TestBridgeDefaultModeRejectsUnsignedAndZeroKey(t *testing.T) {
+	t.Setenv("DCLAW_DEV_MODE", "")
+	t.Setenv("DCLAW_PRODUCTION", "")
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DCLAW_DEVICE_KEY", strings.Repeat("00", 32))
+	if !isProductionMode() {
+		t.Fatal("unset production/dev env selected insecure development mode")
+	}
+	if key := newEnvDeviceKeyProvider().KeyForDevice(42); key != nil {
+		t.Fatal("all-zero device key accepted in default mode")
+	}
+	if key := newStoreBackedKeyProvider(nil).KeyForDevice(42); key != nil {
+		t.Fatal("all-zero store fallback key accepted in default mode")
+	}
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	bridge := NewBridge(newMockClient(), fm, verdict.NewCache(10, nil))
+	bridge.SetHeartbeatRateLimit(0)
+	bridge.handleHeartbeat(Message{Topic: "defenseclaw/1/2/42/heartbeat", Payload: makeHeartbeatPayload(42, 1, 0, 0)})
+	if count, _, errs := bridge.Stats(); count != 0 || errs != 1 {
+		t.Fatalf("unsigned default-mode heartbeat accepted: processed=%d errors=%d", count, errs)
+	}
+	unsignedCurrent := makeHeartbeatPayload(42, 1, 0, 0)
+	bridge.handleHeartbeat(Message{Topic: "defenseclaw/1/2/42/heartbeat", Payload: unsignedCurrent})
+	if count, _, errs := bridge.Stats(); count != 0 || errs != 2 {
+		t.Fatalf("unsigned current-wire heartbeat accepted: processed=%d errors=%d", count, errs)
+	}
+	t.Setenv("DCLAW_DEV_MODE", "ON")
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+	if !isProductionMode() {
+		t.Fatal("managed host honored raw development mode override")
+	}
 }
 
 func newMockClient() *mockClient {
@@ -151,7 +195,7 @@ func splitTopic(t string) []string {
 // --- Helper functions ---
 
 func makeHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16, flags uint8) []byte {
-	data := make([]byte, 32)
+	data := make([]byte, 40)
 	binary.BigEndian.PutUint32(data[0:4], deviceID)
 	binary.BigEndian.PutUint32(data[4:8], 3600) // uptime
 	binary.BigEndian.PutUint16(data[8:10], policyVer)
@@ -164,11 +208,13 @@ func makeHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16,
 	data[21] = 3                                    // session_count
 	binary.BigEndian.PutUint64(data[22:30], 0xDEAD) // audit hmac
 	data[30] = flags
-	data[31] = 0 // capabilities
+	data[31] = 0                               // capabilities
+	binary.BigEndian.PutUint32(data[32:36], 1) // durable boot counter
+	// [36:40] is the last durable emergency sequence, initially zero.
 	return data
 }
 
-// makeSignedHeartbeatPayload creates a 64-byte signed heartbeat: 32-byte payload + 32-byte HMAC-SHA256.
+// makeSignedHeartbeatPayload creates a 72-byte signed heartbeat: 40-byte payload + 32-byte HMAC-SHA256.
 // The HMAC is computed over topic + payload to bind the signature to the message type.
 func makeSignedHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16, flags uint8, key []byte, topic string) []byte {
 	payload := makeHeartbeatPayload(deviceID, policyVer, deniedCount, flags)
@@ -312,25 +358,36 @@ func TestDecodeHeartbeatBadSize(t *testing.T) {
 		t.Fatal("expected error for 16-byte heartbeat")
 	}
 
-	// 48 bytes: neither 32 nor 64 — must be rejected
+	// 48 bytes: not a supported wire size — must be rejected
 	_, err = DecodeHeartbeat(make([]byte, 48))
 	if err == nil {
 		t.Fatal("expected error for 48-byte heartbeat")
 	}
 
-	// 32 bytes: legacy unsigned — must be accepted
-	_, err = DecodeHeartbeat(make([]byte, 32))
-	if err != nil {
-		t.Fatalf("unexpected error for 32-byte heartbeat: %v", err)
+	// The current C development daemon publishes 40 bytes when unkeyed.
+	unsigned := make([]byte, 40)
+	unsigned[35] = 1
+	hw, err := DecodeHeartbeat(unsigned)
+	if err != nil || hw.Signed || hw.BootCounter != 1 {
+		t.Fatalf("40-byte unsigned heartbeat decoded as %+v, %v", hw, err)
 	}
 
-	// 64 bytes: signed — must be accepted
-	hw, err := DecodeHeartbeat(make([]byte, 64))
+	// The old signed frame has no durable boot counter and must be rejected.
+	if _, err := DecodeHeartbeat(make([]byte, 64)); err == nil {
+		t.Fatal("old 64-byte signed heartbeat accepted")
+	}
+	if _, err := DecodeHeartbeat(make([]byte, 68)); err == nil {
+		t.Fatal("old 68-byte signed heartbeat accepted")
+	}
+	// 72 bytes: signed — must be accepted
+	signed := make([]byte, 72)
+	signed[35] = 1
+	hw, err = DecodeHeartbeat(signed)
 	if err != nil {
-		t.Fatalf("unexpected error for 64-byte heartbeat: %v", err)
+		t.Fatalf("unexpected error for 72-byte heartbeat: %v", err)
 	}
 	if !hw.Signed {
-		t.Error("64-byte heartbeat should have Signed=true")
+		t.Error("72-byte heartbeat should have Signed=true")
 	}
 	if len(hw.HMACTag) != 32 {
 		t.Errorf("HMACTag length = %d, want 32", len(hw.HMACTag))
@@ -415,7 +472,7 @@ func TestBridgeHeartbeatRouting(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -469,7 +526,7 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 		return verdict.ActionBlock, 3 // Block with high severity
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -523,6 +580,35 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	<-errCh
 }
 
+func TestBridgeAllowMetricRequiresValidDeviceHMAC(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	t.Setenv("DCLAW_DEVICE_KEY", fmt.Sprintf("%x", key))
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(10, 20, 100, "mcu", "2.0.0", 1, 0x0F)
+	cache := verdict.NewCache(100, func(_, _ uint16, _ [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+	bridge := newTestBridge(t, mc, fm, cache)
+	allows := 0
+	bridge.SetOnAllow(func() { allows++ })
+	topic := "defenseclaw/10/20/100/verdict/req"
+	request := makeVerdictRequestPayload(42, "wget")
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(topic))
+	mac.Write(request)
+	signed := append(append([]byte(nil), request...), mac.Sum(nil)...)
+	bridge.handleVerdictRequest(Message{Topic: topic, Payload: signed})
+	if allows != 1 {
+		t.Fatalf("authenticated ALLOW count = %d, want 1", allows)
+	}
+	signed[len(signed)-1] ^= 0xff
+	bridge.handleVerdictRequest(Message{Topic: topic, Payload: signed})
+	if allows != 1 {
+		t.Fatalf("forged request changed ALLOW count to %d", allows)
+	}
+}
+
 func TestBridgeHandlesDecodeError(t *testing.T) {
 	mc := newMockClient()
 	fm := manager.New(nil)
@@ -530,7 +616,7 @@ func TestBridgeHandlesDecodeError(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -563,7 +649,7 @@ func TestBridgeConnectError(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -580,7 +666,7 @@ func TestBridgeStop(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = cancel // Stop will call its own cancel
@@ -620,7 +706,7 @@ func TestBridgeMultipleHeartbeats(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetHeartbeatRateLimit(0) // disable for rapid test
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -635,6 +721,7 @@ func TestBridgeMultipleHeartbeats(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		deviceID := uint32(1 + i%2)
 		payload := makeHeartbeatPayload(deviceID, uint16(5+i), uint16(i), 0)
+		binary.BigEndian.PutUint32(payload[4:8], uint32(3600+i/2))
 		mc.simulateMessage(
 			fmt.Sprintf("defenseclaw/1/1/%d/heartbeat", deviceID),
 			payload, 0,
@@ -666,7 +753,7 @@ func TestBridgeSignedHeartbeatAccepted(t *testing.T) {
 
 	deviceKey := []byte("test-device-key-32-bytes-long!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -708,7 +795,7 @@ func TestBridgeSignedHeartbeatBadHMAC(t *testing.T) {
 	realKey := []byte("test-device-key-32-bytes-long!!!")
 	wrongKey := []byte("wrong-key-that-attacker-uses!!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&fixedKeyProvider{key: realKey})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -751,7 +838,7 @@ func TestBridgeUnsignedHeartbeatNoKeyChecker(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&fixedKeyProvider{key: []byte("any-key-doesnt-matter-for-legacy")})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -794,7 +881,7 @@ func TestBridgeUnsignedHeartbeatRejectedWhenKeyed(t *testing.T) {
 	fullDeviceID := manager.ComposeID(1, 2, 42)
 	deviceKey := []byte("per-device-key-32-bytes-long!!!!") // 32 bytes
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{fullDeviceID: deviceKey},
 		fallbackKey: make([]byte, 32),
@@ -839,7 +926,7 @@ func TestBridgeUnsignedHeartbeatAcceptedWhenNoDeviceKey(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	// perDeviceKeyProvider with NO key for device 42 — empty keys map
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{},
@@ -884,7 +971,7 @@ func TestBridgeSignedRegistrationAccepted(t *testing.T) {
 
 	deviceKey := []byte("test-device-key-32-bytes-long!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
 
@@ -917,6 +1004,41 @@ func TestBridgeSignedRegistrationAccepted(t *testing.T) {
 	<-errCh
 }
 
+func TestBridgeSignedRegistrationReplayDoesNotRollbackInventory(t *testing.T) {
+	fm := manager.New(nil)
+	if _, err := fm.RegisterDevice(1, 2, 42, "operator-profile", "50", 10, 0xff); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("test-device-key-32-bytes-long!!!")
+	bridge := newTestBridge(t, newMockClient(), fm, verdict.NewCache(10, nil))
+	bridge.SetKeyProvider(&fixedKeyProvider{key: key})
+	topic := "defenseclaw/1/2/42/register"
+	stale := makeSignedHeartbeatPayload(42, 7, 0, 0, key, topic)
+	bridge.handleRegistration(Message{Topic: topic, Payload: stale})
+	dev, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if !ok || dev.FWVersion != "50" || dev.PolicyVersion != 10 || dev.Capabilities != 0xff || dev.HWProfile != "operator-profile" {
+		t.Fatalf("stale signed registration changed inventory: %+v", dev)
+	}
+}
+
+func TestBridgeRejectsOldSignedHeartbeatWithoutBootCounter(t *testing.T) {
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	key := []byte("test-device-key-32-bytes-long!!!")
+	bridge := newTestBridge(t, newMockClient(), fm, verdict.NewCache(10, nil))
+	bridge.SetKeyProvider(&fixedKeyProvider{key: key})
+	topic := "defenseclaw/1/2/42/heartbeat"
+	legacy := makeHeartbeatPayload(42, 7, 0, 0)[:36]
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(topic))
+	mac.Write(legacy)
+	legacy = append(legacy, mac.Sum(nil)...)
+	bridge.handleHeartbeat(Message{Topic: topic, Payload: legacy})
+	if count, _, errs := bridge.Stats(); count != 0 || errs != 1 {
+		t.Fatalf("old signed heartbeat accepted: processed=%d errors=%d", count, errs)
+	}
+}
+
 func TestBridgeSignedRegistrationBadHMAC(t *testing.T) {
 	// A signed registration with an invalid HMAC should be rejected.
 	mc := newMockClient()
@@ -928,7 +1050,7 @@ func TestBridgeSignedRegistrationBadHMAC(t *testing.T) {
 	realKey := []byte("test-device-key-32-bytes-long!!!")
 	wrongKey := []byte("wrong-key-that-attacker-uses!!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&fixedKeyProvider{key: realKey})
 
@@ -977,7 +1099,7 @@ func TestBridgeUnsignedRegistrationRejectedWhenKeyed(t *testing.T) {
 	fullDeviceID := manager.ComposeID(1, 2, 42)
 	deviceKey := []byte("per-device-key-32-bytes-long!!!!") // 32 bytes
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{fullDeviceID: deviceKey},
@@ -1025,7 +1147,7 @@ func TestBridgeUnsignedRegistrationAcceptedWhenNoDeviceKey(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{},
@@ -1072,7 +1194,7 @@ func TestBridgeHeartbeatRejectedOnKeyStoreError(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{},
 		fallbackKey: make([]byte, 32),
@@ -1113,7 +1235,7 @@ func TestBridgeRegistrationRejectedOnKeyStoreError(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&perDeviceKeyProvider{
 		keys:        map[uint64][]byte{},
@@ -1162,7 +1284,7 @@ func TestBridgeHeartbeatHMACReplayedOnRegisterTopicRejected(t *testing.T) {
 
 	deviceKey := []byte("test-device-key-32-bytes-long!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.AllowAutoRegistration = true
 	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
 
@@ -1212,7 +1334,7 @@ func TestBridgeRegisterHMACReplayedOnHeartbeatTopicRejected(t *testing.T) {
 
 	deviceKey := []byte("test-device-key-32-bytes-long!!!")
 
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1261,7 +1383,7 @@ func TestBridgeSignedHeartbeatRejectedWhenKeyStoreErrorsOnLookup(t *testing.T) {
 
 	// errorKeyProvider returns nil from KeyForDevice, simulating the new
 	// behavior where store errors do not fall back to the fleet key.
-	bridge := NewBridge(mc, fm, cache)
+	bridge := newTestBridge(t, mc, fm, cache)
 	bridge.SetKeyProvider(&errorKeyProvider{})
 
 	ctx, cancel := context.WithCancel(context.Background())

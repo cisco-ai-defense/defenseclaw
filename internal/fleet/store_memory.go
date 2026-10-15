@@ -49,6 +49,23 @@ func (s *MemoryStore) SaveDevice(dev *manager.Device) error {
 	return nil
 }
 
+// SaveDeviceRegistration updates the in-memory device and key under one lock.
+// MemoryStore has no tombstones; callers that need to clear one must use a
+// persistent store that supports the complete operation.
+func (s *MemoryStore) SaveDeviceRegistration(dev *manager.Device, key []byte, allowRecommission bool) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	_ = allowRecommission // This store has no tombstone table.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devCopy := *dev
+	keyCopy := append([]byte(nil), key...)
+	s.devices[dev.DeviceID] = &devCopy
+	s.deviceKeys[dev.DeviceID] = keyCopy
+	return nil
+}
+
 func (s *MemoryStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*manager.Device, error) {
 	fullID := manager.ComposeID(tenantID, fleetID, deviceID)
 

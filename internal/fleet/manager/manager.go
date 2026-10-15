@@ -59,7 +59,10 @@ type Device struct {
 	EscalatedTotal uint64       `json:"escalated_total"`
 	FlashWrites    uint32       `json:"flash_writes"`
 
-	LastUptime    uint32 `json:"last_uptime"`
+	LastUptime uint32 `json:"last_uptime"`
+	// BootCounter is a signed, device-persisted monotonic counter sent in the
+	// heartbeat. Unlike uptime, it distinguishes a reboot from old-packet replay.
+	BootCounter   uint32 `json:"boot_counter"`
 	PrevDenied    uint32 `json:"prev_denied"`
 	PrevAllowed   uint32 `json:"prev_allowed"`
 	PrevWarned    uint32 `json:"prev_warned"`
@@ -76,6 +79,7 @@ type Device struct {
 type Heartbeat struct {
 	DeviceID       uint32
 	UptimeSec      uint32
+	BootCounter    uint32
 	PolicyVersion  uint16
 	FWVersion      uint16
 	DeniedCount    uint32
@@ -122,6 +126,14 @@ type DeviceStore interface {
 	LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*Device, error)
 	ListDevices() ([]*Device, error)
 	DeleteDevice(tenantID, fleetID uint16, deviceID uint32) error
+}
+
+// DeviceRegistrationStore persists a device, its new signing key, and any
+// tombstone check/removal in one transaction. A failure must leave all three as
+// they were before the call. Registration uses this only when every Fleet
+// component shares this same backing store.
+type DeviceRegistrationStore interface {
+	SaveDeviceRegistration(dev *Device, key []byte, allowRecommission bool) error
 }
 
 // FleetManager is the core fleet management service.
@@ -241,28 +253,108 @@ const ErrDeviceExists = fleetError("device already registered")
 // Returns ErrDeviceExists if the device is already registered.
 func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32,
 	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8) (*Device, error) {
+	return fm.registerDevice(tenantID, fleetID, deviceID, hwProfile, fwVersion, policyVersion, capabilities, true)
+}
+
+// RegisterDeviceIfAbsent handles device-originated registration without
+// allowing a replay or concurrent API registration to rewrite existing state.
+func (fm *FleetManager) RegisterDeviceIfAbsent(tenantID, fleetID uint16, deviceID uint32,
+	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8) (*Device, error) {
+	return fm.registerDevice(tenantID, fleetID, deviceID, hwProfile, fwVersion, policyVersion, capabilities, false)
+}
+
+// RegisterDeviceWithCredential commits metadata, signing key, and tombstone
+// removal together before changing the in-memory device. It reports whether
+// this was a re-registration. The per-device lock also serializes the update
+// with heartbeat mutations of the same device.
+func (fm *FleetManager) RegisterDeviceWithCredential(tenantID, fleetID uint16, deviceID uint32,
+	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8,
+	key []byte, allowRecommission bool) (*Device, bool, error) {
+	store, ok := fm.store.(DeviceRegistrationStore)
+	if !ok {
+		return nil, false, fmt.Errorf("atomic device registration store is unavailable")
+	}
+	fullID := ComposeID(tenantID, fleetID, deviceID)
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	now := time.Now()
+	if existing, found := fm.devices[fullID]; found {
+		updated := *existing
+		updated.FWVersion = fwVersion
+		if policyVersion > updated.PolicyVersion {
+			updated.PolicyVersion = policyVersion
+		}
+		updated.HWProfile = hwProfile
+		updated.Capabilities = capabilities
+		if err := store.SaveDeviceRegistration(&updated, key, allowRecommission); err != nil {
+			return nil, true, fmt.Errorf("persist device re-registration %d: %w", fullID, err)
+		}
+		*existing = updated
+		return &updated, true, nil
+	}
+
+	dev := &Device{
+		DeviceID:      fullID,
+		TenantID:      tenantID,
+		FleetID:       fleetID,
+		HWProfile:     hwProfile,
+		FWVersion:     fwVersion,
+		PolicyVersion: policyVersion,
+		Capabilities:  capabilities,
+		Status:        StatusOnline,
+		RegisteredAt:  now,
+		LastHeartbeat: now,
+	}
+	if err := store.SaveDeviceRegistration(dev, key, allowRecommission); err != nil {
+		return nil, false, fmt.Errorf("persist device registration %d: %w", fullID, err)
+	}
+	fm.devices[fullID] = dev
+	fm.hookMu.Lock()
+	onReg := fm.onDeviceRegistered
+	fm.hookMu.Unlock()
+	if onReg != nil {
+		onReg()
+	}
+	devCopy := *dev
+	return &devCopy, false, nil
+}
+
+func (fm *FleetManager) registerDevice(tenantID, fleetID uint16, deviceID uint32,
+	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8, updateExisting bool) (*Device, error) {
 
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
 	if existing, ok := fm.devices[fullID]; ok {
+		if !updateExisting {
+			devCopy := *existing
+			return &devCopy, ErrDeviceExists
+		}
 		// Update safe fields on re-registration, preserve counters.
 		// Policy version must not regress (anti-rollback on re-registration).
-		existing.FWVersion = fwVersion
-		if policyVersion > existing.PolicyVersion {
-			existing.PolicyVersion = policyVersion
+		updated := *existing
+		updated.FWVersion = fwVersion
+		if policyVersion > updated.PolicyVersion {
+			updated.PolicyVersion = policyVersion
 		}
-		existing.HWProfile = hwProfile
-		existing.Capabilities = capabilities
+		updated.HWProfile = hwProfile
+		updated.Capabilities = capabilities
 		if fm.store != nil {
-			if err := fm.store.SaveDevice(existing); err != nil {
-				log.Printf("[fleet] store error: %v", err)
+			if err := fm.store.SaveDevice(&updated); err != nil {
+				return nil, fmt.Errorf("persist device re-registration %d: %w", fullID, err)
 			}
 		}
-		devCopy := *existing
-		return &devCopy, ErrDeviceExists
+		*existing = updated
+		return &updated, ErrDeviceExists
 	}
 
 	dev := &Device{
@@ -277,12 +369,12 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 		RegisteredAt:  time.Now(),
 		LastHeartbeat: time.Now(),
 	}
-	fm.devices[fullID] = dev
 	if fm.store != nil {
 		if err := fm.store.SaveDevice(dev); err != nil {
-			log.Printf("[fleet] store error: %v", err)
+			return nil, fmt.Errorf("persist device registration %d: %w", fullID, err)
 		}
 	}
+	fm.devices[fullID] = dev
 	fm.hookMu.Lock()
 	onReg := fm.onDeviceRegistered
 	fm.hookMu.Unlock()
@@ -297,7 +389,7 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 // If the device is not registered and AutoRegister is true, it will be
 // auto-registered with a default "auto-discovered" profile before
 // processing the heartbeat.
-func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint32, hb *Heartbeat) {
+func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint32, hb *Heartbeat) bool {
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
 	shard := fullID % 256
@@ -310,7 +402,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	if !exists {
 		if !fm.AutoRegister {
-			return
+			return false
 		}
 
 		fm.mu.Lock()
@@ -345,7 +437,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			fm.mu.RUnlock()
 			fm.deviceLocks[shard].Unlock()
 			log.Printf("[fleet] device %d was decommissioned during auto-registration, aborting", deviceID)
-			return
+			return false
 		}
 		dev = refreshedDev
 		fm.mu.RUnlock()
@@ -359,7 +451,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 				fm.mu.Lock()
 				delete(fm.devices, fullID)
 				fm.mu.Unlock()
-				return
+				return false
 			}
 		}
 
@@ -372,7 +464,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			fm.mu.RUnlock()
 			fm.deviceLocks[shard].Unlock()
 			log.Printf("[fleet] device %d was decommissioned during auto-registration store write, aborting", deviceID)
-			return
+			return false
 		}
 		dev = refreshedDev
 		fm.mu.RUnlock()
@@ -399,36 +491,45 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		refreshedDev, stillExists := fm.devices[fullID]
 		fm.mu.RUnlock()
 		if !stillExists {
-			return
+			return false
 		}
 		dev = refreshedDev
 	}
+	previous := *dev
 
-	//
-	// Reboot handling: when uptime < last_uptime (or uptime == 0 while
-	// last_uptime > 0), the device has rebooted. Accept the heartbeat but
-	// reset the delta counters to 0 so the first post-reboot absolute
-	// values are treated as the full delta. Don't reject legitimate reboots.
-	//
-	// Increment BootEpoch on each detected reboot so that after a gateway
-	// restart we can distinguish a genuine new boot from a replayed
-	// heartbeat with lower uptime.
-	isReboot := hb.UptimeSec < dev.LastUptime || (hb.UptimeSec == 0 && dev.LastUptime > 0)
+	// The device's signed, durable boot counter authenticates routine reboot.
+	// A lower counter is an old boot; an equal counter requires advancing uptime.
+	// Counter zero is retained only for unsigned legacy development traffic;
+	// the MQTT bridge rejects such traffic for keyed production devices.
+	if hb.BootCounter < dev.BootCounter {
+		log.Printf("[fleet] replay detected for device %d: boot counter %d < last %d, dropping",
+			deviceID, hb.BootCounter, dev.BootCounter)
+		return false
+	}
+	if hb.BootCounter > 0 && hb.BootCounter == dev.BootCounter && hb.UptimeSec <= dev.LastUptime {
+		log.Printf("[fleet] replay detected for device %d: boot counter %d uptime %d <= last %d, dropping",
+			deviceID, hb.BootCounter, hb.UptimeSec, dev.LastUptime)
+		return false
+	}
+	isReboot := hb.BootCounter > dev.BootCounter && (dev.BootCounter > 0 || dev.LastUptime > 0)
+	if hb.BootCounter == 0 {
+		isReboot = hb.UptimeSec < dev.LastUptime
+		if hb.UptimeSec > 0 && hb.UptimeSec == dev.LastUptime {
+			log.Printf("[fleet] replay detected for legacy device %d: uptime %d == last, dropping", deviceID, hb.UptimeSec)
+			return false
+		}
+	}
 	if isReboot {
-		// Device rebooted — increment boot epoch, reset replay counters.
+		// Device rebooted: reset per-boot counter baselines.
 		dev.BootEpoch++
-		log.Printf("[fleet] device %d rebooted (boot_epoch=%d): uptime %d < last %d, resetting counters",
-			deviceID, dev.BootEpoch, hb.UptimeSec, dev.LastUptime)
+		log.Printf("[fleet] device %d rebooted (boot_epoch=%d): counter %d > last %d, resetting counters",
+			deviceID, dev.BootEpoch, hb.BootCounter, dev.BootCounter)
 		dev.PrevDenied = 0
 		dev.PrevAllowed = 0
 		dev.PrevWarned = 0
 		dev.PrevEscalated = 0
-	} else if hb.UptimeSec > 0 && hb.UptimeSec == dev.LastUptime {
-		// Exact same uptime with no reboot — replay. Drop it.
-		log.Printf("[fleet] replay detected for device %d: uptime %d == last %d, dropping",
-			deviceID, hb.UptimeSec, dev.LastUptime)
-		return
 	}
+	dev.BootCounter = hb.BootCounter
 	dev.LastUptime = hb.UptimeSec
 
 	dev.LastHeartbeat = time.Now()
@@ -475,23 +576,6 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	dev.PrevWarned = hb.WarnedCount
 	dev.PrevEscalated = hb.EscalatedCount
 
-	fm.hookMu.Lock()
-	onHB := fm.onHeartbeat
-	fm.hookMu.Unlock()
-	if onHB != nil {
-		onHB()
-	}
-
-	if hb.Flags&0x08 != 0 {
-		fm.fireAlert(Alert{
-			Type:      AlertCanaryRollback,
-			DeviceID:  fullID,
-			Message:   fmt.Sprintf("Device performed OTA canary rollback (policy_v=%d)", hb.PolicyVersion),
-			Severity:  "high",
-			Timestamp: time.Now(),
-		})
-	}
-
 	oldStatus := dev.Status
 
 	// Update status based on flags.
@@ -503,37 +587,14 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	//   0x80 = SE_DEGRADED    (reserved — C encoder does not set this yet)
 	if hb.Flags&0x04 != 0 { // TAMPER_DETECT — C encoder sets when audit chain breaks
 		dev.Status = StatusLockdown
-		fm.fireAlert(Alert{
-			Type:      AlertTamperDetect,
-			DeviceID:  fullID,
-			Message:   "Audit chain integrity failure detected",
-			Severity:  "critical",
-			Timestamp: time.Now(),
-		})
 	} else if hb.Flags&0x80 != 0 { // SE_DEGRADED — C encoder sets when secure element unavailable
 		dev.Status = StatusDegraded
-		fm.fireAlert(Alert{
-			Type:      AlertSEDegraded,
-			DeviceID:  fullID,
-			Message:   "Secure element in degraded mode",
-			Severity:  "critical",
-			Timestamp: time.Now(),
-		})
 	} else if hb.Flags&0x02 != 0 { // POLICY_STALE (clock not trusted)
 		dev.Status = StatusDegraded
 	} else if hb.Flags&0x20 != 0 { // OFFLINE_MODE
 		dev.Status = StatusDegraded
 	} else {
 		dev.Status = StatusOnline
-	}
-
-	if dev.Status != oldStatus {
-		fm.hookMu.Lock()
-		onSC := fm.onStatusChange
-		fm.hookMu.Unlock()
-		if onSC != nil {
-			onSC(oldStatus, dev.Status)
-		}
 	}
 
 	// Store audit HMAC for chain verification
@@ -551,13 +612,44 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 				onSE()
 			}
 			if dev.Status == StatusLockdown || dev.Status == StatusDegraded {
-				if retryErr := fm.store.SaveDevice(dev); retryErr != nil {
+				if retryErr := fm.store.SaveDevice(dev); retryErr == nil {
+					err = nil
+				} else {
 					log.Printf("[fleet] CRITICAL: failed to persist %s status for device %d after retry: %v",
 						dev.Status, dev.DeviceID, retryErr)
 				}
 			}
+			if err != nil {
+				*dev = previous
+				return false
+			}
 		}
 	}
+	fm.hookMu.Lock()
+	onHB := fm.onHeartbeat
+	onSC := fm.onStatusChange
+	fm.hookMu.Unlock()
+	if onHB != nil {
+		onHB()
+	}
+	if hb.Flags&0x08 != 0 && previous.Flags&0x08 == 0 {
+		fm.fireAlert(Alert{
+			Type: AlertCanaryRollback, DeviceID: fullID,
+			Message:  fmt.Sprintf("Device performed OTA canary rollback (policy_v=%d)", hb.PolicyVersion),
+			Severity: "high", Timestamp: time.Now(),
+		})
+	}
+	if hb.Flags&0x04 != 0 {
+		fm.fireAlert(Alert{Type: AlertTamperDetect, DeviceID: fullID,
+			Message: "Audit chain integrity failure detected", Severity: "critical", Timestamp: time.Now()})
+	} else if hb.Flags&0x80 != 0 {
+		fm.fireAlert(Alert{Type: AlertSEDegraded, DeviceID: fullID,
+			Message: "Secure element in degraded mode", Severity: "critical", Timestamp: time.Now()})
+	}
+	if dev.Status != oldStatus && onSC != nil {
+		onSC(oldStatus, dev.Status)
+	}
+	return true
 }
 
 // CheckOfflineDevices detects devices that have gone silent.
@@ -674,24 +766,72 @@ func (fm *FleetManager) ListDevices() []Device {
 	return result
 }
 
-// DecommissionDevice removes a device from the in-memory registry and from the
-// backing store (if configured). Returns true if the device existed.
-func (fm *FleetManager) DecommissionDevice(tenantID, fleetID uint16, deviceID uint32) bool {
+// StoreIs reports whether the manager uses the supplied backing store.
+// Callers use this to select atomic store operations only when all Fleet
+// components share the same persistence instance.
+func (fm *FleetManager) StoreIs(store DeviceStore) bool {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.store == store
+}
+
+// DecommissionDeviceChecked persists deletion before removing a device from
+// memory. A failed backing-store deletion leaves the device retryable.
+func (fm *FleetManager) DecommissionDeviceChecked(tenantID, fleetID uint16, deviceID uint32) (bool, error) {
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
 	if _, ok := fm.devices[fullID]; !ok {
-		return false
+		return false, nil
 	}
-	delete(fm.devices, fullID)
 	if fm.store != nil {
 		if err := fm.store.DeleteDevice(tenantID, fleetID, deviceID); err != nil {
-			log.Printf("[fleet] store error: %v", err)
+			return true, err
 		}
 	}
-	return true
+	delete(fm.devices, fullID)
+	return true, nil
+}
+
+// DecommissionDeviceAtomically removes a device and its key while recording a
+// tombstone in one store transaction when the store supports that operation.
+func (fm *FleetManager) DecommissionDeviceAtomically(tenantID, fleetID uint16, deviceID uint32) (bool, error) {
+	fullID := ComposeID(tenantID, fleetID, deviceID)
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if _, ok := fm.devices[fullID]; !ok {
+		return false, nil
+	}
+	store, ok := fm.store.(interface {
+		DeleteDeviceKeyAndTombstone(tenantID, fleetID uint16, deviceID uint32) error
+	})
+	if !ok {
+		return true, fmt.Errorf("atomic fleet decommission store unavailable")
+	}
+	if err := store.DeleteDeviceKeyAndTombstone(tenantID, fleetID, deviceID); err != nil {
+		return true, err
+	}
+	delete(fm.devices, fullID)
+	return true, nil
+}
+
+// DecommissionDevice preserves the historical bool-only API for callers that
+// cannot report persistence errors. HTTP handlers use the checked variant.
+func (fm *FleetManager) DecommissionDevice(tenantID, fleetID uint16, deviceID uint32) bool {
+	existed, err := fm.DecommissionDeviceChecked(tenantID, fleetID, deviceID)
+	if err != nil {
+		log.Printf("[fleet] store error: %v", err)
+		return false
+	}
+	return existed
 }
 
 // GetFleetHealth returns aggregate fleet statistics.
@@ -746,9 +886,9 @@ func ComposeID(tenantID, fleetID uint16, deviceID uint32) uint64 {
 	return (uint64(tenantID) << 48) | (uint64(fleetID) << 32) | uint64(deviceID)
 }
 
-// ParseHeartbeat decodes a 32-byte heartbeat wire format.
+// ParseHeartbeat decodes the 36-byte heartbeat with a device-persisted boot counter.
 func ParseHeartbeat(data []byte) (*Heartbeat, error) {
-	if len(data) != 32 {
+	if len(data) != 36 {
 		return nil, ErrInvalidHeartbeat
 	}
 	hb := &Heartbeat{
@@ -765,6 +905,7 @@ func ParseHeartbeat(data []byte) (*Heartbeat, error) {
 		AuditHeadHMAC:  binary.BigEndian.Uint64(data[22:30]),
 		Flags:          data[30],
 		Capabilities:   data[31],
+		BootCounter:    binary.BigEndian.Uint32(data[32:36]),
 	}
 	return hb, nil
 }

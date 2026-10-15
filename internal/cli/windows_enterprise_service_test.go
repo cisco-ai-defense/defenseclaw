@@ -75,6 +75,17 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 	}
 }
 
+func TestWindowsStandalonePolicyCompilerIsForwarded(t *testing.T) {
+	opts := &windowsEnterpriseLifecycleOptions{policyCompiler: `C:\stage\policy_compiler.py`}
+	args := windowsEnterprisePowerShellArgs("upgrade", opts)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-PolicyCompiler" && args[i+1] == opts.policyCompiler {
+			return
+		}
+	}
+	t.Fatalf("PowerShell upgrade omitted compiler source: %q", args)
+}
+
 func TestWindowsEnterpriseLifecycleSecurityOptionsAreActionScoped(t *testing.T) {
 	for _, action := range []string{"reconcile", "status", "verify", "uninstall"} {
 		t.Run(action, func(t *testing.T) {

@@ -20,8 +20,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/fleet/sqliteperms"
 
 	_ "modernc.org/sqlite" // pure Go SQLite driver
 )
@@ -35,14 +36,8 @@ type SQLitePolicyStore struct {
 // NewSQLitePolicyStore opens (or creates) a SQLite database at the given path
 // and initializes the policies table.
 func NewSQLitePolicyStore(dbPath string) (*SQLitePolicyStore, error) {
-	if info, err := os.Stat(dbPath); os.IsNotExist(err) {
-		f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			return nil, fmt.Errorf("create sqlite %s: %w", dbPath, err)
-		}
-		f.Close()
-	} else if err == nil && info.Mode().Perm()&0077 != 0 {
-		_ = os.Chmod(dbPath, 0600)
+	if err := sqliteperms.Prepare(dbPath); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -68,6 +63,14 @@ func NewSQLitePolicyStore(dbPath string) (*SQLitePolicyStore, error) {
 	}
 
 	if err := createMetadataTable(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := createEmergencyTable(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := sqliteperms.Secure(dbPath); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -118,6 +121,22 @@ func createMetadataTable(db *sql.DB) error {
 	return nil
 }
 
+func createEmergencyTable(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS emergency_history (
+			tenant_id INTEGER NOT NULL,
+			fleet_id INTEGER NOT NULL,
+			sequence  INTEGER NOT NULL,
+			message   BLOB NOT NULL,
+			PRIMARY KEY (tenant_id, fleet_id, sequence)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create emergency history table: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLitePolicyStore) GetEmergencySeq() (uint32, error) {
 	var valStr string
 	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key = 'emergency_seq'`).Scan(&valStr)
@@ -143,6 +162,97 @@ func (s *SQLitePolicyStore) SetEmergencySeq(seq uint32) error {
 		return fmt.Errorf("set emergency_seq: %w", err)
 	}
 	return nil
+}
+
+// SaveEmergency persists both the anti-replay counter and replayable command
+// in one transaction before the MQTT publish. A power loss cannot leave the
+// counter advanced while silently dropping the last command.
+func (s *SQLitePolicyStore) SaveEmergency(tenantID, fleetID uint64, seq uint32, signedMessage []byte) error {
+	if len(signedMessage) != EmergencyMsgSize {
+		return fmt.Errorf("emergency message must be %d bytes, got %d", EmergencyMsgSize, len(signedMessage))
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin emergency transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var previous uint32
+	err = tx.QueryRow(`SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'emergency_seq'`).Scan(&previous)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read emergency sequence: %w", err)
+	}
+	if seq <= previous {
+		return fmt.Errorf("emergency sequence %d is not newer than %d", seq, previous)
+	}
+	var fleetPrevious uint32
+	err = tx.QueryRow(`SELECT sequence FROM emergency_history WHERE tenant_id=? AND fleet_id=? ORDER BY sequence DESC LIMIT 1`, tenantID, fleetID).Scan(&fleetPrevious)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read fleet emergency predecessor: %w", err)
+	}
+	if err := validateEmergencyChain(seq, fleetPrevious, signedMessage); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO metadata (key, value) VALUES ('emergency_seq', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, fmt.Sprintf("%d", seq)); err != nil {
+		return fmt.Errorf("persist emergency sequence: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO emergency_history (tenant_id, fleet_id, sequence, message)
+		VALUES (?, ?, ?, ?)
+	`, tenantID, fleetID, seq, signedMessage); err != nil {
+		return fmt.Errorf("persist emergency replay: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit emergency transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLitePolicyStore) GetLastEmergency(tenantID, fleetID uint64) (*EmergencyRecord, error) {
+	var rec EmergencyRecord
+	err := s.db.QueryRow(`
+		SELECT sequence, message FROM emergency_history
+		WHERE tenant_id = ? AND fleet_id = ?
+		ORDER BY sequence DESC LIMIT 1
+	`, tenantID, fleetID).Scan(&rec.Sequence, &rec.Message)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read emergency replay for tenant=%d fleet=%d: %w", tenantID, fleetID, err)
+	}
+	if len(rec.Message) != EmergencyMsgSize {
+		return nil, fmt.Errorf("invalid persisted emergency command length %d", len(rec.Message))
+	}
+	return &rec, nil
+}
+
+func (s *SQLitePolicyStore) GetEmergenciesAfter(tenantID, fleetID uint64, afterSeq uint32, limit int) ([]EmergencyRecord, error) {
+	if limit < 1 || limit > 32 {
+		return nil, fmt.Errorf("emergency replay page limit must be 1..32")
+	}
+	rows, err := s.db.Query(`SELECT sequence, message FROM emergency_history
+		WHERE tenant_id=? AND fleet_id=? AND sequence>? ORDER BY sequence ASC LIMIT ?`, tenantID, fleetID, afterSeq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read emergency history: %w", err)
+	}
+	defer rows.Close()
+	page := make([]EmergencyRecord, 0, limit)
+	previous := afterSeq
+	for rows.Next() {
+		var rec EmergencyRecord
+		if err := rows.Scan(&rec.Sequence, &rec.Message); err != nil {
+			return nil, err
+		}
+		if err := validateEmergencyChain(rec.Sequence, previous, rec.Message); err != nil {
+			return nil, err
+		}
+		page = append(page, rec)
+		previous = rec.Sequence
+	}
+	return page, rows.Err()
 }
 
 func parseUint32(s string) (uint32, error) {

@@ -34,7 +34,7 @@ extern dclaw_state_t *dclaw_get_state(void);
  *
  * The caller-provided cap_flags in the IPC request cannot be trusted.
  * This table maps known tool names to their correct capability flags.
- * Unknown tools default to CAP_EXEC_SHELL (fail-closed).
+ * Unknown tools return CAP_UNKNOWN and are refused before cache/cloud lookup.
  */
 typedef struct {
     const char *tool_name;
@@ -46,20 +46,34 @@ static const dclaw_tool_cap_entry_t tool_cap_map[] = {
     { "read_file",      DCLAW_CAP_READ_FS },
     { "read-file",      DCLAW_CAP_READ_FS },
     { "read_data",      DCLAW_CAP_READ_FS },
+    { "cat",            DCLAW_CAP_READ_FS },
+    { "list_files",     DCLAW_CAP_READ_FS },
+    { "list_dir",       DCLAW_CAP_READ_FS },
     { "write_file",     DCLAW_CAP_WRITE_FS },
     { "write-file",     DCLAW_CAP_WRITE_FS },
+    { "save",           DCLAW_CAP_WRITE_FS },
+    { "create_file",    DCLAW_CAP_WRITE_FS },
+    { "delete_file",    DCLAW_CAP_WRITE_FS },
+    { "edit_file",      DCLAW_CAP_WRITE_FS },
 
     /* Shell execution */
     { "exec_shell",     DCLAW_CAP_EXEC_SHELL },
     { "exec-shell",     DCLAW_CAP_EXEC_SHELL },
+    { "exec",           DCLAW_CAP_EXEC_SHELL },
     { "run_command",    DCLAW_CAP_EXEC_SHELL },
     { "run-command",    DCLAW_CAP_EXEC_SHELL },
+    { "execute_code",   DCLAW_CAP_EXEC_SHELL },
+    { "run_python",     DCLAW_CAP_EXEC_SHELL },
+    { "terminal",       DCLAW_CAP_EXEC_SHELL },
     { "bash",           DCLAW_CAP_EXEC_SHELL },
     { "shell",          DCLAW_CAP_EXEC_SHELL },
 
     /* Network */
     { "net_fetch",      DCLAW_CAP_NET_FETCH },
     { "net-fetch",      DCLAW_CAP_NET_FETCH },
+    { "web_search",     DCLAW_CAP_NET_FETCH },
+    { "web_fetch",      DCLAW_CAP_NET_FETCH },
+    { "fetch",          DCLAW_CAP_NET_FETCH },
     { "http_request",   DCLAW_CAP_NET_FETCH },
     { "http-request",   DCLAW_CAP_NET_FETCH },
     { "curl",           DCLAW_CAP_NET_FETCH },
@@ -68,10 +82,15 @@ static const dclaw_tool_cap_entry_t tool_cap_map[] = {
     { "download",       DCLAW_CAP_NET_FETCH },
     { "api_call",       DCLAW_CAP_NET_FETCH },
     { "api-call",       DCLAW_CAP_NET_FETCH },
+    { "call_api",       DCLAW_CAP_NET_FETCH },
+    { "requests_get",   DCLAW_CAP_NET_FETCH },
+    { "requests_post",  DCLAW_CAP_NET_FETCH },
 
     /* Messaging */
     { "send_message",   DCLAW_CAP_SEND_MSG },
     { "send-message",   DCLAW_CAP_SEND_MSG },
+    { "send_email",     DCLAW_CAP_SEND_MSG },
+    { "notify",         DCLAW_CAP_SEND_MSG },
 
     /* Actuation */
     { "actuate",        DCLAW_CAP_ACTUATE },
@@ -116,15 +135,14 @@ static const size_t tool_cap_map_count = sizeof(tool_cap_map) / sizeof(tool_cap_
 
 uint8_t dclaw_policy_lookup_capability(const char *tool_name) {
     if (!tool_name || tool_name[0] == '\0') {
-        return DCLAW_CAP_EXEC_SHELL; /* fail-closed default */
+        return DCLAW_CAP_UNKNOWN;
     }
     for (size_t i = 0; i < tool_cap_map_count; i++) {
         if (strcmp(tool_name, tool_cap_map[i].tool_name) == 0) {
             return tool_cap_map[i].cap_flags;
         }
     }
-    /* Unknown tool: default to EXEC_SHELL (fail-closed — most restrictive) */
-    return DCLAW_CAP_EXEC_SHELL;
+    return DCLAW_CAP_UNKNOWN;
 }
 
 static int compare_hash(const uint8_t *a, const uint8_t *b) {
@@ -284,27 +302,10 @@ dclaw_action_t dclaw_policy_check_destination(const char *dest) {
     char host_buf[DCLAW_RT_MAX_DEST_LEN];
     const char *host = extract_hostname(dest, host_buf, sizeof(host_buf));
 
-    /* Linear scan over destination allowlist (runtime copy, small ≤256 entries)
-     * Use strcasecmp for case-insensitive hostname matching.
-     * DNS hostnames are case-insensitive per RFC 4343. */
+    /* Linear scan over explicit public IP literals (runtime copy, ≤256). */
     for (size_t i = 0; i < rt->dest_allowlist_count; i++) {
         if (strcasecmp(host, rt->dest_allowlist[i]) == 0) {
             return DCLAW_ACTION_ALLOW;
-        }
-        /* Wildcard prefix match: *.example.com */
-        if (rt->dest_allowlist[i][0] == '*' && rt->dest_allowlist[i][1] == '.') {
-            const char *suffix = &rt->dest_allowlist[i][1]; /* e.g. ".cisco.com" */
-            size_t suffix_len = strlen(suffix);
-            size_t host_len = strlen(host);
-            if (host_len > suffix_len &&
-                strcasecmp(host + host_len - suffix_len, suffix) == 0) {
-                return DCLAW_ACTION_ALLOW;
-            }
-            /* Also allow exact match without wildcard prefix (e.g. "cisco.com" matches "*.cisco.com") */
-            if (host_len == suffix_len - 1 &&
-                strcasecmp(host, suffix + 1) == 0) {
-                return DCLAW_ACTION_ALLOW;
-            }
         }
     }
     return DCLAW_ACTION_BLOCK;

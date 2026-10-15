@@ -72,7 +72,7 @@ option(DCLAW_DEV_MODE "Enable development mode (relaxed key requirements)" OFF)
 if(DCLAW_DEV_MODE AND NOT DCLAW_PROFILE STREQUAL "MINIMAL")
     message(WARNING "⚠ DCLAW_DEV_MODE=ON for ${DCLAW_PROFILE} profile. "
         "Production deployments MUST pass -DDCLAW_DEV_MODE=OFF. "
-        "This disables security guards: audit key, zero-key rejection, TLS, OTA Ed25519.")
+        "Development mode relaxes audit-key and zero-key checks and permits plaintext MQTT.")
 endif()
 
 # Sanitizer support (ASan + UBSan)
@@ -114,6 +114,7 @@ set(CORE_SOURCES
     src/crypto/sha256.c
     src/crypto/hmac_sha256.c
     src/decision/policy_table.c
+    src/decision/ssrf_guard.c
     src/decision/correlator.c
     src/decision/verdict_cache.c
     src/enforce/ipc_hook.c
@@ -209,59 +210,73 @@ set_target_properties(dclaw_shared PROPERTIES
 
 # Link mbedTLS for STANDARD/EDGE profiles
 if(DCLAW_MQTT_ENABLED)
-    # Support both mbedTLS 3.x and 4.x.
-    # mbedTLS 4.x has extensive API changes (removed entropy/ctr_drbg,
-    # renamed mbedcrypto to tfpsacrypto, removed ssl_conf_rng/min_version).
-    # Phase 1 uses mbedTLS 3.x for TLS; mbedTLS 4.x falls through to the
-    # built-in HMAC-SHA256 path (DCLAW_HAS_MBEDTLS=0).
+    # The connector TLS engine uses the mbedTLS 3.x API. Production cannot
+    # run with TLS/MQTT stubs; 2.x and 4.x are unsupported.
+    set(DCLAW_HAS_USABLE_MBEDTLS OFF)
     find_package(MbedTLS 3 QUIET)
-    if(MbedTLS_FOUND AND TARGET MbedTLS::mbedcrypto)
+    if(MbedTLS_FOUND AND TARGET MbedTLS::mbedcrypto AND
+       MbedTLS_VERSION VERSION_GREATER_EQUAL 3 AND MbedTLS_VERSION VERSION_LESS 4)
         target_link_libraries(dclaw_core PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto)
         target_link_libraries(dclaw_shared PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto)
         target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=1)
         target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=1)
+        set(DCLAW_HAS_USABLE_MBEDTLS ON)
     else()
         find_library(MBEDTLS_LIB mbedtls)
         if(MBEDTLS_LIB)
             get_filename_component(_MBEDTLS_LIBDIR ${MBEDTLS_LIB} DIRECTORY)
             get_filename_component(_MBEDTLS_PREFIX ${_MBEDTLS_LIBDIR} DIRECTORY)
-            # Only use mbedTLS if it's 3.x (has entropy.h).
-            # mbedTLS 4.x has incompatible API changes; fall through to built-in crypto.
-            if(EXISTS "${_MBEDTLS_PREFIX}/include/mbedtls/entropy.h")
+            # 2.x also has entropy.h. Read the actual major-version macro
+            # from build_info.h (3.x) or version.h (older packages).
+            set(_MBEDTLS_HEADER_DIR "${_MBEDTLS_PREFIX}/include/mbedtls")
+            set(_MBEDTLS_MAJOR_HEADER "")
+            if(EXISTS "${_MBEDTLS_HEADER_DIR}/build_info.h")
+                set(_MBEDTLS_MAJOR_HEADER "${_MBEDTLS_HEADER_DIR}/build_info.h")
+            elseif(EXISTS "${_MBEDTLS_HEADER_DIR}/version.h")
+                set(_MBEDTLS_MAJOR_HEADER "${_MBEDTLS_HEADER_DIR}/version.h")
+            endif()
+            if(_MBEDTLS_MAJOR_HEADER)
+                file(STRINGS "${_MBEDTLS_MAJOR_HEADER}" _MBEDTLS_MAJOR_LINE
+                     REGEX "^#[ \t]*define[ \t]+MBEDTLS_VERSION_MAJOR[ \t]+[0-9]+")
+            endif()
+            if(_MBEDTLS_MAJOR_LINE MATCHES "MBEDTLS_VERSION_MAJOR[ \t]+3([ \t]|$)" AND
+               EXISTS "${_MBEDTLS_HEADER_DIR}/entropy.h")
                 target_link_libraries(dclaw_core PRIVATE mbedtls mbedcrypto mbedx509)
                 target_link_libraries(dclaw_shared PRIVATE mbedtls mbedcrypto mbedx509)
                 target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=1)
                 target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=1)
-                if(EXISTS "${_MBEDTLS_PREFIX}/include/mbedtls/ssl.h")
+                set(DCLAW_HAS_USABLE_MBEDTLS ON)
+                if(EXISTS "${_MBEDTLS_HEADER_DIR}/ssl.h")
                     target_include_directories(dclaw_core PRIVATE ${_MBEDTLS_PREFIX}/include)
                     target_include_directories(dclaw_shared PRIVATE ${_MBEDTLS_PREFIX}/include)
                 endif()
             else()
-                message(WARNING "mbedTLS 4.x detected (entropy.h missing) — using built-in HMAC-SHA256")
+                if(DCLAW_DEV_MODE)
+                    message(WARNING "Unsupported mbedTLS version detected — TLS/MQTT stubs are for development only")
+                endif()
                 target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=0)
                 target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=0)
             endif()
         else()
-            message(WARNING "mbedTLS not found — TLS/MQTT stubs will be used (dev mode)")
+            if(DCLAW_DEV_MODE)
+                message(WARNING "mbedTLS not found — TLS/MQTT stubs will be used (dev mode)")
+            endif()
             target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=0)
             target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=0)
         endif()
     endif()
+    if(NOT DCLAW_DEV_MODE AND NOT DCLAW_HAS_USABLE_MBEDTLS)
+        message(FATAL_ERROR "Production ${DCLAW_PROFILE} requires mbedTLS 3.x; TLS/MQTT stubs are only permitted in development mode")
+    endif()
 endif()
 
 option(DCLAW_ALLOW_HMAC_OTA "Allow HMAC-SHA256 for OTA verification in production" OFF)
-find_path(TWEETNACL_INCLUDE_DIR NAMES tweetnacl.h)
-if(TWEETNACL_INCLUDE_DIR)
-    message(STATUS "TweetNaCl found — Ed25519 OTA verification available")
-else()
-    if(NOT DCLAW_ALLOW_HMAC_OTA)
-        message(STATUS "TweetNaCl not found — enabling DCLAW_ALLOW_HMAC_OTA for HMAC-SHA256 OTA")
-        set(DCLAW_ALLOW_HMAC_OTA ON)
-    endif()
-endif()
-if(DCLAW_ALLOW_HMAC_OTA)
+if(DCLAW_ALLOW_HMAC_OTA AND DCLAW_MQTT_ENABLED)
+    message(STATUS "OTA HMAC explicitly enabled; provision DCLAW_OTA_HMAC_KEY on the device")
     target_compile_definitions(dclaw_core PRIVATE DCLAW_ALLOW_HMAC_OTA=1)
     target_compile_definitions(dclaw_shared PRIVATE DCLAW_ALLOW_HMAC_OTA=1)
+elseif(NOT DCLAW_DEV_MODE AND DCLAW_MQTT_ENABLED)
+    message(STATUS "OTA updates disabled: Ed25519 verifier unavailable and HMAC not enabled")
 endif()
 
 # Main executable

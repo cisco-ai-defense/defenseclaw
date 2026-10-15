@@ -167,6 +167,49 @@ secrets_dir=$config_dir/secrets
 guardian_ledger=$([ "$platform" = linux ] && echo /var/lib/defenseclaw-hook-guardian || echo "$install_root/hook-guardian-state")/protected_targets.json
 test_fault=$lifecycle_dir/.test-fault
 
+# Exercise the policy compiler with the interpreter actually supplied by the
+# installed distro package. EL8 uses Python 3.6 and EL9 uses Python 3.9; a
+# compiler that only parses on the developer's Python would otherwise pass a
+# Fleet-disabled enterprise install lane and fail at the first policy push.
+verify_packaged_fleet_compiler() {
+    [ "$platform" = linux ] || return 0
+    local compiler=$install_root/lib/defenseclaw/policy_compiler.py
+    [ -f "$compiler" ] && [ ! -L "$compiler" ] || die "the Linux package has no regular Fleet policy compiler at $compiler"
+    cmp -s "$repo/edge-connector/tools/policy_compiler.py" "$compiler" ||
+        die "the installed Fleet policy compiler differs from the release source"
+    # The optional Fleet dependency is intentionally absent from the base
+    # package. Provision it only now, after a Fleet-off install has succeeded,
+    # so this disposable CI lane can exercise the installed compiler too.
+    if [ ! -x /usr/bin/python3 ] || ! /usr/bin/python3 -I -c 'import yaml' >/dev/null 2>&1; then
+        echo "provisioning optional Python/PyYAML for the Fleet compiler CI probe"
+        case "$kind" in
+            deb)
+                apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml ||
+                    die "could not provision optional Fleet Python/PyYAML on the Debian CI host"
+                ;;
+            rpm)
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf -y install python3 python3-pyyaml || die "could not provision optional Fleet Python/PyYAML on the RPM CI host"
+                else
+                    yum -y install python3 python3-pyyaml || die "could not provision optional Fleet Python/PyYAML on the RPM CI host"
+                fi
+                ;;
+        esac
+    fi
+    python=/usr/bin/python3
+    "$python" -I -c 'import yaml; assert callable(yaml.safe_load)' ||
+        die "the optional Fleet Python/PyYAML prerequisite is not usable"
+    (
+        cd "$stage"
+        "$python" -I "$compiler" \
+            --input "$repo/edge-connector/policies/strict.yaml" \
+            --profile standard --version 1 \
+            --output-header policy_tables.h --output-binary policy.bin
+    ) || die "the packaged Fleet policy compiler failed with $python"
+    [ -s "$stage/policy_tables.h" ] && [ -s "$stage/policy.bin" ] ||
+        die "the packaged Fleet policy compiler produced no policy outputs"
+}
+
 results=${results:-$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-install-lane.XXXXXX")}
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
@@ -664,6 +707,11 @@ else
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+fi
+
+if [ "$platform" = linux ]; then
+    step "the packaged Fleet compiler runs with the installed Python and PyYAML"
+    verify_packaged_fleet_compiler
 fi
 
 # ---- converge ----------------------------------------------------------------

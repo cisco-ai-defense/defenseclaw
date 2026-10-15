@@ -8,6 +8,22 @@
 # P2-17: Removed DCLAW_TESTING=1 — no source file references it.
 set(DCLAW_TEST_TARGETS "")
 
+# Production permits flash only in its provisioned state directories. CI must
+# create/chown this directory before running production tests; development
+# tests can keep their fixtures inside the build tree.
+set(DCLAW_TEST_FLASH_DIR "" CACHE PATH "Writable flash fixture directory for CTests")
+if(NOT DCLAW_TEST_FLASH_DIR)
+    if(DCLAW_DEV_MODE)
+        set(DCLAW_TEST_FLASH_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+    else()
+        set(DCLAW_TEST_FLASH_DIR "/var/lib/defenseclaw/ctest")
+    endif()
+endif()
+if(NOT DCLAW_DEV_MODE AND
+   NOT DCLAW_TEST_FLASH_DIR MATCHES "^(/var/lib/defenseclaw|/etc/defenseclaw)/")
+    message(FATAL_ERROR "Production CTests require DCLAW_TEST_FLASH_DIR under /var/lib/defenseclaw/ or /etc/defenseclaw/")
+endif()
+
 add_executable(test_input_validation test_input_validation.c)
 target_link_libraries(test_input_validation PRIVATE dclaw_core)
 add_test(NAME input_validation COMMAND test_input_validation)
@@ -46,6 +62,17 @@ add_test(NAME evaluate_pipeline COMMAND test_evaluate_pipeline)
 list(APPEND DCLAW_TEST_TARGETS test_evaluate_pipeline)
 
 if(DCLAW_MQTT_ENABLED)
+    add_executable(test_mqtt_ack test_mqtt_ack.c)
+    target_link_libraries(test_mqtt_ack PRIVATE dclaw_core)
+    target_include_directories(test_mqtt_ack PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded/MQTTClient-C
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded/MQTTPacket)
+    target_compile_definitions(test_mqtt_ack PRIVATE
+        MQTTCLIENT_PLATFORM_HEADER=MQTTDclaw.h)
+    add_test(NAME mqtt_ack COMMAND test_mqtt_ack)
+    list(APPEND DCLAW_TEST_TARGETS test_mqtt_ack)
+
     add_executable(test_verdict_protocol test_verdict_protocol.c)
     target_link_libraries(test_verdict_protocol PRIVATE dclaw_core)
     add_test(NAME verdict_protocol COMMAND test_verdict_protocol)
@@ -58,7 +85,7 @@ if(DCLAW_MQTT_ENABLED)
     # P1-09: Give each test its own flash file so persisted emergency state
     # from one test does not leak into another.
     set_tests_properties(ota_emergency PROPERTIES
-        ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-ota-emergency.bin")
+        ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-ota-emergency.bin")
 endif()
 
 if(DCLAW_CONTENT_SCAN AND DCLAW_MQTT_ENABLED)
@@ -67,7 +94,7 @@ if(DCLAW_CONTENT_SCAN AND DCLAW_MQTT_ENABLED)
     add_test(NAME acceptance COMMAND test_acceptance)
     list(APPEND DCLAW_TEST_TARGETS test_acceptance)
     set_tests_properties(acceptance PROPERTIES
-        ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-acceptance.bin")
+        ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-acceptance.bin")
 endif()
 
 add_executable(bench_latency bench_latency.c)
@@ -82,8 +109,7 @@ endif()
 
 # P2-22 fix: Ensure asserts are active in all test targets even in Release
 # builds. -UNDEBUG removes the NDEBUG that CMake adds for Release/RelWithDebInfo.
-# Also set DCLAW_FLASH_PATH for all tests so they work even when the default
-# /var/lib/defenseclaw/ directory does not exist.
+# Also set a unique DCLAW_FLASH_PATH for every test.
 foreach(_tgt IN LISTS DCLAW_TEST_TARGETS)
     target_compile_options(${_tgt} PRIVATE -UNDEBUG)
 endforeach()
@@ -99,13 +125,19 @@ foreach(_test IN LISTS _all_tests)
     get_test_property(${_test} ENVIRONMENT _env)
     if(NOT _env)
         set_tests_properties(${_test} PROPERTIES
-            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin;DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_ALLOWED=1;DCLAW_OTA_KEY=${_test_audit_key};DCLAW_EMERGENCY_KEY=${_test_audit_key}")
+            ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-${_test}.bin;DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_KEY=${_test_audit_key};DCLAW_EMERGENCY_KEY=${_test_audit_key}")
     else()
         # Append audit key to existing ENVIRONMENT list
         set_tests_properties(${_test} PROPERTIES
-            ENVIRONMENT "${_env};DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_ALLOWED=1;DCLAW_OTA_KEY=${_test_audit_key};DCLAW_EMERGENCY_KEY=${_test_audit_key}")
+            ENVIRONMENT "${_env};DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_KEY=${_test_audit_key};DCLAW_EMERGENCY_KEY=${_test_audit_key}")
     endif()
 endforeach()
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME policy_compiler
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_policy_compiler.py")
+endif()
 
 # Fuzz harness (requires sanitizer support for libFuzzer)
 if(DCLAW_SANITIZE)

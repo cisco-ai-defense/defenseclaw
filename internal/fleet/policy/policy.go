@@ -27,12 +27,30 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+const installedCompilerPath = "/usr/local/lib/defenseclaw/policy_compiler.py"
+
+// ErrInvalidPolicy marks a request rejected because of its policy content or
+// profile. Callers can return a client error without exposing compiler output.
+var ErrInvalidPolicy = errors.New("invalid policy")
+
+// ErrPolicyTooLarge and ErrMalformedPolicy retain ErrInvalidPolicy for callers
+// that only distinguish client input from compiler infrastructure failures.
+var ErrPolicyTooLarge = fmt.Errorf("%w: policy YAML exceeds 64 KiB", ErrInvalidPolicy)
+var ErrMalformedPolicy = fmt.Errorf("%w: malformed policy content", ErrInvalidPolicy)
+var ErrPolicyVersionExhausted = fmt.Errorf("%w: policy version 65534 is the highest supported OTA version; provision a new device policy lineage", ErrInvalidPolicy)
+
+// OTA's uint16 high-water stores 0xffff as erased flash. Never issue it.
+const maxPolicyVersion uint32 = 65534
 
 // sha256Sum returns the SHA-256 hash of data.
 func sha256Sum(data []byte) [32]byte {
@@ -90,8 +108,42 @@ const HeaderSize = 8
 //	[9]      scope       uint8
 //	[10:42]  payload     [32]byte
 //	[42:44]  _reserved   [2]byte
-//	[44:108] signature   [64]byte (HMAC-SHA256 in first 32, zero-padded)
-const EmergencyMsgSize = 108
+//	[44:48]  previous sequence for this fleet, uint32 big-endian
+//	[48:112] signature [64]byte (HMAC-SHA256 in first 32, zero-padded)
+const EmergencyMsgSize = 112
+
+// ManagedMacOSPythonCandidates lists exact Python.org framework interpreters
+// accepted for managed Fleet. Apple CLT Python is often too old for the
+// policy compiler, and PATH must not redirect an installed compiler.
+func ManagedMacOSPythonCandidates() []string {
+	return []string{
+		"/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+		"/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+		"/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+		"/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+		"/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10",
+	}
+}
+
+// CheckManagedMacOSPython returns the same protected interpreter selected at
+// runtime. The managed macOS installer calls it before admitting Fleet; the
+// resolver verifies the protected path and an isolated PyYAML import.
+func CheckManagedMacOSPython() (string, error) {
+	if runtime.GOOS != "darwin" {
+		return "", errors.New("managed macOS Python admission is available only on darwin")
+	}
+	return installedPythonInterpreter()
+}
+
+// CheckManagedLinuxPython returns the protected distro interpreter also used
+// by the managed Linux gateway. Enterprise admission invokes it before
+// enabling Fleet so an unavailable runtime fails before service mutation.
+func CheckManagedLinuxPython() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", errors.New("managed Linux Python admission is available only on linux")
+	}
+	return installedPythonInterpreter()
+}
 
 // ParseHeader decodes the 8-byte policy blob header (big-endian).
 func ParseHeader(data []byte) (*PolicyHeader, error) {
@@ -107,11 +159,8 @@ func ParseHeader(data []byte) (*PolicyHeader, error) {
 
 // Service manages policy compilation, signing, and distribution to edge devices.
 //
-// Design note -- a single OTA signing key (DCLAW_OTA_KEY) is used for both
-// policy blob signatures and emergency broadcast signatures. The fleet
-// manager is the sole issuer of both message types, so a single symmetric
-// HMAC key is sufficient. The 64-byte signature field reserves space for
-// Ed25519 when non-repudiation is needed.
+// OTA policy and emergency commands use independent 32-byte HMAC secrets.
+// The 64-byte signature field carries a 32-byte HMAC followed by zero padding.
 type Service struct {
 	store  PolicyStore
 	signer Signer
@@ -121,7 +170,7 @@ type Service struct {
 	emergencySigner Signer
 
 	// compilerPath is the path to the Python policy_compiler.py script.
-	// If empty, Compile() will return an error.
+	// An empty config value selects a trusted compiler shipped with the gateway.
 	compilerPath string
 
 	// emergencySeq tracks the next emergency broadcast sequence number.
@@ -130,14 +179,27 @@ type Service struct {
 	mu           sync.Mutex
 	emergencySeq uint32
 
-	emergencyMu sync.Mutex
+	emergencyMu  sync.Mutex
+	emergencyErr error
+
+	policyReplayMu sync.Mutex
+	policyReplays  map[string]policyReplayAttempt
+}
+
+type policyReplayAttempt struct {
+	version  uint32
+	at       time.Time
+	inFlight bool
 }
 
 // Config holds configuration for the policy Service.
 type Config struct {
 	// CompilerPath is the path to the Python policy_compiler.py.
-	// Defaults to "edge-connector/tools/policy_compiler.py".
+	// Empty selects a trusted source or installed compiler.
 	CompilerPath string
+	// EmergencyKeyHex is the independent hex-encoded emergency HMAC secret.
+	// Empty resolves DCLAW_EMERGENCY_KEY.
+	EmergencyKeyHex string
 
 	// Logger for policy operations. Defaults to log.Default().
 	Logger *log.Logger
@@ -148,11 +210,12 @@ type Config struct {
 // policy store to guarantee monotonically increasing values across restarts.
 func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Config) *Service {
 	s := &Service{
-		store:        store,
-		signer:       signer,
-		client:       client,
-		compilerPath: "edge-connector/tools/policy_compiler.py",
-		logger:       log.Default(),
+		store:         store,
+		signer:        signer,
+		client:        client,
+		compilerPath:  defaultCompilerPath(),
+		logger:        log.Default(),
+		policyReplays: make(map[string]policyReplayAttempt),
 	}
 	if cfg != nil {
 		if cfg.CompilerPath != "" {
@@ -168,22 +231,23 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		s.logger.Printf("[policy] WARNING: compiler path validation failed: %v — Compile() will re-validate at call time", err)
 	}
 
-	if os.Getenv("DCLAW_EMERGENCY_KEY") != "" {
-		emergencySigner, err := NewEmergencySignerFromEnv()
-		if err != nil {
-			s.logger.Printf("[policy] WARNING: failed to load emergency signer: %v — using OTA signer for emergency commands", err)
-			s.emergencySigner = signer
-		} else {
-			s.emergencySigner = emergencySigner
-			s.logger.Printf("[policy] loaded separate emergency signer from DCLAW_EMERGENCY_KEY")
-		}
+	emergencyKeyHex := ""
+	if cfg != nil {
+		emergencyKeyHex = cfg.EmergencyKeyHex
+	}
+	emergencySigner, err := NewEmergencySignerFromKeyHex(emergencyKeyHex)
+	if err != nil {
+		s.logger.Printf("[policy] WARNING: emergency signer unavailable: %v", err)
+	} else if otaSigner, ok := signer.(*HMACSigner); ok && otaSigner != nil && bytes.Equal(otaSigner.key, emergencySigner.key) {
+		s.logger.Printf("[policy] WARNING: emergency signer unavailable: DCLAW_EMERGENCY_KEY must differ from DCLAW_OTA_HMAC_KEY")
 	} else {
-		s.emergencySigner = signer
+		s.emergencySigner = emergencySigner
 	}
 
 	if store != nil {
 		if seq, err := store.GetEmergencySeq(); err != nil {
-			s.logger.Printf("[policy] WARNING: failed to load emergency sequence from store: %v (starting from 0)", err)
+			s.emergencyErr = fmt.Errorf("load durable emergency sequence: %w", err)
+			s.logger.Printf("[policy] ERROR: %v — emergency commands disabled", s.emergencyErr)
 		} else if seq > 0 {
 			s.emergencySeq = seq
 			s.logger.Printf("[policy] loaded emergency sequence %d from store", seq)
@@ -214,15 +278,179 @@ func validateCompilerPath(path string) error {
 	}
 
 	if !isUnderAllowedDir(abs) {
-		return fmt.Errorf("compiler path %q is not under an allowed directory (/usr/local/lib/defenseclaw/ or $HOME/.defenseclaw/)", abs)
+		return fmt.Errorf("compiler path %q is not under an allowed directory (/usr/local/lib/defenseclaw/, $HOME/.defenseclaw/, $DEFENSECLAW_HOME/, or the running source checkout)", abs)
 	}
 
-	// Must be owned by root or current user
 	return nil
 }
 
-// isUnderAllowedDir checks that the resolved absolute path is under one of
-// the trusted directories: /usr/local/lib/defenseclaw/ or $HOME/.defenseclaw/.
+// sourceCompilerPath returns the one compiler beside a gateway built in the
+// repository root. It does not trust a compiler merely because cwd points at
+// a source tree, which would let an installed gateway execute arbitrary code.
+func sourceCompilerPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return ""
+	}
+	root := filepath.Dir(exe)
+	if !trustedCompilerFile(exe, root) {
+		return ""
+	}
+	module, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil || !bytes.HasPrefix(module, []byte("module github.com/defenseclaw/defenseclaw\n")) {
+		return ""
+	}
+	candidate := filepath.Join(root, "edge-connector", "tools", "policy_compiler.py")
+	if !trustedCompilerFile(candidate, root) {
+		return ""
+	}
+	return candidate
+}
+
+// trustedCompilerFile rejects symlinks and group/other-writable components.
+// For a checkout, stop at its executable directory; for an installed path,
+// stop at the installation prefix (both are checked separately below).
+func trustedCompilerFile(path, base string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != filepath.Clean(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || writableByOthers(info) {
+		return false
+	}
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() || writableByOthers(info) {
+			return false
+		}
+		if dir == base {
+			return true
+		}
+		if dir == filepath.Dir(dir) {
+			return false
+		}
+	}
+}
+
+// Unix permission bits are not a faithful representation of Windows ACLs.
+func writableByOthers(info os.FileInfo) bool {
+	return runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0
+}
+
+// pythonForCompiler uses the installer's pinned Python environment for the
+// bundled per-user compiler. Source and system packages use system Python.
+func pythonForCompiler(compilerPath string) (string, error) {
+	if homeCompiler := homeInstallerCompilerPath(); homeCompiler != "" && compilerPath == homeCompiler {
+		home := homeInstallerRoot()
+		interpreter := filepath.Join(home, ".venv", "bin", "python")
+		if runtime.GOOS == "windows" {
+			interpreter = filepath.Join(home, ".venv", "Scripts", "python.exe")
+		}
+		resolved, err := filepath.EvalSymlinks(interpreter)
+		if err != nil || !trustedDirectory(filepath.Dir(interpreter), home) ||
+			!trustedCompilerFile(resolved, filepath.VolumeName(resolved)+string(filepath.Separator)) {
+			return "", fmt.Errorf("trusted policy compiler Python interpreter unavailable at %s", interpreter)
+		}
+		return interpreter, nil
+	}
+	// Source checkouts and unmanaged raw archives use the developer's Python.
+	// Managed installations use a fixed admitted interpreter, never PATH.
+	if !managedCompilerRuntime() {
+		return "python3", nil
+	}
+	return installedPythonInterpreter()
+}
+
+func managedCompilerRuntime() bool {
+	return managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) || managed.IsStandaloneManagedHost()
+}
+
+func trustedDirectory(dir, base string) bool {
+	for ; ; dir = filepath.Dir(dir) {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil || resolved != dir {
+			return false
+		}
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() || writableByOthers(info) {
+			return false
+		}
+		if dir == base {
+			return true
+		}
+		if dir == filepath.Dir(dir) {
+			return false
+		}
+	}
+}
+
+// homeInstallerRoot resolves the same per-user data directory used by config
+// loading. A daemon launched without DEFENSECLAW_HOME still finds the
+// installer under the user's default ~/.defenseclaw directory.
+func homeInstallerRoot() string {
+	home := config.DefaultDataPath()
+	if !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Clean(home)
+}
+
+// homeInstallerCompilerPath identifies the compiler atomically installed with
+// the per-user gateway. It is accepted only under the actual private home.
+func homeInstallerCompilerPath() string {
+	home := homeInstallerRoot()
+	if home == "" {
+		return ""
+	}
+	candidate := filepath.Join(home, "installer", "policy_compiler.py")
+	if !trustedCompilerFile(candidate, home) {
+		return ""
+	}
+	return candidate
+}
+
+// defaultCompilerPath selects the compiler shipped with the source build,
+// installed under DEFENSECLAW_HOME, or installed beside the gateway prefix.
+func defaultCompilerPath() string {
+	if !managedCompilerRuntime() {
+		if source := sourceCompilerPath(); source != "" {
+			return source
+		}
+		if homeCompiler := homeInstallerCompilerPath(); homeCompiler != "" {
+			return homeCompiler
+		}
+	}
+	for _, candidate := range installedCompilerPaths() {
+		if trustedCompilerFile(candidate, filepath.Dir(filepath.Dir(filepath.Dir(candidate)))) {
+			return candidate
+		}
+	}
+	return installedCompilerPath
+}
+
+// installedCompilerPaths includes only compiler locations under the running
+// executable's own installation prefix.
+func installedCompilerPaths() []string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			prefix := filepath.Dir(filepath.Dir(resolved))
+			paths := make([]string, 0, 2)
+			for _, libdir := range []string{"lib", "lib64"} {
+				paths = append(paths, filepath.Join(prefix, libdir, "defenseclaw", "policy_compiler.py"))
+			}
+			return paths
+		}
+	}
+	return nil
+}
+
+// isUnderAllowedDir checks the resolved path against installed/home locations
+// and the exact compiler beside the running source-checkout gateway binary.
 func isUnderAllowedDir(abs string) bool {
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
@@ -232,9 +460,31 @@ func isUnderAllowedDir(abs string) bool {
 	if err != nil {
 		return false
 	}
+	if !managedCompilerRuntime() {
+		if source := sourceCompilerPath(); source != "" {
+			if resolvedSource, err := filepath.EvalSymlinks(source); err == nil && absPath == resolvedSource {
+				return true
+			}
+		}
+		if homeCompiler := homeInstallerCompilerPath(); homeCompiler != "" && absPath == homeCompiler {
+			return true
+		}
+	}
+	for _, installed := range installedCompilerPaths() {
+		base := filepath.Dir(filepath.Dir(filepath.Dir(installed)))
+		if trustedCompilerFile(installed, base) && absPath == installed {
+			return true
+		}
+	}
+	if managedCompilerRuntime() {
+		return false
+	}
 
 	allowed := []string{
 		"/usr/local/lib/defenseclaw/",
+		"/usr/local/lib64/defenseclaw/",
+		"/usr/lib/defenseclaw/",
+		"/usr/lib64/defenseclaw/",
 	}
 
 	if home, err := os.UserHomeDir(); err == nil {
@@ -269,12 +519,15 @@ func isUnderAllowedDir(abs string) bool {
 //
 // Returns the raw binary blob (header + payload, no signature).
 func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]byte, error) {
+	if version == 0 || version > maxPolicyVersion {
+		return nil, ErrPolicyVersionExhausted
+	}
 	if s.compilerPath == "" {
 		return nil, errors.New("policy compiler path not configured")
 	}
 
 	if len(yamlBytes) > 65536 {
-		return nil, fmt.Errorf("policy YAML exceeds maximum size of 64KB")
+		return nil, ErrPolicyTooLarge
 	}
 
 	// Validate profile
@@ -282,7 +535,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	case "minimal", "standard", "edge":
 		// ok
 	default:
-		return nil, fmt.Errorf("unknown profile %q: must be minimal, standard, or edge", profile)
+		return nil, fmt.Errorf("%w: unknown profile %q: must be minimal, standard, or edge", ErrInvalidPolicy, profile)
 	}
 
 	absPath, err := filepath.Abs(s.compilerPath)
@@ -302,6 +555,10 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	if !isUnderAllowedDir(absPath) {
 		return nil, fmt.Errorf("compiler path %q is not under an allowed directory", absPath)
 	}
+	python, err := pythonForCompiler(absPath)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create temp directory for compiler I/O
 	tmpDir, err := makeTempDir()
@@ -319,7 +576,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", s.compilerPath,
+	cmd := exec.CommandContext(ctx, python, "-I", s.compilerPath,
 		"--input", filepath.Base(inputPath),
 		"--profile", profile,
 		"--version", fmt.Sprintf("%d", version),
@@ -335,6 +592,10 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 65 {
+			return nil, fmt.Errorf("%w: policy compiler rejected input: %s", ErrMalformedPolicy, output)
+		}
 		return nil, fmt.Errorf("policy compiler failed: %w\noutput: %s", err, output)
 	}
 
@@ -407,7 +668,7 @@ func (s *Service) Sign(policyBin []byte) ([]byte, error) {
 	}
 
 	if s.signer == nil {
-		return nil, errors.New("policy signer not configured — set DCLAW_OTA_KEY")
+		return nil, errors.New("policy signer not configured — set DCLAW_OTA_HMAC_KEY")
 	}
 	sig, err := s.signer.Sign(policyBin)
 	if err != nil {
@@ -464,24 +725,31 @@ func (s *Service) Distribute(ctx context.Context, tenantID, fleetID uint64, sign
 //	[9]     scope       uint8   (0 = fleet-wide)
 //	[10:42] payload     [32]byte (zeros for now)
 //	[42:44] _reserved   [2]byte
-//	[44:108] signature  [64]byte (HMAC-SHA256 in first 32, zero-padded)
+//	[44:48]  prior sequence in this fleet (uint32 big-endian)
+//	[48:112] signature [64]byte (HMAC-SHA256 in first 32, zero-padded)
 func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uint64, cmd EmergencyCommand) error {
 	if s.client == nil {
 		return errors.New("MQTT not configured")
 	}
+	if s.store == nil {
+		return errors.New("policy store not configured for durable emergency delivery")
+	}
 	if s.emergencySigner == nil {
-		return errors.New("emergency signer not configured — set DCLAW_OTA_KEY or DCLAW_EMERGENCY_KEY")
+		return errors.New("emergency signer not configured — set DCLAW_EMERGENCY_KEY")
 	}
 
 	s.emergencyMu.Lock()
 	defer s.emergencyMu.Unlock()
+	if s.emergencyErr != nil {
+		return s.emergencyErr
+	}
 
 	if s.emergencySeq == ^uint32(0) {
 		return errors.New("emergency sequence counter exhausted (uint32 overflow)")
 	}
 	seq := s.emergencySeq + 1
 
-	// Build the message: 44 bytes of data + 64-byte signature field = 108 bytes.
+	// Build the message: 48 bytes of data + 64-byte signature field = 112 bytes.
 	// The signature field holds 32 bytes of HMAC-SHA256 followed by 32 bytes of
 	// zero padding, matching the C-side dclaw_emergency_msg_t which reserves a
 	// 64-byte Ed25519 signature field.
@@ -499,12 +767,21 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	// Scope: 0 = fleet-wide
 	msg[9] = 0
 
-	// Payload [10:42] and reserved [42:44] are zero-filled
+	// Payload [10:42] and reserved [42:44] are zero-filled. A signed
+	// predecessor links this command to the previous one in its fleet, so a
+	// device cannot miss BLOCK_ALL then accept a later FORCE_SYNC.
+	previous, err := s.store.GetLastEmergency(tenantID, fleetID)
+	if err != nil {
+		return fmt.Errorf("read emergency predecessor: %w", err)
+	}
+	if previous != nil {
+		binary.BigEndian.PutUint32(msg[44:48], previous.Sequence)
+	}
 
-	// Sign the first 44 bytes of the emergency message (everything before
-	// the 64-byte signature field). The C verifier passes exactly msg[0:44]
+	// Sign the first 48 bytes of the emergency message (everything before
+	// the 64-byte signature field). The C verifier passes exactly msg[0:48]
 	// to verify_emergency_signature(), so the HMAC input MUST match.
-	sig, err := s.emergencySigner.Sign(msg[:44])
+	sig, err := s.emergencySigner.Sign(msg[:48])
 	if err != nil {
 		return fmt.Errorf("sign emergency msg: %w", err)
 	}
@@ -514,18 +791,16 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	if len(sig) < n {
 		n = len(sig)
 	}
-	copy(msg[44:44+n], sig[:n])
+	copy(msg[48:48+n], sig[:n])
 
-	// Bytes 76-108 are zero-padded (reserved for Ed25519 signature).
+	// Bytes 80-112 are zero-padded (reserved for Ed25519 signature).
 
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
 
-	s.emergencySeq = seq
-	if s.store != nil {
-		if err := s.store.SetEmergencySeq(seq); err != nil {
-			s.logger.Printf("[policy] WARNING: failed to persist emergency sequence %d: %v", seq, err)
-		}
+	if err := s.store.SaveEmergency(tenantID, fleetID, seq, msg); err != nil {
+		return fmt.Errorf("persist emergency sequence %d and command: %w", seq, err)
 	}
+	s.emergencySeq = seq
 
 	if err := s.client.Publish(ctx, topic, 1, msg); err != nil {
 		return fmt.Errorf("MQTT publish emergency to %s: %w", topic, err)
@@ -535,11 +810,85 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	return nil
 }
 
+// ReplayLatestForDevice repairs a clean-session device's missed OTA messages.
+// A broker PUBACK confirms only broker receipt. The signed heartbeat reports
+// the device's installed policy version and durable last emergency sequence.
+// At most 32 emergency commands are sent per call; subsequent heartbeats
+// request the next page after the device has actually applied those commands.
+func (s *Service) ReplayLatestForDevice(ctx context.Context, tenantID, fleetID uint64, devicePolicyVersion uint16, deviceEmergencySeq uint32) (uint32, error) {
+	if s.store == nil || s.client == nil {
+		return deviceEmergencySeq, nil
+	}
+	latest, err := s.store.GetLatestPolicy(tenantID, fleetID)
+	if err != nil {
+		return deviceEmergencySeq, fmt.Errorf("read latest policy for replay: %w", err)
+	}
+	if latest != nil && latest.Version > uint32(devicePolicyVersion) && s.beginPolicyReplay(tenantID, fleetID, latest.Version) {
+		published := false
+		defer func() { s.completePolicyReplay(tenantID, fleetID, latest.Version, published) }()
+		if len(latest.PolicyBin) < HeaderSize || len(latest.Signature) != 64 {
+			return deviceEmergencySeq, fmt.Errorf("stored policy version %d has invalid signed content", latest.Version)
+		}
+		hdr, err := ParseHeader(latest.PolicyBin)
+		if err != nil || uint32(hdr.Version) != latest.Version {
+			return deviceEmergencySeq, fmt.Errorf("stored policy version %d has mismatched header", latest.Version)
+		}
+		signed := make([]byte, 0, len(latest.PolicyBin)+len(latest.Signature))
+		signed = append(signed, latest.PolicyBin...)
+		signed = append(signed, latest.Signature...)
+		if err := s.Distribute(ctx, tenantID, fleetID, signed); err != nil {
+			return deviceEmergencySeq, fmt.Errorf("replay policy version %d: %w", latest.Version, err)
+		}
+		published = true
+		s.logger.Printf("[policy] replayed version=%d for lagging device (reported=%d)", latest.Version, devicePolicyVersion)
+	}
+	records, err := s.store.GetEmergenciesAfter(tenantID, fleetID, deviceEmergencySeq, 32)
+	if err != nil {
+		return deviceEmergencySeq, fmt.Errorf("read emergency history for replay: %w", err)
+	}
+	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
+	lastPublished := deviceEmergencySeq
+	for _, record := range records {
+		if err := s.client.Publish(ctx, topic, 1, record.Message); err != nil {
+			return lastPublished, fmt.Errorf("replay emergency sequence %d: %w", record.Sequence, err)
+		}
+		lastPublished = record.Sequence
+		s.logger.Printf("[policy] replayed emergency seq=%d to %s", record.Sequence, topic)
+	}
+	return lastPublished, nil
+}
+
+// One stale or compromised device can otherwise force a fleet-wide policy
+// broadcast for every signed registration with increasing uptime. A new
+// version bypasses the cooldown, while retries after a publish failure do too.
+func (s *Service) beginPolicyReplay(tenantID, fleetID uint64, version uint32) bool {
+	key := fleetKey(tenantID, fleetID)
+	s.policyReplayMu.Lock()
+	defer s.policyReplayMu.Unlock()
+	last := s.policyReplays[key]
+	if last.version == version && (last.inFlight || time.Since(last.at) < 30*time.Second) {
+		return false
+	}
+	s.policyReplays[key] = policyReplayAttempt{version: version, inFlight: true}
+	return true
+}
+
+func (s *Service) completePolicyReplay(tenantID, fleetID uint64, version uint32, published bool) {
+	key := fleetKey(tenantID, fleetID)
+	s.policyReplayMu.Lock()
+	defer s.policyReplayMu.Unlock()
+	if !published {
+		delete(s.policyReplays, key)
+		return
+	}
+	s.policyReplays[key] = policyReplayAttempt{version: version, at: time.Now()}
+}
+
 // CompileSignAndStore is a convenience method that compiles a YAML policy,
 // signs it, stores the result, and returns the signed blob ready for distribution.
 func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID, fleetID uint64) ([]byte, uint32, error) {
 	if s.signer == nil {
-		return nil, 0, errors.New("policy signer not configured — set DCLAW_OTA_KEY")
+		return nil, 0, errors.New("policy signer not configured — set DCLAW_OTA_HMAC_KEY")
 	}
 
 	// Determine version from latest stored policy
@@ -550,6 +899,9 @@ func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID
 
 	var version uint32 = 1
 	if latest != nil {
+		if latest.Version >= maxPolicyVersion {
+			return nil, 0, ErrPolicyVersionExhausted
+		}
 		version = latest.Version + 1
 	}
 

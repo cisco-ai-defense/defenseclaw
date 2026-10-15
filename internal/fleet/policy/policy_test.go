@@ -19,7 +19,9 @@ package policy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -39,6 +41,33 @@ type mockMsg struct {
 	Topic   string
 	Payload []byte
 	QoS     byte
+}
+
+type faultyEmergencySeqStore struct {
+	PolicyStore
+	readErr  error
+	writeErr error
+}
+
+func (s *faultyEmergencySeqStore) GetEmergencySeq() (uint32, error) {
+	if s.readErr != nil {
+		return 0, s.readErr
+	}
+	return s.PolicyStore.GetEmergencySeq()
+}
+
+func (s *faultyEmergencySeqStore) SetEmergencySeq(seq uint32) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	return s.PolicyStore.SetEmergencySeq(seq)
+}
+
+func (s *faultyEmergencySeqStore) SaveEmergency(tenantID, fleetID uint64, seq uint32, message []byte) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	return s.PolicyStore.SaveEmergency(tenantID, fleetID, seq, message)
 }
 
 func (m *mockMQTTClient) Connect(_ context.Context) error {
@@ -143,20 +172,25 @@ func TestHMACSignerEmptyKeyRejected(t *testing.T) {
 	}
 }
 
-func TestHMACSignerFromEnvDevFallback(t *testing.T) {
-	// Without DCLAW_OTA_KEY set, should use dev fallback (all-zero key)
-	signer, err := NewHMACSignerFromEnv()
-	if err != nil {
-		t.Fatal(err)
+func TestHMACSignerRequiresDedicatedNonzeroSecret(t *testing.T) {
+	t.Setenv("DCLAW_OTA_HMAC_KEY", "")
+	t.Setenv("DCLAW_OTA_KEY", strings.Repeat("aa", 32))
+	if _, err := NewHMACSignerFromEnv(); err == nil {
+		t.Fatal("public Ed25519 key was accepted as OTA HMAC secret")
 	}
-
-	data := []byte("test data")
-	sig, err := signer.Sign(data)
-	if err != nil {
-		t.Fatalf("Sign failed: %v", err)
+	if _, err := NewHMACSigner(make([]byte, 32)); err == nil {
+		t.Fatal("all-zero OTA HMAC secret was accepted")
 	}
-	if err := signer.Verify(data, sig); err != nil {
-		t.Fatalf("Verify failed: %v", err)
+	if _, err := NewHMACSigner(make([]byte, 33)); err == nil {
+		t.Fatal("oversized OTA HMAC secret was accepted")
+	}
+	t.Setenv("DCLAW_OTA_HMAC_KEY", strings.Repeat("ab", 32))
+	if _, err := NewHMACSignerFromEnv(); err != nil {
+		t.Fatalf("dedicated OTA HMAC secret rejected: %v", err)
+	}
+	t.Setenv("DCLAW_EMERGENCY_KEY", "")
+	if _, err := NewEmergencySignerFromEnv(); err == nil {
+		t.Fatal("emergency signer fell back to OTA signer")
 	}
 }
 
@@ -346,9 +380,52 @@ func newTestService() (*Service, *mockMQTTClient, *MemoryPolicyStore) {
 	signer, _ := NewHMACSigner([]byte("test-key-for-unit-tests-32bytes!"))
 
 	svc := NewService(store, signer, mc, &Config{
-		CompilerPath: "", // disable compiler for unit tests
+		CompilerPath:    "", // default compiler is unused by these unit tests
+		EmergencyKeyHex: strings.Repeat("ab", 32),
 	})
 	return svc, mc, store
+}
+
+func TestServiceRejectsSharedOTAAndEmergencySecret(t *testing.T) {
+	key := []byte("test-key-for-unit-tests-32bytes!")
+	signer, err := NewHMACSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(NewMemoryPolicyStore(), signer, &mockMQTTClient{}, &Config{
+		EmergencyKeyHex: fmt.Sprintf("%x", key),
+	})
+	if svc.emergencySigner != nil {
+		t.Fatal("same secret was accepted for OTA and emergency signing")
+	}
+	if err := svc.DistributeEmergency(context.Background(), 1, 1, EmergencyBlockAll); err == nil {
+		t.Fatal("emergency command signed with shared OTA secret")
+	}
+}
+
+func TestEmergencyPublicationRequiresDurableSequence(t *testing.T) {
+	ota, err := NewHMACSigner([]byte("test-key-for-unit-tests-32bytes!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		store PolicyStore
+	}{
+		{"read failure", &faultyEmergencySeqStore{PolicyStore: NewMemoryPolicyStore(), readErr: errors.New("database unreadable")}},
+		{"write failure", &faultyEmergencySeqStore{PolicyStore: NewMemoryPolicyStore(), writeErr: errors.New("disk full")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockMQTTClient{}
+			svc := NewService(tc.store, ota, client, &Config{EmergencyKeyHex: strings.Repeat("ab", 32)})
+			if err := svc.DistributeEmergency(context.Background(), 1, 2, EmergencyBlockAll); err == nil {
+				t.Fatal("emergency command was published without durable sequence")
+			}
+			if len(client.getPublished()) != 0 {
+				t.Fatal("emergency command reached MQTT after persistence failure")
+			}
+		})
+	}
 }
 
 func TestServiceSign(t *testing.T) {
@@ -468,11 +545,11 @@ func TestServiceDistributeEmergency(t *testing.T) {
 		t.Errorf("command = %d, want %d", msg[8], EmergencyBlockAll)
 	}
 
-	if err := svc.signer.Verify(msg[:44], msg[44:76]); err != nil {
+	if err := svc.emergencySigner.Verify(msg[:48], msg[48:80]); err != nil {
 		t.Fatalf("emergency signature verification failed: %v", err)
 	}
 
-	for i := 76; i < 108; i++ {
+	for i := 80; i < EmergencyMsgSize; i++ {
 		if msg[i] != 0 {
 			t.Fatalf("signature padding byte [%d] = %d, want 0", i, msg[i])
 		}

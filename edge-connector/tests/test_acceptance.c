@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <time.h>
+#include <unistd.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
@@ -43,7 +44,7 @@ extern void dclaw_ota_reset_key_state(void);
 
 /*
  * Test OTA key — a known non-zero key used for test signing.
- * Must match the key set via DCLAW_OTA_KEY env var.
+ * Must match the key set via DCLAW_OTA_HMAC_KEY env var.
  */
 static const uint8_t TEST_OTA_KEY[32] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -63,9 +64,7 @@ static uint64_t clock_ns(void) {
 
 /* AC-01: Agent blocks capability sequence [NET_FETCH, EXEC_SHELL] in <5μs */
 static void test_ac01(void) {
-    /* H-6 fix: hostname destinations are blocked when offline. Set online
-     * so the first request (NET_FETCH to api.openai.com) is not blocked by
-     * the SSRF check, allowing the capability sequence test to proceed. */
+    /* A public literal in the allowlist lets the sequence test proceed. */
     dclaw_get_state()->online = true;
 
     dclaw_tool_request_t req1 = {0};
@@ -73,7 +72,7 @@ static void test_ac01(void) {
     dclaw_sha256((const uint8_t *)"curl", 4, req1.tool_hash);
     req1.cap_flags = DCLAW_CAP_NET_FETCH;
     req1.session_id = 100;
-    strncpy(req1.destination, "api.openai.com", DCLAW_DESTINATION_MAX - 1);
+    strncpy(req1.destination, "8.8.8.8", DCLAW_DESTINATION_MAX - 1);
     dclaw_evaluate(&req1);
 
     dclaw_tool_request_t req2 = {0};
@@ -97,7 +96,7 @@ static void test_ac01(void) {
     dclaw_get_state()->online = false;
 }
 
-/* AC-02: Unknown hash with cloud unreachable returns BLOCK */
+/* AC-02: Unknown tool is refused before cached or cloud verdicts */
 static void test_ac02(void) {
     dclaw_tool_request_t req = {0};
     strncpy(req.tool_name, "unknown-tool", DCLAW_TOOL_NAME_MAX - 1);
@@ -106,11 +105,10 @@ static void test_ac02(void) {
     req.session_id = 200;
 
     dclaw_verdict_t v = dclaw_evaluate(&req);
-    /* ACTUATE is sync_block → cloud timeout → BLOCK */
     assert(v.action == DCLAW_ACTION_BLOCK);
-    assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    assert(v.reason == DCLAW_REASON_INVALID_INPUT);
     (void)v;
-    printf("  AC-02 PASS: unknown tool + sync_block cap → BLOCK (cloud_timeout)\n");
+    printf("  AC-02 PASS: unknown tool → BLOCK before cloud\n");
 }
 
 /* AC-03: BLOCK audit entries persist (simulated — flash write verified) */
@@ -163,7 +161,7 @@ static void test_ac05(void) {
 
 /* AC-06: Emergency broadcast with invalid signature rejected */
 static void test_ac06(void) {
-    uint8_t msg[108];
+    uint8_t msg[112];
     memset(msg, 0, sizeof(msg));
     msg[3] = 1; /* sequence = 1 */
     msg[8] = 0x01; /* BLOCK_ALL */
@@ -184,18 +182,11 @@ static void test_ac07(void) {
     blob[0] = 0; blob[1] = 11; /* version=11 */
     blob[2] = 0; blob[3] = 56;
     blob[4] = 0; blob[5] = 3; /* baseline=3 */
+    blob[8] = 0x81; /* explicit severity section; preserve destination defaults */
 
     /* Compute valid signature for the blob using the test OTA key */
     uint8_t sig[64] = {0};
-#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
-    (void)sig; /* mbedTLS path needs real Ed25519 — not testable here */
-    printf("  AC-07 SKIP: Ed25519 signing not available in test harness\n");
-    return;
-#else
-    {
-        dclaw_hmac_sha256(TEST_OTA_KEY, 32, blob, 64, sig);
-    }
-#endif
+    dclaw_hmac_sha256(TEST_OTA_KEY, 32, blob, 64, sig);
 
     int rc = dclaw_apply_policy(blob, 64, sig);
     assert(rc == 0);
@@ -255,7 +246,7 @@ static void test_ac10(void) {
     /* Validated by Python policy compiler test (exits non-zero on oversize).
      * Here verify destination check works (proves tables compiled correctly). */
     extern dclaw_action_t dclaw_policy_check_destination(const char *host);
-    assert(dclaw_policy_check_destination("api.openai.com") == DCLAW_ACTION_ALLOW);
+    assert(dclaw_policy_check_destination("8.8.8.8") == DCLAW_ACTION_ALLOW);
     assert(dclaw_policy_check_destination("evil.com") == DCLAW_ACTION_BLOCK);
     printf("  AC-10 PASS: policy tables compiled correctly (dest check works)\n");
 }
@@ -402,7 +393,11 @@ static void test_ac17_backward_compat(void) {
 
 int main(void) {
     /* Set a real (non-zero) test OTA key for signature verification */
-    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    setenv("DCLAW_OTA_HMAC_KEY", TEST_OTA_KEY_HEX, 1);
+
+    const char *flash_path = getenv("DCLAW_FLASH_PATH");
+    if (flash_path && strstr(flash_path, "flash-acceptance.bin"))
+        unlink(flash_path);
 
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};

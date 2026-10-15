@@ -323,6 +323,8 @@ ACTION_FLEET_ALERT: Final[str]               = "fleet.alert"
 ACTION_FLEET_DEVICE_REREGISTERED: Final[str] = "fleet.device.reregistered"
 ACTION_FLEET_TOKEN_ROTATED: Final[str]       = "fleet.token.rotated"
 ACTION_FLEET_DEVICE_KEY_ROTATED: Final[str]  = "fleet.device.key_rotated"
+ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED: Final[str] = "fleet.device.credential_provision_authorized"
+ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED: Final[str] = "fleet.device.decommission_authorized"
 
 
 ALL_ACTIONS: Final[tuple[str, ...]] = (
@@ -554,6 +556,8 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_FLEET_DEVICE_REREGISTERED,
     ACTION_FLEET_TOKEN_ROTATED,
     ACTION_FLEET_DEVICE_KEY_ROTATED,
+    ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED,
+    ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED,
 )
 
 

@@ -18,6 +18,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestSignedStandaloneTrustRejectsUnsignedOuterSetup(t *testing.T) {
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := verifySignedEnterpriseSetup(file, path); err == nil {
+		t.Fatal("WinVerifyTrust accepted the unsigned Go test image as signed Setup")
+	}
+}
+
 func TestEnterpriseLifecycleArgumentsUsePublicMachineTransaction(t *testing.T) {
 	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
 	opts := enterpriseSetupOptions{
@@ -84,6 +99,7 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 		"--hook-binary", filepath.Join(stage, "defenseclaw-hook.exe"),
 		"--sensor-helper-binary", filepath.Join(stage, "defenseclaw-sensor-helper.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),
+		"--policy-compiler", filepath.Join(stage, "policy_compiler.py"),
 		"--config", `C:\staging\config.yaml`,
 		// --bootstrap-parent is unconditional post-#839 (Authenticode-
 		// aware trailer reader + protected bootstrap parent): the

@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -7226,18 +7226,18 @@
     {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
-      "purpose": "Fleet management API bearer token (hex-encoded).",
+      "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",
       "default": "",
       "accepted_values": [
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/gateway/sidecar.go",
-          "description": "Fleet API bearer token"
+          "location": "internal/fleet/api.go",
+          "description": "Fleet API authentication reader"
         }
       ],
       "since": "1.1.0"
@@ -7251,12 +7251,12 @@
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/gateway/sidecar.go",
-          "description": "Tenant-scoped bearer tokens"
+          "location": "internal/fleet/api.go",
+          "description": "Fleet API authentication reader"
         }
       ],
       "since": "1.1.0"
@@ -7270,7 +7270,7 @@
         "string"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
@@ -7289,7 +7289,7 @@
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
@@ -7308,7 +7308,7 @@
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
@@ -7319,39 +7319,24 @@
       "since": "1.1.0"
     },
     {
-      "name": "DCLAW_OTA_KEY",
+      "name": "DCLAW_EMERGENCY_KEY",
       "category": "fleet",
-      "purpose": "OTA policy signing key (hex-encoded, 32 bytes).",
+      "purpose": "Separate nonzero 32-byte hex HMAC key required for emergency commands and lockdown release; no OTA-key fallback.",
       "default": "",
       "accepted_values": [
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
           "location": "internal/fleet/policy/signer.go",
-          "description": "OTA policy signing key"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DCLAW_EMERGENCY_KEY",
-      "category": "fleet",
-      "purpose": "Emergency command signing key (hex-encoded, 32 bytes). Falls back to DCLAW_OTA_KEY.",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": true,
-      "managed": "allow",
-      "consumers": [
+          "description": "Sign emergency commands with separate HMAC secret"
+        },
         {
-          "location": "internal/fleet/policy/policy.go",
-          "description": "Emergency command signing key"
+          "location": "edge-connector/src/comms/ota_receiver.c",
+          "description": "Verify emergency commands"
         }
       ],
       "since": "1.1.0"
@@ -7365,12 +7350,16 @@
         "string"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
           "location": "internal/fleet/mqtt/bridge.go",
           "description": "Device HMAC signing key"
+        },
+        {
+          "location": "edge-connector/src/comms/verdict_protocol.c",
+          "description": "Device verdict HMAC key"
         }
       ],
       "since": "1.1.0"
@@ -7384,7 +7373,7 @@
         "string"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
@@ -7397,18 +7386,20 @@
     {
       "name": "DCLAW_PRODUCTION",
       "category": "fleet",
-      "purpose": "Enable production mode (reject zero keys, require TLS).",
+      "purpose": "Force production Fleet MQTT security checks when set to 1 or true; production checks are already the default.",
       "default": "",
       "accepted_values": [
-        "string"
+        "1",
+        "true",
+        "unset"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/fleet/mqtt/broker.go",
-          "description": "Production mode flag"
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Production key requirements"
         }
       ],
       "since": "1.1.0"
@@ -7416,265 +7407,449 @@
     {
       "name": "DCLAW_DEV_MODE",
       "category": "fleet",
-      "purpose": "Enable development mode (relaxed key requirements). Inverse of DCLAW_PRODUCTION.",
+      "purpose": "On unmanaged hosts only, ON explicitly enables legacy development Fleet MQTT behavior; unset defaults to production checks. C has a separate compile-time option of the same name.",
       "default": "",
       "accepted_values": [
-        "string"
+        "ON",
+        "unset"
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
-      "managed": "allow",
+      "managed": "ignore",
       "consumers": [
         {
-          "location": "internal/fleet/mqtt/broker.go",
-          "description": "Development mode flag"
+          "location": "internal/fleet/mqtt/bridge.go",
+          "description": "Development mode for bridge"
         }
       ],
       "since": "1.1.0"
     },
     {
-      "name": "DCLAW_ALLOW_KEY_OVER_HTTP",
+      "name": "DCLAW_AUDIT_KEY",
       "category": "fleet",
-      "purpose": "Allow device key delivery over plaintext HTTP (testing only).",
+      "purpose": "Nonzero 32-byte hex HMAC key for signed local audit records.",
       "default": "",
       "accepted_values": [
-        "string"
+        "64-hex-chars"
       ],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/fleet/api.go",
-          "description": "Allow key rotation over HTTP"
+          "location": "edge-connector/src/persist/audit_ring.c",
+          "description": "Runtime environment reader"
         }
       ],
       "since": "1.1.0"
     },
     {
-      "name": "DCLAW_TRUST_PROXY_HEADERS",
+      "name": "DCLAW_BROKER_URL",
       "category": "fleet",
-      "purpose": "Trust X-Forwarded-Proto from reverse proxies.",
+      "purpose": "Device MQTT broker URL; use mqtts:// and a trusted CA in production.",
       "default": "",
       "accepted_values": [
-        "string"
+        "mqtt://host:port, mqtts://host:port"
       ],
       "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/persist/config_store.c",
+          "description": "Device MQTT broker URL"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_CA_CERT_PATH",
+      "category": "fleet",
+      "purpose": "Path to a PEM CA certificate used to verify the MQTT broker in production.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "MQTT broker certificate verification"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_CRL_PATH",
+      "category": "fleet",
+      "purpose": "Optional certificate revocation list for edge MQTT TLS peer validation; an explicit unreadable or invalid CRL aborts TLS initialization.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_CERT_PATH",
+      "category": "fleet",
+      "purpose": "Path to the edge device client TLS certificate.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_ID",
+      "category": "fleet",
+      "purpose": "Numeric edge device identifier assigned by Fleet registration.",
+      "default": "",
+      "accepted_values": [
+        "uint64"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_DEVICE_KEY_PATH",
+      "category": "fleet",
+      "purpose": "Path to the edge device client TLS private key.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLASH_PATH",
+      "category": "fleet",
+      "purpose": "Override path to edge device emulated flash storage.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_API_URL",
+      "category": "fleet",
+      "purpose": "Fleet API URL used by the remote device installer.",
+      "default": "",
+      "accepted_values": [
+        "URL"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_edge_install.py",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_FLEET_ID",
+      "category": "fleet",
+      "purpose": "Numeric Fleet identifier assigned to the edge device.",
+      "default": "",
+      "accepted_values": [
+        "uint32"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_ALLOWED_GID",
+      "category": "fleet",
+      "purpose": "Allowed local group ID for the edge IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "integer"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        },
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_ALLOWED_UID",
+      "category": "fleet",
+      "purpose": "Allowed local user ID for the edge IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "integer"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        },
+        {
+          "location": "edge-connector/src/platform/hal_linux.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_IPC_SOCKET_PATH",
+      "category": "fleet",
+      "purpose": "Path of the edge connector Unix IPC socket.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_OTA_HMAC_KEY",
+      "category": "fleet",
+      "purpose": "Explicit nonzero 32-byte hex shared secret for OTA policy HMAC; C production also requires DCLAW_ALLOW_HMAC_OTA=ON at build time.",
+      "default": "",
+      "accepted_values": [
+        "64-hex-chars"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/policy/signer.go",
+          "description": "Sign OTA policies with the explicit secret"
+        },
+        {
+          "location": "edge-connector/src/comms/ota_receiver.c",
+          "description": "Verify HMAC OTA policies"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_REQUIRE_TLS",
+      "category": "fleet",
+      "purpose": "Require TLS for the Go Fleet MQTT client.",
+      "default": "",
+      "accepted_values": [
+        "1, unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/paho_client.go",
+          "description": "Go Fleet MQTT TLS requirement"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_STRICT_MODE",
+      "category": "fleet",
+      "purpose": "Require strict edge connector behavior on policy and verdict failures.",
+      "default": "",
+      "accepted_values": [
+        "0, 1"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/dclaw_core.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TENANT_ID",
+      "category": "fleet",
+      "purpose": "Numeric Fleet tenant identifier assigned to the edge device.",
+      "default": "",
+      "accepted_values": [
+        "uint16"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "edge-connector/src/main.c",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CA_CERT",
+      "category": "fleet",
+      "purpose": "CA certificate path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CLIENT_CERT",
+      "category": "fleet",
+      "purpose": "Client certificate path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_CLIENT_KEY",
+      "category": "fleet",
+      "purpose": "Client private-key path for the active Go Fleet MQTT TLS client.",
+      "default": "",
+      "accepted_values": [
+        "path"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Runtime environment reader"
+        }
+      ],
+      "since": "1.1.0"
+    },
+    {
+      "name": "DCLAW_TLS_INSECURE",
+      "category": "fleet",
+      "purpose": "Development-only switch to allow TLS without a trusted CA; rejected by production C builds.",
+      "default": "",
+      "accepted_values": [
+        "1, unset"
+      ],
+      "security_impact": "high",
       "surface_in_doctor": true,
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/fleet/api.go",
-          "description": "Trust X-Forwarded-* headers"
+          "location": "edge-connector/src/comms/tls_engine.c",
+          "description": "Development TLS certificate verification override"
         }
       ],
       "since": "1.1.0"
     },
     {
-      "name": "DEFENSECLAW_TRAINING_ALGORITHM",
-      "category": "debug",
-      "purpose": "GRPO training algorithm",
+      "name": "DCLAW_TLS_SKIP_VERIFY",
+      "category": "fleet",
+      "purpose": "Skip Go Fleet MQTT broker certificate verification only in explicit unmanaged development mode; production and managed hosts enforce verification.",
       "default": "",
       "accepted_values": [
-        "string"
+        "1, unset"
       ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_BACKEND",
-      "category": "debug",
-      "purpose": "Training compute backend",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_CATEGORY",
-      "category": "debug",
-      "purpose": "Guardrail category for training",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_GROUP_SIZE",
-      "category": "debug",
-      "purpose": "GRPO group size",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_KL_COEF",
-      "category": "debug",
-      "purpose": "KL divergence coefficient",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_LORA_RANK",
-      "category": "debug",
-      "purpose": "LoRA adapter rank",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_MAX_GEN_LENGTH",
-      "category": "debug",
-      "purpose": "Maximum generation token length",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_MAX_STEPS",
-      "category": "debug",
-      "purpose": "Maximum training steps",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_MEMORY_MODE",
-      "category": "debug",
-      "purpose": "GPU memory optimization mode",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_POLICY_GGUF",
-      "category": "debug",
-      "purpose": "GGUF model path for policy training",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
-        }
-      ],
-      "since": "1.1.0"
-    },
-    {
-      "name": "DEFENSECLAW_TRAINING_REWARD_FUNCS",
-      "category": "debug",
-      "purpose": "Comma-separated reward functions",
-      "default": "",
-      "accepted_values": [
-        "string"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_training.py",
-          "description": "Training subprocess env"
+          "location": "internal/fleet/mqtt/tls_config.go",
+          "description": "Active MQTT TLS certificate verification override"
         }
       ],
       "since": "1.1.0"

@@ -181,6 +181,7 @@ archives:
       - README*
       - CHANGELOG.md
       - packaging/**/*
+      - edge-connector/tools/policy_compiler.py
 
   # Standalone managed-enterprise payload for Linux and macOS: extract as
   # root and run `sudo ./defenseclaw-gateway enterprise <linux|macos> install
@@ -201,6 +202,7 @@ archives:
       - README*
       - CHANGELOG.md
       - packaging/**/*
+      - edge-connector/tools/policy_compiler.py
 
   - id: windows-amd64
     # The GUI-subsystem hook ships beside the x64 gateway so installers stage
@@ -219,6 +221,7 @@ archives:
       - README*
       - CHANGELOG.md
       - packaging/**/*
+      - edge-connector/tools/policy_compiler.py
 
 # Standalone managed-enterprise Linux packages. The maintainer scripts call
 # the lifecycle (`enterprise linux ensure --from-package`), which renders the
@@ -254,6 +257,10 @@ nfpms:
         dependencies:
           - systemd >= 239
     contents:
+      - src: edge-connector/tools/policy_compiler.py
+        dst: /opt/defenseclaw/lib/defenseclaw/policy_compiler.py
+        file_info:
+          mode: 0644
       - src: packaging/systemd/defenseclaw-gateway.service
         dst: /usr/lib/systemd/system/defenseclaw-gateway.service
       - src: packaging/systemd/defenseclaw-gateway-api.socket

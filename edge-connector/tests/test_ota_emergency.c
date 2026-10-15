@@ -23,12 +23,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
 extern void dclaw_canary_tick(void);
+extern void dclaw_canary_tick_at(uint64_t now_ms);
 extern void dclaw_canary_record_block(void);
 extern void dclaw_policy_rollback(void);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
+extern uint32_t dclaw_load_lockdown_release_seq(void);
+extern int dclaw_store_lockdown_release_seq(uint32_t seq);
+extern uint32_t dclaw_boot_counter_get(void);
+extern int dclaw_boot_counter_advance(void);
+extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
 
 /* Helper: build a valid policy blob with correct header */
 static void make_policy_blob(uint8_t *blob, size_t *len, uint16_t version,
@@ -41,12 +48,13 @@ static void make_policy_blob(uint8_t *blob, size_t *len, uint16_t version,
     blob[4] = (uint8_t)(canary_baseline >> 8);
     blob[5] = (uint8_t)canary_baseline;
     blob[6] = 0; blob[7] = 0;
+    blob[8] = 0x87; /* explicit severity/sequence/destination sections */
     *len = 64;
 }
 
 /*
  * Test OTA key — a known non-zero key used for test signing.
- * Set as DCLAW_OTA_KEY env var in hex before tests run.
+ * Set as DCLAW_OTA_HMAC_KEY env var in hex before tests run.
  */
 static const uint8_t TEST_OTA_KEY[32] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -60,19 +68,11 @@ static const char *TEST_OTA_KEY_HEX =
 
 /*
  * Helper: build a valid signature for the given blob using the test OTA key.
- * When mbedTLS is available, this would need real Ed25519 signing (not testable here).
- * Without mbedTLS, the built-in path uses HMAC-SHA256(ota_key, blob).
+ * The explicitly selected HMAC mode uses HMAC-SHA256(ota_hmac_key, blob).
  */
 static void make_valid_signature_for(const uint8_t *blob, size_t blob_len, uint8_t *sig) {
     memset(sig, 0, 64);
-#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
-    /* mbedTLS path uses real Ed25519 — tests would need a keypair.
-     * This branch is not exercised when mbedTLS is not found. */
-    (void)blob; (void)blob_len;
-#else
-    /* Built-in path: HMAC-SHA256(test_key, blob), first 32 bytes in sig */
     dclaw_hmac_sha256(TEST_OTA_KEY, 32, blob, blob_len, sig);
-#endif
 }
 
 static void make_invalid_signature(uint8_t *sig) {
@@ -113,8 +113,12 @@ static void test_policy_invalid_signature_rejected(void) {
 
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -1);
+    make_valid_signature_for(blob, len, sig);
+    sig[63] = 1; /* HMAC wire format requires zero padding. */
+    rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
+    assert(rc == -1);
     (void)rc;
-    printf("  PASS: invalid signature rejected\n");
+    printf("  PASS: invalid signature and nonzero HMAC padding rejected\n");
 }
 
 static void test_policy_rollback_version_rejected(void) {
@@ -132,6 +136,18 @@ static void test_policy_rollback_version_rejected(void) {
     assert(rc == -2);
     (void)rc;
     printf("  PASS: downgrade (version 3 < 5) rejected\n");
+}
+
+static void test_reserved_policy_version_rejected(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint16_t prior = s->device.policy_version;
+    uint8_t blob[64], sig[64];
+    size_t len;
+    make_policy_blob(blob, &len, UINT16_MAX, 2);
+    make_valid_signature_for(blob, len, sig);
+    assert(dclaw_apply_policy(blob, (uint32_t)len, sig) == -2);
+    assert(s->device.policy_version == prior);
+    printf("  PASS: reserved version 65535 cannot reset anti-rollback on reboot\n");
 }
 
 static void test_policy_canary_rollback(void) {
@@ -167,13 +183,45 @@ static void test_policy_canary_rollback(void) {
     dclaw_policy_rollback();
 
     assert(s->canary.canary_active == false);
-    printf("  PASS: canary spike triggers rollback\n");
+    assert(s->device.policy_version == 6); /* signed anti-rollback watermark */
+    uint8_t heartbeat[40];
+    size_t heartbeat_len = 0;
+    assert(dclaw_cbor_encode_heartbeat(heartbeat, &heartbeat_len, sizeof(heartbeat)) == 0);
+    assert(heartbeat_len == sizeof(heartbeat));
+    assert(heartbeat[8] == 0 && heartbeat[9] == 6); /* report watermark, not active v5 */
+    assert((heartbeat[30] & 0x08) != 0); /* surface the canary rollback */
+    assert(dclaw_apply_policy(blob, (uint32_t)len, sig) == -2); /* captured v6 cannot replay */
+    printf("  PASS: canary rollback heartbeat reports high-water version and rollback flag\n");
+}
+
+static void test_canary_final_minute(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t blob[64], sig[64];
+    size_t len;
+    make_policy_blob(blob, &len, 7, 2);
+    make_valid_signature_for(blob, len, sig);
+    assert(dclaw_apply_policy(blob, (uint32_t)len, sig) == 0);
+    assert(!s->rollback_pending); /* durable higher version clears prior rollback */
+    s->canary.canary_started_at = 1000000;
+    s->canary.canary_minute = 7;
+    s->canary.canary_blocks[7] = 15;
+    s->canary.canary_blocks[8] = 15;
+    s->canary.canary_blocks[9] = 15;
+    dclaw_canary_tick_at(1000000 + 8 * 60000);
+    assert(s->canary.spike_streak == 1);
+    dclaw_canary_tick_at(1000000 + 9 * 60000);
+    assert(s->canary.spike_streak == 2);
+    dclaw_canary_tick_at(1000000 + 10 * 60000);
+    assert(!s->canary.canary_active && s->rollback_pending);
+    assert(s->device.policy_version == 7);
+    printf("  PASS: final canary minute is scored before window expiry\n");
 }
 
 /* === Emergency Broadcast Tests === */
 
-static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint8_t cmd, bool valid_sig) {
-    memset(buf, 0, 108);
+static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint32_t prev,
+                               uint8_t cmd, bool valid_sig) {
+    memset(buf, 0, 112);
     /* sequence (4 bytes BE) */
     buf[0] = (uint8_t)(seq >> 24);
     buf[1] = (uint8_t)(seq >> 16);
@@ -186,11 +234,15 @@ static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint8_t cmd, bool val
     /* scope */
     buf[9] = 0x00; /* ALL_DEVICES */
     /* payload[32] + reserved[2] = 34 bytes of zeros (already memset) */
-    /* signature at offset 44 — sign the first 44 bytes */
+    buf[44] = (uint8_t)(prev >> 24);
+    buf[45] = (uint8_t)(prev >> 16);
+    buf[46] = (uint8_t)(prev >> 8);
+    buf[47] = (uint8_t)prev;
+    /* signature at offset 48 — sign the first 48 bytes */
     if (valid_sig) {
-        make_valid_signature_for(buf, 44, buf + 44);
+        make_valid_signature_for(buf, 48, buf + 48);
     } else {
-        make_invalid_signature(buf + 44);
+        make_invalid_signature(buf + 48);
     }
 }
 
@@ -198,8 +250,8 @@ static void test_emergency_valid_applies(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->emergency.last_seen_seq = 0;
 
-    uint8_t msg[108];
-    make_emergency_msg(msg, 1, 0x01, true); /* BLOCK_ALL, seq=1 */
+    uint8_t msg[112];
+    make_emergency_msg(msg, 1, 0, 0x01, true); /* BLOCK_ALL, seq=1 */
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == 0);
@@ -209,21 +261,26 @@ static void test_emergency_valid_applies(void) {
 }
 
 static void test_emergency_invalid_sig_rejected(void) {
-    uint8_t msg[108];
-    make_emergency_msg(msg, 2, 0x01, false);
+    uint8_t msg[112];
+    make_emergency_msg(msg, 2, 1, 0x01, false);
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -1);
     (void)rc;
     printf("  PASS: emergency with invalid signature rejected\n");
+
+    make_emergency_msg(msg, 2, 1, 0x01, true);
+    msg[111] = 1; /* reject nonzero HMAC padding, including final byte */
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == -1);
+    printf("  PASS: emergency HMAC padding tamper rejected\n");
 }
 
 static void test_emergency_replay_rejected(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->emergency.last_seen_seq = 5;
 
-    uint8_t msg[108];
-    make_emergency_msg(msg, 3, 0x01, true); /* seq 3 < last_seen 5 */
+    uint8_t msg[112];
+    make_emergency_msg(msg, 3, 1, 0x01, true); /* seq 3 < last_seen 5 */
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -2);
@@ -231,17 +288,21 @@ static void test_emergency_replay_rejected(void) {
     printf("  PASS: replayed emergency (old sequence) rejected\n");
 }
 
-static void test_emergency_jump_attack_rejected(void) {
+static void test_emergency_predecessor_gap(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->emergency.last_seen_seq = 5;
 
-    uint8_t msg[108];
-    make_emergency_msg(msg, 5 + 1001, 0x01, true); /* delta > 1000 */
+    uint8_t msg[112];
+    make_emergency_msg(msg, 5 + 1001, 5 + 1000, 0x03, true);
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -3);
+    assert(s->emergency.last_seen_seq == 5);
+    make_emergency_msg(msg, 5 + 1001, 5, 0x03, true);
+    assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+    assert(s->emergency.last_seen_seq == 5 + 1001);
     (void)rc;
-    printf("  PASS: emergency jump attack (delta > 1000) rejected\n");
+    printf("  PASS: missing predecessor rejects out-of-order command; global gap with correct predecessor accepted\n");
 }
 
 static void test_emergency_gap_detection(void) {
@@ -272,7 +333,8 @@ extern void dclaw_ota_reset_key_state(void);
 
 static void test_unprovisioned_key_rejects_valid_signature(void) {
     /* Unset the OTA key — should reject even a correctly signed blob */
-    unsetenv("DCLAW_OTA_KEY");
+    unsetenv("DCLAW_OTA_HMAC_KEY");
+    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1); /* public key is not an HMAC secret */
     dclaw_ota_reset_key_state();
 
     dclaw_state_t *s = dclaw_get_state();
@@ -292,18 +354,77 @@ static void test_unprovisioned_key_rejects_valid_signature(void) {
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -1); /* Must reject — no key provisioned */
     assert(s->device.policy_version == saved_version); /* Version unchanged */
+    make_valid_signature_for(blob, len, sig);
+    rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
+    assert(rc == -1); /* Public DCLAW_OTA_KEY must never sign an HMAC update */
     (void)rc; (void)saved_version;
-    printf("  PASS: unprovisioned key rejects zero-key-signed update\n");
+    printf("  PASS: unprovisioned key and public-key HMAC forgery rejected\n");
 
     /* Restore both test keys for subsequent tests */
-    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    unsetenv("DCLAW_OTA_KEY");
+    setenv("DCLAW_OTA_HMAC_KEY", TEST_OTA_KEY_HEX, 1);
     setenv("DCLAW_EMERGENCY_KEY", TEST_OTA_KEY_HEX, 1);
     dclaw_ota_reset_key_state();
 }
 
+static void test_release_counter_redundancy(void) {
+    uint8_t blank[12] = {0};
+    uint8_t damaged = 0;
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 32, blank, sizeof(blank)) == 0);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 48, blank, sizeof(blank)) == 0);
+    assert(hal_flash_sync() == 0);
+    assert(dclaw_load_lockdown_release_seq() == 0);
+    assert(dclaw_store_lockdown_release_seq(1) == 0);
+    assert(dclaw_load_lockdown_release_seq() == 1);
+    assert(dclaw_store_lockdown_release_seq(1) == -1);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 32, &damaged, 1) == 0);
+    assert(dclaw_load_lockdown_release_seq() == 1); /* backup B survives */
+    assert(dclaw_store_lockdown_release_seq(2) == 0); /* next signed release repairs A */
+    assert(dclaw_load_lockdown_release_seq() == 2);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 48, &damaged, 1) == 0);
+    assert(dclaw_load_lockdown_release_seq() == 2); /* repaired A survives B corruption */
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 32, &damaged, 1) == 0);
+    assert(dclaw_load_lockdown_release_seq() == UINT32_MAX); /* both corrupt: fail closed */
+    printf("  PASS: release counter persists, rejects replay, repairs one torn copy, and fails closed on two\n");
+}
+
+static void test_boot_counter_durability(void) {
+    uint32_t initial = dclaw_boot_counter_get();
+    assert(initial > 0);
+    uint8_t heartbeat[40];
+    size_t length = 0;
+    assert(dclaw_cbor_encode_heartbeat(heartbeat, &length, sizeof(heartbeat)) == 0);
+    assert(length == 40);
+    assert(heartbeat[32] == (uint8_t)(initial >> 24));
+    assert(heartbeat[33] == (uint8_t)(initial >> 16));
+    assert(heartbeat[34] == (uint8_t)(initial >> 8));
+    assert(heartbeat[35] == (uint8_t)initial);
+    assert(heartbeat[36] == (uint8_t)(dclaw_get_state()->emergency.last_seen_seq >> 24));
+    assert(heartbeat[39] == (uint8_t)dclaw_get_state()->emergency.last_seen_seq);
+    assert(dclaw_boot_counter_advance() == 0);
+    assert(dclaw_boot_counter_get() == initial + 1);
+    uint8_t damaged = 0;
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 64, &damaged, 1) == 0);
+    assert(dclaw_boot_counter_advance() == 0); /* B survives and A repairs */
+    assert(dclaw_boot_counter_get() == initial + 2);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 80, &damaged, 1) == 0);
+    assert(dclaw_boot_counter_advance() == 0); /* A survives and B repairs */
+    assert(dclaw_boot_counter_get() == initial + 3);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 64, &damaged, 1) == 0);
+    assert(hal_flash_write(HAL_FLASH_CONFIG_OFFSET + 80, &damaged, 1) == 0);
+    assert(dclaw_boot_counter_advance() == -1); /* both corrupt: fail closed */
+    assert(dclaw_boot_counter_get() == 0);
+    printf("  PASS: signed heartbeat includes durable boot generation; one copy repairs and two corrupt copies fail closed\n");
+}
+
 int main(void) {
+    /* The test intentionally corrupts both boot-counter copies. Start from
+     * its dedicated fixture on every run so CTest is repeatable. */
+    const char *flash_path = getenv("DCLAW_FLASH_PATH");
+    if (flash_path && strstr(flash_path, "flash-ota-emergency.bin"))
+        unlink(flash_path);
     /* Set test keys for both OTA and emergency signature verification */
-    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    setenv("DCLAW_OTA_HMAC_KEY", TEST_OTA_KEY_HEX, 1);
     setenv("DCLAW_EMERGENCY_KEY", TEST_OTA_KEY_HEX, 1);
 
     hal_init();
@@ -315,16 +436,20 @@ int main(void) {
     test_policy_apply_valid();
     test_policy_invalid_signature_rejected();
     test_policy_rollback_version_rejected();
+    test_reserved_policy_version_rejected();
     test_policy_canary_rollback();
+    test_canary_final_minute();
     test_unprovisioned_key_rejects_valid_signature();
+    test_release_counter_redundancy();
     printf(" -- Emergency Broadcast --\n");
     test_emergency_valid_applies();
     test_emergency_invalid_sig_rejected();
     test_emergency_replay_rejected();
-    test_emergency_jump_attack_rejected();
+    test_emergency_predecessor_gap();
     test_emergency_gap_detection();
     test_emergency_no_gap();
-    printf("  ALL PASSED (11 tests)\n");
+    test_boot_counter_durability();
+    printf("  ALL PASSED (12 tests)\n");
 
     dclaw_shutdown();
     return 0;
