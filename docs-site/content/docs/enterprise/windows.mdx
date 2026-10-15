@@ -1450,7 +1450,11 @@ While a program runs a DefenseClaw executable from
 `C:\Program Files\Cisco\DefenseClaw\bin`, `/uninstall` (with or without
 `PURGE=1`) fails with `uninstall_in_use` before it stops any service, and
 names the program, its process id, the account and the program that started
-it. Close it (or sign the account out) and run the uninstall again.
+it. Close it (or sign the account out) and run the uninstall again. The
+Intune launcher's uninstall (`Install-DefenseClawIntune.ps1 -Uninstall`)
+runs Setup again a few times once the named programs exit, then exits
+`1618` so that Intune retries; see
+[Intune on Windows](/docs/enterprise/mdm/intune-windows).
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes

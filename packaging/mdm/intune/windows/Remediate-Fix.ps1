@@ -274,6 +274,38 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Test-DefenseClawLifecycleRunning {
+    # True while a DefenseClaw lifecycle run (Setup, ensure, a bundle apply
+    # or an uninstall) holds lifecycle.lock. The script then starts no
+    # installed CLI: a CLI running from the install folder makes a running
+    # uninstall refuse with uninstall_in_use (GAP-0126). A missing lock, or
+    # one this account cannot open, is not a running lifecycle. The probe
+    # holds the lock file for an instant; a lifecycle that opens it at that
+    # moment waits (Setup) or reports a retryable lifecycle_busy. Identical
+    # in detect.ps1, Remediate-Detect.ps1 and Remediate-Fix.ps1 (a test
+    # enforces it).
+    $key = Get-DefenseClawRegistryKey64 -SubKey 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders'
+    if ($null -eq $key) { return $false }
+    try {
+        $programData = [string]$key.GetValue('Common AppData', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally { $key.Dispose() }
+    if (-not $programData -or $programData.Contains('%') -or $programData -notmatch '^[A-Za-z]:\\[^/]*$') { return $false }
+    $lock = $programData.TrimEnd('\') + '\Cisco\DefenseClaw-Lifecycle\lifecycle.lock'
+    try {
+        $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stream.Dispose()
+        return $false
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $false
+    } catch [System.IO.IOException] {
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-DefenseClawBundleEnforcement {
     # A bundle-mode device is compliant only while the running gateway
     # enforces its confirmed signed policy bundle: `enterprise bundle status`
@@ -418,6 +450,11 @@ try {
 if ($null -eq $deployment) {
     [Console]::Out.WriteLine('DefenseClaw: not installed (the Win32 app installs it)')
     exit 0
+}
+if (Test-DefenseClawLifecycleRunning) {
+    # As an ensure that met the lock would: 1618, nothing started (GAP-0126).
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): not started: another DefenseClaw lifecycle run is in progress; the next scheduled run checks again")
+    exit 1618
 }
 try {
     $check = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 180 -ArgumentList @(

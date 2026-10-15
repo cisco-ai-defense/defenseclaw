@@ -453,13 +453,14 @@ Setup:             build each bundle package with the Setup of the release the d
 @"
 Win32 app content: $content
 Install command:   %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1
-Uninstall command: DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
+Uninstall command: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1 -Uninstall
+                   (runs Setup /uninstall JSON=1; while a program runs from the install folder it retries, then exits 1618 so Intune retries)
 Install behavior:  System
 Return codes:      0 Success, 1707 Success, 3010 Soft reboot, 1641 Hard reboot, 1618 Retry (defaults; 1603 and 1639 report Failed)
 Requirements:      x64 only; Windows 10 22H2 or later; dependency: PowerShell 7.4+ (x64 MSI) Win32 app
 Detection rule:    Registry, HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise, value ProductVersion,
                    Version comparison, Greater than or equal to $version, 32-bit app on 64-bit clients: No
-Purge twin:        DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall PURGE=1 JSON=1 (assign as Uninstall when purging)
+Purge twin:        the same uninstall command with -Purge (Setup PURGE=1; assign as Uninstall when purging)
 Bundle mode:       once a device takes signed bundles, do not assign a package built with -ConfigPath to it again (Setup refuses it with bundle_required); build upgrade packages without -ConfigPath.
 "@
 if ($packHint) { $packHint }
