@@ -113,19 +113,28 @@ def windows_kit(tmp_path: Path) -> dict[str, Path | str]:
         "    testpack:\n      path: policies/guardrail/testpack\n"
         "      digest: sha256:" + "a" * 64 + "\n"
     )
-    manifest = {"files": [{"path": "config.yaml", "sha256": hashlib.sha256(bundle_config.encode()).hexdigest()},
-                          {"path": "policies/guardrail/testpack/rules.yaml", "sha256": "b" * 64}]}
+    manifest = {
+        "files": [
+            {"path": "config.yaml", "sha256": hashlib.sha256(bundle_config.encode()).hexdigest()},
+            {"path": "policies/guardrail/testpack/rules.yaml", "sha256": "b" * 64},
+        ]
+    }
     with tarfile.open(bundle, "w:gz") as archive:
-        for name, data in (("manifest.json", json.dumps(manifest).encode()),
-                           ("config.yaml", bundle_config.encode()),
-                           ("policies/guardrail/testpack/rules.yaml", b"rules: []\n")):
+        for name, data in (
+            ("manifest.json", json.dumps(manifest).encode()),
+            ("config.yaml", bundle_config.encode()),
+            ("policies/guardrail/testpack/rules.yaml", b"rules: []\n"),
+        ):
             info = tarfile.TarInfo(name)
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
     anchors = tmp_path / "anchors.json"
     anchors.write_text('{"schema_version":1,"anchors":[]}', encoding="ascii")
     config = tmp_path / "config.yaml"
-    config.write_text(bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"), encoding="ascii")
+    config.write_text(
+        bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"),
+        encoding="ascii",
+    )
     return {
         "pwsh": pwsh,
         "ps51": ps51,
