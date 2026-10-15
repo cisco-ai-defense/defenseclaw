@@ -376,6 +376,57 @@ func TestPlanWindowsEnterpriseEnsure(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseCompilerDriftOnlyForFleetEnabled(t *testing.T) {
+	directory := t.TempDir()
+	compilerPath := filepath.Join(directory, "policy_compiler.py")
+	if err := os.WriteFile(compilerPath, []byte("# trusted release compiler\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := windowsEnterpriseFileSHA256(compilerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "config.yaml")
+	for _, tc := range []struct {
+		name     string
+		config   string
+		recorded string
+		want     bool
+		wantErr  bool
+	}{
+		{"Fleet off, payload compiler absent from metadata", "config_version: 9\nfleet:\n  enabled: false\n", "", false, false},
+		{"Fleet off, old compiler hash is irrelevant", "config_version: 9\nfleet:\n  enabled: false\n", strings.Repeat("0", 64), false, false},
+		{"Fleet enabled, adopt missing hash", "config_version: 9\nfleet:\n  enabled: true\n", "", true, false},
+		{"Fleet enabled, identical source", "config_version: 9\nfleet:\n  enabled: true\n", digest, false, false},
+		{"Fleet enabled, changed source", "config_version: 9\nfleet:\n  enabled: true\n", strings.Repeat("0", 64), true, false},
+		{"invalid Fleet flag is refused", "config_version: 9\nfleet:\n  enabled: 'true'\n", "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(configPath, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			opts := &windowsEnterpriseLifecycleOptions{configPath: configPath}
+			got, err := windowsEnterpriseCompilerSourceDrift(tc.recorded, compilerPath, opts, filepath.Join(directory, "missing-config.yaml"))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("invalid Fleet flag was accepted")
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("compiler drift = %t, %v; want %t", got, err, tc.want)
+			}
+		})
+	}
+	if err := os.WriteFile(configPath, []byte("config_version: 9\nfleet:\n  enabled: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := windowsEnterpriseCompilerSourceDrift("", compilerPath, &windowsEnterpriseLifecycleOptions{}, configPath)
+	if err != nil || !got {
+		t.Fatalf("installed Fleet config fallback = %t, %v; want drift", got, err)
+	}
+}
+
 func TestWindowsEnterpriseStandaloneActionReportsSchemaTwo(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseStandaloneRunner
@@ -2487,6 +2538,28 @@ func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testi
 	if len(stub.calls) != 3 || stub.calls[2][1] != "Repair" ||
 		!strings.Contains(strings.Join(stub.calls[2], " "), `-HookBinary C:\stage\defenseclaw-hook.exe`) {
 		t.Fatalf("installer runs %q", stub.calls)
+	}
+}
+
+func TestWindowsEnterpriseEnsureRepairsMissingOrModifiedInstalledCompiler(t *testing.T) {
+	for _, failure := range []string{"installed artifact recorded in metadata is missing: compiler", "installed artifact hash drift: compiler"} {
+		t.Run(failure, func(t *testing.T) {
+			failed := installedStatus("verify")
+			failed["ok"] = false
+			failed["errors"] = []string{failure}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failed, installedStatus("repair")}}
+			stub.install(t)
+			command := &cobra.Command{}
+			command.SetOut(&bytes.Buffer{})
+			command.SetErr(&bytes.Buffer{})
+			if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err != nil {
+				t.Fatal(err)
+			}
+			if len(stub.calls) != 3 || stub.calls[2][1] != "Repair" ||
+				!strings.Contains(strings.Join(stub.calls[2], " "), `-PolicyCompiler C:\stage\policy_compiler.py`) {
+				t.Fatalf("Fleet compiler repair did not retain source: %q", stub.calls)
+			}
+		})
 	}
 }
 

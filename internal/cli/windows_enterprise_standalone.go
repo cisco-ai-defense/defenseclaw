@@ -2939,12 +2939,13 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 
 func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []string {
 	var missing []string
+	// The installer admits policy_compiler.py separately after its trusted
+	// config probe says Fleet is enabled. Core installs never need this source.
 	for _, source := range []struct{ flag, value string }{
 		{"--gateway-binary", opts.gatewayBinary},
 		{"--acp-binary", opts.acpBinary},
 		{"--hook-binary", opts.hookBinary},
 		{"--sensor-helper-binary", opts.sensorHelperBinary},
-		{"--policy-compiler", opts.policyCompiler},
 	} {
 		if strings.TrimSpace(source.value) == "" {
 			missing = append(missing, source.flag)
@@ -3034,10 +3035,20 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			continue
 		}
 		recorded := strings.ToLower(strings.TrimSpace(metadata.Hashes[source.key]))
-		if recorded == "" {
-			if source.key == "compiler" {
-				return source.key, nil // adopt compiler on upgrades from older deployments
+		if source.key == "compiler" {
+			// Setup always carries the optional Fleet source, including when
+			// Fleet is off. Only a Fleet-enabled target config makes it an
+			// installed artifact whose bytes can cause ensure drift.
+			drift, err := windowsEnterpriseCompilerSourceDrift(recorded, source.path, opts, layout.ConfigPath)
+			if err != nil {
+				return "", err
 			}
+			if drift {
+				return source.key, nil
+			}
+			continue
+		}
+		if recorded == "" {
 			continue
 		}
 		digest, err := windowsEnterpriseFileSHA256(source.path)
@@ -3081,6 +3092,35 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		}
 	}
 	return "", nil
+}
+
+// windowsEnterpriseCompilerSourceDrift uses the same bounded, duplicate-key
+// rejecting config parser as the signed installer's Fleet preflight. The
+// compiler in Setup's payload must not force a Fleet-off ensure to upgrade.
+func windowsEnterpriseCompilerSourceDrift(recorded, source string, opts *windowsEnterpriseLifecycleOptions, installedConfig string) (bool, error) {
+	configPath := strings.TrimSpace(opts.configPath)
+	if configPath == "" {
+		configPath = installedConfig
+	}
+	raw, err := readConfigV8Source(configPath)
+	if err != nil {
+		return false, fmt.Errorf("inspect standalone Fleet config: %w", err)
+	}
+	enabled, err := config.FleetEnabledFromSource(configPath, raw)
+	if err != nil {
+		return false, fmt.Errorf("inspect standalone Fleet config: %w", err)
+	}
+	if !enabled {
+		return false, nil
+	}
+	if recorded == "" {
+		return true, nil // adopt compiler for an older Fleet-enabled deployment
+	}
+	digest, err := windowsEnterpriseFileSHA256(source)
+	if err != nil {
+		return false, err
+	}
+	return digest != recorded, nil
 }
 
 // compareWindowsEnterpriseVersions orders dotted release versions,

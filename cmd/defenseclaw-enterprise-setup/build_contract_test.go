@@ -143,10 +143,12 @@ func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
 	deferredGuard := strings.Index(lifecycle, "if (-not $DeferredConfig) {")
 	inspect := strings.Index(lifecycle, "$standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `")
 	gate := strings.Index(lifecycle, "if ($standaloneFleetEnabled) {")
+	missing := strings.Index(lifecycle, "if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {")
+	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'")
 	add := strings.Index(lifecycle, "Add-DefenseClawStandaloneFleetCompilerSource `")
 	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
-	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || add < gate || mutation < add {
-		t.Fatalf("Fleet compiler source must follow non-deferred config opt-in before managed-root mutation (deferred guard %d, inspect %d, gate %d, add %d, mutation %d)", deferredGuard, inspect, gate, add, mutation)
+	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || missing < gate || refusal < missing || add < refusal || mutation < add {
+		t.Fatalf("Fleet-on missing compiler must be refused before managed-root mutation (deferred guard %d, inspect %d, gate %d, missing %d, refusal %d, add %d, mutation %d)", deferredGuard, inspect, gate, missing, refusal, add, mutation)
 	}
 	for _, required := range []string{
 		"'inspect-standalone-fleet'",
