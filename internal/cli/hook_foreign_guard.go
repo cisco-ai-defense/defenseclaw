@@ -474,6 +474,11 @@ func foreignHookSessionLocal(name string) bool {
 }
 
 func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	// --foreign-hook-check exits before the ordinary hook preflight. Prepare
+	// its managed runtime here so this exchange uses the verified transport.
+	if prepareEnterpriseManagedHookRuntime(name) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("managed hook runtime has been retired")
+	}
 	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
 	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)

@@ -157,7 +157,7 @@ func NativeHookRuntimeNoop() bool {
 			nativeEnterpriseHookRuntimeSnapshot.Unlock()
 			return false
 		}
-		return enterpriseManagedHookRuntimeNoop(connectorName)
+		return prepareEnterpriseManagedHookRuntime(connectorName)
 	}
 	if !recognized {
 		return false
@@ -258,7 +258,9 @@ func hookConnectorFromArgs(args []string) (string, error) {
 	return connectorName, nil
 }
 
-func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
+// prepareEnterpriseManagedHookRuntime caches the authenticated Windows
+// generation. Its true result is the native launcher tombstone.
+func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	// Cobra passes the raw flag value ("ClaudeCode" for --connector
 	// ClaudeCode), but hookConnectorFromArgs caches the lowercase form
 	// ("claudecode"). Without normalization here the snapshot cache would
@@ -425,7 +427,7 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 func enterpriseManagedHookRuntimeConnection(
 	connectorName string,
 ) (gatewayAddr, gatewayServiceName string, scopedToken *string, ok bool) {
-	// Normalize identically to enterpriseManagedHookRuntimeNoop so the
+	// Normalize identically to prepareEnterpriseManagedHookRuntime so the
 	// snapshot cache lookup matches regardless of the caller's casing.
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	nativeEnterpriseHookRuntimeSnapshot.Lock()

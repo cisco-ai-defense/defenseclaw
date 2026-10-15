@@ -10,9 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -62,6 +66,45 @@ func testDescriptor() *managed.RuntimeDescriptor {
 
 func noMarkers(string) (enterprisepolicy.Options, bool) { return enterprisepolicy.Options{}, false }
 
+func TestForeignHookSessionPreparesUnixManagedTransport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/foreign-hook-session/opencode" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"deny":false}`))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	descriptor := testDescriptor()
+	descriptor.HookSocket = path
+	descriptor.ServiceUID = os.Getuid()
+	withStandaloneHookRuntime(t, "linux", func(string) (*managed.RuntimeDescriptor, error) {
+		return descriptor, nil
+	}, noMarkers, "/nonexistent-secure-client")
+	standaloneHookRuntime.Lock()
+	standaloneHookRuntime.prepared = false
+	standaloneHookRuntime.Unlock()
+	if before := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true); before.ManagedRuntimeFailure == "" {
+		t.Fatal("test must start without prepared managed state")
+	}
+	decision, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
+	if err != nil || decision.Deny {
+		t.Fatalf("real hook socket exchange = %+v, error %v", decision, err)
+	}
+	opts := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true)
+	if !opts.ManagedStandalone || opts.ManagedUnixSocket != path || opts.ManagedServiceUID != os.Getuid() || opts.ManagedRuntimeFailure != "" {
+		t.Fatalf("foreign exchange did not bind verified socket: standalone=%v socket=%q uid=%d failure=%q",
+			opts.ManagedStandalone, opts.ManagedUnixSocket, opts.ManagedServiceUID, opts.ManagedRuntimeFailure)
+	}
+}
+
 // rootedMachinePolicy resolves the real standalone machine policy paths
 // under root, as the publisher writes them.
 func rootedMachinePolicy(root string) func(string) (enterprisepolicy.Options, bool) {
@@ -87,7 +130,7 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "inherited")
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
 	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "99999999")
-	if enterpriseManagedHookRuntimeNoop("Codex") {
+	if prepareEnterpriseManagedHookRuntime("Codex") {
 		t.Fatal("a present descriptor is never a no-op")
 	}
 	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
@@ -144,7 +187,7 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 			reported := ""
 			standaloneHookInUserNamespace = func() bool { return tc.userns }
 			reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
-			if enterpriseManagedHookRuntimeNoop("claudecode") {
+			if prepareEnterpriseManagedHookRuntime("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
 			}
 			if reason := enterpriseManagedHookRuntimeFailureReason(); reason != tc.reason {
@@ -177,7 +220,7 @@ func TestStandaloneHookRuntimeKeepsSecureClientMacFailClosed(t *testing.T) {
 	withStandaloneHookRuntime(t, "darwin",
 		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
 		noMarkers, secureClient)
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("a Secure Client Mac keeps the historical fail-closed --enterprise-managed result")
 	}
 	if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonInvalid {
@@ -223,7 +266,7 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 			{"kiro", "PreToolUse", "Stop", "", 2},
 			{"opencode", "tool.execute.before", "session.idle", `"decision":"deny"`, 2},
 		} {
-			if enterpriseManagedHookRuntimeNoop(tc.connector) {
+			if prepareEnterpriseManagedHookRuntime(tc.connector) {
 				t.Fatalf("%s: missing descriptor became a no-op with policy=%v", tc.connector, policyPresent)
 			}
 			if reason := enterpriseManagedHookRuntimeFailureReason(); reason != standaloneRuntimeReasonDescriptorMissing {
