@@ -120,6 +120,41 @@ On Linux, `data_dir` must be exactly `/var/lib/defenseclaw`. Never put the AI
 Defense key in the script: Microsoft states that custom scripts must not carry
 sensitive information.
 
+### Install order with a signed bundle
+
+To deliver a signed policy bundle instead, paste the base64 bundle into
+`dc_inline_bundle` (or set `DC_BUNDLE_FILE`) and the trust anchor file into
+`dc_inline_trust_anchors` (or set `DC_TRUST_ANCHOR_FILE`). The bundle carries
+its own config. Put the package source and the bundle in the **same** script.
+In that run the package's post-install step applies the built-in default,
+which protects no agents and installs no agent hooks. The wrapper then
+installs the trust anchors and applies the bundle, so the first policy the
+hooks answer under is the bundle's.
+
+The bundle-only script leaves the device unprotected if the first bundle does
+not apply (for example an expired trust anchor). To protect agents in that
+case, also fill in `dc_inline_config` (or `DC_CONFIG_FILE`) with a **base
+config** that carries the bundle's guardrail policy:
+
+- Its `guardrail:` block must match the bundle's `config.yaml` line for line,
+  apart from `custom_packs.<pack>.path`. The bundle names
+  `policies/guardrail/<pack>` inside itself. The base config names the
+  absolute folder where a separate root script installed the same pack before
+  this one runs. Only root may be able to change that folder, and it must be
+  outside `/etc/defenseclaw`, which an uninstall with purge removes.
+- Before it installs anything, the wrapper compares the two blocks. It
+  refuses a different threshold, mode, connector list or digest, a missing
+  rule pack, or a relative pack path with `mdm_base_config_mismatch` (exit
+  `2`).
+- On a device that is not yet in bundle mode, the wrapper applies the base
+  config first, then the trust anchors, then the bundle. Once the trust
+  anchors are installed, only bundles apply and the base config is no longer
+  used.
+
+Don't deploy a base config in an earlier, separate script whose guardrail
+block differs from the bundle's. Until the bundle applies, the agents run
+under that base config, so it can allow calls that the bundle denies.
+
 ## 3. Add the platform script
 
 In the Intune admin center, go to **Devices** > **Manage devices** >
