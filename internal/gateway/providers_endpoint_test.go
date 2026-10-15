@@ -269,8 +269,13 @@ func TestProviderManagementHookOnlyIntegration(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
-	case <-time.After(3 * time.Second):
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("sidecar API shutdown: %v", err)
+		}
+	case <-time.After(7 * time.Second):
+		// Run permits a five-second graceful HTTP shutdown. Leave a margin
+		// for race instrumentation and shared build-host scheduling.
 		t.Fatal("sidecar API did not stop")
 	}
 }
