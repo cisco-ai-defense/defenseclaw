@@ -23,6 +23,11 @@ func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 		"kiro":       {"Stop"},
 		"opencode":   {"session.created", "session.updated", "session.status", "session.idle", "session.compacted", "session.error", "session.deleted"},
 	}
+	// Compare the whole map, so a new connector key fails here as well as a
+	// new or dropped event of a listed connector.
+	if !reflect.DeepEqual(neutralLifecycleSets, want) {
+		t.Fatalf("lifecycle sets = %v, want %v", neutralLifecycleSets, want)
+	}
 	for connector, events := range want {
 		if got := NeutralLifecycleEvents(connector); !reflect.DeepEqual(got, events) {
 			t.Errorf("%s lifecycle set = %v, want %v", connector, got, events)
@@ -37,6 +42,7 @@ func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 		{"kiro", "PostToolUse"}, {"kiro", "UserPromptSubmit"},
 		{"opencode", "tool.execute.after"}, {"opencode", "tool.execute.before"},
 		{"cursor", "beforeShellExecution"}, {"copilot", "preToolUse"},
+		{"amp", "Stop"}, {"hermes", "on_session_end"}, {"", "Stop"},
 	} {
 		if NeutralLifecycleEvent(tc.connector, tc.event) {
 			t.Errorf("%s/%s unexpectedly neutral", tc.connector, tc.event)
