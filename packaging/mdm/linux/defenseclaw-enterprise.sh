@@ -1003,6 +1003,79 @@ dc_top_block() {
     ' "$1"
 }
 
+# dc_plain_yaml <config>: fails, printing why, unless the base config is
+# written plainly enough for dc_guardrail_block and dc_top_block, which find
+# a key by its text (GAP-0090 verify r2). The product's loader also reads
+# "claude\u005fcode":, !!str claude_code: and ? claude_code as claude_code,
+# and takes a line that continues a quoted value or a {...} or [...] as part
+# of that value even when the line starts in column 1, so a config written
+# that way passed the compare and still set a hook mode or hid its guardrail
+# block. Every top-level key must be lowercase letters, digits and
+# underscores, plain or in quotes (the document may start with ---), and
+# every quoted value and {...} or [...] must end on the line it starts on.
+# Block scalar (| and >) lines are not read. A single-quoted '' is read as
+# the end of one quoted value and the start of the next, which ends on the
+# same line either way.
+dc_plain_yaml() {
+    LC_ALL=C awk -v bom="$(printf '\357\273\277')" '
+        function refuse(why) { print "the base config line " NR " " why; bad = 1; exit }
+        BEGIN { block = -1 }
+        { sub(/\r$/, "") }
+        NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
+        { line = $0; n = length(line); match(line, /^ */); indent = RLENGTH }
+        block >= 0 && (line ~ /^[ \t]*$/ || indent > block) { next }
+        { block = -1 }
+        line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/ { next }
+        indent == 0 {
+            if (line == "---" && !top) { top = 1; next }
+            top = 1
+            if (line !~ /^([a-z0-9_]+|"[a-z0-9_]+"|\047[a-z0-9_]+\047)[ \t]*:([ \t]|$)/) {
+                key = line
+                sub(/[ \t]*:.*/, "", key)
+                gsub(/^["\047]+|["\047]+$/, "", key)
+                lower = tolower(key)
+                if (key != lower && (lower == "guardrail" || lower == "claude_code" || lower == "codex" || lower == "connector_hooks" || lower == "application_protection"))
+                    refuse("writes the top-level key " lower " in other letters; write it in lowercase")
+                refuse("is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]")
+            }
+        }
+        {
+            i = indent + 1; depth = 0; owner = indent; start = indent
+            while (i <= n) {
+                c = substr(line, i, 1)
+                spaced = (i == n || index(" \t", substr(line, i + 1, 1)) > 0)
+                if (c == " " || c == "\t") { i++; continue }
+                if (c == "#") break
+                if (c == "\"" || c == "\047") {
+                    for (j = i + 1; j <= n && substr(line, j, 1) != c; j++)
+                        if (c == "\"" && substr(line, j, 1) == "\\") j++
+                    if (j > n) refuse("leaves a quoted value open; end each quoted value on the line it starts on")
+                    start = i - 1; i = j + 1; continue
+                }
+                if (c == "{" || c == "[") { depth++; i++; continue }
+                if ((c == "}" || c == "]") && depth > 0) { depth--; i++; continue }
+                if (c == "," && depth > 0) { i++; continue }
+                if (c == ":" && (spaced || depth > 0)) { owner = start; i++; continue }
+                if ((c == "-" || c == "?") && spaced) { owner = i - 1; i++; continue }
+                if ((c == "|" || c == ">") && depth == 0) { block = owner; next }
+                if (c == "!" || c == "&" || c == "*") {
+                    while (i <= n && !index(" \t,{}[]", substr(line, i, 1))) i++
+                    continue
+                }
+                start = i - 1
+                for (; i <= n; i++) {
+                    c = substr(line, i, 1)
+                    if (c == ":" && (depth > 0 || i == n || index(" \t", substr(line, i + 1, 1)))) break
+                    if (depth > 0 && index(",{}[]", c)) break
+                    if (c == "#" && index(" \t", substr(line, i - 1, 1))) break
+                }
+            }
+            if (depth > 0) refuse("leaves a {...} or [...] open; end each one on the line it starts on")
+        }
+        END { exit bad }
+    ' "$1"
+}
+
 # dc_check_base_config <config> <bundle>: a base config delivered with a
 # signed bundle is the config the agents run under until the bundle applies,
 # and after a bundle that does not apply (GAP-0090; the Intune Windows
@@ -1014,11 +1087,13 @@ dc_top_block() {
 # blocks must be identical too, or absent from both: the hooks take
 # claude_code.mode, codex.mode and connector_hooks.<connector>.mode before
 # the guardrail mode, and application_protection sets the guardrail policy
-# of automatically protected agents. No other key is compared. Prints why
-# and fails when they differ. Needs tar (dc_main checks for it). The bundle
+# of automatically protected agents. No other key is compared. The config
+# must pass dc_plain_yaml first. Prints why and fails when they differ.
+# Needs tar (dc_main checks for it). The bundle
 # apply verifies the signature later; the config compared here must match
 # the manifest's files[] pin.
 dc_check_base_config() {
+    dc_plain_yaml "$1" || return 1
     parity="$DC_STAGE/parity"
     rm -rf "$parity"
     mkdir "$parity"

@@ -145,6 +145,41 @@ def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
          "base CONFIG= claude_code: block differs"),
         ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (),
          "# base\nclaude_code:\n\n  mode: action\nguardrail:\n  block_at: HIGH\n", ""),
+        # GAP-0090 verify r2: a quoted key, CRLF and a byte order mark in the
+        # hook mode blocks are compared like the plain spelling.
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n\"claude_code\":\n  mode: observe\n",
+         "base CONFIG= claude_code: block differs"),
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (),
+         "guardrail:\r\n  block_at: HIGH\r\nclaude_code:\r\n  mode: action\r\n", ""),
+        ("\ufeffclaude_code:\n  mode: action\nguardrail:\n  block_at: HIGH\n", (),
+         "claude_code:\n  mode: action\nguardrail:\n  block_at: HIGH\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffclaude_code: {mode: observe}\r\nguardrail:\r\n  block_at: HIGH\r\n",
+         "base CONFIG= claude_code: block differs"),
+        # The loader reads these spellings as claude_code; the packager
+        # refuses them before it compares.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra, "base CONFIG= line 3 " + why)
+          for extra, why in (('"claude\\u005fcode":\n  mode: observe\n', "is not a plain top-level key"),
+                             ("!!str claude_code: {mode: observe}\n", "is not a plain top-level key"),
+                             ("? claude_code\n: {mode: observe}\n", "is not a plain top-level key"),
+                             ("Claude_Code: {mode: observe}\n", "writes the top-level key claude_code in"))],
+        # A quoted value or a {...} that runs on hides the guardrail block.
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: \"t\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: 't\nguardrail:\n  block_at: HIGH\nworkspace_id: w'\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: \"t\\\"\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "scanners: {a: [b,\nguardrail:\n  block_at: HIGH\nw: c]}\n",
+         "base CONFIG= line 1 leaves a {...} or [...] open"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "scanners:\n  - note: |\n      say \"hi\n    other: \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
+         "base CONFIG= line 4 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "scanners:\n  x:\n  - - |\n      text\n    - \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
+         "base CONFIG= line 5 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "---\n# it's \"fine\nguardrail:\n  block_at: HIGH\nscanners:\n  note: it's a \"plain\" value # 'x\n"
+         "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n\n  more: >-\n    a \"b\n  'q': 'it''s'\n", ""),
     ],
 )
 def test_intune_bundle_package_compares_every_pack(
@@ -155,7 +190,7 @@ def test_intune_bundle_package_compares_every_pack(
     setup.write_bytes(b"packager-only stub")
     bundle = _intune_bundle(tmp_path, bundle_config, packs)
     base = tmp_path / "base.yaml"
-    base.write_text(base_config)
+    base.write_bytes(base_config.encode())
     run = subprocess.run(
         ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(packager),
          "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),

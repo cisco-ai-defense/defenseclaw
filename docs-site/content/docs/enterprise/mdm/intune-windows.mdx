@@ -136,8 +136,8 @@ path. Build the bundle app with the same base config:
 ```
 
 Verify the bundle signature offline first. The packager compares the base
-config with the manifest-pinned bundle config and refuses a different
-guardrail policy; only the pack path may differ. Set the bundle app's
+config with the manifest-pinned bundle config. It refuses a different
+guardrail policy (only the pack path may differ) and a `claude_code:`, `codex:`, `connector_hooks:` or `application_protection:` block (the hook modes) that differs from the bundle's; leave a hook mode block out of both or copy it from the bundle. It compares the configs as text, so it also refuses a base config that writes a top-level key other than plainly in lowercase (a tag, anchor, escape or `?` key) or that continues a quoted value or a `{...}` or `[...]` on the next line. Set the bundle app's
 dependency to the base app with **Automatically install: Yes**, and upload
 the generated `detect-bundle.ps1` as its custom detection rule. A base-only
 device is installed but has no confirmed signed bundle. It enforces only the

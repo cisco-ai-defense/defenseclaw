@@ -993,7 +993,8 @@ def _parity_bundle(path: Path, config: str, packs: tuple[str, ...] = ("p2int",),
 
 def _parity_script() -> str:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_check_base_config")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_yaml",
+             "dc_check_base_config")
     return "DC_SCRIPT_OS=linux\n" + "\n".join(_shell_function(text, name) for name in names) + '''
 DC_STAGE=$1
 reason=$(dc_check_base_config "$2" "$3") || { echo "refused: $reason"; exit 1; }
@@ -1144,6 +1145,75 @@ def test_unix_wrapper_base_config_must_carry_the_bundle_hook_modes(tmp_path: Pat
         refused("application_protection")), shell
 
 
+_NOT_PLAIN = ("is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, "
+              "plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]")
+_OPEN_QUOTE = "leaves a quoted value open; end each quoted value on the line it starts on"
+_OPEN_FLOW = "leaves a {...} or [...] open; end each one on the line it starts on"
+
+
+def _other_letters(key: str) -> str:
+    return f"writes the top-level key {key} in other letters; write it in lowercase"
+
+
+@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_be_written_plainly(tmp_path: Path, shell: str) -> None:
+    # GAP-0090 verify r2: the compare finds a key by its text. The product's
+    # loader also read "claude_code":, !!str claude_code: and
+    # ? claude_code as claude_code (5-6 marker ALLOW live), and a quoted value
+    # that runs on to the next line hid the whole guardrail block.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int")
+    after = base_ok.count("\n") + 1
+    head, rest = base_ok.split("guardrail:\n")
+    guardrail = "guardrail:\n" + rest
+
+    def check(base: str) -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base.encode("utf-8"))
+        result = subprocess.run([shell, "-c", _parity_script(), "t", str(stage), str(config), str(bundle)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    def refused(line: int, why: str) -> str:
+        return f"refused: the base config line {line} {why}"
+
+    for block in ('"claude\\u005fcode":\n  mode: observe\n', "!!str claude_code: {mode: observe}\n",
+                  "? claude_code\n: {mode: observe}\n", "&cc claude_code: {mode: observe}\n",
+                  "<<: {claude_code: {mode: observe}}\n", "*cc : {mode: observe}\n", "...\n",
+                  "---\nclaude_code: {mode: observe}\n", "\tclaude_code: {mode: observe}\n"):
+        assert check(base_ok + block) == refused(after, _NOT_PLAIN), (shell, block)
+    assert check("{config_version: 9}\n") == refused(1, _NOT_PLAIN), shell
+    assert check("%YAML 1.2\n---\n" + base_ok) == refused(1, _NOT_PLAIN), shell
+    assert check(base_ok + "Claude_Code: {mode: observe}\n") == refused(after, _other_letters("claude_code")), shell
+    assert check(base_ok + '"CODEX":\n  mode: observe\n') == refused(after, _other_letters("codex")), shell
+    assert check(base_ok.replace("guardrail:\n", "Guardrail:\n")) == refused(3, _other_letters("guardrail")), shell
+    # A quoted value or a [...] that runs on hides the guardrail block from
+    # the loader (it reads tenant_id "t guardrail: enabled: true ...").
+    assert check(head + 'tenant_id: "t\n' + guardrail + 'workspace_id: w"\n') == refused(3, _OPEN_QUOTE), shell
+    assert check(head + "tenant_id: 't\n" + guardrail + "workspace_id: w'\n") == refused(3, _OPEN_QUOTE), shell
+    assert check(head + 'tenant_id: "t\\"\n' + guardrail + 'workspace_id: w"\n') == refused(3, _OPEN_QUOTE), shell
+    assert check(head + "tenant_id: [t,\n" + guardrail + "workspace_id: w]\n") == refused(3, _OPEN_FLOW), shell
+    # Lines of a block scalar are skipped only while they are deeper than the
+    # key (or the - item) that owns it.
+    nested = head + 'ai_discovery:\n  items:\n    - note: |\n        say "hi\n      other: "t\n' + guardrail + 'w: v"\n'
+    assert check(nested) == refused(7, _OPEN_QUOTE), shell
+    dashes = head + 'ai_discovery:\n  items:\n  - - |\n      text\n    - "t\n' + guardrail + 'w: v"\n'
+    assert check(dashes) == refused(7, _OPEN_QUOTE), shell
+    # Plain spellings, comments, one-line quoted values and flows, plain
+    # values with quote characters and block scalars all pass.
+    plain = (base_ok + "# it's \"fine\n" + '"ai_discovery":\n  enabled: true\n' + "scanners:\n"
+             "  note: it's a \"plain\" value # with a 'comment\n  url: http://127.0.0.1:1/x\n"
+             "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n    it's: 'open\n\n"
+             "  more: >-\n    a \"b\n  'quoted': 'it''s'\n  list:\n  - |\n    x \"y\n  - z\n")
+    assert check(plain) == "ok", shell
+    assert check("---\n" + base_ok) == "ok", shell
+    assert check("\ufeff" + base_ok) == "ok", shell
+
+
 @pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
 def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(tmp_path: Path) -> None:
     # GAP-0090: with a base config and a bundle, the wrapper refuses a
@@ -1151,7 +1221,8 @@ def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(
     # trust anchors (so the hooks never answer under a weaker policy), and
     # skips it once the device is in bundle mode.
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_check_base_config", "dc_main")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_yaml",
+             "dc_check_base_config", "dc_main")
     bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
     bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
     good = tmp_path / "base.yaml"

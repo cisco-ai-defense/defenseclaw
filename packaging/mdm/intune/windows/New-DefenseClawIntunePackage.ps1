@@ -22,6 +22,11 @@
     signed bundle, apart from the custom pack's installed path. Install that
     pack before the base app. Verify the bundle offline with
     defenseclaw-gateway enterprise bundle verify before packaging it.
+    The base config's claude_code, codex, connector_hooks and
+    application_protection blocks (the hook modes) must equal the bundle's,
+    or be absent from both. The packager compares the configs as text, so the
+    base config must write each top-level key plainly in lowercase and end
+    each quoted value and each {...} or [...] on the line where it starts.
 
 .EXAMPLE
     ./New-DefenseClawIntunePackage.ps1 -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
@@ -92,6 +97,82 @@ function Get-TopLevelBlock {
     return ($found -join "`n")
 }
 
+function Get-BaseConfigSpellingProblem {
+    # Get-GuardrailBlock and Get-TopLevelBlock find a key by its text. The
+    # product's loader also reads "claude\u005fcode":, !!str claude_code: and
+    # ? claude_code as claude_code, and takes a line that continues a quoted
+    # value or a {...} or [...] as part of that value even when the line
+    # starts in column 1, so a base config written that way passed the
+    # compare and still set a hook mode or hid its guardrail block (GAP-0090
+    # verify r2). Returns why the config is not plain enough to compare, or
+    # ''. The Unix wrappers' dc_plain_yaml applies the same rules; Get-Content
+    # has already dropped a byte order mark.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $compared = @('guardrail', 'claude_code', 'codex', 'connector_hooks', 'application_protection')
+    $block = -1
+    $top = $false
+    $number = 0
+    foreach ($raw in ($Text -split "`n")) {
+        $number++
+        $line = $raw.TrimEnd([char]13)
+        $n = $line.Length
+        $indent = $n - $line.TrimStart(' ').Length
+        if ($block -ge 0) {
+            if ($line -match '^[ \t]*$' -or $indent -gt $block) { continue }
+            $block = -1
+        }
+        if ($line -match '^[ \t]*(#|$)') { continue }
+        if ($indent -eq 0) {
+            if ($line -ceq '---' -and -not $top) { $top = $true; continue }
+            $top = $true
+            if ($line -cnotmatch '^([a-z0-9_]+|"[a-z0-9_]+"|''[a-z0-9_]+'')[ \t]*:([ \t]|$)') {
+                $key = ($line -replace '[ \t]*:.*$', '').Trim([char[]]@('"', "'"))
+                if ($compared -contains $key -and $key -cne $key.ToLowerInvariant()) {
+                    return "line $number writes the top-level key $($key.ToLowerInvariant()) in other letters; write it in lowercase"
+                }
+                return "line $number is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]"
+            }
+        }
+        # A single-quoted '' reads as the end of one quoted value and the
+        # start of the next, which ends on the same line either way.
+        $i = $indent; $depth = 0; $owner = $indent; $start = $indent
+        while ($i -lt $n) {
+            $c = $line[$i]
+            $spaced = $i + 1 -ge $n -or " `t".Contains($line[$i + 1])
+            if (" `t".Contains($c)) { $i++; continue }
+            if ($c -eq '#') { break }
+            if ($c -eq '"' -or $c -eq "'") {
+                $j = $i + 1
+                while ($j -lt $n -and $line[$j] -ne $c) {
+                    if ($c -eq '"' -and $line[$j] -eq '\') { $j++ }
+                    $j++
+                }
+                if ($j -ge $n) { return "line $number leaves a quoted value open; end each quoted value on the line it starts on" }
+                $start = $i; $i = $j + 1; continue
+            }
+            if ('{['.Contains($c)) { $depth++; $i++; continue }
+            if ('}]'.Contains($c) -and $depth -gt 0) { $depth--; $i++; continue }
+            if ($c -eq ',' -and $depth -gt 0) { $i++; continue }
+            if ($c -eq ':' -and ($spaced -or $depth -gt 0)) { $owner = $start; $i++; continue }
+            if ('-?'.Contains($c) -and $spaced) { $owner = $i; $i++; continue }
+            if ('|>'.Contains($c) -and $depth -eq 0) { $block = $owner; break }
+            if ('!&*'.Contains($c)) {
+                while ($i -lt $n -and -not " `t,{}[]".Contains($line[$i])) { $i++ }
+                continue
+            }
+            $start = $i
+            for (; $i -lt $n; $i++) {
+                $c = $line[$i]
+                if ($c -eq ':' -and ($depth -gt 0 -or $i + 1 -ge $n -or " `t".Contains($line[$i + 1]))) { break }
+                if ($depth -gt 0 -and ',{}[]'.Contains($c)) { break }
+                if ($c -eq '#' -and " `t".Contains($line[$i - 1])) { break }
+            }
+        }
+        if ($block -lt 0 -and $depth -gt 0) { return "line $number leaves a {...} or [...] open; end each one on the line it starts on" }
+    }
+    return ''
+}
+
 function Get-GuardrailBlock {
     param([Parameter(Mandatory)][string]$Text)
     $lines = ($Text -replace "`r`n", "`n") -split "`n"
@@ -128,6 +209,8 @@ function Get-CustomPackPath {
 if ($BundlePath) {
     $baseText = Get-Content -LiteralPath $BaseConfigPath -Raw
     if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
+    $spelling = Get-BaseConfigSpellingProblem -Text $baseText
+    if ($spelling) { throw "base CONFIG= $spelling" }
     $file = [IO.File]::OpenRead($BundlePath)
     try {
         $gzip = [IO.Compression.GZipStream]::new($file, [IO.Compression.CompressionMode]::Decompress)
