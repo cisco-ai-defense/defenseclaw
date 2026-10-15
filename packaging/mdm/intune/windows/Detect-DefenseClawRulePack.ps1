@@ -10,7 +10,8 @@
     defaults in param() below: the pack name, the folder that holds the
     pack, and the tree SHA-256 that Install-DefenseClawRulePack.ps1 -PlanOnly
     prints for the approved pack. The pack is detected (exit 0 and one line
-    on STDOUT) when <PacksRoot>\<PackName> has that tree SHA-256, only
+    on STDOUT) when <PacksRoot> has the .defenseclaw-rule-packs file the
+    install writes, <PacksRoot>\<PackName> has that tree SHA-256, only
     SYSTEM and Administrators own and can change it and its parent, no
     standard user can read them, and NT SERVICE\DefenseClawGateway can read
     them and list every folder above. Otherwise it exits 1 with the reason on
@@ -41,8 +42,17 @@ $ErrorActionPreference = 'Stop'
 # Compatible with Windows PowerShell 5.1 and PowerShell 7.
 
 # NT SERVICE\DefenseClawGateway. Windows derives a service SID from the
-# service name, so the grant works before DefenseClaw is installed.
+# service name, but looks it up only once the service exists: before the
+# first install icacls fails on it (1332, No mapping between account names
+# and security IDs), so the install writes it with Set-Acl, by SID.
 $script:DcGatewaySid = 'S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274'
+# The owner and access list the install gives <PacksRoot>: owner
+# Administrators, no inherited entries, SYSTEM and Administrators Full
+# control, the gateway Read & execute, for the folder, subfolders and files.
+$script:DcPacksRootSddl = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$($script:DcGatewaySid))"
+# The file the install writes in <PacksRoot>; a folder without it is not one
+# the install set up.
+$script:DcPacksRootMarker = '.defenseclaw-rule-packs'
 $script:DcAdminSids = @(
     'S-1-5-18',     # LocalSystem
     'S-1-5-32-544', # BUILTIN\Administrators
@@ -166,7 +176,7 @@ function Get-DcAclState {
             InheritOnly = (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)
         }
     }
-    return [pscustomobject]@{ Owner = $acl.GetOwner($sidType).Value; Entries = $entries }
+    return [pscustomobject]@{ Owner = $acl.GetOwner($sidType).Value; Protected = $acl.AreAccessRulesProtected; Entries = $entries }
 }
 
 function Get-DcAclProblems {
@@ -223,6 +233,9 @@ function Test-DcRulePack {
     }
     $tree = Get-DcRulePackTree -Path $pack
     $problems = @()
+    if (-not (Test-Path -LiteralPath (Join-Path $PacksRoot $script:DcPacksRootMarker) -PathType Leaf)) {
+        $problems += "$PacksRoot has no $($script:DcPacksRootMarker) file, which Install-DefenseClawRulePack.ps1 writes"
+    }
     if ($ExpectedTreeSha256 -and $tree.Sha256 -cne $ExpectedTreeSha256.ToLowerInvariant()) {
         $problems += "rule pack $pack has tree sha256 $($tree.Sha256), not $($ExpectedTreeSha256.ToLowerInvariant())"
     }

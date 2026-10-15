@@ -29,15 +29,22 @@
     The tree SHA-256 is the SHA-256 of one "<relative/path><TAB><file sha256>"
     line per file, sorted. Pass it as -ExpectedTreeSha256 to refuse a pack
     folder whose content differs, and set it in Detect-DefenseClawRulePack.ps1.
-    -PlanOnly prints the tree SHA-256 and the icacls commands without changing
+    -PlanOnly prints the tree SHA-256 and the commands without changing
     anything, on any computer; use it on the administrator workstation.
 
+    The parent folder's access list is written with Set-Acl by SID: the
+    service SID resolves only once the DefenseClawGateway service exists, and
+    icacls fails on it before (1332), which is the documented order (this app
+    before the base app). icacls only runs /reset, which names no account.
+
     -PacksRoot must be a folder of its own: the install refuses (1639) a drive
-    root, a Windows, program, profile or DefenseClaw folder, and an existing
-    folder that holds anything other than rule pack folders.
+    root, a Windows, program, profile or DefenseClaw folder, an existing
+    folder that is not empty and that this script did not set up (no
+    .defenseclaw-rule-packs marker file, which it writes, and not its access
+    list), and one that holds anything other than rule pack folders.
 
     Exit codes: 0 installed or already installed, 1603 failed (the message
-    names the problem and the icacls fix), 1639 invalid arguments.
+    names the problem), 1639 invalid arguments.
 
     Install command (Intune > App > Program):
       %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawRulePack.ps1 -PackName my-pack -ExpectedTreeSha256 <tree sha256>
@@ -68,8 +75,17 @@ $ErrorActionPreference = 'Stop'
 # Compatible with Windows PowerShell 5.1 and PowerShell 7.
 
 # NT SERVICE\DefenseClawGateway. Windows derives a service SID from the
-# service name, so the grant works before DefenseClaw is installed.
+# service name, but looks it up only once the service exists: before the
+# first install icacls fails on it (1332, No mapping between account names
+# and security IDs), so the install writes it with Set-Acl, by SID.
 $script:DcGatewaySid = 'S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274'
+# The owner and access list the install gives <PacksRoot>: owner
+# Administrators, no inherited entries, SYSTEM and Administrators Full
+# control, the gateway Read & execute, for the folder, subfolders and files.
+$script:DcPacksRootSddl = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$($script:DcGatewaySid))"
+# The file the install writes in <PacksRoot>; a folder without it is not one
+# the install set up.
+$script:DcPacksRootMarker = '.defenseclaw-rule-packs'
 $script:DcAdminSids = @(
     'S-1-5-18',     # LocalSystem
     'S-1-5-32-544', # BUILTIN\Administrators
@@ -193,7 +209,7 @@ function Get-DcAclState {
             InheritOnly = (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)
         }
     }
-    return [pscustomobject]@{ Owner = $acl.GetOwner($sidType).Value; Entries = $entries }
+    return [pscustomobject]@{ Owner = $acl.GetOwner($sidType).Value; Protected = $acl.AreAccessRulesProtected; Entries = $entries }
 }
 
 function Get-DcAclProblems {
@@ -250,6 +266,9 @@ function Test-DcRulePack {
     }
     $tree = Get-DcRulePackTree -Path $pack
     $problems = @()
+    if (-not (Test-Path -LiteralPath (Join-Path $PacksRoot $script:DcPacksRootMarker) -PathType Leaf)) {
+        $problems += "$PacksRoot has no $($script:DcPacksRootMarker) file, which Install-DefenseClawRulePack.ps1 writes"
+    }
     if ($ExpectedTreeSha256 -and $tree.Sha256 -cne $ExpectedTreeSha256.ToLowerInvariant()) {
         $problems += "rule pack $pack has tree sha256 $($tree.Sha256), not $($ExpectedTreeSha256.ToLowerInvariant())"
     }
@@ -287,23 +306,62 @@ function Format-DcIcacls {
     return ('icacls "' + $Arguments[0] + '" ' + (($Arguments | Select-Object -Skip 1) -join ' '))
 }
 
-function Get-DcRulePackAclCommands {
-    # The icacls argument lists for the parent folder ($Root) and the pack
-    # ($Pack), in the order the install runs them.
+# What the marker file in <PacksRoot> says.
+$script:DcPacksRootMarkerText = 'DefenseClaw rule packs: Install-DefenseClawRulePack.ps1 manages this folder'
+
+function Format-DcSetAcl {
+    # The Set-Acl command line that gives $Path the owner (and access list)
+    # of $Sddl, as an administrator types it.
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Sddl, [string]$Sections = 'Owner, Access')
+    $quoted = "'" + $Path.Replace("'", "''") + "'"
+    return "`$a = Get-Acl -LiteralPath $quoted; `$a.SetSecurityDescriptorSddlForm('$Sddl', '$Sections'); Set-Acl -LiteralPath $quoted -AclObject `$a"
+}
+
+function Get-DcRulePackPlan {
+    # What the install runs after the copy, as administrator command lines.
     param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Pack)
-    $grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*$($script:DcGatewaySid):(OI)(CI)RX")
-    $rootCommands = New-Object System.Collections.Generic.List[object]
-    $rootCommands.Add([string[]]@($Root, '/setowner', '*S-1-5-32-544', '/C'))
-    $rootCommands.Add([string[]](@($Root, '/inheritance:r', '/grant:r') + $grant))
-    $rootCommands.Add([string[]]@($Root, '/remove:g', '*S-1-5-32-545', '*S-1-5-11', '*S-1-1-0', '*S-1-5-4'))
-    $packCommands = New-Object System.Collections.Generic.List[object]
-    $packCommands.Add([string[]]@($Pack, '/reset', '/T', '/C'))
-    $packCommands.Add([string[]](@($Pack, '/grant:r') + $grant))
-    $packCommands.Add([string[]]@($Pack, '/setowner', '*S-1-5-32-544', '/T', '/C'))
-    return [pscustomobject]@{ Root = $rootCommands.ToArray(); Pack = $packCommands.ToArray() }
+    $quoted = "'" + $Pack.Replace("'", "''") + "'"
+    return @(
+        (Format-DcSetAcl -Path $Root -Sddl $script:DcPacksRootSddl),
+        "Set-Content -LiteralPath '$((Join-DcPackPath -Root $Root -Name $script:DcPacksRootMarker).Replace("'", "''"))' -Value '$($script:DcPacksRootMarkerText)'",
+        (Format-DcIcacls -Arguments @($Pack, '/reset', '/T', '/C')),
+        ("foreach (`$p in @($quoted) + @(Get-ChildItem -LiteralPath $quoted -Recurse -Force | ForEach-Object FullName)) { " + (Format-DcSetAcl -Path 'PATH' -Sddl 'O:BA' -Sections 'Owner').Replace("'PATH'", '$p') + ' }')
+    )
+}
+
+function Set-DcAcl {
+    # Gives $Path the owner (and access list) of $Sddl with Set-Acl. SDDL
+    # names every account by SID and Set-Acl writes it without a lookup, so
+    # this works before the DefenseClawGateway service exists.
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Sddl, [string]$Sections = 'Owner, Access')
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm($Sddl, $Sections)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Set-DcPacksRootAcl {
+    # <PacksRoot>: this script's owner and access list, and its marker file.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Set-DcAcl -Path $Path -Sddl $script:DcPacksRootSddl
+    $marker = Join-Path $Path $script:DcPacksRootMarker
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+        Set-Content -LiteralPath $marker -Encoding Ascii -Value $script:DcPacksRootMarkerText
+    }
+}
+
+function Set-DcRulePackAcl {
+    # The pack and everything in it: only the entries inherited from
+    # <PacksRoot>, owner Administrators.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Invoke-DcIcacls -Arguments @($Path, '/reset', '/T', '/C')
+    foreach ($item in @($Path) + @((Get-DcRulePackTree -Path $Path).Items | ForEach-Object { $_.Path })) {
+        Set-DcAcl -Path $item -Sddl 'O:BA' -Sections 'Owner'
+    }
 }
 
 function Invoke-DcIcacls {
+    # Only for commands that name no account (/reset): icacls looks every
+    # account up, and the gateway's SID resolves only once its service exists.
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $exe = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
     # Windows PowerShell 5.1 turns native stderr into a terminating error
@@ -329,19 +387,33 @@ function Remove-DcRulePackFolder {
     Remove-Item -LiteralPath $Path -Recurse -Force
 }
 
-function Get-DcPacksRootStranger {
+function Get-DcPacksRootRefusal {
     # The install gives <PacksRoot> its own owner and permissions, so an
-    # existing one may hold only rule pack folders and the .<pack>.new- and
-    # .<pack>.old- folders an interrupted run leaves. Returns what else it
-    # holds, or nothing.
+    # existing one must be empty or one this script set up: it holds the
+    # marker file, or it already has the access list this script (or the
+    # windows.mdx steps) set. It may then hold only rule pack folders, the
+    # marker and the .<pack>.new- and .<pack>.old- folders an interrupted run
+    # leaves. Returns why the folder is refused, or nothing.
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
     $root = Get-Item -LiteralPath $Path -Force
-    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $Path }
-    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force)) {
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return 'is a file or a link' }
+    $items = @(Get-ChildItem -LiteralPath $Path -Force)
+    if ($items.Count -eq 0) { return '' }
+    $isMarker = { param($Item) $Item.Name -ceq $script:DcPacksRootMarker -and -not $Item.PSIsContainer -and -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) }
+    $marked = @($items | Where-Object { & $isMarker $_ }).Count -gt 0
+    if (-not $marked) {
+        $state = Get-DcAclState -Path $Path
+        $gateway = @($state.Entries | Where-Object { $_.Sid -eq $script:DcGatewaySid -and $_.Allow -and -not $_.InheritOnly }).Count -gt 0
+        if (-not ($state.Owner -eq 'S-1-5-32-544' -and $state.Protected -and $gateway)) {
+            return "is not empty and was not set up by this script (no $($script:DcPacksRootMarker) file, and not its access list)"
+        }
+    }
+    foreach ($item in $items) {
+        if (& $isMarker $item) { continue }
         $folder = $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
         $packLike = (Test-DcRulePackName -Name $item.Name) -or ($item.Name -cmatch '^\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(new|old)-[0-9a-f]{8}$')
-        if (-not ($folder -and $packLike)) { return $item.FullName }
+        if (-not ($folder -and $packLike)) { return "holds $($item.FullName), which is not a rule pack folder" }
     }
     return ''
 }
@@ -369,7 +441,6 @@ function Invoke-DcRulePackInstall {
     }
     $expected = $ExpectedTreeSha256.ToLowerInvariant()
     $target = Join-DcPackPath -Root $PacksRoot -Name $PackName
-    $commands = Get-DcRulePackAclCommands -Root $PacksRoot -Pack $target
     if ($Remove) {
         if ($PlanOnly) {
             Write-DcLine (Format-DcIcacls -Arguments @($target, '/reset', '/T', '/C'))
@@ -388,9 +459,9 @@ function Invoke-DcRulePackInstall {
         }
         return 0
     }
-    $stranger = Get-DcPacksRootStranger -Path $PacksRoot
-    if ($stranger) {
-        Write-DcLine "invalid_arguments: -PacksRoot $PacksRoot must hold only rule pack folders, and $stranger is not one; the install would replace its permissions. Use a folder of its own, for example C:\ProgramData\DefenseClaw-RulePacks"
+    $refusal = Get-DcPacksRootRefusal -Path $PacksRoot
+    if ($refusal) {
+        Write-DcLine "invalid_arguments: -PacksRoot $PacksRoot $refusal; the install would replace its permissions. Use a folder of its own, for example C:\ProgramData\DefenseClaw-RulePacks"
         return 1639
     }
     if (-not $SourcePath) { $SourcePath = Join-Path $PSScriptRoot $PackName }
@@ -406,7 +477,7 @@ function Invoke-DcRulePackInstall {
     if ($PlanOnly) {
         Write-DcLine "rule pack $PackName tree sha256 $($source.Sha256)"
         Write-DcLine "copy $SourcePath to $target, then run:"
-        foreach ($command in @($commands.Root) + @($commands.Pack)) { Write-DcLine (Format-DcIcacls -Arguments $command) }
+        foreach ($line in (Get-DcRulePackPlan -Root $PacksRoot -Pack $target)) { Write-DcLine $line }
         return 0
     }
     if (-not (Test-DcElevated)) {
@@ -430,7 +501,7 @@ function Invoke-DcRulePackInstall {
     } else {
         New-Item -ItemType Directory -Path $PacksRoot -Force | Out-Null
     }
-    foreach ($command in @($commands.Root)) { Invoke-DcIcacls -Arguments $command }
+    Set-DcPacksRootAcl -Path $PacksRoot
     $current = $false
     if (Test-Path -LiteralPath $target -PathType Container) {
         try { $current = ((Get-DcRulePackTree -Path $target).Sha256 -ceq $source.Sha256) } catch { $current = $false }
@@ -452,11 +523,11 @@ function Invoke-DcRulePackInstall {
             Rename-Item -LiteralPath $stage -NewName $PackName
         }
     }
-    foreach ($command in @($commands.Pack)) { Invoke-DcIcacls -Arguments $command }
+    Set-DcRulePackAcl -Path $target
     $check = Test-DcRulePack -PacksRoot $PacksRoot -PackName $PackName -ExpectedTreeSha256 $source.Sha256
     if (@($check.Problems).Count -ne 0) {
         foreach ($problem in @($check.Problems)) { Write-DcLine "rule_pack_not_ready: $problem" }
-        Write-DcLine "fix the permissions, for example: icacls `"$PacksRoot`" /grant `"NT SERVICE\DefenseClawGateway:RX`" and icacls `"$target`" /grant `"NT SERVICE\DefenseClawGateway:(OI)(CI)RX`", then run this script again"
+        Write-DcLine "the install set the permissions -PlanOnly lists (by SID with Set-Acl, which works before DefenseClaw is installed); find what changed them again, then run this script again"
         return 1603
     }
     Write-DcLine "installed rule pack $PackName in $target (tree sha256 $($source.Sha256)); NT SERVICE\DefenseClawGateway can read it and its parent folder"

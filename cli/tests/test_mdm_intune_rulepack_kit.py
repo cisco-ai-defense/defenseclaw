@@ -6,9 +6,11 @@ A base config that names a custom rule pack needs the pack on the device, with
 NT SERVICE\\DefenseClawGateway able to read it and its parent folder, before
 Setup runs; the live lab script granted only SYSTEM and Administrators and
 Setup refused the base app with 1639. These tests run the kit's scripts under
-pwsh on any OS: -PlanOnly for the icacls command lines, and the functions
-(dot-sourced, with icacls and Get-Acl replaced) for the install, its
-idempotence and the permission check.
+pwsh on any OS: -PlanOnly for the command lines, and the functions
+(dot-sourced, with icacls, Get-Acl and Set-Acl replaced) for the install, its
+idempotence and the permission check. The pack app runs before the base app,
+so the DefenseClawGateway service does not exist yet and Windows cannot look
+its SID up: the icacls stand-in fails for it as icacls does (1332).
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ GATEWAY = "S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274"
 REGION_BEGIN = "# region DefenseClaw rule pack helpers"
 REGION_END = "# endregion DefenseClaw rule pack helpers"
 PACKS = r"C:\ProgramData\DefenseClaw-RulePacks"
+MARKER = ".defenseclaw-rule-packs"
+ROOT_SDDL = f"O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;{GATEWAY})"
 
 # Exit code 1639 (invalid arguments); a POSIX shell keeps its low 8 bits.
 INVALID_ARGUMENTS = 1639 if os.name == "nt" else 1639 & 0xFF
@@ -76,15 +80,21 @@ def test_plan_grants_the_gateway_on_the_pack_and_its_parent(tmp_path: Path) -> N
     assert run.returncode == 0, run.stdout + run.stderr
     lines = run.stdout.splitlines()
     assert lines[0] == f"rule pack p2int tree sha256 {_tree_sha256(pack)}"
-    grant = rf"*S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *{GATEWAY}:(OI)(CI)RX"
     target = PACKS + r"\p2int"
+    # The gateway grant is a Set-Acl by SID: icacls cannot name the service
+    # SID before the service exists.
+    owner = "$a = Get-Acl -LiteralPath $p; $a.SetSecurityDescriptorSddlForm('O:BA', 'Owner'); Set-Acl -LiteralPath $p -AclObject $a"
     assert lines[2:] == [
-        f'icacls "{PACKS}" /setowner *S-1-5-32-544 /C',
-        f'icacls "{PACKS}" /inheritance:r /grant:r {grant}',
-        f'icacls "{PACKS}" /remove:g *S-1-5-32-545 *S-1-5-11 *S-1-1-0 *S-1-5-4',
+        f"$a = Get-Acl -LiteralPath '{PACKS}'; $a.SetSecurityDescriptorSddlForm('{ROOT_SDDL}', 'Owner, Access'); "
+        f"Set-Acl -LiteralPath '{PACKS}' -AclObject $a",
+        f"Set-Content -LiteralPath '{PACKS}\\{MARKER}' -Value "
+        "'DefenseClaw rule packs: Install-DefenseClawRulePack.ps1 manages this folder'",
         f'icacls "{target}" /reset /T /C',
-        f'icacls "{target}" /grant:r {grant}',
-        f'icacls "{target}" /setowner *S-1-5-32-544 /T /C',
+        f"foreach ($p in @('{target}') + @(Get-ChildItem -LiteralPath '{target}' -Recurse -Force | ForEach-Object FullName)) "
+        f"{{ {owner} }}",
+    ]
+    assert not [
+        line for line in lines if line.startswith("icacls") and (GATEWAY in line or "DefenseClawGateway" in line)
     ]
 
 
@@ -111,6 +121,7 @@ REFUSED_ROOTS = [
     r"C:\ProgramData",
     r"c:\programdata",
     r"C:\Windows",
+    r"C:\\Windows",
     r"D:\Windows\Temp\packs",
     r"C:\Program Files",
     r"C:\Program Files (x86)\Packs",
@@ -160,11 +171,13 @@ def test_install_plans_for_a_folder_of_its_own(tmp_path: Path, packs_root: str) 
     run = _pwsh(
         "-File", str(INSTALL), "-PackName", "p2int", "-SourcePath", str(pack), "-PacksRoot", packs_root, "-PlanOnly"
     )
-    assert run.returncode == 0 and f'icacls "{packs_root}" /inheritance:r' in run.stdout, run.stdout
+    assert run.returncode == 0 and f"Set-Acl -LiteralPath '{packs_root}' -AclObject" in run.stdout, run.stdout
 
 
 # Dot-sources a kit script, replaces what touches Windows (icacls, Get-Acl,
-# the elevation and drive-path checks), runs the scenario and prints JSON.
+# Set-Acl, the elevation and drive-path checks), runs the scenario and prints
+# JSON. The icacls stand-in resolves accounts as Windows does before the
+# DefenseClawGateway service exists: the gateway's SID and name do not map.
 HARNESS = r"""
 param([string]$Script, [string]$Scenario, [string]$Work)
 $ErrorActionPreference = 'Stop'
@@ -172,11 +185,38 @@ $ErrorActionPreference = 'Stop'
 . $env:DC_DETECT
 $global:Calls = New-Object System.Collections.Generic.List[string]
 $global:Acl = @{}
-$global:Good = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Entries = @(
+$global:Good = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Entries = @(
     [pscustomobject]@{ Sid = 'S-1-5-18'; Rights = 0x1F01FF; Allow = $true; InheritOnly = $false },
     [pscustomobject]@{ Sid = 'S-1-5-32-544'; Rights = 0x1F01FF; Allow = $true; InheritOnly = $false },
     [pscustomobject]@{ Sid = $script:DcGatewaySid; Rights = 0x1200A9; Allow = $true; InheritOnly = $false }) }
-function Invoke-DcIcacls { param([string[]]$Arguments) $global:Calls.Add(($Arguments -join ' ')) }
+# Vendor folders: inherited permissions; or protected but owned by SYSTEM; or
+# protected and owned by Administrators without the gateway entry.
+$global:Vendors = @(
+    [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Entries = $global:Good.Entries },
+    [pscustomobject]@{ Owner = 'S-1-5-18'; Protected = $true; Entries = $global:Good.Entries },
+    [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Entries = @($global:Good.Entries[0], $global:Good.Entries[1]) })
+$global:GatewaySid = $script:DcGatewaySid
+$global:SetAclRepairs = $true
+function Invoke-DcIcacls {
+    param([string[]]$Arguments)
+    foreach ($a in $Arguments) {
+        if ($a -match [regex]::Escape($global:GatewaySid) -or $a -match 'DefenseClawGateway') {
+            throw "icacls exited 1332: ${a}: No mapping between account names and security IDs was done."
+        }
+    }
+    $global:Calls.Add('icacls ' + ($Arguments -join ' '))
+}
+function Get-Acl {
+    param([string]$LiteralPath)
+    $o = [pscustomobject]@{ Sddl = ''; Sections = '' }
+    $o | Add-Member -MemberType ScriptMethod -Name SetSecurityDescriptorSddlForm -Value { param($Sddl, $Sections) $this.Sddl = [string]$Sddl; $this.Sections = [string]$Sections }
+    return $o
+}
+function Set-Acl {
+    param([string]$LiteralPath, $AclObject)
+    $global:Calls.Add("setacl $LiteralPath $($AclObject.Sddl) [$($AclObject.Sections)]")
+    if ($global:SetAclRepairs -and $AclObject.Sddl -match 'D:') { $global:Acl.Remove($LiteralPath) }
+}
 function Test-DcElevated { return $true }
 function Test-DcPacksRoot { param([string]$Path) return $true }
 function Get-DcAclState { param([string]$Path) if ($global:Acl.ContainsKey($Path)) { return $global:Acl[$Path] } return $global:Good }
@@ -195,16 +235,18 @@ switch ($Scenario) {
         $result.changed = Install; $result.changedCalls = @($global:Calls); $global:Calls.Clear()
         $result.changedContent = Get-Content -LiteralPath (Join-Path $root 'p2int/rules/r.yaml') -Raw
         # The permissions drifted, the content did not: re-apply, do not copy.
-        $global:Acl[$root] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Entries = @($global:Good.Entries[0], $global:Good.Entries[1]) }
-        function Invoke-DcIcacls { param([string[]]$Arguments) $global:Calls.Add(($Arguments -join ' ')); $global:Acl.Remove($global:PacksRootPath) }
+        $global:Acl[$root] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Entries = @($global:Good.Entries[0], $global:Good.Entries[1]) }
         $result.drift = Install; $result.driftCalls = @($global:Calls); $global:Calls.Clear()
+        # The marker went missing: written again.
+        Remove-Item -Force -LiteralPath (Join-Path $root '.defenseclaw-rule-packs')
+        $result.noMarker = Install; $result.noMarkerCalls = @($global:Calls); $global:Calls.Clear()
         $result.removed = Invoke-DcRulePackInstall -PackName 'p2int' -SourcePath '' -PacksRoot $root -ExpectedTreeSha256 '' -Remove
         $result.removedExists = Test-Path -LiteralPath (Join-Path $root 'p2int')
         $result.leftovers = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
     }
     'strangers' {
-        # An existing PacksRoot that holds more than packs is refused before
-        # any icacls; other packs and this script's leftovers are not.
+        # An existing PacksRoot this script did not set up, or that holds
+        # more than packs, is refused before anything changes.
         # A PacksRoot that is a file or a link is not a folder of its own.
         Set-Content -LiteralPath $root -Value 'x'
         $result.rootFile = Install
@@ -215,17 +257,40 @@ switch ($Scenario) {
         $result.rootLink = Install; $result.linkCalls = @($global:Calls)
         Remove-Item -LiteralPath $root
         New-Item -ItemType Directory -Path $root | Out-Null
-        # A file named like a pack is still not a pack folder.
+        # A vendor folder whose subfolders have pack-like names
+        # (C:\ProgramData\Amazon: EC2Launch, SSM, Tools): no marker, not this
+        # script's access list.
+        foreach ($name in 'EC2Launch', 'SSM', 'Tools') { New-Item -ItemType Directory -Path (Join-Path $root $name) | Out-Null }
+        $result.vendor = @(foreach ($state in $global:Vendors) { $global:Acl[$root] = $state; Install })
+        $result.vendorCalls = @($global:Calls)
+        foreach ($name in 'EC2Launch', 'SSM', 'Tools') { Remove-Item -LiteralPath (Join-Path $root $name) }
+        # In a folder this script set up (the marker), a file is still not a
+        # pack folder, nor is a folder with another name.
+        Set-Content -LiteralPath (Join-Path $root '.defenseclaw-rule-packs') -Value 'x'
         Set-Content -LiteralPath (Join-Path $root 'readme') -Value 'x'
         $result.file = Install; $result.fileCalls = @($global:Calls)
         Remove-Item -LiteralPath (Join-Path $root 'readme')
         New-Item -ItemType Directory -Path (Join-Path $root 'Microsoft Edge') | Out-Null
         $result.folder = Install; $result.folderCalls = @($global:Calls)
         Remove-Item -LiteralPath (Join-Path $root 'Microsoft Edge')
+        # The marker with other packs and this script's leftovers: accepted.
         New-Item -ItemType Directory -Path (Join-Path $root 'other-pack') | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $root '.p2int.old-0123abcd') | Out-Null
-        $result.packs = Install
-        $result.left = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name } | Sort-Object)
+        $result.marked = Install
+        $result.markedLeft = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
+        # No marker but this script's access list (set up by hand as in
+        # windows.mdx): accepted, and the marker is written.
+        Remove-Item -Force -LiteralPath (Join-Path $root '.defenseclaw-rule-packs')
+        Remove-Item -LiteralPath (Join-Path $root 'p2int') -Recurse
+        $global:Acl.Remove($root)
+        $result.ownAcl = Install
+        $result.ownAclLeft = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
+    }
+    'noservice' {
+        # The documented order: the pack app runs before the base app creates
+        # the DefenseClawGateway service, so its SID does not resolve yet.
+        try { Invoke-DcIcacls -Arguments @($root, '/grant', "*$($global:GatewaySid):(OI)(CI)RX"); $result.icaclsGrant = 'ok' } catch { $result.icaclsGrant = $_.Exception.Message }
+        $result.code = Install; $result.calls = @($global:Calls)
     }
     'ancestor' {
         # A folder above PacksRoot does not let the gateway list it.
@@ -236,7 +301,9 @@ switch ($Scenario) {
         $result.code = Install
     }
     'unreadable' {
-        # The parent stays without the gateway entry after icacls ran.
+        # The parent stays without the gateway entry after Set-Acl ran (for
+        # example a policy that resets folder permissions).
+        $global:SetAclRepairs = $false
         $global:Acl[$root] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Entries = @($global:Good.Entries[0], $global:Good.Entries[1]) }
         $result.code = Install
     }
@@ -247,6 +314,9 @@ switch ($Scenario) {
         $result.otherPack = Invoke-DcRulePackDetect -PackName 'p2int' -PacksRoot $root -ExpectedTreeSha256 ('0' * 64)
         $global:Acl[(Join-Path $root 'p2int')] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Entries = @($global:Good.Entries + [pscustomobject]@{ Sid = 'S-1-5-32-545'; Rights = 0x1200A9; Allow = $true; InheritOnly = $false }) }
         $result.usersRead = Invoke-DcRulePackDetect -PackName 'p2int' -PacksRoot $root -ExpectedTreeSha256 $sha
+        $global:Acl.Remove((Join-Path $root 'p2int'))
+        Remove-Item -Force -LiteralPath (Join-Path $root '.defenseclaw-rule-packs')
+        $result.noMarker = Invoke-DcRulePackDetect -PackName 'p2int' -PacksRoot $root -ExpectedTreeSha256 $sha
     }
 }
 [Console]::Out.WriteLine('RESULT:' + ($result | ConvertTo-Json -Compress -Depth 4))
@@ -279,7 +349,7 @@ def _harness(tmp_path: Path, scenario: str) -> tuple[dict, str]:
     )
     assert run.returncode == 0, run.stdout + run.stderr
     line = next(line for line in run.stdout.splitlines() if line.startswith("RESULT:"))
-    return {**json.loads(line[len("RESULT:") :]), "pythonTree": before}, run.stdout
+    return {**json.loads(line[len("RESULT:") :]), "pythonTree": before}, run.stdout + run.stderr
 
 
 @needs_pwsh
@@ -287,20 +357,13 @@ def test_install_is_idempotent_swaps_a_changed_pack_and_repairs_permissions(tmp_
     result, out = _harness(tmp_path, "lifecycle")
     root = str(tmp_path / "packs")
     pack = str(tmp_path / "packs" / "p2int")
-    gateway_grant = f"*{GATEWAY}:(OI)(CI)RX"
-    # First install: the parent first (owner, entries, no Users), then the pack.
+    # First install: the parent's owner and access list by SID (the gateway
+    # entry included, no lookup), then the pack inherits it, owner
+    # Administrators on every item.
     assert result["first"] == 0, out
-    calls = result["firstCalls"]
-    assert [c.split(" ")[1] for c in calls] == [
-        "/setowner",
-        "/inheritance:r",
-        "/remove:g",
-        "/reset",
-        "/grant:r",
-        "/setowner",
-    ]
-    assert calls[1].startswith(root + " /inheritance:r /grant:r") and gateway_grant in calls[1]
-    assert calls[4].startswith(pack + " /grant:r") and gateway_grant in calls[4]
+    items = [pack, *(str(tmp_path / "packs" / "p2int" / n) for n in ("judge", "judge/j.yaml", "rules", "rules/r.yaml"))]
+    assert result["firstCalls"][:2] == [f"setacl {root} {ROOT_SDDL} [Owner, Access]", f"icacls {pack} /reset /T /C"]
+    assert sorted(result["firstCalls"][2:]) == sorted(f"setacl {item} O:BA [Owner]" for item in items)
     assert result["firstTree"] == result["sourceTree"] == result["pythonTree"]
     # Run again: nothing to do.
     assert result["again"] == 0 and result["againCalls"] == []
@@ -308,11 +371,25 @@ def test_install_is_idempotent_swaps_a_changed_pack_and_repairs_permissions(tmp_
     # A changed pack is copied beside the old one and swapped in.
     assert result["changed"] == 0
     assert result["changedContent"] == "rules: [changed]"
-    assert any(c == pack + " /reset /T /C" for c in result["changedCalls"])
+    assert f"icacls {pack} /reset /T /C" in result["changedCalls"]
     # Drifted permissions with the same content are re-applied without a copy.
-    assert result["drift"] == 0 and len(result["driftCalls"]) == 6
+    assert result["drift"] == 0 and sorted(result["driftCalls"]) == sorted(result["firstCalls"])
+    assert result["noMarker"] == 0 and sorted(result["noMarkerCalls"]) == sorted(result["firstCalls"])
     assert result["removed"] == 0 and result["removedExists"] is False
-    assert result["leftovers"] == []
+    # -Remove deletes the pack only; the folder stays one this script set up.
+    assert result["leftovers"] == [MARKER]
+
+
+@needs_pwsh
+def test_install_grants_the_gateway_before_its_service_exists(tmp_path: Path) -> None:
+    # icacls looks the service SID up and fails (1332) until the service
+    # exists; the grant must not need that lookup.
+    result, out = _harness(tmp_path, "noservice")
+    assert "1332" in result["icaclsGrant"], result
+    assert result["code"] == 0, out
+    root = str(tmp_path / "packs")
+    assert f"setacl {root} {ROOT_SDDL} [Owner, Access]" in result["calls"]
+    assert not [c for c in result["calls"] if c.startswith("icacls") and GATEWAY in c]
 
 
 @needs_pwsh
@@ -321,7 +398,7 @@ def test_install_fails_when_the_gateway_still_cannot_read_the_parent(tmp_path: P
     assert result["code"] == 1603
     root = str(tmp_path / "packs")
     assert f"rule_pack_not_ready: the gateway service account NT SERVICE\\DefenseClawGateway cannot read {root}" in out
-    assert f'icacls "{root}" /grant "NT SERVICE\\DefenseClawGateway:RX"' in out
+    assert "by SID with Set-Acl" in out and "DefenseClawGateway:RX" not in out
 
 
 @needs_pwsh
@@ -329,14 +406,19 @@ def test_install_refuses_a_packs_root_that_holds_more_than_packs(tmp_path: Path)
     result, out = _harness(tmp_path, "strangers")
     root = tmp_path / "packs"
     assert result["rootFile"] == 1639 and result["rootLink"] == 1639 and result["linkCalls"] == [], out
-    assert result["file"] == 1639 and result["fileCalls"] == [], out
+    assert f"invalid_arguments: -PacksRoot {root} is a file or a link;" in out
+    assert result["vendor"] == [1639, 1639, 1639] and result["vendorCalls"] == [], out
     assert (
-        f"invalid_arguments: -PacksRoot {root} must hold only rule pack folders, and {root / 'readme'} is not one"
-        in out
+        f"invalid_arguments: -PacksRoot {root} is not empty and was not set up by this script "
+        f"(no {MARKER} file, and not its access list); the install would replace its permissions" in out
     )
+    assert result["file"] == 1639 and result["fileCalls"] == [], out
+    assert f"invalid_arguments: -PacksRoot {root} holds {root / 'readme'}, which is not a rule pack folder" in out
     assert result["folder"] == 1639 and result["folderCalls"] == [], out
-    assert result["packs"] == 0, out
-    assert result["left"] == ["other-pack", "p2int"]
+    assert result["marked"] == 0, out
+    assert sorted(result["markedLeft"]) == [MARKER, "other-pack", "p2int"]
+    assert result["ownAcl"] == 0, out
+    assert sorted(result["ownAclLeft"]) == [MARKER, "other-pack", "p2int"]
 
 
 @needs_pwsh
@@ -355,6 +437,8 @@ def test_detect_requires_the_tree_and_private_permissions(tmp_path: Path) -> Non
     assert result["detected"] == 0 and "DefenseClaw rule pack p2int installed in" in out
     assert result["otherPack"] == 1
     assert result["usersRead"] == 1
+    # A folder without the install's marker is not detected.
+    assert result["noMarker"] == 1 and f"has no {MARKER} file" in out
 
 
 ACL_CASES = r"""

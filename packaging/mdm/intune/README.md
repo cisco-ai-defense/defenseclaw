@@ -45,11 +45,18 @@ bundle app. Each later app depends on the one before it.
    `NT SERVICE\DefenseClawGateway` Read & execute, removes `Users`, verifies the
    copy and the permissions, and changes nothing when run again. Run it with
    `-PlanOnly` on the workstation to print the pack's tree SHA-256 and the
-   `icacls` commands; set that SHA-256 and the pack name in your copy of
-   `Detect-DefenseClawRulePack.ps1`, the app's detection script. Without the
-   pack, or when the gateway cannot read the pack or its parent folder, Setup
-   refuses the base config with `1639` and prints the `icacls` fix, for
-   example `icacls "C:\ProgramData\DefenseClaw-RulePacks" /grant "NT SERVICE\DefenseClawGateway:RX"`.
+   commands it runs; set that SHA-256 and the pack name in your copy of
+   `Detect-DefenseClawRulePack.ps1`, the app's detection script. The script
+   sets the parent folder with `Set-Acl`, by SID: this app runs before the base
+   app creates the gateway service, and `icacls` cannot grant the service SID
+   until the service exists (it fails with `1332`). `-PacksRoot` must be empty,
+   or a folder the script set up (it writes `.defenseclaw-rule-packs` there) or
+   that already has its permissions. Without the pack, or when the gateway
+   cannot read the pack or its parent folder, Setup refuses the base config
+   with `1639` and prints an `icacls` fix that works only once the service
+   exists. On a new device run the rule-pack app's install command again, or
+   set the parent from an elevated prompt:
+   `$a = Get-Acl -LiteralPath 'C:\ProgramData\DefenseClaw-RulePacks'; $a.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access'); Set-Acl -LiteralPath 'C:\ProgramData\DefenseClaw-RulePacks' -AclObject $a`.
 2. **Base app**, built with `-ConfigPath`. Its guardrail block must select the
    same custom rule pack, digest, threshold and rules as the signed bundle,
    with the pack's installed absolute path. Make the rule-pack app its

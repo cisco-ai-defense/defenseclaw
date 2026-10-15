@@ -206,9 +206,12 @@ writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` and by no standard user: a pack is
 one profile's policy, and users see only their own. Grant that account read
 and execute by its SID (`S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274`,
-which Windows derives from the service name, so the grant works before the
-first install; `sc.exe showsid DefenseClawGateway` prints it), remove `Users`,
-and add no Deny entry for that account.
+which Windows derives from the service name; `sc.exe showsid DefenseClawGateway`
+prints it), remove `Users`, and add no Deny entry for that account. Before the
+first install the service does not exist yet, and `icacls` cannot grant that
+SID (or the `NT SERVICE\DefenseClawGateway` name): it looks the account up and
+fails with `1332` (No mapping between account names and security IDs). Set the
+permissions with `Set-Acl` instead, as below: it writes the SID without a lookup.
 Status, verify and Setup warn `rule_pack_readable_by_users` for a pack that
 `Users`, `Authenticated Users`, `Everyone`, `INTERACTIVE` or `Domain Users`
 can read, with the `icacls` commands that fix it. Every parent folder of it needs
@@ -219,10 +222,11 @@ locked staging folder below; give it its own folder:
 ```powershell
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
-icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
-$Gateway = '*S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274'   # NT SERVICE\DefenseClawGateway
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "${Gateway}:(OI)(CI)RX" | Out-Null
-icacls $Packs /remove:g '*S-1-5-32-545' '*S-1-5-11' /T /C | Out-Null
+# Owner Administrators, no inherited entries, SYSTEM and Administrators Full control,
+# NT SERVICE\DefenseClawGateway Read & execute (by SID, so this works before the first install).
+$Acl = Get-Acl -LiteralPath $Packs
+$Acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access')
+Set-Acl -LiteralPath $Packs -AclObject $Acl
 if (Test-Path -LiteralPath "$Packs\my-pack") {
     icacls "$Packs\my-pack" /reset /T /C | Out-Null
     Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction Stop
@@ -232,18 +236,20 @@ icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
 The snippet is safe to run again, for example after you fix a permission:
-it replaces the pack folder instead of copying into it, and every file of
-the new copy inherits the permissions of `$Packs`. Do not add `/T` to the
-`/inheritance:r /grant:r` line: on a file an `(OI)(CI)` grant does not
-apply, so `/T` leaves every file in an existing pack with no permissions at
-all. The `/reset` line repairs such a pack before it is removed. Copying a
-folder onto one that exists nests a copy (`my-pack\my-pack`), which Setup
-refuses, naming the nested folder.
+it replaces the access list of `$Packs` (so it also removes `Users` and any
+other entry), replaces the pack folder instead of copying into it, and every
+file of the new copy inherits the permissions of `$Packs`. The `/reset` line
+repairs a pack whose files lost their permissions before it is removed.
+Copying a folder onto one that exists nests a copy (`my-pack\my-pack`), which
+Setup refuses, naming the nested folder. The two `icacls` lines name no
+service account, so they work before the first install.
 
 The grant names the service SID, not the `Users` group, so only the gateway,
 Administrators and SYSTEM can read the pack. Setup's own `icacls` advice for a refused
 pack folder lists the `Users` entry (`*S-1-5-32-545:(OI)(CI)RX`); where packs are
-meant to stay private, replace that entry with the service SID as above. A rule pack
+meant to stay private, use the `Set-Acl` lines above instead. Setup's advice also
+names `NT SERVICE\DefenseClawGateway`, which `icacls` resolves only once the service
+exists, so on a first install use the `Set-Acl` lines. A rule pack
 is policy, not a secret that protects anything by itself, but which pack a group
 gets tells a reader how the groups differ.
 
