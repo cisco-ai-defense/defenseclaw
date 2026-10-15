@@ -103,11 +103,23 @@ script:
 | `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
 | `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of the signer certificates you accept, comma-separated or repeated. |
 | `-ConfigPath` | The base config. It must select the same guardrail pack and rules as the signed bundle. Without a config the first install fails with `1639`. |
-| `-BaseConfigPath` | Required for a bundle package: the exact base app config. Packaging refuses a missing or weaker guardrail policy. |
+| `-BaseConfigPath` | Required for a bundle package: the exact base app config. Packaging refuses a missing base config, a `guardrail:` block that differs from the bundle's in more than the pack path, and a `claude_code:`, `codex:`, `connector_hooks:` or `application_protection:` block that differs from the bundle's. |
 | `-BundlePath`, `-TrustAnchorPath`, `-RequireBundle` | For a bundle app: signed bundle, optional public anchors and required bundle version for detection. |
 | `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
 | `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
 | `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
+
+With `-BundlePath`, the packager compares `-BaseConfigPath` with the
+manifest-pinned bundle config as text. It refuses a different guardrail
+policy (only the pack path may differ) and a `claude_code:`, `codex:`,
+`connector_hooks:` or `application_protection:` block (the hook modes) that
+differs from the bundle's; leave a hook mode block out of both or copy it
+from the bundle. The base config must be plain ASCII with LF or CRLF line
+endings: the packager refuses any other byte, even in a comment, such as a
+tab, a lone CR or a non-ASCII character (one UTF-8 byte order mark at the
+start is allowed). It also refuses a base config that writes a top-level key
+other than plainly in lowercase (a tag, anchor, escape or `?` key) or that
+continues a quoted value or a `{...}` or `[...]` on the next line.
 
 The script:
 

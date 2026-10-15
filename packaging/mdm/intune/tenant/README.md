@@ -60,7 +60,9 @@ Run `python3 intune_tenant.py COMMAND --help` for the options. Python 3.9 or lat
 
 For the kit's macOS wrapper, set an inline config or `DC_CONFIG_FILE`, or use
 `dc_inline_bundle` (base64) or `DC_BUNDLE_FILE` for a signed bundle. The bundle
-carries its own config, so leave both config inputs empty when using one. Trust
+carries its own config; a config set next to it is the base config, which the
+wrapper compares with the bundle's `guardrail:` block and hook mode blocks on
+the device before it installs anything (`mdm_base_config_mismatch`). Trust
 anchors can already be installed on the device, supplied by
 `DC_TRUST_ANCHOR_FILE`, or pasted into `dc_inline_trust_anchors` (JSON). The
 helper also accepts source-only installs, read-only `status` and `verify` actions,
@@ -82,7 +84,7 @@ syntax. For a recognizable kit wrapper it also checks:
   `DC_SECRET_FILE` and `DC_STAGING_DIR` paths; a valid lowercase/digit/dash
   secret name paired with a secret file; and no secret file without a name.
 - No source, config, bundle, trust anchor, secret or capability-loss option for
-  read-only actions; no config alongside a signed bundle; a bundle when
+  read-only actions; a bundle when
   capability-loss refusal is requested; valid inline bundle base64 on an
   `ensure` run; and at least one input setting on an `ensure` run.
 

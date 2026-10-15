@@ -24,6 +24,12 @@
     Install-DefenseClawRulePack.ps1; the script prints a Prerequisite line for
     every such pack. Verify the bundle offline with
     defenseclaw-gateway enterprise bundle verify before packaging it.
+    The base config's claude_code, codex, connector_hooks and
+    application_protection blocks (the hook modes) must equal the bundle's,
+    or be absent from both. The packager compares the configs as text, so the
+    base config must be plain ASCII with LF or CRLF line endings, write each
+    top-level key plainly in lowercase and end each quoted value and each
+    {...} or [...] on the line where it starts.
 
 .EXAMPLE
     ./New-DefenseClawIntunePackage.ps1 -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
@@ -75,6 +81,126 @@ if ($TrustAnchorPath) {
     if ($anchorText -match '-----BEGIN [A-Z ]*PRIVATE KEY-----') { throw '-TrustAnchorPath contains a private key' }
     try { $anchorJson = $anchorText | ConvertFrom-Json -ErrorAction Stop } catch { throw '-TrustAnchorPath must contain a JSON object with schema_version 1' }
     if ($null -eq $anchorJson -or $anchorJson -isnot [pscustomobject] -or $null -eq $anchorJson.PSObject.Properties['schema_version'] -or $anchorJson.schema_version -isnot [long] -or $anchorJson.schema_version -ne 1) { throw '-TrustAnchorPath must contain a JSON object with schema_version 1' }
+}
+
+function Get-TopLevelBlock {
+    # Every top-level <Key>: block of a config (the key plain or quoted),
+    # without blank and full-line comment lines; '' when there is none.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Key)
+    $inside = $false
+    $found = @()
+    foreach ($line in ($Text.TrimStart([char]0xFEFF) -split "`n")) {
+        $line = $line.TrimEnd([char]13)
+        if ($line -match '^[ \t]*(#|$)') { continue }
+        if (-not $line.StartsWith(' ')) {
+            $inside = $line -cmatch ('^(' + $Key + '|"' + $Key + '"|''' + $Key + ''')[ \t]*:([ \t]|$)')
+        }
+        if ($inside) { $found += $line }
+    }
+    return ($found -join "`n")
+}
+
+function Get-BaseConfigSpellingProblem {
+    # Get-GuardrailBlock and Get-TopLevelBlock find a key by its text. The
+    # product's loader also reads "claude\u005fcode":, !!str claude_code: and
+    # ? claude_code as claude_code, and takes a line that continues a quoted
+    # value or a {...} or [...] as part of that value even when the line
+    # starts in column 1, so a base config written that way passed the
+    # compare and still set a hook mode or hid its guardrail block (GAP-0090
+    # verify r2). The loader also starts a new line at a lone CR, NEL, LS and
+    # PS, so a key after one was hidden from these checks, which split lines
+    # only at LF (GAP-0090 verify r3). So first every byte of the file must be
+    # printable ASCII or LF, a CR may come only right before an LF and a UTF-8
+    # byte order mark only first; the bytes are read raw, so the check does
+    # not depend on how PowerShell decodes the file. Returns why the config is
+    # not plain enough to compare, or ''. The Unix wrappers' dc_plain_bytes
+    # and dc_plain_yaml apply the same rules.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    $first = 0
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { $first = 3 }
+    $number = 1
+    for ($i = $first; $i -lt $Bytes.Length; $i++) {
+        $b = $Bytes[$i]
+        if ($b -eq 10) { $number++; continue }
+        if (($b -ge 0x20 -and $b -le 0x7E) -or ($b -eq 13 -and $i + 1 -lt $Bytes.Length -and $Bytes[$i + 1] -eq 10)) { continue }
+        $next = @(1, 2 | ForEach-Object { if ($i + $_ -lt $Bytes.Length) { [int]$Bytes[$i + $_] } else { -1 } })
+        $what = if ($b -eq 0) { 'a NUL byte' }
+        elseif ($b -eq 9) { 'a tab' }
+        elseif ($b -eq 11) { 'a vertical tab' }
+        elseif ($b -eq 12) { 'a form feed' }
+        elseif ($b -eq 13) { 'a carriage return (CR) that is not followed by a line feed (LF)' }
+        elseif ($b -lt 0x80) { 'a control character (0x{0:X2})' -f $b }
+        elseif ($b -eq 0xC2 -and $next[0] -eq 0x85) { 'a NEL (U+0085) line break' }
+        elseif ($b -eq 0xE2 -and $next[0] -eq 0x80 -and $next[1] -eq 0xA8) { 'an LS (U+2028) line break' }
+        elseif ($b -eq 0xE2 -and $next[0] -eq 0x80 -and $next[1] -eq 0xA9) { 'a PS (U+2029) line break' }
+        elseif ($b -eq 0xEF -and $next[0] -eq 0xBB -and $next[1] -eq 0xBF) { 'a byte order mark that is not at the start of the file' }
+        else { 'a non-ASCII byte (0x{0:X2})' -f $b }
+        return "line $number has $what; write the base config in plain ASCII with LF or CRLF line ends"
+    }
+    $Text = [Text.Encoding]::ASCII.GetString($Bytes, $first, $Bytes.Length - $first)
+    $compared = @('guardrail', 'claude_code', 'codex', 'connector_hooks', 'application_protection')
+    $block = -1
+    $top = $false
+    $number = 0
+    foreach ($raw in ($Text -split "`n")) {
+        $number++
+        $line = $raw.TrimEnd([char]13)
+        $n = $line.Length
+        $indent = $n - $line.TrimStart(' ').Length
+        if ($block -ge 0) {
+            if ($line -match '^ *$' -or $indent -gt $block) { continue }
+            $block = -1
+        }
+        if ($line -match '^ *(#|$)') { continue }
+        if ($indent -eq 0) {
+            if ($line -ceq '---' -and -not $top) { $top = $true; continue }
+            $top = $true
+            if ($line -cnotmatch '^([a-z0-9_]+|"[a-z0-9_]+"|''[a-z0-9_]+'') *:( |$)') {
+                $key = ($line -replace ' *:.*$', '').Trim([char[]]@('"', "'"))
+                if ($compared -contains $key -and $key -cne $key.ToLowerInvariant()) {
+                    return "line $number writes the top-level key $($key.ToLowerInvariant()) in other letters; write it in lowercase"
+                }
+                return "line $number is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]"
+            }
+        }
+        # A single-quoted '' reads as the end of one quoted value and the
+        # start of the next, which ends on the same line either way.
+        $i = $indent; $depth = 0; $owner = $indent; $start = $indent
+        while ($i -lt $n) {
+            $c = $line[$i]
+            $spaced = $i + 1 -ge $n -or $line[$i + 1] -eq ' '
+            if ($c -eq ' ') { $i++; continue }
+            if ($c -eq '#') { break }
+            if ($c -eq '"' -or $c -eq "'") {
+                $j = $i + 1
+                while ($j -lt $n -and $line[$j] -ne $c) {
+                    if ($c -eq '"' -and $line[$j] -eq '\') { $j++ }
+                    $j++
+                }
+                if ($j -ge $n) { return "line $number leaves a quoted value open; end each quoted value on the line it starts on" }
+                $start = $i; $i = $j + 1; continue
+            }
+            if ('{['.Contains($c)) { $depth++; $i++; continue }
+            if ('}]'.Contains($c) -and $depth -gt 0) { $depth--; $i++; continue }
+            if ($c -eq ',' -and $depth -gt 0) { $i++; continue }
+            if ($c -eq ':' -and ($spaced -or $depth -gt 0)) { $owner = $start; $i++; continue }
+            if ('-?'.Contains($c) -and $spaced) { $owner = $i; $i++; continue }
+            if ('|>'.Contains($c) -and $depth -eq 0) { $block = $owner; break }
+            if ('!&*'.Contains($c)) {
+                while ($i -lt $n -and -not ' ,{}[]'.Contains($line[$i])) { $i++ }
+                continue
+            }
+            $start = $i
+            for (; $i -lt $n; $i++) {
+                $c = $line[$i]
+                if ($c -eq ':' -and ($depth -gt 0 -or $i + 1 -ge $n -or $line[$i + 1] -eq ' ')) { break }
+                if ($depth -gt 0 -and ',{}[]'.Contains($c)) { break }
+                if ($c -eq '#' -and $line[$i - 1] -eq ' ') { break }
+            }
+        }
+        if ($block -lt 0 -and $depth -gt 0) { return "line $number leaves a {...} or [...] open; end each one on the line it starts on" }
+    }
+    return ''
 }
 
 function Get-GuardrailBlock {
@@ -136,7 +262,11 @@ function Get-PreinstalledPackPath {
 }
 
 if ($BundlePath) {
-    $baseText = Get-Content -LiteralPath $BaseConfigPath -Raw
+    # Raw bytes: Get-Content would decode them (as ANSI in Windows PowerShell).
+    $baseBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $BaseConfigPath).ProviderPath)
+    $spelling = Get-BaseConfigSpellingProblem -Bytes $baseBytes
+    if ($spelling) { throw "base CONFIG= $spelling" }
+    $baseText = [Text.Encoding]::UTF8.GetString($baseBytes).TrimStart([char]0xFEFF)
     if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
     $file = [IO.File]::OpenRead($BundlePath)
     try {
@@ -202,6 +332,17 @@ if ($BundlePath) {
     }
     if (($baseLines -join "`n") -cne $bundleBlock) {
         throw "base CONFIG= guardrail policy differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
+    }
+    # The hooks take claude_code.mode, codex.mode and
+    # connector_hooks.<connector>.mode before the guardrail mode, and
+    # application_protection sets the guardrail policy of automatically
+    # protected agents, so these blocks must be the bundle's too, or absent
+    # from both (GAP-0090). No other key is compared.
+    $bundleText = [Text.Encoding]::UTF8.GetString($entries['config.yaml'])
+    foreach ($key in 'claude_code', 'codex', 'connector_hooks', 'application_protection') {
+        if ((Get-TopLevelBlock -Text $baseText -Key $key) -cne (Get-TopLevelBlock -Text $bundleText -Key $key)) {
+            throw "base CONFIG= ${key}: block differs from the signed bundle's (it sets hook modes or the guardrail policy the hooks answer under); use the bundle's ${key}: block, or leave it out of both"
+        }
     }
 }
 

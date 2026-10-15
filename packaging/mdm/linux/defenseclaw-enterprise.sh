@@ -49,11 +49,22 @@
 # Signed policy bundles: --trust-anchor-file installs the trust anchor file
 # (root-only writable) and turns on bundle mode; --bundle-file applies a
 # signed bundle with `enterprise bundle apply` after the package step and the
-# credential. A bundle carries its own config, so it excludes --config-file,
-# --config-stdin and the inline config. When the apply fails, the bundle in
-# force keeps enforcing and the trust anchor file this run replaced is put
-# back. Script-only MDMs can paste the anchor file and the base64 of the
-# bundle into the settings below.
+# credential. When the apply fails, the bundle in force keeps enforcing and
+# the trust anchor file this run replaced is put back. Script-only MDMs can
+# paste the anchor file and the base64 of the bundle into the settings below.
+# A bundle carries its own config. A config given with it (--config-file,
+# --config-stdin or the inline config) is the base config. Its guardrail:
+# block must be the bundle's, apart from custom_packs.<pack>.path, which
+# names the pack's folder installed before this run. Its claude_code:,
+# codex:, connector_hooks: and application_protection: blocks must be the
+# bundle's, or absent from both: their hook modes override the guardrail
+# mode. Otherwise nothing is installed (mdm_base_config_mismatch, exit 2).
+# The check reads the bundle with tar; without tar nothing is installed
+# (mdm_tar_missing, exit 1). No other config key is compared. On a device
+# that is not yet in bundle mode the base config is applied before the trust
+# anchors and the bundle, so while the bundle is pending, or after it fails
+# to apply, the agents run under a base config whose guardrail block and hook
+# modes are the bundle's (GAP-0090).
 # Bundle config should omit data_dir: the gateway uses its managed data
 # directory; enterprise lifecycle state stays separate and root-only.
 
@@ -509,9 +520,6 @@ dc_validate_args() {
     if [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ] && [ -z "$DC_BUNDLE_FILE" ] && ! dc_inline_bundle | grep -q '[^[:space:]]'; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--refuse-capability-loss requires a bundle"
     fi
-    if [ -n "$DC_BUNDLE_FILE" ] && { [ -n "$DC_CONFIG_FILE" ] || [ "$DC_CONFIG_STDIN" = 1 ]; }; then
-        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
-    fi
     for path in "$DC_BUNDLE_FILE" "$DC_TRUST_ANCHOR_FILE"; do
         case "$path" in
             "" | /*) ;;
@@ -942,6 +950,290 @@ dc_extract_payload() {
     DC_PAYLOAD_GATEWAY=$gateway
 }
 
+# dc_guardrail_block <config>: the config's top-level guardrail: block with
+# LF line ends and without trailing blank lines. Fails unless the file has
+# exactly one plain guardrail: line.
+dc_guardrail_block() {
+    awk '
+        { sub(/\r$/, "") }
+        $0 == "guardrail:" { count++; inside = (count == 1); if (inside) { n = 1; block[1] = $0 }; next }
+        inside && ($0 == "" || substr($0, 1, 1) == " ") { block[++n] = $0; next }
+        { inside = 0 }
+        END {
+            if (count != 1) exit 1
+            while (n > 1 && block[n] == "") n--
+            for (i = 1; i <= n; i++) print block[i]
+        }
+    ' "$1"
+}
+
+# dc_custom_pack_path <block> <pack>: "<line> <path>" of
+# guardrail.custom_packs.<pack>.path in a dc_guardrail_block file, the path
+# without quotes; nothing when the block names none.
+dc_custom_pack_path() {
+    awk -v pack="$2" -v quotes="\"'" '
+        $0 == "  custom_packs:" { packs = 1; inpack = 0; next }
+        packs && substr($0, 1, 4) ~ /[^ ]/ { packs = 0 }
+        !packs { next }
+        /^    [^ \t:]+:[ \t]*$/ { name = $0; sub(/^    /, "", name); sub(/:[ \t]*$/, "", name); inpack = (name == pack); next }
+        inpack && /^      path:[ \t]*[^ \t]/ {
+            value = $0
+            sub(/^      path:[ \t]*/, "", value)
+            sub(/[ \t]*$/, "", value)
+            while (value != "" && index(quotes, substr(value, 1, 1))) value = substr(value, 2)
+            while (value != "" && index(quotes, substr(value, length(value), 1))) value = substr(value, 1, length(value) - 1)
+            print NR " " value
+            exit
+        }
+    ' "$1"
+}
+
+# dc_top_block <config> <key>: every top-level <key>: block of the config
+# (the key plain or quoted), with LF line ends and without blank or
+# full-line comment lines; nothing when the config has none.
+dc_top_block() {
+    awk -v key="$2" -v bom="$(printf '\357\273\277')" '
+        { sub(/\r$/, "") }
+        NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
+        /^[ \t]*#/ || /^[ \t]*$/ { next }
+        substr($0, 1, 1) != " " {
+            inside = ($0 ~ ("^(" key "|\"" key "\"|\047" key "\047)[ \t]*:([ \t]|$)"))
+        }
+        inside { print }
+    ' "$1"
+}
+
+# dc_plain_bytes <config>: fails, printing why, unless every byte of the
+# base config is printable ASCII or LF, a CR comes only right before an LF
+# and a UTF-8 byte order mark only first (GAP-0090 verify r3). The product's
+# loader also starts a new line at a lone CR, NEL, LS and PS, so a key after
+# one was hidden from the text checks, which split lines only at LF. od reads
+# the bytes, so the check does not depend on the awk or the locale; a file
+# od does not read in full is refused.
+dc_plain_bytes() {
+    size=$(wc -c <"$1" | tr -d ' ')
+    LC_ALL=C od -An -v -tu1 "$1" 2>/dev/null | LC_ALL=C awk -v size="$size" '
+        function refuse(why) {
+            msg = "the base config line " line " " why "; write the base config in plain ASCII with LF or CRLF line ends"
+            bad = 1
+        }
+        function high(   name) {
+            name = sprintf("a non-ASCII byte (0x%02X)", seq1)
+            if (seq1 == 194 && seq2 == 133) name = "a NEL (U+0085) line break"
+            if (seq1 == 226 && seq2 == 128 && seq3 == 168) name = "an LS (U+2028) line break"
+            if (seq1 == 226 && seq2 == 128 && seq3 == 169) name = "a PS (U+2029) line break"
+            if (seq1 == 239 && seq2 == 187 && seq3 == 191) {
+                if (start == 1) return
+                name = "a byte order mark that is not at the start of the file"
+            }
+            refuse("has " name)
+        }
+        BEGIN { line = 1 }
+        {
+            for (f = 1; f <= NF; f++) {
+                b = $f + 0
+                at++
+                if (want) {
+                    if (++got == 2) seq2 = b; else seq3 = b
+                    if (--want == 0) { high(); if (bad) exit }
+                    continue
+                }
+                if (cr) { cr = 0; if (b != 10) { refuse("has a carriage return (CR) that is not followed by a line feed (LF)"); exit } }
+                if (b == 10) { line++; continue }
+                if (b >= 32 && b <= 126) continue
+                if (b == 13) { cr = 1; continue }
+                if (b >= 128) {
+                    seq1 = b; seq2 = seq3 = -1; got = 1; start = at
+                    want = (b == 194) ? 1 : ((b == 226 || b == 239) ? 2 : 0)
+                    if (!want) { high(); exit }
+                    continue
+                }
+                if (b == 0) refuse("has a NUL byte")
+                else if (b == 9) refuse("has a tab")
+                else if (b == 11) refuse("has a vertical tab")
+                else if (b == 12) refuse("has a form feed")
+                else refuse(sprintf("has a control character (0x%02X)", b))
+                exit
+            }
+        }
+        END {
+            if (!bad && want) high()
+            if (!bad && cr) refuse("has a carriage return (CR) that is not followed by a line feed (LF)")
+            if (!bad && at != size + 0) { msg = "the base config could not be read byte by byte"; bad = 1 }
+            if (bad) { print msg; exit 1 }
+        }
+    '
+}
+
+# dc_plain_yaml <config>: fails, printing why, unless the base config is
+# written plainly enough for dc_guardrail_block and dc_top_block, which find
+# a key by its text (GAP-0090 verify r2). The product's loader also reads
+# "claude\u005fcode":, !!str claude_code: and ? claude_code as claude_code,
+# and takes a line that continues a quoted value or a {...} or [...] as part
+# of that value even when the line starts in column 1, so a config written
+# that way passed the compare and still set a hook mode or hid its guardrail
+# block. Every top-level key must be lowercase letters, digits and
+# underscores, plain or in quotes (the document may start with ---), and
+# every quoted value and {...} or [...] must end on the line it starts on.
+# Block scalar (| and >) lines are not read. A single-quoted '' is read as
+# the end of one quoted value and the start of the next, which ends on the
+# same line either way. The config must pass dc_plain_bytes first, so it has
+# no tab.
+dc_plain_yaml() {
+    LC_ALL=C awk -v bom="$(printf '\357\273\277')" '
+        function refuse(why) { print "the base config line " NR " " why; bad = 1; exit }
+        BEGIN { block = -1 }
+        { sub(/\r$/, "") }
+        NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
+        { line = $0; n = length(line); match(line, /^ */); indent = RLENGTH }
+        block >= 0 && (line ~ /^ *$/ || indent > block) { next }
+        { block = -1 }
+        line ~ /^ *#/ || line ~ /^ *$/ { next }
+        indent == 0 {
+            if (line == "---" && !top) { top = 1; next }
+            top = 1
+            if (line !~ /^([a-z0-9_]+|"[a-z0-9_]+"|\047[a-z0-9_]+\047) *:( |$)/) {
+                key = line
+                sub(/ *:.*/, "", key)
+                gsub(/^["\047]+|["\047]+$/, "", key)
+                lower = tolower(key)
+                if (key != lower && (lower == "guardrail" || lower == "claude_code" || lower == "codex" || lower == "connector_hooks" || lower == "application_protection"))
+                    refuse("writes the top-level key " lower " in other letters; write it in lowercase")
+                refuse("is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]")
+            }
+        }
+        {
+            i = indent + 1; depth = 0; owner = indent; start = indent
+            while (i <= n) {
+                c = substr(line, i, 1)
+                spaced = (i == n || substr(line, i + 1, 1) == " ")
+                if (c == " ") { i++; continue }
+                if (c == "#") break
+                if (c == "\"" || c == "\047") {
+                    for (j = i + 1; j <= n && substr(line, j, 1) != c; j++)
+                        if (c == "\"" && substr(line, j, 1) == "\\") j++
+                    if (j > n) refuse("leaves a quoted value open; end each quoted value on the line it starts on")
+                    start = i - 1; i = j + 1; continue
+                }
+                if (c == "{" || c == "[") { depth++; i++; continue }
+                if ((c == "}" || c == "]") && depth > 0) { depth--; i++; continue }
+                if (c == "," && depth > 0) { i++; continue }
+                if (c == ":" && (spaced || depth > 0)) { owner = start; i++; continue }
+                if ((c == "-" || c == "?") && spaced) { owner = i - 1; i++; continue }
+                if ((c == "|" || c == ">") && depth == 0) { block = owner; next }
+                if (c == "!" || c == "&" || c == "*") {
+                    while (i <= n && !index(" ,{}[]", substr(line, i, 1))) i++
+                    continue
+                }
+                start = i - 1
+                for (; i <= n; i++) {
+                    c = substr(line, i, 1)
+                    if (c == ":" && (depth > 0 || i == n || substr(line, i + 1, 1) == " ")) break
+                    if (depth > 0 && index(",{}[]", c)) break
+                    if (c == "#" && substr(line, i - 1, 1) == " ") break
+                }
+            }
+            if (depth > 0) refuse("leaves a {...} or [...] open; end each one on the line it starts on")
+        }
+        END { exit bad }
+    ' "$1"
+}
+
+# dc_check_base_config <config> <bundle>: a base config delivered with a
+# signed bundle is the config the agents run under until the bundle applies,
+# and after a bundle that does not apply (GAP-0090; the Intune Windows
+# packager checks the same, GAP-0105). The two guardrail: blocks must be
+# identical apart from where each custom rule pack the bundle ships is
+# installed: the bundle names policies/guardrail/<pack> inside itself, the
+# base config an absolute folder the administrator installed before this
+# run. The claude_code:, codex:, connector_hooks: and application_protection:
+# blocks must be identical too, or absent from both: the hooks take
+# claude_code.mode, codex.mode and connector_hooks.<connector>.mode before
+# the guardrail mode, and application_protection sets the guardrail policy
+# of automatically protected agents. No other key is compared. The config
+# must pass dc_plain_bytes and dc_plain_yaml first. Prints why and fails
+# when they differ.
+# Needs tar (dc_main checks for it). The bundle
+# apply verifies the signature later; the config compared here must match
+# the manifest's files[] pin.
+dc_check_base_config() {
+    dc_plain_bytes "$1" || return 1
+    dc_plain_yaml "$1" || return 1
+    parity="$DC_STAGE/parity"
+    rm -rf "$parity"
+    mkdir "$parity"
+    for member in manifest.json config.yaml; do
+        tar -xzOf "$2" "$member" 2>/dev/null | head -c 262145 >"$parity/$member" || true
+        size=$(wc -c <"$parity/$member" | tr -d ' ')
+        if [ "$size" = 0 ]; then
+            echo "the bundle has no readable $member"
+            return 1
+        fi
+        if [ "$size" -gt 262144 ]; then
+            echo "the bundle $member is larger than 262144 bytes"
+            return 1
+        fi
+    done
+    manifest=$(tr -d ' \t\r\n' <"$parity/manifest.json")
+    pin=$(printf '%s\n' "$manifest" | sed -n 's/.*"path":"config\.yaml","sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+    if [ -z "$pin" ] || [ "$pin" != "$(dc_sha256 "$parity/config.yaml")" ]; then
+        echo "the bundle config.yaml does not match the signed manifest files[] pin"
+        return 1
+    fi
+    if ! dc_guardrail_block "$1" >"$parity/base" || ! dc_guardrail_block "$parity/config.yaml" >"$parity/bundle"; then
+        echo "the base config and the bundle config must each have one plain guardrail: block"
+        return 1
+    fi
+    selected=$(grep '^  rule_pack: ' "$parity/bundle" || true)
+    if [ -n "$selected" ] && [ "$(printf '%s\n' "$selected" | wc -l | tr -d ' ')" = 1 ] && ! grep -qxF "$selected" "$parity/base"; then
+        echo "the base config must select the bundle rule pack ${selected#  rule_pack: }"
+        return 1
+    fi
+    packs=$(printf '%s\n' "$manifest" | grep -o '"path":"policies/guardrail/[^/"]*/' | sed -e 's|.*/guardrail/||' -e 's|/$||' | sort -u)
+    case "$(printf '%s' "$packs" | tr '\n' '.')" in
+        *[!A-Za-z0-9._-]*) echo "the bundle names a rule pack folder that is not a plain name"; return 1 ;;
+    esac
+    for pack in $packs; do
+        in_bundle=$(dc_custom_pack_path "$parity/bundle" "$pack")
+        in_base=$(dc_custom_pack_path "$parity/base" "$pack")
+        if [ -z "$in_bundle" ] || [ "${in_bundle#* }" != "policies/guardrail/$pack" ]; then
+            echo "the bundle config.yaml must name policies/guardrail/$pack as custom_packs.$pack.path"
+            return 1
+        fi
+        if [ -z "$in_base" ]; then
+            echo "the base config must define custom_packs.$pack"
+            return 1
+        fi
+        case "${in_base#* }" in
+            /*) ;;
+            *) echo "the base config must name an absolute, preinstalled path for bundle rule pack $pack"; return 1 ;;
+        esac
+        awk -v at="${in_base%% *}" -v from="${in_bundle%% *}" '
+            NR == FNR { if (FNR == from + 0) line = $0; next }
+            FNR == at + 0 { print line; next }
+            { print }
+        ' "$parity/bundle" "$parity/base" >"$parity/base.next"
+        mv -f "$parity/base.next" "$parity/base"
+    done
+    if ! cmp -s "$parity/base" "$parity/bundle"; then
+        echo "the base config guardrail: block differs from the signed bundle's; use the same policy source and change only custom_packs.<pack>.path"
+        return 1
+    fi
+    for key in claude_code codex connector_hooks application_protection; do
+        dc_top_block "$1" "$key" >"$parity/base.$key"
+        dc_top_block "$parity/config.yaml" "$key" >"$parity/bundle.$key"
+        cmp -s "$parity/base.$key" "$parity/bundle.$key" && continue
+        case "$key" in
+            claude_code) why="claude_code.mode overrides the guardrail mode for Claude Code" ;;
+            codex) why="codex.mode overrides the guardrail mode for Codex" ;;
+            connector_hooks) why="connector_hooks.<connector>.mode overrides the guardrail mode for that connector" ;;
+            *) why="it sets the guardrail policy of automatically protected agents" ;;
+        esac
+        echo "the base config $key: block differs from the signed bundle's ($why); use the bundle's $key: block, or leave it out of both"
+        return 1
+    done
+}
+
 # dc_put_anchors <src>: atomically replace the trust anchor file with src
 # (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
 dc_put_anchors() {
@@ -1104,8 +1396,14 @@ dc_main() {
             dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the inline bundle is not valid base64"
         dc_read_bounded "$bundle" "$DC_MAX_BUNDLE_BYTES" "bundle" <"$DC_STAGE/inline.dcbundle"
     fi
+    # A config delivered with a bundle is the base config; it is checked
+    # against the bundle before anything is installed. The check reads the
+    # bundle with tar, which minimal Linux images may lack.
     if [ -n "$bundle" ] && [ -n "$config" ]; then
-        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a signed bundle carries its own config; empty the inline config block"
+        command -v tar >/dev/null 2>&1 ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_tar_missing "tar is not installed; the wrapper needs it to compare the base config with the signed bundle, so nothing was installed (install tar, or deliver the bundle without a base config)"
+        reason=$(dc_check_base_config "$config" "$bundle") ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_base_config_mismatch "the base config does not match the signed bundle's guardrail block and hook modes, so nothing was installed: $reason"
     fi
     anchors=""
     if [ -n "$DC_TRUST_ANCHOR_FILE" ]; then
@@ -1179,13 +1477,22 @@ dc_main() {
         dc_log "stored credential $DC_SECRET_NAME"
     fi
 
-    # A bundle apply runs the ensure transaction itself, so ensure runs
-    # first only to install the payload channel; the package channel's
-    # postinstall already applied the deployment.
-    if [ -z "$bundle" ] || [ -n "$DC_PAYLOAD_GATEWAY" ]; then
+    # A bundle apply runs the ensure transaction itself, so with a bundle
+    # ensure runs first only to install the payload channel (the package
+    # channel's postinstall already applied the deployment) or to apply the
+    # base config. The base config goes in before the trust anchors, so
+    # until the bundle applies the hooks answer under the base config that
+    # dc_check_base_config compared with the bundle (GAP-0090).
+    # In bundle mode (trust anchors installed) only the current bundle's
+    # config applies, so the base config is not used.
+    ensure_config=$config
+    if [ -n "$bundle" ] && { [ -e "$DC_ANCHORS" ] || [ -L "$DC_ANCHORS" ]; }; then
+        ensure_config=""
+    fi
+    if [ -z "$bundle" ] || [ -n "$DC_PAYLOAD_GATEWAY" ] || [ -n "$ensure_config" ]; then
         set -- "$DC_OS_GROUP" ensure --reason mdm --lock-wait 10m
         [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
-        [ -z "$config" ] || set -- "$@" "--config=$config"
+        [ -z "$ensure_config" ] || set -- "$@" "--config=$ensure_config"
         [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
         status=0
         dc_run_lifecycle_retry "$gateway" "$@" || status=$?

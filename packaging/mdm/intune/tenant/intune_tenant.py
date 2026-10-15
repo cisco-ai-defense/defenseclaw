@@ -952,10 +952,6 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
                 )
         elif refuse_capability_loss and not (bundle_file or has_bundle):
             raise SystemExit("error: --refuse-capability-loss requires a bundle")
-        elif bundle_file and config_file:
-            raise SystemExit(
-                "error: --bundle-file takes its config from the signed bundle; drop --config-file and --config-stdin"
-            )
         for path in (bundle_file, anchor_file):
             if path and not path.startswith(b"/"):
                 raise SystemExit(
@@ -967,8 +963,6 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
                 base64.b64decode(re.sub(rb"[ \t\r\n]", b"", bundle), validate=True)
             except (ValueError, binascii.Error):
                 raise SystemExit("error: the inline bundle is not valid base64") from None
-        if action == b"ensure" and (bundle_file or has_bundle) and (config_file or has_config):
-            raise SystemExit("error: a signed bundle carries its own config; empty the inline config block")
         if secret_file and not secret_file.startswith(b"/"):
             raise SystemExit("error: secret must be an absolute path")
         if config_file and not config_file.startswith(b"/"):
