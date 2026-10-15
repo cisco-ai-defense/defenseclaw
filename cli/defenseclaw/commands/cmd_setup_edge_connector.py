@@ -26,6 +26,7 @@ Subcommands:
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import secrets
 import shutil
@@ -34,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import click
 import yaml
@@ -49,6 +51,41 @@ from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
 _DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:18970/api/v1/fleet"
+
+
+def _validate_fleet_endpoint(endpoint: str) -> str:
+    """Allow plaintext bearer-token traffic only to a literal loopback IP."""
+    if not endpoint or any(ord(char) <= 32 or ord(char) == 127 for char in endpoint) or "\\" in endpoint:
+        raise click.ClickException("Fleet API endpoint must be a valid HTTP(S) URL")
+    try:
+        parsed = urlsplit(endpoint)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise click.ClickException("Fleet API endpoint must be a valid HTTP(S) URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in endpoint
+        or "#" in endpoint
+        or "%" in parsed.netloc
+        or parsed.netloc.endswith(":")
+        or port == 0
+    ):
+        raise click.ClickException(
+            "Fleet API endpoint must be a valid HTTP(S) URL without credentials, query, or fragment"
+        )
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise click.ClickException("Fleet API endpoint requires HTTPS outside a literal loopback address")
+    return endpoint
 
 
 def _existing_env_value(env_path: Path, name: str) -> str:
@@ -77,6 +114,7 @@ def _hmac_key(env_path: Path, name: str) -> str:
 def _install_fleet_compiler(data_dir: str) -> Path:
     """Install the bundled compiler only when the operator enables Fleet."""
     from defenseclaw.commands.cmd_edge_install import _find_edge_connector_source
+    from defenseclaw.file_permissions import make_private_directory, set_file_mode
 
     source_root = _find_edge_connector_source()
     source = source_root / "tools" / "policy_compiler.py" if source_root else None
@@ -88,13 +126,23 @@ def _install_fleet_compiler(data_dir: str) -> Path:
     home = Path(data_dir).absolute()
     if home.is_symlink() or not home.is_dir():
         raise click.ClickException(f"Fleet data directory is not a real directory: {home}")
+    if os.name == "nt":
+        try:
+            make_private_directory(home)
+        except OSError as exc:
+            raise click.ClickException(f"Fleet data directory is not private: {exc}") from exc
     target_dir = home / "installer"
     if target_dir.exists() or target_dir.is_symlink():
         if target_dir.is_symlink() or not target_dir.is_dir():
             raise click.ClickException(f"Fleet compiler directory is not a real directory: {target_dir}")
     else:
         target_dir.mkdir(mode=0o700)
-    if os.name != "nt":
+    if os.name == "nt":
+        try:
+            make_private_directory(target_dir)
+        except OSError as exc:
+            raise click.ClickException(f"Fleet compiler directory is not private: {exc}") from exc
+    else:
         for directory in (home, target_dir):
             if directory.stat().st_mode & 0o022:
                 raise click.ClickException(f"Fleet compiler directory is writable by another account: {directory}")
@@ -103,15 +151,19 @@ def _install_fleet_compiler(data_dir: str) -> Path:
         raise click.ClickException(f"Fleet compiler path is a symlink: {destination}")
     fd, temporary = tempfile.mkstemp(prefix=".policy_compiler.py.", dir=target_dir)
     try:
-        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+        set_file_mode(fd, temporary, stat.S_IRUSR | stat.S_IWUSR, set_owner=True)
+        stream = os.fdopen(fd, "wb")
+        fd = -1
+        with stream as output, source.open("rb") as input_file:
             shutil.copyfileobj(input_file, output)
             output.flush()
             os.fsync(output.fileno())
-        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
         os.replace(temporary, destination)
     except OSError as exc:
         raise click.ClickException(f"Could not install Fleet policy compiler: {exc}") from exc
     finally:
+        if fd >= 0:
+            os.close(fd)
         if os.path.exists(temporary):
             os.unlink(temporary)
     return destination
@@ -165,7 +217,7 @@ iot_extensions:
 @click.option(
     "--endpoint",
     default=None,
-    help="Fleet API base URL (default: gateway loopback on port 18970).",
+    help="Device registration API URL (default: local gateway on port 18970).",
 )
 @click.option(
     "--emit-policy",
@@ -256,8 +308,7 @@ def edge_connector(
         endpoint = _DEFAULT_FLEET_ENDPOINT
         if not non_interactive:
             endpoint = click.prompt("Fleet API endpoint", default=endpoint)
-    if not endpoint or "\n" in endpoint or "\r" in endpoint:
-        raise click.ClickException("Fleet API endpoint must be a nonempty single line")
+    endpoint = _validate_fleet_endpoint(endpoint)
 
     linux_device_host = sys.platform.startswith("linux")
     svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
@@ -298,8 +349,9 @@ def edge_connector(
     ux.echo()
     ux.section("Next Steps")
     ux.echo(
-        "  1. Start (or restart) the DefenseClaw gateway -- the fleet API\n"
-        f"     is now mounted at {endpoint}\n"
+        "  1. Start (or restart) the DefenseClaw gateway that hosts Fleet.\n"
+        f"     Device registration will use {endpoint}\n"
+        "     Health and policy commands use this host's gateway.\n"
         "  2. Configure the Linux devices with broker TLS and per-device keys.\n"
         "  3. Verify the fleet is running:\n"
         "\n"

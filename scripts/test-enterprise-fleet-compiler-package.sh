@@ -25,9 +25,8 @@ case "$package" in
         dpkg-deb --extract "$package" "$work/extracted"
         ;;
     *.rpm)
-        command -v rpm2cpio >/dev/null || { echo "rpm2cpio is required" >&2; exit 2; }
-        command -v cpio >/dev/null || { echo "cpio is required" >&2; exit 2; }
-        (cd "$work/extracted" && rpm2cpio "$package" | cpio -idm --quiet --no-absolute-filenames)
+        command -v bsdtar >/dev/null || { echo "bsdtar is required" >&2; exit 2; }
+        bsdtar -xf "$package" -C "$work/extracted"
         ;;
     *)
         echo "expected a .deb or .rpm enterprise package" >&2

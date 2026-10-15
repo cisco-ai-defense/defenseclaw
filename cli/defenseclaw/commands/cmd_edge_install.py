@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import click
 
@@ -367,9 +368,12 @@ def _register_device_via_api(
         or _load_local_env_value("DCLAW_FLEET_API_URL")
         or "http://127.0.0.1:18970/api/v1/fleet"
     )
+    from defenseclaw.commands.cmd_setup_edge_connector import _validate_fleet_endpoint
+
+    api_base = _validate_fleet_endpoint(api_base)
     api_token = _load_local_env_value("DCLAW_FLEET_API_TOKEN") or os.environ.get("DCLAW_FLEET_API_TOKEN", "")
 
-    url = f"{api_base}/devices"
+    url = f"{api_base.rstrip('/')}/devices"
     body = _json.dumps({
         "tenant_id": int(tenant_id),
         "fleet_id": int(fleet_id),
@@ -377,11 +381,14 @@ def _register_device_via_api(
     })
 
     curl_cmd = [
-        "curl", "-s", "-o", "-", "-w", "\n%{http_code}",
+        "curl", "-q", "-s", "-o", "-", "-w", "\n%{http_code}",
         "-X", "POST", url,
         "-H", "Content-Type: application/json",
         "-H", "X-DefenseClaw-Client: true",
     ]
+    if urlsplit(api_base).scheme == "http":
+        # A process-level HTTP proxy must not receive the local bearer token.
+        curl_cmd[2:2] = ["--noproxy", "*"]
     stdin_data = None
     if api_token:
         curl_cmd += ["-H", "@-"]

@@ -18,9 +18,9 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
+
+from defenseclaw.file_permissions import atomic_write_private_bytes
 
 
 def persist_env_var(env_path: Path, key: str, value: str) -> None:
@@ -32,7 +32,7 @@ def persist_env_var(env_path: Path, key: str, value: str) -> None:
     lines: list[str] = []
     found = False
     if env_path.exists():
-        lines = env_path.read_text().splitlines()
+        lines = env_path.read_text(encoding="utf-8").splitlines()
         new_lines: list[str] = []
         for line in lines:
             stripped = line.strip()
@@ -48,17 +48,7 @@ def persist_env_var(env_path: Path, key: str, value: str) -> None:
 
     content = "\n".join(lines) + "\n"
 
-    # A private same-directory temporary file keeps the previous credentials
-    # intact if the write fails before replacement.
-    temp_path = None
-    try:
-        fd, temp_path = tempfile.mkstemp(prefix=f".{env_path.name}.", dir=env_path.parent)
-        with os.fdopen(fd, "w") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_path, env_path)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            Path(temp_path).unlink(missing_ok=True)
+    # Protect the staging file before writing secrets, including on Windows.
+    # The shared writer also verifies the published file and cleans up on
+    # replacement failure.
+    atomic_write_private_bytes(env_path, content.encode("utf-8"))

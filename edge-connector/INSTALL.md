@@ -265,7 +265,7 @@ DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
 python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml
 ```
 
-HTTP upstreams are for reviewed public services. The proxy rejects private and loopback upstream addresses, so the former `192.168.1.100` example cannot work; use stdio for a local MCP server. For a remote upstream, configure a reachable public HTTPS endpoint and verify its downstream network behavior.
+Use stdio for a local MCP server: the proxy rejects private and loopback HTTP upstream addresses. For a remote upstream, configure a reviewed public HTTPS endpoint and verify its downstream network behavior.
 
 **Using with Claude Desktop or Claude Code:**
 
@@ -295,7 +295,6 @@ Replace `/usr/local/lib` if CMake installed into another library directory. The 
 | `DCLAW_MCP_UPSTREAM` | (none) | Target server: JSON array of command (stdio) or URL (HTTP) |
 | `DCLAW_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `DCLAW_MCP_PORT` | `8089` | HTTP port when proxy serves HTTP |
-| `DCLAW_MCP_CONFIG` | (none) | Path to YAML config file |
 
 All standard Edge Connector env vars (`DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`) are passed through.
 
@@ -411,16 +410,16 @@ Replace `USERNAME` with the actual home directory. A process launcher need not e
 #### Verify the integration
 
 ```bash
-# Test the hook standalone
+# Check that the hook protocol responds (this does not evaluate a tool)
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
   DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
-# Test through PicoClaw (should ALLOW — sensor read)
+# Observe a sensor-read decision; production waits for a Fleet verdict
 picoclaw agent -m "check battery status"
 
-# Test through PicoClaw (should BLOCK — shell execution)
+# Observe a shell decision; inspect the actual tool call and audit result
 picoclaw agent -m "run whoami in the shell"
 
 # Watch decisions in real-time
@@ -450,6 +449,8 @@ printf '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{'\
 '"destination":"","session_id":1}}\n' "$tool_hash" | \
   socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
 ```
+
+This optional raw IPC probe requires `socat` and a running daemon. The daemon derives trusted capability flags from the tool name; the caller-supplied `capabilities` value is not authority.
 
 ---
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestFleetMQTTClientIDsAreDistinctAndBrokerCompatible(t *testing.T) {
@@ -29,7 +30,8 @@ func TestFleetMQTTClientIDsAreDistinctAndBrokerCompatible(t *testing.T) {
 func TestFleetAuditEmitterRequiredOnlyWhenEnabled(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
-	cfg.DataDir = t.TempDir()
+	// A fresh device identity requires a private data directory on Windows too.
+	cfg.DataDir = testenv.PrivateTempDir(t)
 	cfg.Gateway.DeviceKeyFile = filepath.Join(cfg.DataDir, "device.key")
 	cfg.Fleet.Enabled = true
 	if sidecar, err := NewSidecar(cfg, nil, nil); sidecar != nil || err == nil ||

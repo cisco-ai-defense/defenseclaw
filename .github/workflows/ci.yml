@@ -159,10 +159,31 @@ jobs:
           # -race also turns on checkptr in every package. In the transpiled
           # SQLite (modernc.org) that every audit store runs, checkptr alone
           # doubles the cost of a race shard; race detection stays on everywhere.
+          test_log="$(mktemp)"
+          trap 'rm -f "$test_log"' EXIT
+          set +e
           go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
-            ./internal/gateway
+            ./internal/gateway 2>&1 | tee "$test_log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            # Only test identifiers go into annotations; keep assertion output in
+            # the normal step log. Limit annotations in case many tests fail.
+            mapfile -t failed_tests < <(
+              awk '/^--- FAIL: / && $3 ~ /^[A-Za-z0-9_\/]+$/ { print $3 }' "$test_log" |
+                sort -u | head -n 20
+            )
+            if (( ${#failed_tests[@]} == 0 )); then
+              echo "::error title=Gateway shard $GO_TEST_SHARD failed::No named failing test was reported"
+            else
+              for failed_test in "${failed_tests[@]}"; do
+                echo "::error title=Gateway shard $GO_TEST_SHARD failed::$failed_test"
+              done
+            fi
+          fi
+          exit "$test_status"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage-gateway-${{ matrix.shard }}
@@ -1037,7 +1058,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Install RPM archive reader on the disposable runner
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm2cpio cpio
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools
       - name: Check opt-in compiler source and compile a policy from each package
         shell: bash
         env:

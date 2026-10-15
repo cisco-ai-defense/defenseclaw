@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -74,12 +75,19 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     monkeypatch.setattr(cmd_edge_install.subprocess, "run", fake_run)
     assert cmd_edge_install._register_device_via_api("1", "1", "42") == "12" * 32
     assert endpoint + "/devices" in calls[0]
+    assert calls[0][1:5] == ["-q", "--noproxy", "*", "-s"]
 
 
 @pytest.mark.parametrize("platform", ["darwin", "win32"])
 def test_edge_setup_non_linux_enables_gateway_without_linux_service(tmp_path, monkeypatch, platform) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    actual_platform = sys.platform
     monkeypatch.setattr(cmd_setup_edge_connector.sys, "platform", platform)
+    if platform == "darwin" and actual_platform != "darwin" and os.name == "posix":
+        # A simulated macOS branch on Linux cannot invoke macOS ACL tools.
+        import defenseclaw.file_permissions as permissions
+
+        monkeypatch.setattr(permissions, "_clear_darwin_extended_acl", lambda *_args: None)
 
     def unexpected_service_write(*_args):
         raise AssertionError("non-Linux Fleet gateway setup touched Linux service env")
@@ -100,6 +108,9 @@ def test_edge_setup_non_linux_enables_gateway_without_linux_service(tmp_path, mo
 
 def test_edge_setup_generates_distinct_keys_and_reuses_them(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    # This assertion exercises the Linux device-service provisioning path even
+    # when the suite runs on a Windows fleet gateway host.
+    monkeypatch.setattr(cmd_setup_edge_connector.sys, "platform", "linux")
     monkeypatch.setattr(cmd_setup_edge_connector, "_enable_fleet_config", lambda _path: None)
     service_writes: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -168,7 +179,14 @@ def test_fleet_compiler_installs_only_during_opt_in(tmp_path, monkeypatch) -> No
     assert not (home / "installer").exists()
     installed = cmd_setup_edge_connector._install_fleet_compiler(str(home))
     assert installed.read_bytes() == compiler.read_bytes()
-    assert installed.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        from defenseclaw.file_permissions import windows_acl_write_error
+
+        assert windows_acl_write_error(home) is None
+        assert windows_acl_write_error(installed.parent) is None
+        assert windows_acl_write_error(installed) is None
+    else:
+        assert installed.stat().st_mode & 0o777 == 0o600
     compiler.write_bytes(b"# updated compiler\n")
     assert cmd_setup_edge_connector._install_fleet_compiler(str(home)).read_bytes() == compiler.read_bytes()
 
@@ -190,6 +208,7 @@ def test_fleet_compiler_rejects_symlink_without_mutating_destination(tmp_path, m
 
 def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.setattr(cmd_setup_edge_connector.sys, "platform", "linux")
     monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: False)
     result = CliRunner().invoke(
         cmd_setup_edge_connector.edge_connector,
@@ -202,20 +221,80 @@ def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> N
 
 
 def test_dotenv_failed_replace_preserves_existing_secret(tmp_path, monkeypatch) -> None:
-    import defenseclaw.dotenv_utils as dotenv
+    import defenseclaw.file_permissions as permissions
 
     path = tmp_path / ".env"
     persist_env_var(path, "SECRET", "old")
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        assert permissions.windows_acl_confidentiality_error(path) is None
+    else:
+        assert path.stat().st_mode & 0o777 == 0o600
 
     def failed_replace(*_args):
         raise OSError("simulated rename failure")
 
-    monkeypatch.setattr(dotenv.os, "replace", failed_replace)
+    monkeypatch.setattr(permissions, "replace_file_durable", failed_replace)
     with pytest.raises(OSError, match="simulated rename failure"):
         persist_env_var(path, "SECRET", "new")
     assert path.read_text() == "SECRET=old\n"
     assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+def test_dotenv_unicode_values_round_trip(tmp_path) -> None:
+    path = tmp_path / ".env"
+    persist_env_var(path, "LABEL", "équipe")
+    persist_env_var(path, "SECRET", "nouveau")
+    assert path.read_text(encoding="utf-8") == "LABEL=équipe\nSECRET=nouveau\n"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://fleet.example/api/v1/fleet",
+    "http://localhost:18970/api/v1/fleet",
+    "http://127.0.0.1.evil.example/api/v1/fleet",
+    "http://user:password@127.0.0.1/api/v1/fleet",
+    "https://user@fleet.example/api/v1/fleet",
+    "https://fleet.example:invalid/api/v1/fleet",
+    "https://fleet.example:0/api/v1/fleet",
+    "https://fleet.example/api/v1/fleet?redirect=evil",
+    "https://fleet.example/api/v1/fleet#fragment",
+    "https://fleet.example/api/v1/fleet?",
+    "https://fleet.example/api/v1/fleet#",
+    "https://fleet.example:/api/v1/fleet",
+    "ftp://fleet.example/api/v1/fleet",
+    "https://fleet.example\\@evil.example/api/v1/fleet",
+])
+def test_edge_setup_rejects_insecure_or_malformed_endpoint_before_writing(
+    tmp_path, monkeypatch, endpoint: str,
+) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    result = CliRunner().invoke(
+        cmd_setup_edge_connector.edge_connector,
+        ["--non-interactive", "--token", "test-token", "--endpoint", endpoint],
+        obj=_app(tmp_path),
+    )
+    assert result.exit_code != 0, endpoint
+    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path / "config.yaml").exists()
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:18970/api/v1/fleet",
+    "http://[::1]:18970/api/v1/fleet",
+    "https://fleet.example/api/v1/fleet",
+])
+def test_fleet_endpoint_accepts_literal_loopback_or_remote_tls(endpoint: str) -> None:
+    assert cmd_setup_edge_connector._validate_fleet_endpoint(endpoint) == endpoint
+
+
+def test_device_registration_rejects_poisoned_endpoint_before_curl(monkeypatch) -> None:
+    monkeypatch.setenv("DCLAW_FLEET_API_URL", "http://fleet.example/api/v1/fleet")
+    monkeypatch.setenv("DCLAW_FLEET_API_TOKEN", "test-secret")
+    monkeypatch.setattr(
+        cmd_edge_install.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("curl must not receive bearer token"),
+    )
+    with pytest.raises(click.ClickException, match="requires HTTPS"):
+        cmd_edge_install._register_device_via_api("1", "1", "42")
 
 
 def test_remote_installer_streams_secrets_outside_ssh_arguments(tmp_path, monkeypatch) -> None:

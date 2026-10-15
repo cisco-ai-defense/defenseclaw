@@ -156,13 +156,13 @@ class TestProxyConfig:
         assert cfg.fail_mode == "open"
 
     def test_from_env_http(self, monkeypatch):
-        monkeypatch.setenv("DCLAW_MCP_UPSTREAM", "http://localhost:8088/mcp")
+        monkeypatch.setenv("DCLAW_MCP_UPSTREAM", "https://1.1.1.1:8088/mcp")
         monkeypatch.setenv("DCLAW_MCP_TRANSPORT", "http")
         monkeypatch.setenv("DCLAW_MCP_PORT", "9999")
 
         cfg = ProxyConfig.from_env()
         assert cfg.upstream_transport == "http"
-        assert cfg.upstream_url == "http://localhost:8088/mcp"
+        assert cfg.upstream_url == "https://1.1.1.1:8088/mcp"
         assert cfg.http_port == 9999
 
     def test_from_env_defaults(self, monkeypatch):
@@ -468,10 +468,62 @@ class TestProxyConstruction:
     def test_http_upstream_created(self, mock_gate):
         config = ProxyConfig(
             upstream_transport="http",
-            upstream_url="http://localhost:8088/mcp",
+            upstream_url="https://1.1.1.1:8088/mcp",
         )
         proxy = MCPProxy(config)
         assert isinstance(proxy._upstream, _HttpUpstream)
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:8088/mcp",
+    "http://localhost.:8088/mcp",
+    "http://device.localhost:8088/mcp",
+    "http://localhost.localdomain:8088/mcp",
+    "http://127.0.0.1:8088/mcp",
+    "http://[::1]:8088/mcp",
+    "http://127.1:8088/mcp",
+    "http://0177.0.0.1:8088/mcp",
+    "http://0x7f000001:8088/mcp",
+    "http://2130706433:8088/mcp",
+    "ftp://1.1.1.1/mcp",
+    "https://user:pass@1.1.1.1/mcp",
+])
+def test_http_upstream_rejects_loopback_aliases_and_unsafe_urls(url):
+    with pytest.raises(ValueError):
+        _HttpUpstream(url)
+
+
+@pytest.mark.asyncio
+async def test_http_upstream_rejects_private_dns_answer(monkeypatch):
+    """A public-looking hostname cannot resolve to a private target."""
+    import aiohttp.resolver
+
+    async def private_answer(_self, host, port=0, family=0):
+        return [{"hostname": host, "host": "127.0.0.1", "port": port,
+                 "family": family, "proto": 0, "flags": 0}]
+
+    monkeypatch.setattr(aiohttp.resolver.DefaultResolver, "resolve", private_answer)
+    upstream = _HttpUpstream("http://reviewed.example:18088/mcp")
+    await upstream.start()
+    try:
+        with pytest.raises((OSError, aiohttp.ClientError)):
+            await upstream.send({"jsonrpc": "2.0", "method": "initialize"})
+    finally:
+        await upstream.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_upstream_does_not_follow_redirects():
+    upstream = _HttpUpstream("https://1.1.1.1/mcp")
+    response = MagicMock()
+    response.json = AsyncMock(return_value={"ok": True})
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=False)
+    upstream._session = MagicMock()
+    upstream._session.post.return_value = context
+    assert await upstream.send({"id": 1}) == {"ok": True}
+    assert upstream._session.post.call_args.kwargs["allow_redirects"] is False
 
 
 # -----------------------------------------------------------------------

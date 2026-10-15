@@ -114,4 +114,28 @@ jobs:
       - name: Run fleet tests with race detector
         run: go test ./internal/fleet/... -count=1 -race -timeout 15m
       - name: Run gateway and configuration tests
-        run: go test ./internal/gateway/... ./internal/config/... ./internal/enterpriseunix/... -count=1 -timeout 15m
+        run: |
+          set -euo pipefail
+          test_log="$(mktemp)"
+          trap 'rm -f "$test_log"' EXIT
+          set +e
+          go test ./internal/gateway/... ./internal/config/... ./internal/enterpriseunix/... \
+            -count=1 -timeout 15m 2>&1 | tee "$test_log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            # Expose only bounded test identifiers in annotations. Assertion
+            # output remains in the ordinary step log.
+            mapfile -t failed_tests < <(
+              awk '/^--- FAIL: / && $3 ~ /^[A-Za-z0-9_\/]+$/ { print $3 }' "$test_log" |
+                sort -u | head -n 20
+            )
+            if (( ${#failed_tests[@]} == 0 )); then
+              echo "::error title=Fleet gateway/config tests failed::No named failing test was reported"
+            else
+              for failed_test in "${failed_tests[@]}"; do
+                echo "::error title=Fleet gateway/config tests failed::$failed_test"
+              done
+            fi
+          fi
+          exit "$test_status"

@@ -52,7 +52,6 @@ Environment variables:
     DCLAW_MCP_UPSTREAM    Target server — JSON array (stdio) or URL (HTTP)
     DCLAW_MCP_TRANSPORT   "stdio" (default) or "http"
     DCLAW_MCP_PORT        HTTP port when proxy itself serves HTTP (default: 8089)
-    DCLAW_MCP_CONFIG      Path to YAML config file
     DCLAW_LIB_PATH        Passed through to EdgeConnector
     DCLAW_SOCKET_PATH     Passed through to EdgeConnector
     DCLAW_FAIL_OPEN       "1" = allow on engine error; "0" (default) = block
@@ -65,6 +64,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import sys
@@ -89,9 +89,17 @@ def _validate_upstream_url(url: str) -> str:
     if '\\' in url:
         raise ValueError(f"URL contains backslash (potential authority bypass): {url}")
     parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("HTTP upstream must use http:// or https://")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("HTTP upstream URL must not contain credentials")
     hostname = parsed.hostname
     if not hostname:
         raise ValueError(f"Invalid upstream URL (no hostname): {url}")
+    # A hostname spelling of loopback previously bypassed the safe resolver.
+    normalized = hostname.lower().rstrip(".")
+    if normalized in ("localhost", "localhost.localdomain") or normalized.endswith(".localhost"):
+        raise ValueError(f"Upstream URL targets loopback hostname: {hostname}")
 
     # Block cloud metadata endpoints
     _BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal", "fd00:ec2::254"}
@@ -107,8 +115,12 @@ def _validate_upstream_url(url: str) -> str:
         # Re-raise our own ValueError (from the checks above)
         if "Upstream URL targets" in str(exc):
             raise
-        # hostname is a DNS name, not an IP — allow
-        # (DNS rebinding is out of scope for config-time check)
+        # Reject noncanonical decimal, octal and hexadecimal IP spellings;
+        # some HTTP stacks treat them as literals and skip a DNS resolver.
+        if all(re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", label)
+               for label in normalized.split(".")):
+            raise ValueError(f"Upstream URL uses an ambiguous numeric address: {hostname}")
+        # Ordinary DNS names are checked again by _SafeResolver at connect time.
 
     return url
 
@@ -125,13 +137,6 @@ def _is_private_ip(ip_str: str) -> bool:
                 or addr.is_reserved or addr.is_multicast)
     except ValueError:
         return True  # fail-closed on unparseable
-
-
-def _is_loopback_url(url: str) -> bool:
-    """Return True if the upstream URL targets a loopback address."""
-    parsed = urllib.parse.urlparse(url)
-    hostname = (parsed.hostname or "").lower()
-    return hostname in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
 # ---------------------------------------------------------------------------
@@ -318,28 +323,17 @@ class _HttpUpstream:
                 "HTTP upstream requires aiohttp: pip install aiohttp"
             )
 
-        # Non-loopback upstreams use a DNS resolver that rejects private IPs to prevent DNS rebinding
-        if _is_loopback_url(self._url):
-            self._session = aiohttp.ClientSession()
-        else:
-            class _SafeResolver(aiohttp.resolver.DefaultResolver):
-                """DNS resolver that rejects private/reserved IP resolutions (anti-DNS-rebinding)."""
-                async def resolve(self, host, port=0, family=0):
-                    results = await super().resolve(host, port, family)
-                    safe = []
-                    for r in results:
-                        if _is_private_ip(r['host']):
-                            continue
-                        safe.append(r)
-                    if not safe:
-                        raise aiohttp.ClientConnectorError(
-                            connection_key=None,
-                            os_error=OSError(f"DNS resolved to private/reserved IP for {host}")
-                        )
-                    return safe
+        class _SafeResolver(aiohttp.resolver.DefaultResolver):
+            """Reject private/reserved DNS answers on every connection."""
+            async def resolve(self, host, port=0, family=0):
+                results = await super().resolve(host, port, family)
+                safe = [r for r in results if not _is_private_ip(r["host"])]
+                if not safe:
+                    raise OSError(f"DNS resolved to private/reserved IP for {host}")
+                return safe
 
-            connector = aiohttp.TCPConnector(resolver=_SafeResolver())
-            self._session = aiohttp.ClientSession(connector=connector)
+        connector = aiohttp.TCPConnector(resolver=_SafeResolver())
+        self._session = aiohttp.ClientSession(connector=connector)
 
         logger.info("Upstream HTTP: %s", self._url)
 
