@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -92,6 +93,16 @@ func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T
 	compiler, err := os.ReadFile(filepath.Join(enterpriseSetupRepositoryRoot(t), "edge-connector", "tools", "policy_compiler.py"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Git for Windows otherwise checks out this text file with CRLF, changing
+	// the source digest after the signed module's LF digest has been pinned.
+	attributes := readEnterpriseSetupContractFile(t, ".gitattributes")
+	attributes = strings.ReplaceAll(attributes, "\r\n", "\n")
+	if !strings.Contains("\n"+attributes, "\nedge-connector/tools/policy_compiler.py text eol=lf\n") {
+		t.Fatal("Fleet compiler checkout must preserve LF bytes on Windows")
+	}
+	if bytes.Contains(compiler, []byte("\r\n")) {
+		t.Fatal("Fleet compiler source was checked out with CRLF bytes")
 	}
 	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
 	wantPin := fmt.Sprintf("$script:DefenseClawPolicyCompilerSHA256 = '%x'", sha256.Sum256(compiler))

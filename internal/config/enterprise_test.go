@@ -100,13 +100,17 @@ func TestSecureClientFleetRejectedFromRuntimeConfigSource(t *testing.T) {
 }
 
 func TestSecureClientFleetSourcePreflight(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
 	for _, tc := range []struct {
 		name string
 		raw  string
 		want string
 	}{
 		{"v8 disabled", "config_version: 8\nfleet:\n  enabled: false\n", ""},
-		{"v9 omitted", "config_version: 9\ndeployment_mode: managed_enterprise\n", ""},
+		{"v9 omitted", "config_version: 9\n", ""},
+		{"v9 standalone omitted", "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", ""},
+		{"v9 managed Secure Client", "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n", "newer DefenseClaw"},
 		{"v8 enabled", "config_version: 8\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
 		{"v9 enabled", "config_version: 9\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
 		{"string enabled", "config_version: 8\nfleet:\n  enabled: 'true'\n", "fleet.enabled must be a boolean"},
