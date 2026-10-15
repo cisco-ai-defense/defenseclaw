@@ -48,7 +48,10 @@ def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
     assert "base CONFIG= guardrail policy differs from signed bundle rule pack" in script
     assert script.index("$basePolicy -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
     detect = (ROOT / "packaging/mdm/intune/windows/Remediate-Detect.ps1").read_text()
-    assert "base-only; signed bundle not confirmed" in detect
+    # A config-only deployment is healthy too; the line names the policy source.
+    assert "no signed policy bundle is confirmed; the installed config enforces" in detect
+    assert "base-only" not in detect
+    assert "if ($null -ne $key)" in detect
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")

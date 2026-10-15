@@ -214,8 +214,10 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   the lock (the next scheduled run checks again). Otherwise it exits `1`,
   which starts the remediation. Its line names the failing check: each
   DefenseClaw service that is not running, with its start mode, or else the
-  first error. A healthy base without a confirmed bundle is reported as
-  `base-only`; Remediations do not install a missing bundle.
+  first error. A healthy line also names the policy source: the confirmed
+  signed bundle and its version, or that the installed config enforces
+  because no bundle is confirmed. Remediations do not install a missing
+  bundle; the bundle app's detection does.
 - `Remediate-Fix.ps1` first checks the same way. When the only problem is a
   stopped or disabled hook guardian or enumerator while the gateway runs, it
   sets that service back to automatic start, starts it and verifies again,

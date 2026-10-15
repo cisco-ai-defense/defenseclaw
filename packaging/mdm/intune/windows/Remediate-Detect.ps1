@@ -323,13 +323,18 @@ try {
     exit 1
 }
 if ($run.ExitCode -eq 0) {
+    # Health covers the deployment. The line also names the policy source;
+    # the bundle app's detection decides whether a signed bundle enforces.
+    $policy = 'no signed policy bundle is confirmed; the installed config enforces'
     $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
-    try { $bundleState = [string]$key.GetValue('BundleState') } finally { $key.Dispose() }
-    if ($bundleState -ne 'confirmed') {
-        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): base-only; signed bundle not confirmed")
-    } else {
-        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy; check bundle detection for enforced policy")
+    if ($null -ne $key) {
+        try {
+            if ([string]$key.GetValue('BundleState') -eq 'confirmed') {
+                $policy = "signed policy bundle $([string]$key.GetValue('BundleId')) version $([string]$key.GetValue('BundleVersion')) is confirmed"
+            }
+        } finally { $key.Dispose() }
     }
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy; $policy")
     exit 0
 }
 $summary = Format-DefenseClawVerifyFailure -Json ([string]$run.StdOut)
