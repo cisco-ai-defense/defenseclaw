@@ -214,15 +214,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 				return
 			}
 		}
-		message := "the gateway's effective policy digest differs from the signed expected digest"
-		if code == enterprisebundle.WarnDigestUnverifiable {
-			message = "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
-		} else if code == enterprisebundle.WarnDigestLayoutUnverifiable {
-			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
-		} else if code == "capability_disabled" {
-			message = "the bundle disabled: " + strings.Join(currentReceipt.DisabledByBundle, ", ")
-		}
-		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: bundleReceiptWarningMessage(code, currentReceipt)})
 	}
 	if currentReceipt != nil {
 		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
@@ -255,6 +247,27 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})
 	}
 	return nil
+}
+
+// bundleReceiptWarningMessage explains a warning code the confirmed
+// receipt recorded. Digest mismatch codes keep the generic text.
+func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt) string {
+	switch code {
+	case enterprisebundle.WarnDigestUnverifiable:
+		return "the signer used a different product version, or another signing platform produced a different digest; bundle file hashes and the gateway-versus-installed digest were checked"
+	case enterprisebundle.WarnDigestLayoutUnverifiable:
+		return "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
+	case "capability_disabled":
+		if receipt == nil {
+			return "the bundle disabled a capability"
+		}
+		return "the bundle disabled: " + strings.Join(receipt.DisabledByBundle, ", ")
+	case "sessions_scan_unknown":
+		// Windows records a session scan that did not finish when the
+		// bundle applied (GAP-0104); it says nothing about the digest.
+		return "running agent sessions could not be checked when this bundle applied; restart any agent session opened before it"
+	}
+	return "the gateway's effective policy digest differs from the signed expected digest"
 }
 
 func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebundle.Warning {
