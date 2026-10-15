@@ -1159,7 +1159,15 @@ PS7_ONLY = [
 ]
 
 
-@pytest.mark.parametrize("path", WINDOWS_51, ids=lambda p: p.name)
+# The reference rule-pack app scripts run before DefenseClaw is installed, so
+# they carry their own helper region, not the MDM shared one.
+RULE_PACK_51 = [
+    MDM / "intune" / "windows" / "Install-DefenseClawRulePack.ps1",
+    MDM / "intune" / "windows" / "Detect-DefenseClawRulePack.ps1",
+]
+
+
+@pytest.mark.parametrize("path", WINDOWS_51 + RULE_PACK_51, ids=lambda p: p.name)
 def test_intune_facing_windows_scripts_run_in_powershell_51(path: Path) -> None:
     text = _text(path)
     for pattern, label in PS7_ONLY:

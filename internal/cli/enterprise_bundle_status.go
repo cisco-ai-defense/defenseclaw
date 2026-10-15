@@ -286,10 +286,10 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 	}
 	key := anchors.Key(signerKeyID)
 	if key == nil {
-		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyUnknown), Message: "the confirmed bundle signer is absent from the installed trust anchors"}
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyUnknown), Message: fmt.Sprintf("the confirmed bundle signer %s is absent from the installed trust anchors", signerKeyID)}
 	}
 	if key.Status == enterprisebundle.KeyRevoked {
-		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyRevoked), Message: "the confirmed bundle signer is revoked in the installed trust anchors; review the device policy"}
+		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyRevoked), Message: fmt.Sprintf("the confirmed bundle signer %s is revoked in the installed trust anchors; review the device policy", signerKeyID)}
 	}
 	return nil
 }
