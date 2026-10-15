@@ -648,6 +648,162 @@ echo installed-ok
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("source", ["defenseclaw-enterprise.rpm", "defenseclaw-enterprise.deb"])
+@pytest.mark.parametrize("applied", [False, True])
+def test_linux_wrapper_reports_the_postinstall_result_when_no_deployment_came_up(
+    source: str, applied: bool, tmp_path: Path
+) -> None:
+    # The deb/rpm postinstall never fails the package transaction. When its
+    # lifecycle run rolled back (units shipped group-writable, GAP-0108)
+    # there was no deployment record, so every binary read as damaged and
+    # the wrapper reported mdm_binaries_damaged. It now reports the result
+    # the postinstall wrote, which names the unit files and their mode; a
+    # postinstall that succeeded leaves the wrapper's own checks in charge.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_package_release_version", "dc_package_step",
+                     "dc_lifecycle_lock_held", "dc_package_script_result", "dc_package_apply_failed",
+                     "dc_install_package")
+    )
+    message = ("unit files the package installed are writable by group or other: "
+               "/usr/lib/systemd/system/defenseclaw-gateway.service (0664)")
+    document = json.dumps({"ok": applied, "errors": [] if applied else [{"code": "verify_failed", "message": message}],
+                           "exit_code": 0 if applied else 1}, indent=2)
+    stubs = dict(_PACKAGE_TOOL_STUBS)
+    # The package manager runs the postinstall, which writes its result.
+    stubs["rpm"] = stubs["rpm"].replace('-U) echo "rpm -U" >>"$DC_TEST_LOG" ;;',
+                                        '-U) printf "%s\\n" "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT" ;;')
+    stubs["dpkg"] = stubs["dpkg"].replace('-i) echo "dpkg -i" >>"$DC_TEST_LOG" ;;',
+                                          '-i) printf "%s\\n" "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT" ;;')
+    assert stubs["rpm"] != _PACKAGE_TOOL_STUBS["rpm"] and stubs["dpkg"] != _PACKAGE_TOOL_STUBS["dpkg"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    result_file = tmp_path / "last-package-result.json"
+    script = f"""
+DC_SCRIPT_OS=linux
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
+DC_PRODUCT_VERSION='' DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / source}'
+DC_PACKAGE_RESULT='{result_file}' DC_RESULT='' DC_PACKAGE_ACTION=''
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+{functions}
+dc_install_package
+dc_package_apply_failed
+echo own-checks
+"""
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_VERSION": "1.5.0", "DC_TEST_LOG": str(tmp_path / "log"),
+           "DC_TEST_RESULT": str(result_file), "DC_TEST_DOCUMENT": document}
+    for shell in ("sh", "bash"):
+        result_file.unlink(missing_ok=True)
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert result_file.is_file(), (shell, result.stdout, result.stderr)
+        if applied:
+            assert result.returncode == 0, (shell, result.stdout, result.stderr)
+            assert result.stdout.strip() == "own-checks", (shell, result.stdout)
+            continue
+        assert result.returncode == 1, (shell, result.stdout, result.stderr)
+        assert "own-checks" not in result.stdout, (shell, result.stdout)
+        assert json.loads(result.stdout)["errors"][0]["message"] == message, (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("applied", [False, True])
+def test_wrapper_main_reports_the_package_result_instead_of_binaries_damaged(
+    os_dir: str, applied: bool, tmp_path: Path
+) -> None:
+    # dc_main itself, in both copies: when this run installed the package and
+    # its postinstall did not bring a deployment up, every binary reads as
+    # damaged, and the dc_binaries_damaged branch must report the result the
+    # postinstall wrote instead of mdm_binaries_damaged (GAP-0108). After a
+    # postinstall that succeeded the branch still reports mdm_binaries_damaged,
+    # which proves the run reached it.
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    message = ("unit files the package installed are writable by group or other: "
+               "/usr/lib/systemd/system/defenseclaw-gateway.service (0664)")
+    document = json.dumps({"ok": applied, "errors": [] if applied else [{"code": "verify_failed", "message": message}],
+                           "exit_code": 0 if applied else 1}, indent=2)
+    result_file = tmp_path / "last-package-result.json"
+    stage_parent = tmp_path / "stage"
+    stage_parent.mkdir()
+    # Stand-ins for the root, platform and package-manager steps; the
+    # branch and dc_package_apply_failed run as shipped.
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{tmp_path}/bin/defenseclaw-gateway'
+    DC_PACKAGE_RESULT='{result_file}'
+    DC_OS_GROUP=linux
+    DC_LOG=''
+}}
+dc_parse_args() {{ DC_SOURCE='{tmp_path}/defenseclaw-enterprise.rpm'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{
+    : >"$DC_STAGE/package.started"
+    printf '%s\\n' "$DC_TEST_DOCUMENT" >"$DC_PACKAGE_RESULT"
+    dc_package_step "" 1.5.0
+}}
+dc_trusted_path() {{ return 0; }}
+dc_binaries_damaged() {{ return 0; }}
+dc_main
+"""
+    script = text[: -len(entry)] + "\n" + overrides
+    env = {"PATH": "/usr/bin:/bin", "DC_TEST_DOCUMENT": document}
+    for shell in ("sh", "bash"):
+        result_file.unlink(missing_ok=True)
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert result_file.is_file(), (shell, result.stdout, result.stderr)
+        assert result.returncode == 1, (shell, result.stdout, result.stderr)
+        error = json.loads(result.stdout)["errors"][0]
+        if applied:
+            assert error["code"] == "mdm_binaries_damaged", (shell, result.stdout)
+            continue
+        assert "mdm_binaries_damaged" not in result.stdout, (shell, result.stdout)
+        assert error == {"code": "verify_failed", "message": message}, (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: str, tmp_path: Path) -> None:
+    # dc_package_apply_failed reads DC_PACKAGE_RESULT: unless the Linux layout
+    # names the file packaging/linux/postinstall.sh writes, the wrapper falls
+    # back to mdm_binaries_damaged (GAP-0108).
+    postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
+    state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
+    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    assert len(state) == 1 and len(written) == 1, (state, written)
+    expected = f"{state[0]}/{written.pop()}"
+    assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    script = f"""
+DC_SCRIPT_OS=linux DC_LOG='{tmp_path}/mdm.log' DC_PACKAGE_RESULT=''
+{_shell_function(text, "dc_layout")}
+dc_layout
+printf '%s\\n' "$DC_PACKAGE_RESULT"
+"""
+    for shell in ("sh", "bash"):
+        result = subprocess.run([shell, "-c", script], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+                                timeout=30)
+        assert result.returncode == 0, (shell, result.stdout, result.stderr)
+        assert result.stdout == f"{expected}\n", (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
         pytest.skip("a deployment is installed on this host")

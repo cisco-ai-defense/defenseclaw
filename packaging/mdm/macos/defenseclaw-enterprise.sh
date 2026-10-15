@@ -134,7 +134,7 @@ DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
 DC_ANCHORS_PREVIOUS="" # staged copy of the trust anchor file this run replaced
 DC_ANCHORS_CHANGED=0   # 1 when this run installed a different trust anchor file
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
-DC_PACKAGE_RESULT=""   # the result the macOS package's own scripts write
+DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
 
 dc_platform() {
     case "$(uname -s)" in
@@ -568,6 +568,7 @@ dc_layout() {
         DC_INSTALL_ROOT=/opt/defenseclaw
         DC_DEPLOYMENT_RECORD=/var/lib/defenseclaw-enterprise/deployment.json
         DC_ANCHORS=/etc/defenseclaw/trust/bundle-anchors.json
+        DC_PACKAGE_RESULT=/var/lib/defenseclaw-enterprise/last-package-result.json
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
     fi
@@ -690,6 +691,7 @@ dc_install_package() {
             if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
+                : >"$DC_STAGE/package.started"
                 attempt=1
                 while ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); do
                     if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
@@ -730,6 +732,7 @@ dc_install_package() {
                 fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
+                : >"$DC_STAGE/package.started"
                 attempt=1
                 while ! output=$(rpm -U --quiet $replace "$file" 2>&1); do
                     if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
@@ -849,6 +852,19 @@ dc_package_script_result() {
     status=$(grep -o '"exit_code"[[:space:]]*:[[:space:]]*[0-9]*' "$DC_RESULT" | tail -n 1 | sed 's/.*://; s/[[:space:]]//g')
     case "$status" in 2 | 75) exit "$status" ;; esac
     exit "$DC_EXIT_FAILURE"
+}
+
+# dc_package_apply_failed: after this run installed the deb or rpm, report
+# the result its postinstall wrote when that run did not activate the
+# deployment. The postinstall never fails the package transaction, and with
+# no deployment record every binary reads as damaged: the wrapper reported
+# mdm_binaries_damaged while the postinstall had named the cause, unit files
+# the package shipped group-writable (GAP-0108).
+dc_package_apply_failed() {
+    [ -n "$DC_PACKAGE_ACTION" ] && [ -f "$DC_STAGE/package.started" ] || return 0
+    [ -n "$DC_PACKAGE_RESULT" ] && [ -f "$DC_PACKAGE_RESULT" ] && [ ! -L "$DC_PACKAGE_RESULT" ] || return 0
+    grep -m 1 '"ok"' "$DC_PACKAGE_RESULT" 2>/dev/null | grep -q false || return 0
+    dc_package_script_result "$DC_STAGE/package.started" "the package installed, but its postinstall wrote no result"
 }
 
 # dc_package_step <previous version> <installed version>: record that the
@@ -1135,6 +1151,7 @@ dc_main() {
     elif ! dc_trusted_path "$gateway"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned$DC_TRUST_ACL"
     elif dc_binaries_damaged; then
+        dc_package_apply_failed
         dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "a required installed DefenseClaw binary is missing, not executable, or differs from its deployment record; run this script with the package as --source, or reinstall the package"
     fi
 

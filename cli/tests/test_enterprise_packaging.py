@@ -268,6 +268,51 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
     assert payload.get("KeepAlive") is True
 
 
+# GAP-0108: nfpm copies the builder's file mode for an entry without
+# file_info, so a checkout made under umask 0002 shipped every systemd unit
+# 0664 and the first install rolled back (verify refuses group-writable
+# units). Every entry the package installs pins its owner and mode.
+_NFPM_DIR_MODE, _NFPM_FILE_MODE = 0o755, 0o644
+_NFPM_EXECUTABLES = {"/usr/lib/defenseclaw-enterprise/apt-downgrade-guard"}
+
+
+def _enterprise_nfpm_contents() -> list[dict]:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    return nfpm["contents"]
+
+
+def test_enterprise_package_pins_owner_and_mode_of_every_entry() -> None:
+    contents = _enterprise_nfpm_contents()
+    checked, problems = 0, []
+    for entry in contents:
+        if entry.get("type") == "symlink":
+            continue
+        checked += 1
+        info = entry.get("file_info") or {}
+        if entry.get("type") == "dir" or entry["dst"] in _NFPM_EXECUTABLES:
+            want = _NFPM_DIR_MODE
+        else:
+            want = _NFPM_FILE_MODE
+        if info.get("mode") != want or info.get("owner") != "root" or info.get("group") != "root":
+            problems.append(f"{entry['dst']}: file_info {info!r}, want mode {want:04o} owner root group root")
+    assert not problems, "\n".join(problems)
+    assert checked >= 20, f"only {checked} package entries were checked"
+
+
+def test_enterprise_package_ships_every_systemd_unit_at_0644() -> None:
+    units = {
+        p.relative_to(ROOT).as_posix()
+        for pattern in ("*.service", "*.socket", "*.timer", "*.path")
+        for p in [*SYSTEMD.glob(pattern), *(SYSTEMD / "user").glob(pattern)]
+    }
+    shipped = {c["src"]: c for c in _enterprise_nfpm_contents() if "src" in c}
+    assert len(units) >= 14 and units <= set(shipped), sorted(units - set(shipped))
+    for src in sorted(units):
+        assert shipped[src]["file_info"]["mode"] == 0o644, src
+        assert shipped[src]["dst"].startswith(("/usr/lib/systemd/system/", "/usr/lib/systemd/user/")), src
+
+
 def test_enterprise_rpm_owns_its_doc_directory():
     # An rpm erase removes only the directories the package lists; without
     # the entry /usr/share/doc/defenseclaw-enterprise stays behind, empty.
@@ -288,6 +333,57 @@ def test_enterprise_package_ships_the_managed_opencode_plugin():
     plugin = shipped.get("/opt/defenseclaw/share/opencode/defenseclaw.js")
     assert plugin is not None and plugin["src"] == "internal/enterprisepolicy/opencode_managed_plugin.js"
     assert plugin.get("file_info", {}).get("mode") == 0o644
+
+
+# GAP-0108: the archives take each file's mode from the checkout. The
+# before hook drops the group and other write bits of every archived tree,
+# so a builder under umask 0002 archives the modes CI's umask 0022 gives,
+# and the binaries are root-owned 0755 (a root `tar -x` keeps the owner, and
+# `enterprise <os> install --payload` refuses binaries another uid owns).
+_ARCHIVE_MODE_HOOK = "chmod -R go-w packaging LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md"
+
+
+def test_release_archives_do_not_take_the_builders_modes() -> None:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    assert _ARCHIVE_MODE_HOOK in config["before"]["hooks"]
+    covered = set(_ARCHIVE_MODE_HOOK.split()[3:])
+    for archive in config["archives"]:
+        assert archive.get("builds_info") == {"mode": 0o755, "owner": "root", "group": "root"}, archive["id"]
+        for pattern in archive["files"]:
+            matched = {p.relative_to(ROOT).parts[0] for p in ROOT.glob(pattern)}
+            assert matched and matched <= covered, (archive["id"], pattern, sorted(matched - covered))
+    assert "\numask 022\n" in (ROOT / "scripts" / "build-release-assets.sh").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_archive_mode_hook_gives_umask_0002_checkouts_the_ci_modes(tmp_path: Path) -> None:
+    files = {
+        "packaging/systemd/defenseclaw-gateway.service": 0o664,
+        "packaging/systemd/user/defenseclaw-sandbox.socket": 0o664,
+        "packaging/linux/postinstall.sh": 0o775,
+        "LICENSE": 0o664,
+        "NOTICE": 0o664,
+        "THIRD_PARTY_LICENSES.txt": 0o664,
+        "README.md": 0o664,
+        "CHANGELOG.md": 0o664,
+    }
+    for name, mode in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+        path.chmod(mode)
+    for directory in (tmp_path / "packaging").rglob("*"):
+        if directory.is_dir():
+            directory.chmod(0o775)
+    completed = subprocess.run(
+        ["sh", "-c", _ARCHIVE_MODE_HOOK], cwd=tmp_path, capture_output=True, text=True, timeout=30
+    )
+    assert completed.returncode == 0, completed.stderr
+    for name, mode in files.items():
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == mode & ~0o022, name
+    for directory in (tmp_path / "packaging").rglob("*"):
+        if directory.is_dir():
+            assert stat.S_IMODE(directory.stat().st_mode) == 0o755, directory
 
 
 def test_release_archives_ship_enterprise_packaging_assets():

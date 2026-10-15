@@ -140,6 +140,58 @@ func TestVerifyReportsInstalledModeDriftAndRepairNamesTheRemedy(t *testing.T) {
 	}
 }
 
+// A package built from a checkout made under umask 0002 shipped every
+// systemd unit 0664. The first install rolled back with verify_failed and
+// left no deployment, so the advice to run repair led to not_installed.
+// The problem names each unit with its mode, once, and the step that
+// finishes the install (GAP-0108).
+func TestPackageUnitsWritableByGroupNameEveryUnitAndTheFinishStep(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	var paths []string
+	for _, unit := range h.services.Units() {
+		paths = append(paths, h.services.DefinitionPath(unit, ChannelPackage))
+	}
+	chmodAll := func(mode os.FileMode, paths ...string) {
+		t.Helper()
+		for _, path := range paths {
+			if err := os.Chmod(h.env.P(path), mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	requireNamed := func(got string, loosened ...string) {
+		t.Helper()
+		if strings.Count(got, "unit files the package installed are writable by group or other") != 1 {
+			t.Fatalf("want one problem for the package units: %s", got)
+		}
+		for _, path := range loosened {
+			if !strings.Contains(got, path+" (0664)") {
+				t.Fatalf("the problem does not name %s with its mode: %s", path, got)
+			}
+		}
+		if !strings.Contains(got, "`chmod 0644` on them") || !strings.Contains(got, " ensure --from-package`") || strings.Contains(got, " repair` to restore it") {
+			t.Fatalf("the problem does not name the finish step: %s", got)
+		}
+	}
+
+	chmodAll(0o664, paths...)
+	failed := h.run(Options{Action: ActionInstall, FromPackage: true})
+	requireError(t, failed, codeVerify)
+	requireNamed(messagesOf(failed.Errors, codeVerify), paths...)
+
+	chmodAll(0o644, paths...)
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true}))
+	writeFreshLedger(t, h)
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+
+	chmodAll(0o664, paths[0])
+	loosened := h.run(Options{Action: ActionVerify})
+	requireError(t, loosened, codeVerify)
+	requireNamed(messagesOf(loosened.Errors, codeVerify), paths[0])
+	chmodAll(0o644, paths[0])
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
+
 // A hook binary replaced after the macOS package install (root copied
 // /usr/bin/true over it) was recorded as the deployment by repair and by
 // ensure --from-package, so verify turned green while agents ran without
