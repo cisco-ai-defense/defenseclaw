@@ -219,7 +219,7 @@ func windowsEnterpriseHotConfigApply(
 		// Setup falls through to its full Upgrade; a bundle fails before any
 		// config write so the administrator can apply it through Setup.
 		if opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil {
-			result.AddError("fleet_setup_required", "Fleet enablement changes require signed standalone Setup to install or remove the compiler; the bundle changed nothing")
+			result.AddError("fleet_setup_required", "Fleet enablement changes require signed standalone Setup to install or remove the compiler; installed config and services were not changed")
 		}
 		return false, nil
 	}
