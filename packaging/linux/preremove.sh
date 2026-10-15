@@ -8,7 +8,9 @@
 # for the whole wait or when the hook-removal precheck refuses. Removing the
 # files then would leave machine policy or per-user hooks naming a deleted
 # binary. Later lifecycle problems are reported without stopping the package
-# transaction.
+# transaction. When the run it waited for was an uninstall (an MDM purge, say)
+# that removed the deployment and its lock, the uninstall is a no-op and
+# exits 0, and the removal goes on (GAP-0112).
 #
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
 # and apt purge, and rpm has no purge. It removes the machine state (config,

@@ -65,7 +65,9 @@ type lifecycleLock struct {
 }
 
 // errLockRemoved reports that the uninstall this run waited for removed the
-// lifecycle lock, and the lifecycle directory with it, while it held it.
+// lifecycle lock, and the lifecycle directory with it, while it held it. An
+// uninstall then has nothing left to do and is a no-op; any other action
+// reports busy.
 var errLockRemoved = errors.New("DefenseClaw enterprise was uninstalled while this run waited for the lifecycle lock, so nothing was changed")
 
 // acquireLock takes the exclusive lifecycle lock, polling until timeout.

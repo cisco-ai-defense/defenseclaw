@@ -1054,6 +1054,51 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
         assert "uninstall reported a problem" in result.stderr
 
 
+# GAP-0112: the preremove's uninstall waited on the lock of a concurrent MDM
+# purge, which removed the deployment and the lock with it. That uninstall
+# now reports a not_installed no-op and exits 0 (it exited busy 75, and the
+# preremove aborted the rpm or deb removal after the purge had removed
+# everything): the removal goes on, stops the package units and keeps no
+# result.
+@pytest.mark.parametrize("argument", ["remove", "0"])
+def test_linux_preremove_goes_on_when_a_concurrent_purge_removed_the_deployment(tmp_path: Path, argument: str) -> None:
+    noop = {
+        "schema_version": 2,
+        "action": "uninstall",
+        "ok": True,
+        "exit_code": 0,
+        "noop": True,
+        "noop_reason": "not_installed",
+        "warnings": [
+            {
+                "code": "not_installed",
+                "message": "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove",
+            }
+        ],
+    }
+    host = _Host(tmp_path, gateway_rc=0, gateway_out=json.dumps(noop))
+    result = host.run(_linux_scriptlet(host, "preremove.sh").replace("${TMPDIR:-/tmp}", str(tmp_path)), argument)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "nothing was removed" not in result.stderr
+    assert "reported a problem" not in result.stderr
+    assert not host.state.exists()
+    assert list(tmp_path.glob("defenseclaw-preremove.*")) == []
+    calls = host.calls()
+    assert calls[0] == "gateway enterprise linux uninstall --json --lock-wait 8m"
+    assert any(call.startswith("systemctl stop ") for call in calls), calls
+
+
+# The preremove aborts the package removal only on a busy lock (75) and on a
+# refused hook-removal precheck; every other uninstall outcome, the
+# not_installed no-op above included, lets the removal go on.
+def test_linux_preremove_aborts_only_on_busy_or_a_refused_precheck() -> None:
+    text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    aborts = [line.strip() for line in text.splitlines() if re.match(r"\s*exit [1-9]", line)]
+    assert aborts == ["exit 1", "exit 1"], aborts  # busy, precheck
+    assert 'if [ "$status" = 75 ]; then' in text
+    assert 'if [ "$precheck_refused" = 1 ]; then' in text
+
+
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
 # abort-remove": the postinstall must not wait on the same lock again.
 # "abort-upgrade" follows a failed upgrade step the same way.

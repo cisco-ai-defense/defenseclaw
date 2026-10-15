@@ -1902,7 +1902,9 @@ has found a regression.
   back after a rejected edit supersedes the rejection. Code.
 - **REG-1-1-14** **[L] Package steps wait for the lock.** Remove or upgrade the package while an apply run
   holds the lock. Expect: the package scripts wait (`--lock-wait 8m`); the removal fails on a
-  busy lock instead of deleting files under a live deployment. Code.
+  busy lock instead of deleting files under a live deployment. When the run it waited for was
+  an uninstall or MDM purge that removed the deployment and its lock, the package uninstall is a
+  `not_installed` no-op (exit 0) and the removal completes (GAP-0112). Code.
 - **REG-1-1-15** **[U] Non-purge uninstall can be retried.** Make an uninstall hit one error, then retry and
   reinstall. Expect: the deployment record is kept until an uninstall fully succeeds, so the
   retry and a package reinstall work (no `unmanaged_layout_present`). Code.

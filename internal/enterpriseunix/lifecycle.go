@@ -319,6 +319,21 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		if errors.Is(err, errLockRemoved) {
+			if l.opts.Action == ActionUninstall {
+				// Only an uninstall that left the lifecycle directory empty
+				// removes the lock: the run this one waited for removed the
+				// deployment, so there is nothing left to remove. A busy exit
+				// here aborted the rpm or deb removal whose preremove waited
+				// for a concurrent MDM purge, after the purge had removed
+				// everything (GAP-0112).
+				r.Noop, r.NoopReason = true, "not_installed"
+				message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
+				if l.opts.Purge {
+					message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
+				}
+				r.AddWarning(codeNotInstalled, message)
+				return 0
+			}
 			r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
