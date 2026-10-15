@@ -1003,6 +1003,68 @@ dc_top_block() {
     ' "$1"
 }
 
+# dc_plain_bytes <config>: fails, printing why, unless every byte of the
+# base config is printable ASCII or LF, a CR comes only right before an LF
+# and a UTF-8 byte order mark only first (GAP-0090 verify r3). The product's
+# loader also starts a new line at a lone CR, NEL, LS and PS, so a key after
+# one was hidden from the text checks, which split lines only at LF. od reads
+# the bytes, so the check does not depend on the awk or the locale; a file
+# od does not read in full is refused.
+dc_plain_bytes() {
+    size=$(wc -c <"$1" | tr -d ' ')
+    LC_ALL=C od -An -v -tu1 "$1" 2>/dev/null | LC_ALL=C awk -v size="$size" '
+        function refuse(why) {
+            msg = "the base config line " line " " why "; write the base config in plain ASCII with LF or CRLF line ends"
+            bad = 1
+        }
+        function high(   name) {
+            name = sprintf("a non-ASCII byte (0x%02X)", seq1)
+            if (seq1 == 194 && seq2 == 133) name = "a NEL (U+0085) line break"
+            if (seq1 == 226 && seq2 == 128 && seq3 == 168) name = "an LS (U+2028) line break"
+            if (seq1 == 226 && seq2 == 128 && seq3 == 169) name = "a PS (U+2029) line break"
+            if (seq1 == 239 && seq2 == 187 && seq3 == 191) {
+                if (start == 1) return
+                name = "a byte order mark that is not at the start of the file"
+            }
+            refuse("has " name)
+        }
+        BEGIN { line = 1 }
+        {
+            for (f = 1; f <= NF; f++) {
+                b = $f + 0
+                at++
+                if (want) {
+                    if (++got == 2) seq2 = b; else seq3 = b
+                    if (--want == 0) { high(); if (bad) exit }
+                    continue
+                }
+                if (cr) { cr = 0; if (b != 10) { refuse("has a carriage return (CR) that is not followed by a line feed (LF)"); exit } }
+                if (b == 10) { line++; continue }
+                if (b >= 32 && b <= 126) continue
+                if (b == 13) { cr = 1; continue }
+                if (b >= 128) {
+                    seq1 = b; seq2 = seq3 = -1; got = 1; start = at
+                    want = (b == 194) ? 1 : ((b == 226 || b == 239) ? 2 : 0)
+                    if (!want) { high(); exit }
+                    continue
+                }
+                if (b == 0) refuse("has a NUL byte")
+                else if (b == 9) refuse("has a tab")
+                else if (b == 11) refuse("has a vertical tab")
+                else if (b == 12) refuse("has a form feed")
+                else refuse(sprintf("has a control character (0x%02X)", b))
+                exit
+            }
+        }
+        END {
+            if (!bad && want) high()
+            if (!bad && cr) refuse("has a carriage return (CR) that is not followed by a line feed (LF)")
+            if (!bad && at != size + 0) { msg = "the base config could not be read byte by byte"; bad = 1 }
+            if (bad) { print msg; exit 1 }
+        }
+    '
+}
+
 # dc_plain_yaml <config>: fails, printing why, unless the base config is
 # written plainly enough for dc_guardrail_block and dc_top_block, which find
 # a key by its text (GAP-0090 verify r2). The product's loader also reads
@@ -1015,7 +1077,8 @@ dc_top_block() {
 # every quoted value and {...} or [...] must end on the line it starts on.
 # Block scalar (| and >) lines are not read. A single-quoted '' is read as
 # the end of one quoted value and the start of the next, which ends on the
-# same line either way.
+# same line either way. The config must pass dc_plain_bytes first, so it has
+# no tab.
 dc_plain_yaml() {
     LC_ALL=C awk -v bom="$(printf '\357\273\277')" '
         function refuse(why) { print "the base config line " NR " " why; bad = 1; exit }
@@ -1023,15 +1086,15 @@ dc_plain_yaml() {
         { sub(/\r$/, "") }
         NR == 1 && index($0, bom) == 1 { $0 = substr($0, length(bom) + 1) }
         { line = $0; n = length(line); match(line, /^ */); indent = RLENGTH }
-        block >= 0 && (line ~ /^[ \t]*$/ || indent > block) { next }
+        block >= 0 && (line ~ /^ *$/ || indent > block) { next }
         { block = -1 }
-        line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/ { next }
+        line ~ /^ *#/ || line ~ /^ *$/ { next }
         indent == 0 {
             if (line == "---" && !top) { top = 1; next }
             top = 1
-            if (line !~ /^([a-z0-9_]+|"[a-z0-9_]+"|\047[a-z0-9_]+\047)[ \t]*:([ \t]|$)/) {
+            if (line !~ /^([a-z0-9_]+|"[a-z0-9_]+"|\047[a-z0-9_]+\047) *:( |$)/) {
                 key = line
-                sub(/[ \t]*:.*/, "", key)
+                sub(/ *:.*/, "", key)
                 gsub(/^["\047]+|["\047]+$/, "", key)
                 lower = tolower(key)
                 if (key != lower && (lower == "guardrail" || lower == "claude_code" || lower == "codex" || lower == "connector_hooks" || lower == "application_protection"))
@@ -1043,8 +1106,8 @@ dc_plain_yaml() {
             i = indent + 1; depth = 0; owner = indent; start = indent
             while (i <= n) {
                 c = substr(line, i, 1)
-                spaced = (i == n || index(" \t", substr(line, i + 1, 1)) > 0)
-                if (c == " " || c == "\t") { i++; continue }
+                spaced = (i == n || substr(line, i + 1, 1) == " ")
+                if (c == " ") { i++; continue }
                 if (c == "#") break
                 if (c == "\"" || c == "\047") {
                     for (j = i + 1; j <= n && substr(line, j, 1) != c; j++)
@@ -1059,15 +1122,15 @@ dc_plain_yaml() {
                 if ((c == "-" || c == "?") && spaced) { owner = i - 1; i++; continue }
                 if ((c == "|" || c == ">") && depth == 0) { block = owner; next }
                 if (c == "!" || c == "&" || c == "*") {
-                    while (i <= n && !index(" \t,{}[]", substr(line, i, 1))) i++
+                    while (i <= n && !index(" ,{}[]", substr(line, i, 1))) i++
                     continue
                 }
                 start = i - 1
                 for (; i <= n; i++) {
                     c = substr(line, i, 1)
-                    if (c == ":" && (depth > 0 || i == n || index(" \t", substr(line, i + 1, 1)))) break
+                    if (c == ":" && (depth > 0 || i == n || substr(line, i + 1, 1) == " ")) break
                     if (depth > 0 && index(",{}[]", c)) break
-                    if (c == "#" && index(" \t", substr(line, i - 1, 1))) break
+                    if (c == "#" && substr(line, i - 1, 1) == " ") break
                 }
             }
             if (depth > 0) refuse("leaves a {...} or [...] open; end each one on the line it starts on")
@@ -1088,11 +1151,13 @@ dc_plain_yaml() {
 # claude_code.mode, codex.mode and connector_hooks.<connector>.mode before
 # the guardrail mode, and application_protection sets the guardrail policy
 # of automatically protected agents. No other key is compared. The config
-# must pass dc_plain_yaml first. Prints why and fails when they differ.
+# must pass dc_plain_bytes and dc_plain_yaml first. Prints why and fails
+# when they differ.
 # Needs tar (dc_main checks for it). The bundle
 # apply verifies the signature later; the config compared here must match
 # the manifest's files[] pin.
 dc_check_base_config() {
+    dc_plain_bytes "$1" || return 1
     dc_plain_yaml "$1" || return 1
     parity="$DC_STAGE/parity"
     rm -rf "$parity"

@@ -993,8 +993,8 @@ def _parity_bundle(path: Path, config: str, packs: tuple[str, ...] = ("p2int",),
 
 def _parity_script() -> str:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_yaml",
-             "dc_check_base_config")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_bytes",
+             "dc_plain_yaml", "dc_check_base_config")
     return "DC_SCRIPT_OS=linux\n" + "\n".join(_shell_function(text, name) for name in names) + '''
 DC_STAGE=$1
 reason=$(dc_check_base_config "$2" "$3") || { echo "refused: $reason"; exit 1; }
@@ -1184,7 +1184,7 @@ def test_unix_wrapper_base_config_must_be_written_plainly(tmp_path: Path, shell:
     for block in ('"claude\\u005fcode":\n  mode: observe\n', "!!str claude_code: {mode: observe}\n",
                   "? claude_code\n: {mode: observe}\n", "&cc claude_code: {mode: observe}\n",
                   "<<: {claude_code: {mode: observe}}\n", "*cc : {mode: observe}\n", "...\n",
-                  "---\nclaude_code: {mode: observe}\n", "\tclaude_code: {mode: observe}\n"):
+                  "---\nclaude_code: {mode: observe}\n"):
         assert check(base_ok + block) == refused(after, _NOT_PLAIN), (shell, block)
     assert check("{config_version: 9}\n") == refused(1, _NOT_PLAIN), shell
     assert check("%YAML 1.2\n---\n" + base_ok) == refused(1, _NOT_PLAIN), shell
@@ -1214,6 +1214,76 @@ def test_unix_wrapper_base_config_must_be_written_plainly(tmp_path: Path, shell:
     assert check("\ufeff" + base_ok) == "ok", shell
 
 
+def _not_ascii(what: str) -> str:
+    return f"has {what}; write the base config in plain ASCII with LF or CRLF line ends"
+
+
+_LONE_CR = "a carriage return (CR) that is not followed by a line feed (LF)"
+
+
+@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_be_plain_ascii(tmp_path: Path, shell: str) -> None:
+    # GAP-0090 verify r3: the loader also starts a new line at a lone CR, NEL,
+    # LS and PS, but the text checks split only at LF, so a top-level key
+    # after one passed the compare (6 marker ALLOW live), and a comment line
+    # ending in CR could open a quote that hides the guardrail block. Every
+    # byte must be printable ASCII or LF, a CR only before an LF, and a byte
+    # order mark only first.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int").encode()
+    after = base_ok.count(b"\n") + 1
+    head, rest = base_ok.split(b"guardrail:\n")
+    guardrail = b"guardrail:\n" + rest
+    hidden = b"claude_code: {mode: observe}\n"
+
+    def check(base: bytes, prelude: str = "") -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base)
+        result = subprocess.run([shell, "-c", prelude + _parity_script(), "t", str(stage), str(config), str(bundle)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    def refused(line: int, what: str) -> str:
+        return f"refused: the base config line {line} {_not_ascii(what)}"
+
+    rows = {
+        b"ai_discovery:\n  enabled: true\r" + hidden: (after + 1, _LONE_CR),
+        b"# administrator note\r" + hidden: (after, _LONE_CR),
+        b"ai_discovery:\n  enabled: true\xc2\x85" + hidden: (after + 1, "a NEL (U+0085) line break"),
+        b"ai_discovery:\n  enabled: true\xe2\x80\xa8" + hidden: (after + 1, "an LS (U+2028) line break"),
+        b"ai_discovery:\n  enabled: true\xe2\x80\xa9" + hidden: (after + 1, "a PS (U+2029) line break"),
+        b"ai_discovery:\n  enabled: true\x00\n": (after + 1, "a NUL byte"),
+        b"ai_discovery:\n  enabled:\ttrue\n": (after + 1, "a tab"),
+        b"\tclaude_code: {mode: observe}\n": (after, "a tab"),
+        b"ai_discovery:\n  enabled: true\x0b\n": (after + 1, "a vertical tab"),
+        b"ai_discovery:\n  enabled: true\x0c\n": (after + 1, "a form feed"),
+        b"ai_discovery:\n  enabled: true\x7f\n": (after + 1, "a control character (0x7F)"),
+        "# caf\u00e9\n".encode(): (after, "a non-ASCII byte (0xC3)"),
+        b"\xef\xbb\xbf# a second byte order mark\n": (after, "a byte order mark that is not at the start of the file"),
+        b"ai_discovery:\n  enabled: true\r": (after + 1, _LONE_CR),
+        b"# cut off \xe2\x80": (after, "a non-ASCII byte (0xE2)"),
+    }
+    for extra, (line, what) in rows.items():
+        assert check(base_ok + extra) == refused(line, what), (shell, extra)
+        # The first fault is the one named.
+        assert check(base_ok + extra + b"\t\x00\n") == refused(line, what), (shell, extra)
+    # A comment line that ends in CR opens a quote the loader reads as
+    # tenant_id "t guardrail: ...", hiding the guardrail block.
+    assert check(head + b"# note\rtenant_id: \"t\n" + guardrail + b"workspace_id: w\"\n") == refused(3, _LONE_CR), shell
+    assert check(b"\xef\xbb" + base_ok) == refused(1, "a non-ASCII byte (0xEF)"), shell
+    # Plain ASCII with LF or CRLF, with or without a byte order mark, passes.
+    assert check(base_ok) == "ok", shell
+    assert check(base_ok.replace(b"\n", b"\r\n")) == "ok", shell
+    assert check(b"\xef\xbb\xbf" + base_ok) == "ok", shell
+    assert check(b"\xef\xbb\xbf" + base_ok.replace(b"\n", b"\r\n")) == "ok", shell
+    # A file od does not read in full is refused.
+    assert check(base_ok, prelude="od() { :; }\n") == "refused: the base config could not be read byte by byte", shell
+
+
 @pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
 def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(tmp_path: Path) -> None:
     # GAP-0090: with a base config and a bundle, the wrapper refuses a
@@ -1221,8 +1291,8 @@ def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(
     # trust anchors (so the hooks never answer under a weaker policy), and
     # skips it once the device is in bundle mode.
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_yaml",
-             "dc_check_base_config", "dc_main")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_bytes",
+             "dc_plain_yaml", "dc_check_base_config", "dc_main")
     bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
     bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
     good = tmp_path / "base.yaml"
@@ -1230,6 +1300,9 @@ def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(
     weak = tmp_path / "weak.yaml"
     weak.write_text(bundle_config.replace("block_at: HIGH", "block_at: CRITICAL").replace(
         "policies/guardrail/p2int", "/etc/dc-packs/p2int"), encoding="utf-8")
+    # GAP-0090 verify r3: a key after a lone CR is a top-level key for the loader.
+    hidden = tmp_path / "hidden.yaml"
+    hidden.write_bytes(good.read_bytes() + b"ai_discovery:\n  enabled: true\rclaude_code: {mode: observe}\n")
     (tmp_path / "anchors.json").write_text('{"schema_version": 1}\n', encoding="utf-8")
     calls = tmp_path / "calls.log"
     script = "\n".join(_shell_function(text, name) for name in names) + f'''
@@ -1297,6 +1370,8 @@ dc_main
         assert len(order) == 4 and order[3].startswith("bundle apply --bundle "), (via, order)
         assert order[3].endswith(" --reason mdm --lock-wait 10m"), (via, order)
         code, order = run(weak, via=via)
+        assert (code, order) == (2, ["fail mdm_base_config_mismatch"]), (via, order)
+        code, order = run(hidden, via=via)
         assert (code, order) == (2, ["fail mdm_base_config_mismatch"]), (via, order)
         code, order = run(good, via=via, path=str(no_tar))
         assert (code, order) == (1, ["fail mdm_tar_missing"]), (via, order)

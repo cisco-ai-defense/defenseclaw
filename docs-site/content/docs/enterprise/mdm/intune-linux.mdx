@@ -151,9 +151,12 @@ config** that matches the bundle's guardrail block and hook modes:
   `mode: observe` there only reports calls that the bundle blocks. Comments and
   blank lines don't count.
 - The wrapper compares these blocks as text, so write the base config
-  plainly: every top-level key in lowercase, plain (`claude_code:`) or in
-  quotes without escapes, and every quoted value and every `{...}` or `[...]`
-  ending on the line where it starts. The wrapper refuses a tag (`!!str`), an
+  plainly. The base config must be plain ASCII with LF or CRLF line endings:
+  the wrapper refuses any other byte, even in a comment, such as a tab, a lone
+  CR or a non-ASCII character (one UTF-8 byte order mark at the start is
+  allowed). Write every top-level key in lowercase, plain (`claude_code:`) or
+  in quotes without escapes, and end every quoted value and every `{...}` or
+  `[...]` on the line where it starts. The wrapper refuses a tag (`!!str`), an
   anchor, an alias, a merge key, a `?` key or a document written as one
   `{...}` with `mdm_base_config_mismatch`; the product would read some of
   those spellings as a hook mode block the comparison does not see.

@@ -177,6 +177,31 @@ def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
         ("guardrail:\n  block_at: HIGH\n", (),
          "scanners:\n  x:\n  - - |\n      text\n    - \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
          "base CONFIG= line 5 leaves a quoted value open"),
+        # GAP-0090 verify r3: the loader also starts a line at a lone CR, NEL,
+        # LS and PS, so only printable ASCII, LF, CRLF and one leading byte
+        # order mark pass, even in a comment.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra,
+           f"base CONFIG= line {line} has {what}; write the base config in plain ASCII with LF or CRLF line ends")
+          for extra, line, what in (
+              ("x:\n  y: 1\rclaude_code: {mode: observe}\n", 4, "a carriage return (CR) that is not followed by a line feed (LF)"),
+              ("# note\rclaude_code: {mode: observe}\n", 3, "a carriage return (CR) that is not followed by a line feed (LF)"),
+              ("x:\n  y: 1\u0085claude_code: {mode: observe}\n", 4, "a NEL (U+0085) line break"),
+              ("x:\n  y: 1\u2028claude_code: {mode: observe}\n", 4, "an LS (U+2028) line break"),
+              ("x:\n  y: 1\u2029claude_code: {mode: observe}\n", 4, "a PS (U+2029) line break"),
+              ("x:\n  y: 1\x00\n", 4, "a NUL byte"), ("x:\n  y:\t1\n", 4, "a tab"),
+              ("x:\n  y: 1\x0c\n", 4, "a form feed"), ("x:\n  y: 1\x0b\n", 4, "a vertical tab"),
+              ("x:\n  y: 1\x7f\n", 4, "a control character (0x7F)"),
+              ("# caf\u00e9\n", 3, "a non-ASCII byte (0xC3)"),
+              ("\ufeff# again\n", 3, "a byte order mark that is not at the start of the file"),
+              ("x: 1\r", 3, "a carriage return (CR) that is not followed by a line feed (LF)"))],
+        # A comment line ending in CR opens a quote that hides the guardrail block.
+        ("guardrail:\n  block_at: HIGH\n", (), "# note\rtenant_id: \"t\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 has a carriage return (CR) that is not followed by a line feed (LF)"),
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\r\n  block_at: HIGH\r\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffguardrail:\n  block_at: HIGH\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffguardrail:\r\n  block_at: HIGH\r\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffapi_key: x\nguardrail:\n  block_at: HIGH\n",
+         "base config contains an inline api_key"),
         # Only a leading --- is allowed; a second document is refused.
         ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n---\nclaude_code: {mode: observe}\n",
          "base CONFIG= line 3 is not a plain top-level key"),
@@ -202,7 +227,9 @@ def test_intune_bundle_package_compares_every_pack(
         capture_output=True, text=True, timeout=30,
     )
     if refusal:
-        assert run.returncode != 0 and refusal in run.stderr, run.stderr
+        # PowerShell colours the error and wraps it at the console width.
+        message = " ".join(line.rsplit("| ", 1)[-1].strip() for line in re.sub(r"\x1b\[[0-9;]*m", "", run.stderr).splitlines())
+        assert run.returncode != 0 and refusal in message, run.stderr
         assert not (tmp_path / "out/content").exists()
     else:
         assert run.returncode == 0, run.stderr

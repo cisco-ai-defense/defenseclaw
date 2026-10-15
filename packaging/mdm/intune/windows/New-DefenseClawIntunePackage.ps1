@@ -25,8 +25,9 @@
     The base config's claude_code, codex, connector_hooks and
     application_protection blocks (the hook modes) must equal the bundle's,
     or be absent from both. The packager compares the configs as text, so the
-    base config must write each top-level key plainly in lowercase and end
-    each quoted value and each {...} or [...] on the line where it starts.
+    base config must be plain ASCII with LF or CRLF line endings, write each
+    top-level key plainly in lowercase and end each quoted value and each
+    {...} or [...] on the line where it starts.
 
 .EXAMPLE
     ./New-DefenseClawIntunePackage.ps1 -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
@@ -104,10 +105,37 @@ function Get-BaseConfigSpellingProblem {
     # value or a {...} or [...] as part of that value even when the line
     # starts in column 1, so a base config written that way passed the
     # compare and still set a hook mode or hid its guardrail block (GAP-0090
-    # verify r2). Returns why the config is not plain enough to compare, or
-    # ''. The Unix wrappers' dc_plain_yaml applies the same rules; Get-Content
-    # has already dropped a byte order mark.
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # verify r2). The loader also starts a new line at a lone CR, NEL, LS and
+    # PS, so a key after one was hidden from these checks, which split lines
+    # only at LF (GAP-0090 verify r3). So first every byte of the file must be
+    # printable ASCII or LF, a CR may come only right before an LF and a UTF-8
+    # byte order mark only first; the bytes are read raw, so the check does
+    # not depend on how PowerShell decodes the file. Returns why the config is
+    # not plain enough to compare, or ''. The Unix wrappers' dc_plain_bytes
+    # and dc_plain_yaml apply the same rules.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    $first = 0
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { $first = 3 }
+    $number = 1
+    for ($i = $first; $i -lt $Bytes.Length; $i++) {
+        $b = $Bytes[$i]
+        if ($b -eq 10) { $number++; continue }
+        if (($b -ge 0x20 -and $b -le 0x7E) -or ($b -eq 13 -and $i + 1 -lt $Bytes.Length -and $Bytes[$i + 1] -eq 10)) { continue }
+        $next = @(1, 2 | ForEach-Object { if ($i + $_ -lt $Bytes.Length) { [int]$Bytes[$i + $_] } else { -1 } })
+        $what = if ($b -eq 0) { 'a NUL byte' }
+        elseif ($b -eq 9) { 'a tab' }
+        elseif ($b -eq 11) { 'a vertical tab' }
+        elseif ($b -eq 12) { 'a form feed' }
+        elseif ($b -eq 13) { 'a carriage return (CR) that is not followed by a line feed (LF)' }
+        elseif ($b -lt 0x80) { 'a control character (0x{0:X2})' -f $b }
+        elseif ($b -eq 0xC2 -and $next[0] -eq 0x85) { 'a NEL (U+0085) line break' }
+        elseif ($b -eq 0xE2 -and $next[0] -eq 0x80 -and $next[1] -eq 0xA8) { 'an LS (U+2028) line break' }
+        elseif ($b -eq 0xE2 -and $next[0] -eq 0x80 -and $next[1] -eq 0xA9) { 'a PS (U+2029) line break' }
+        elseif ($b -eq 0xEF -and $next[0] -eq 0xBB -and $next[1] -eq 0xBF) { 'a byte order mark that is not at the start of the file' }
+        else { 'a non-ASCII byte (0x{0:X2})' -f $b }
+        return "line $number has $what; write the base config in plain ASCII with LF or CRLF line ends"
+    }
+    $Text = [Text.Encoding]::ASCII.GetString($Bytes, $first, $Bytes.Length - $first)
     $compared = @('guardrail', 'claude_code', 'codex', 'connector_hooks', 'application_protection')
     $block = -1
     $top = $false
@@ -118,15 +146,15 @@ function Get-BaseConfigSpellingProblem {
         $n = $line.Length
         $indent = $n - $line.TrimStart(' ').Length
         if ($block -ge 0) {
-            if ($line -match '^[ \t]*$' -or $indent -gt $block) { continue }
+            if ($line -match '^ *$' -or $indent -gt $block) { continue }
             $block = -1
         }
-        if ($line -match '^[ \t]*(#|$)') { continue }
+        if ($line -match '^ *(#|$)') { continue }
         if ($indent -eq 0) {
             if ($line -ceq '---' -and -not $top) { $top = $true; continue }
             $top = $true
-            if ($line -cnotmatch '^([a-z0-9_]+|"[a-z0-9_]+"|''[a-z0-9_]+'')[ \t]*:([ \t]|$)') {
-                $key = ($line -replace '[ \t]*:.*$', '').Trim([char[]]@('"', "'"))
+            if ($line -cnotmatch '^([a-z0-9_]+|"[a-z0-9_]+"|''[a-z0-9_]+'') *:( |$)') {
+                $key = ($line -replace ' *:.*$', '').Trim([char[]]@('"', "'"))
                 if ($compared -contains $key -and $key -cne $key.ToLowerInvariant()) {
                     return "line $number writes the top-level key $($key.ToLowerInvariant()) in other letters; write it in lowercase"
                 }
@@ -138,8 +166,8 @@ function Get-BaseConfigSpellingProblem {
         $i = $indent; $depth = 0; $owner = $indent; $start = $indent
         while ($i -lt $n) {
             $c = $line[$i]
-            $spaced = $i + 1 -ge $n -or " `t".Contains($line[$i + 1])
-            if (" `t".Contains($c)) { $i++; continue }
+            $spaced = $i + 1 -ge $n -or $line[$i + 1] -eq ' '
+            if ($c -eq ' ') { $i++; continue }
             if ($c -eq '#') { break }
             if ($c -eq '"' -or $c -eq "'") {
                 $j = $i + 1
@@ -157,15 +185,15 @@ function Get-BaseConfigSpellingProblem {
             if ('-?'.Contains($c) -and $spaced) { $owner = $i; $i++; continue }
             if ('|>'.Contains($c) -and $depth -eq 0) { $block = $owner; break }
             if ('!&*'.Contains($c)) {
-                while ($i -lt $n -and -not " `t,{}[]".Contains($line[$i])) { $i++ }
+                while ($i -lt $n -and -not ' ,{}[]'.Contains($line[$i])) { $i++ }
                 continue
             }
             $start = $i
             for (; $i -lt $n; $i++) {
                 $c = $line[$i]
-                if ($c -eq ':' -and ($depth -gt 0 -or $i + 1 -ge $n -or " `t".Contains($line[$i + 1]))) { break }
+                if ($c -eq ':' -and ($depth -gt 0 -or $i + 1 -ge $n -or $line[$i + 1] -eq ' ')) { break }
                 if ($depth -gt 0 -and ',{}[]'.Contains($c)) { break }
-                if ($c -eq '#' -and " `t".Contains($line[$i - 1])) { break }
+                if ($c -eq '#' -and $line[$i - 1] -eq ' ') { break }
             }
         }
         if ($block -lt 0 -and $depth -gt 0) { return "line $number leaves a {...} or [...] open; end each one on the line it starts on" }
@@ -207,10 +235,12 @@ function Get-CustomPackPath {
 }
 
 if ($BundlePath) {
-    $baseText = Get-Content -LiteralPath $BaseConfigPath -Raw
-    if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
-    $spelling = Get-BaseConfigSpellingProblem -Text $baseText
+    # Raw bytes: Get-Content would decode them (as ANSI in Windows PowerShell).
+    $baseBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $BaseConfigPath).ProviderPath)
+    $spelling = Get-BaseConfigSpellingProblem -Bytes $baseBytes
     if ($spelling) { throw "base CONFIG= $spelling" }
+    $baseText = [Text.Encoding]::UTF8.GetString($baseBytes).TrimStart([char]0xFEFF)
+    if ($baseText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'base config contains an inline api_key' }
     $file = [IO.File]::OpenRead($BundlePath)
     try {
         $gzip = [IO.Compression.GZipStream]::new($file, [IO.Compression.CompressionMode]::Decompress)
