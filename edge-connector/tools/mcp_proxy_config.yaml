@@ -6,7 +6,7 @@
 # evaluating it through the 8-stage policy pipeline.
 #
 # Usage:
-#   python3 -m mcp_proxy --config mcp_proxy_config.yaml
+#   python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml
 
 # ---------------------------------------------------------------------------
 # Upstream MCP server (the real hardware controller)
@@ -18,18 +18,17 @@ upstream:
 
   # --- Option B: HTTP transport (for remote MCP servers) ---
   # transport: http
-  # url: "http://192.168.1.100:8088/mcp"
+  # url: "https://your-reviewed-public-host.example/mcp"
 
 # ---------------------------------------------------------------------------
 # Edge Connector engine settings
 # ---------------------------------------------------------------------------
 edge_connector:
-  # Path to the shared library (FFI backend).
-  # Falls back to Unix socket if unavailable.
+  # Path to the shared library (FFI fallback when the daemon is unavailable).
   lib_path: /usr/local/lib/libdclaw_core.so
 
   # Path to the Edge Connector daemon Unix socket (JSON-RPC backend).
-  socket_path: /tmp/defenseclaw.sock
+  socket_path: /run/defenseclaw/defenseclaw.sock
 
   # What to do when the engine is unavailable:
   #   closed = block all tool calls (safe default)
@@ -56,15 +55,10 @@ proxy:
 #     transport: stdio
 #     command: ["python3", "-m", "ha_mcp.server", "--config", "/etc/ha-mcp/config.yaml"]
 #
-# Bubbaloop (Kornia fleet agent):
-#   upstream:
-#     transport: http
-#     url: "http://localhost:8088/mcp"
-#
 # IoT-Edge-MCP-Server (industrial gateway):
 #   upstream:
 #     transport: http
-#     url: "http://192.168.1.50:9000/mcp"
+#     url: "https://your-reviewed-public-host.example/mcp"
 #
 # Claude Code MCP server (development tools):
 #   upstream:

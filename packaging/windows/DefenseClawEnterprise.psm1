@@ -21117,9 +21117,8 @@ function Get-DefenseClawLifecycleSources {
         [string]$InstallerSource,
         [string]$ModuleSource,
         [switch]$AllowUnsigned,
-        # Retained only for internal call-shape compatibility. The public
-        # lifecycle entry point rejects deferred configuration before layout
-        # resolution, so this legacy source-selection branch is unreachable.
+        # Deferred Install still authenticates protected placeholder config
+        # and manifest inputs, but Fleet activation waits for Repair.
         [switch]$DeferredConfig
     )
     $sources = @{}
@@ -21164,9 +21163,8 @@ function Get-DefenseClawLifecycleSources {
             @('HookBinary', $HookBinary),
             @('SensorHelperBinary', $SensorHelperBinary)
         )
-        # Legacy compatibility scaffolding: direct callers of this internal
-        # helper can still describe the old source shape, but the lifecycle
-        # gate rejects that mode before this function is reached.
+        # Deferred Install supplies authenticated placeholder config and
+        # manifest sources; their Fleet content is inspected at Repair.
         if (-not $DeferredConfig) {
             $required += @(
                 @('Config', $Config),

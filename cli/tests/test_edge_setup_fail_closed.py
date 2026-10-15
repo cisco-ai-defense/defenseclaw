@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import click
@@ -17,6 +19,83 @@ def _app(tmp_path):
     app = AppContext()
     app.cfg = SimpleNamespace(data_dir=str(tmp_path))
     return app
+
+
+def test_edge_setup_advertises_real_gateway_port_and_emits_compilable_policy(tmp_path) -> None:
+    runner = CliRunner()
+    help_result = runner.invoke(cmd_setup_edge_connector.edge_connector, ["--help"])
+    assert help_result.exit_code == 0
+    assert "18970" in help_result.output
+    assert "13400" not in help_result.output
+
+    sample = runner.invoke(
+        cmd_setup_edge_connector.edge_connector, ["--emit-policy"], obj=_app(tmp_path)
+    )
+    assert sample.exit_code == 0, sample.output
+    assert "kind: FleetPolicy" not in sample.output
+    policy_file = tmp_path / "fleet-policy.yaml"
+    policy_file.write_text(sample.output)
+    compiler = Path(__file__).resolve().parents[2] / "edge-connector" / "tools" / "policy_compiler.py"
+    compiled = subprocess.run(
+        [sys.executable, str(compiler), "--input", str(policy_file),
+         "--profile", "standard", "--version", "1",
+         "--output-header", "policy_tables.h", "--output-binary", "policy.bin"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    assert (tmp_path / "policy.bin").stat().st_size > 0
+
+
+def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_URL", raising=False)
+    monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: True)
+    endpoint = "http://127.0.0.1:19999/api/v1/fleet"
+    enabled = []
+
+    def enable(_path):
+        enabled.append(cmd_edge_install._load_local_env_value("DCLAW_FLEET_API_URL"))
+
+    monkeypatch.setattr(cmd_setup_edge_connector, "_enable_fleet_config", enable)
+    result = CliRunner().invoke(
+        cmd_setup_edge_connector.edge_connector,
+        ["--non-interactive", "--token", "test-token", "--endpoint", endpoint],
+        obj=_app(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert enabled == [endpoint]
+
+    calls = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout='{"device_key":"' + "12" * 32 + '"}\n201', stderr="")
+
+    monkeypatch.setattr(cmd_edge_install.subprocess, "run", fake_run)
+    assert cmd_edge_install._register_device_via_api("1", "1", "42") == "12" * 32
+    assert endpoint + "/devices" in calls[0]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_edge_setup_non_linux_enables_gateway_without_linux_service(tmp_path, monkeypatch, platform) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.setattr(cmd_setup_edge_connector.sys, "platform", platform)
+
+    def unexpected_service_write(*_args):
+        raise AssertionError("non-Linux Fleet gateway setup touched Linux service env")
+
+    monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", unexpected_service_write)
+    enabled = []
+    monkeypatch.setattr(cmd_setup_edge_connector, "_enable_fleet_config", enabled.append)
+    result = CliRunner().invoke(
+        cmd_setup_edge_connector.edge_connector,
+        ["--non-interactive", "--token", "test-token"], obj=_app(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert enabled
+    assert "C Edge" in result.output
+    assert "/etc/defenseclaw/edge-connector.env" not in result.output
+    assert "DCLAW_FLEET_API_URL=http://127.0.0.1:18970/api/v1/fleet" in (tmp_path / ".env").read_text()
 
 
 def test_edge_setup_generates_distinct_keys_and_reuses_them(tmp_path, monkeypatch) -> None:

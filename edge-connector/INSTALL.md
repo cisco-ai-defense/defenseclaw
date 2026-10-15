@@ -2,6 +2,8 @@
 
 Run the Linux Edge Connector alongside an AI agent and connect it to a DefenseClaw Fleet gateway.
 
+For a normal macOS, Linux, or Windows agent install, follow the [core quickstart](../docs-site/content/docs/get-started/quickstart.mdx); Fleet and this separate Linux C daemon stay off. For a broker-free Linux C smoke, build `MINIMAL` with `-DDCLAW_DEV_MODE=ON`, then run CTest and `edge-connector --help` as shown in the [Edge install page](../docs-site/content/docs/edge-connector/install.mdx#local-only-linux-smoke). The production `STANDARD` build below needs broker TLS, per-device registration, and matching secrets before its service can run. The gateway Fleet wizard works on macOS and Windows without installing a local C daemon; on Linux it also provisions the C service environment through `sudo`.
+
 ---
 
 ## Security Requirements
@@ -153,7 +155,7 @@ The C engine uses a built-in content scanner and an all-profile SSRF guard. The 
 
 ### Step 3: Compile the Policy (Optional — for custom policies)
 
-The policy compiler requires Python 3 and PyYAML (`python3 -m pip install PyYAML` in a managed Python environment). CMake installs the compiler script but does not install PyYAML. For a gateway deployed from a raw release tar archive, provision Python 3 and PyYAML before using Fleet policy push. Linux enterprise RPM/DEB packages leave Python/PyYAML optional while Fleet is off; provision a trusted `/usr/bin/python3` and PyYAML before enabling Fleet. Managed Fleet install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires **PyYAML 6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14), not Apple's `/usr/bin/python3` or Homebrew PATH. For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'` before install/ensure. The interpreter, framework parents, and installed PyYAML tree must be root-owned and not group/world-writable. The managed lifecycle checks these paths and refuses Fleet-enabled config before service changes if no candidate passes. Managed Windows standalone Setup carries the compiler as signed inert payload and activates it only for authenticated Fleet-enabled config, using its admitted scanner runtime Python/PyYAML. Fleet-off Setup/upgrade leaves no active compiler, and disabling Fleet removes a previous active script. Secure Client managed profiles on Windows and macOS reject Fleet-enabled configuration because they do not include the compiler/runtime.
+The policy compiler requires Python 3 and PyYAML (`python3 -m pip install PyYAML` in a managed Python environment). CMake installs the compiler script but does not install PyYAML. For a gateway deployed from a raw release tar archive, provision Python 3 and PyYAML before using Fleet policy push. Linux enterprise RPM/DEB packages leave Python/PyYAML optional while Fleet is off; provision a trusted `/usr/bin/python3` and PyYAML before enabling Fleet. Managed Fleet install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires **PyYAML 6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14), not Apple's `/usr/bin/python3` or Homebrew PATH. For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'` before install/ensure. The interpreter, framework parents, and installed PyYAML tree must be root-owned and not group/world-writable. The managed lifecycle checks these paths and refuses Fleet-enabled config before service changes if no candidate passes. Managed Windows standalone Setup carries the compiler in its signed Setup payload and activates it only for authenticated Fleet-enabled config, using its admitted scanner runtime Python/PyYAML. Fleet-off Setup/upgrade leaves no active compiler, and disabling Fleet removes a previous active script. Secure Client managed profiles on Windows and macOS reject Fleet-enabled configuration because they do not include the compiler/runtime.
 
 Fleet activation is optional for the gateway. Managed Linux/macOS packages carry `policy_compiler.py` as inert source under `<InstallRoot>/share/fleet/`; validated Fleet-enabled install/ensure copies it into the protected active `<InstallRoot>/lib/defenseclaw/` path. Fleet-off install/upgrade does not activate the compiler or require Python/PyYAML. A Fleet-off raw payload install discards its optional compiler source; supply the staged release `--payload` when enabling Fleet later. The bundled Fleet Grafana dashboard is empty while Fleet is off, and the local Prometheus stack has no Fleet scrape job by default.
 
@@ -213,9 +215,9 @@ else:
 ```
 
 **Features:**
-- Auto-detects backend: tries FFI (ctypes) first, falls back to Unix socket
+- Auto-detects backend: uses the running daemon's Unix socket first, then FFI (ctypes) when no daemon is available
 - Configurable fail-open / fail-closed behavior
-- Built-in tool-name-to-capability mapping with heuristic fallback
+- Built-in Python capability hints; the C engine still rejects unknown names without a reviewed C mapping
 - Automatic destination extraction from URL arguments
 - Content scanning when arguments are provided
 
@@ -225,8 +227,7 @@ else:
 ec = EdgeConnector(
     lib_path="/path/to/libdclaw_core.so",   # override FFI path
     socket_path="/run/defenseclaw/defenseclaw.sock", # default daemon socket
-    fail_open=True,                          # allow when engine is down
-    tool_cap_map={"my_tool": 0x04},          # custom capability mapping
+    fail_open=False,                         # block when engine is down
     session_id=42,                           # session correlation ID
 )
 ```
@@ -250,27 +251,21 @@ Edge Connector MCP Proxy (mcp_proxy.py)
 Real MCP Server (ESP-Claw, HA-MCP, etc.)
 ```
 
-**Quick start (stdio transport):**
+From the `edge-connector/` source directory, quick start with a local stdio MCP server:
 
 ```bash
 # Proxy an MCP server that speaks stdio
 DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
-  python3 -m mcp_proxy
+  python3 tools/mcp_proxy.py
 ```
 
 **With a config file:**
 
 ```bash
-python3 -m mcp_proxy --config tools/mcp_proxy_config.yaml
+python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml
 ```
 
-**HTTP transport (for remote MCP servers):**
-
-```bash
-DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
-DCLAW_MCP_TRANSPORT=http \
-  python3 -m mcp_proxy
-```
+HTTP upstreams are for reviewed public services. The proxy rejects private and loopback upstream addresses, so the former `192.168.1.100` example cannot work; use stdio for a local MCP server. For a remote upstream, configure a reachable public HTTPS endpoint and verify its downstream network behavior.
 
 **Using with Claude Desktop or Claude Code:**
 
@@ -281,7 +276,7 @@ Add the proxy to your MCP client configuration. Instead of pointing directly at 
   "mcpServers": {
     "esp-claw-secured": {
       "command": "python3",
-      "args": ["-m", "mcp_proxy"],
+      "args": ["/usr/local/lib/defenseclaw/mcp_proxy.py"],
       "env": {
         "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
         "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
@@ -290,6 +285,8 @@ Add the proxy to your MCP client configuration. Instead of pointing directly at 
   }
 }
 ```
+
+Replace `/usr/local/lib` if CMake installed into another library directory. The `esp_claw.mcp_server` module is an upstream example and must be installed separately; substitute your actual stdio MCP server command. For Python imports such as `from generic_hook import EdgeConnector`, set `PYTHONPATH=/usr/local/lib/defenseclaw` (or the source `tools/` directory), because CMake does not add its installed adapter directory to Python's import path.
 
 **Environment variables:**
 
@@ -376,6 +373,7 @@ PicoClaw integrates via its process hook system, intercepting tool calls, LLM in
 
 ```bash
 # 1. Copy the hook
+mkdir -p ~/.picoclaw/hooks
 cp /usr/local/lib/defenseclaw/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
 
 # 2. Register in config
@@ -390,15 +388,17 @@ Add to `hooks.processes`:
     "enabled": true,
     "priority": 5,
     "transport": "stdio",
-    "command": ["python3", "~/.picoclaw/hooks/defenseclaw_gate.py"],
+    "command": ["python3", "/home/USERNAME/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
       "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
-      "DCLAW_LOG_PATH": "~/edge-connector.log"
+      "DCLAW_LOG_PATH": "/home/USERNAME/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
   }
 }
 ```
+
+Replace `USERNAME` with the actual home directory. A process launcher need not expand `~` in JSON command or environment values.
 
 #### What gets intercepted
 
@@ -444,9 +444,11 @@ lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
 Query the daemon from any process:
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
-  "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
+tool_hash="$(printf exec_shell | sha256sum | cut -d' ' -f1)"
+printf '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{'\
+'"tool_name":"exec_shell","tool_hash":"%s","capabilities":4,'\
+'"destination":"","session_id":1}}\n' "$tool_hash" | \
+  socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
 ```
 
 ---
@@ -581,15 +583,16 @@ cd edge-connector/build && ./tests/bench_latency
 ## Updating
 
 ```bash
-# Pre-built binary
-curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/edge-connector-linux-$(uname -m).tar.gz | tar xz
-sudo mv edge-connector/libdclaw_core.so /usr/local/lib/
+# No separate prebuilt C Edge Connector archive is published by this release.
+# Update the reviewed source checkout and rebuild the same production profile.
+cd defenseclaw
+git pull --ff-only
+cmake -S edge-connector -B edge-connector/build \
+  -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON
+cmake --build edge-connector/build -j$(nproc)
+ctest --test-dir edge-connector/build --output-on-failure
+sudo cmake --install edge-connector/build
 sudo ldconfig
-
-# From source
-cd defenseclaw && git pull
-cd edge-connector/build && cmake .. && make -j$(nproc)
-sudo make install
 ```
 
 ---

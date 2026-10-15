@@ -36,16 +36,16 @@ Usage (stdio transport — most common):
 
     # Proxy an MCP server that speaks stdio
     DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
-    python3 -m mcp_proxy
+    python3 tools/mcp_proxy.py
 
     # Or with a config file
-    python3 -m mcp_proxy --config mcp_proxy_config.yaml
+    python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml
 
 Usage (HTTP SSE transport):
 
-    DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
+    DCLAW_MCP_UPSTREAM="https://approved-public.example.com/mcp" \
     DCLAW_MCP_TRANSPORT=http \
-    python3 -m mcp_proxy
+    python3 tools/mcp_proxy.py
 
 Environment variables:
 

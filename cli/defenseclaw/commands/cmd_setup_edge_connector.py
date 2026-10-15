@@ -31,6 +31,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -47,7 +48,7 @@ from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
-_DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:13400/api/v1/fleet"
+_DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:18970/api/v1/fleet"
 
 
 def _existing_env_value(env_path: Path, name: str) -> str:
@@ -135,30 +136,23 @@ def _enable_fleet_config(data_dir: str) -> None:
     ux.ok(f"Updated fleet section in {cfg_path}")
 
 _SAMPLE_POLICY = """\
-# Edge Connector fleet policy -- drop this into your policy directory
-# or apply via `defenseclaw policy load`.
-apiVersion: defenseclaw.dev/v1
-kind: FleetPolicy
-metadata:
-  name: edge-default
-spec:
-  heartbeat_interval: 30s
-  offline_threshold_multiplier: 3
-  verdict_cache:
-    max_entries: 4096
-    ttl_allow: 24h
-    ttl_block: 168h   # 7 days
-    ttl_warn: 4h
-  alerts:
-    - type: device_offline
-      severity: warning
-    - type: tamper_detect
-      severity: critical
-    - type: block_spike
-      severity: high
-      threshold: 50
-    - type: policy_drift
-      severity: medium
+# Edge Connector on-device policy. Review the actions before pushing.
+# Add only approved public numeric IPs to destination_allowlist when needed.
+name: edge-default
+skill_actions:
+  critical:
+    runtime: disable
+  high:
+    runtime: disable
+  medium:
+    runtime: warn
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [net_fetch, actuate]
+      action: block
+  destination_allowlist: []
 """
 
 
@@ -171,7 +165,7 @@ spec:
 @click.option(
     "--endpoint",
     default=None,
-    help="Fleet API base URL (default: gateway loopback on port 13400).",
+    help="Fleet API base URL (default: gateway loopback on port 18970).",
 )
 @click.option(
     "--emit-policy",
@@ -193,8 +187,8 @@ def edge_connector(
 ) -> None:
     """Configure the Edge Connector fleet management API.
 
-    Walks through building the edge-connector binary, setting the fleet
-    API bearer token in ~/.defenseclaw/.env, and registering the endpoint.
+    Prints Edge Connector build instructions, provisions Fleet credentials,
+    and saves the Fleet API endpoint in ~/.defenseclaw/.env.
     Use ``--emit-policy`` to print a sample fleet policy YAML.
 
     Subcommands:
@@ -215,31 +209,26 @@ def edge_connector(
 
     # --- 1. Build instructions -------------------------------------------
     ux.echo()
-    ux.echo(
-        "Edge Connector Engine (C):\n"
-        "\n"
-        "  cd edge-connector\n"
-        "  mkdir build && cd build\n"
-        "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON\n"
-        "  make -j$(nproc)\n"
-        "  sudo make install\n"
-        "\n"
-        "  NOTE: -DDCLAW_DEV_MODE=OFF disables unsigned audit log acceptance.\n"
-        "  The edge-connector requires DCLAW_AUDIT_KEY in its environment to\n"
-        "  start.  This wizard provisions the key automatically to both\n"
-        "  ~/.defenseclaw/.env (CLI) and /etc/defenseclaw/edge-connector.env\n"
-        "  (systemd service).  For manual installs, generate a key with:\n"
-        "\n"
-        "    python3 -c \"import secrets; print(secrets.token_hex(32))\"\n"
-        "\n"
-        "  and write it to /etc/defenseclaw/edge-connector.env as:\n"
-        "\n"
-        "    DCLAW_AUDIT_KEY=<hex-key>\n"
-        "\n"
-        "Gateway (includes fleet manager):\n"
-        "\n"
-        "  go build -o defenseclaw ./cmd/defenseclaw\n"
-    )
+    if sys.platform.startswith("linux"):
+        ux.echo(
+            "Optional Edge Connector Engine (C, Linux device):\n"
+            "\n"
+            "  cd edge-connector\n"
+            "  mkdir build && cd build\n"
+            "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON\n"
+            "  make -j$(nproc)\n"
+            "  sudo make install\n"
+            "\n"
+            "  The Linux C service requires keys, broker TLS, and a per-device identity.\n"
+            "  This wizard writes its audit, OTA, and emergency keys to both\n"
+            "  ~/.defenseclaw/.env and /etc/defenseclaw/edge-connector.env.\n"
+            "  See edge-connector/INSTALL.md before starting the C service.\n"
+        )
+    else:
+        ux.echo(
+            "This sets up the Fleet gateway on this host. The separate C Edge\n"
+            "Connector daemon deploys on Linux devices; no local C service is installed.\n"
+        )
 
     # --- 2. Fleet API token ----------------------------------------------
     env_path = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
@@ -263,6 +252,14 @@ def edge_connector(
     if not token or "\n" in token or "\r" in token:
         raise click.ClickException("Fleet API token must be a nonempty single line")
 
+    if endpoint is None:
+        endpoint = _DEFAULT_FLEET_ENDPOINT
+        if not non_interactive:
+            endpoint = click.prompt("Fleet API endpoint", default=endpoint)
+    if not endpoint or "\n" in endpoint or "\r" in endpoint:
+        raise click.ClickException("Fleet API endpoint must be a nonempty single line")
+
+    linux_device_host = sys.platform.startswith("linux")
     svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
     audit_key = _hmac_key(env_path, "DCLAW_AUDIT_KEY")
     ota_key = _hmac_key(env_path, "DCLAW_OTA_HMAC_KEY")
@@ -273,30 +270,26 @@ def edge_connector(
     try:
         for name, value in (
             (_TOKEN_ENV, token),
+            ("DCLAW_FLEET_API_URL", endpoint),
             ("DCLAW_AUDIT_KEY", audit_key),
             ("DCLAW_OTA_HMAC_KEY", ota_key),
             ("DCLAW_EMERGENCY_KEY", emergency_key),
         ):
             _persist_env_var(env_path, name, value)
             ux.ok(f"Wrote {name} to {env_path}")
-        for name, value in (
-            ("DCLAW_AUDIT_KEY", audit_key),
-            ("DCLAW_OTA_HMAC_KEY", ota_key),
-            ("DCLAW_EMERGENCY_KEY", emergency_key),
-        ):
-            if not _persist_svc_env_var(svc_env_path, name, value):
-                raise click.ClickException(
-                    f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"
-                )
+        if linux_device_host:
+            for name, value in (
+                ("DCLAW_AUDIT_KEY", audit_key),
+                ("DCLAW_OTA_HMAC_KEY", ota_key),
+                ("DCLAW_EMERGENCY_KEY", emergency_key),
+            ):
+                if not _persist_svc_env_var(svc_env_path, name, value):
+                    raise click.ClickException(
+                        f"Could not provision {name} in {svc_env_path}; Edge setup is incomplete"
+                    )
     except OSError as exc:
         raise click.ClickException(f"Could not persist Fleet credentials; setup is incomplete: {exc}") from exc
     _enable_fleet_config(ctx.obj.cfg.data_dir)
-
-    # --- 3. Fleet API endpoint -------------------------------------------
-    if endpoint is None:
-        endpoint = _DEFAULT_FLEET_ENDPOINT
-        if not non_interactive:
-            endpoint = click.prompt("Fleet API endpoint", default=endpoint)
 
     ux.echo()
     ux.ok(f"Fleet API endpoint: {endpoint}")
@@ -307,18 +300,18 @@ def edge_connector(
     ux.echo(
         "  1. Start (or restart) the DefenseClaw gateway -- the fleet API\n"
         f"     is now mounted at {endpoint}\n"
-        "  2. Point your edge-connector devices at this endpoint.\n"
+        "  2. Configure the Linux devices with broker TLS and per-device keys.\n"
         "  3. Verify the fleet is running:\n"
         "\n"
-        "       defenseclaw status\n"
+        "       defenseclaw edge-connector health\n"
         "\n"
         "  4. Optionally apply a fleet policy:\n"
         "\n"
         "       defenseclaw setup edge-connector --emit-policy > fleet-policy.yaml\n"
-        "       defenseclaw policy load fleet-policy.yaml\n"
+        "       defenseclaw edge-connector policy push fleet-policy.yaml\n"
         "\n"
-        "  Note: Device registration currently requires the REST API.\n"
-        "  Register devices via: defenseclaw edge-connector register <device-id>\n"
+        "  Register devices via the Fleet REST API or its CLI wrapper:\n"
+        "    defenseclaw edge-connector register <device-id>\n"
         "\n"
         "  Optional environment variables for edge devices:\n"
         "    DCLAW_OTA_HMAC_KEY     — Shared HMAC-SHA256 secret (hex-encoded, 32 bytes)\n"

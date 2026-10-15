@@ -360,12 +360,12 @@ def _register_device_via_api(
     ux.section("Registering device with fleet manager")
 
     # The fleet API base URL comes from the operator's local env, falling back
-    # to the local .env file, or defaults to the gateway on port 13400 (consistent
+    # to the local .env file, or defaults to the gateway on port 18970 (consistent
     # with _DEFAULT_FLEET_ENDPOINT in cmd_setup_edge_connector.py).
     api_base = (
         os.environ.get("DCLAW_FLEET_API_URL")
         or _load_local_env_value("DCLAW_FLEET_API_URL")
-        or "http://localhost:13400/api/v1/fleet"
+        or "http://127.0.0.1:18970/api/v1/fleet"
     )
     api_token = _load_local_env_value("DCLAW_FLEET_API_TOKEN") or os.environ.get("DCLAW_FLEET_API_TOKEN", "")
 

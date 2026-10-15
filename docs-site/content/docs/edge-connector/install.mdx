@@ -16,7 +16,29 @@ keywords:
   - IoT setup
 ---
 
-## Build from source
+## Choose a path
+
+For an ordinary agent on macOS, Linux, or Windows, use the [core install](/docs/get-started/install) and [quickstart](/docs/get-started/quickstart). Fleet stays off, and the separate C daemon is not installed.
+
+For a Linux device without a Fleet gateway, use the local-only smoke below. It builds the `MINIMAL` development profile, runs the C tests, and needs no broker, certificates, or Fleet API token. The policy compiler test needs Python 3 and PyYAML. Use the production build and deployment steps later on this page when connecting real devices to Fleet.
+
+For an optional Fleet deployment, install the core gateway first, run `defenseclaw setup edge-connector` on the gateway host, then provision an authenticated TLS broker with per-device topic ACLs and registration-issued device keys before starting Linux C devices. The wizard saves the API token, signing keys, and selected registration endpoint before enabling Fleet. On Linux it also provisions the local C service's environment through `sudo`; on macOS and Windows it configures the gateway only. The C daemon itself runs on Linux. CLI health and policy commands use the configured local gateway; `--endpoint` is used by device installation and registration.
+
+### Local-only Linux smoke
+
+```bash
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
+cd defenseclaw
+cmake -S edge-connector -B edge-connector/build-local \
+  -DDCLAW_PROFILE=MINIMAL -DDCLAW_DEV_MODE=ON
+cmake --build edge-connector/build-local -j2
+ctest --test-dir edge-connector/build-local --output-on-failure
+./edge-connector/build-local/edge-connector --help
+```
+
+This checks the local C engine and binary without enabling the gateway or installing a service. The `MINIMAL` profile has no MQTT; use `STANDARD` or `EDGE` with TLS and keys for Fleet devices.
+
+## Build a Linux Fleet device from source
 
 Required: `gcc`, `cmake` (3.22+), `make`, and mbedTLS 3.x development libraries for production MQTT over TLS.
 
@@ -100,7 +122,7 @@ Content patterns, rate limits (60 tool calls, 30 network requests, 10 actuations
 
 Only needed when you change the policy. Pre-built binaries include the default policy.
 
-The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup carries a signed inert compiler payload and activates it only for authenticated Fleet-enabled config, using the admitted Python/PyYAML scanner runtime. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes a previous active script.
+The compiler needs Python 3 and PyYAML. CMake installs the script but does not install its Python dependency. A raw release tar needs provisioned Python 3 and PyYAML before Fleet policy push. Linux enterprise RPM/DEB leaves them optional while Fleet is off; provision trusted `/usr/bin/python3` and distro PyYAML before enabling Fleet. Managed install/ensure checks the prerequisite before service changes. Per-user installers use their bundled Python environment. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** inside a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if none of the trusted candidates passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected for this channel. Managed Windows standalone Setup carries the compiler in its signed Setup payload and activates it only for authenticated Fleet-enabled config, using the admitted Python/PyYAML scanner runtime. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes a previous active script.
 
 Fleet is an optional gateway subsystem. Managed Linux/macOS packages carry the compiler as inert source under `<InstallRoot>/share/fleet/`; validated Fleet-enabled install/ensure copies it into the protected `<InstallRoot>/lib/defenseclaw/` path. Fleet-off install/upgrade does not activate the compiler or need Python/PyYAML. A Fleet-off raw payload install discards its optional compiler source; provide the staged release `--payload` to enable Fleet later. The local observability bundle includes an empty Fleet dashboard, but no Fleet scrape job runs by default.
 
@@ -125,6 +147,8 @@ The Edge Connector is framework-agnostic. Choose the integration that matches yo
 
 The simplest starting point for any Python agent. Three lines to add security enforcement:
 
+When using the source checkout, run your agent with `PYTHONPATH=/path/to/defenseclaw/edge-connector/tools`; after `sudo make install`, use the installed adapter directory (normally `/usr/local/lib/defenseclaw`). CMake copies the Python files there but does not add that directory to Python's import path. Set `DCLAW_LIB_PATH` if your shared library is not at `/usr/local/lib/libdclaw_core.so`.
+
 ```python
 from generic_hook import EdgeConnector
 
@@ -138,7 +162,7 @@ if verdict.blocked:
     print(f"Blocked: {verdict.reason}")
 ```
 
-Auto-detects FFI (ctypes) first, then falls back to the Unix socket. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
+Uses the Unix socket first when the daemon is running, then FFI (ctypes) when no daemon is available. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
 
 ### MCP proxy (Model Context Protocol)
 
@@ -155,26 +179,20 @@ Edge Connector MCP Proxy
 Real MCP Server (ESP-Claw, HA-MCP, etc.)
 ```
 
-Quick start (stdio):
+From the `edge-connector/` source directory, quick start with a local stdio MCP server:
 
 ```bash
 DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
-  python3 -m mcp_proxy
+  python3 tools/mcp_proxy.py
 ```
 
 With a config file:
 
 ```bash
-python3 -m mcp_proxy --config tools/mcp_proxy_config.yaml
+python3 tools/mcp_proxy.py --config tools/mcp_proxy_config.yaml
 ```
 
-HTTP transport (remote servers):
-
-```bash
-DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
-DCLAW_MCP_TRANSPORT=http \
-  python3 -m mcp_proxy
-```
+HTTP upstreams are for reviewed public services. The proxy rejects private and loopback upstream addresses, so the former `192.168.1.100` example cannot work; use stdio for a local MCP server. For a remote upstream, configure a reachable public HTTPS endpoint and verify its downstream network behavior.
 
 Use with Claude Desktop or Claude Code by adding the proxy to your MCP client config:
 
@@ -183,7 +201,7 @@ Use with Claude Desktop or Claude Code by adding the proxy to your MCP client co
   "mcpServers": {
     "esp-claw-secured": {
       "command": "python3",
-      "args": ["-m", "mcp_proxy"],
+      "args": ["/usr/local/lib/defenseclaw/mcp_proxy.py"],
       "env": {
         "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
         "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
@@ -192,6 +210,8 @@ Use with Claude Desktop or Claude Code by adding the proxy to your MCP client co
   }
 }
 ```
+
+Replace `/usr/local/lib` if CMake installed into another library directory. The named upstream module, `esp_claw.mcp_server`, must be installed separately; substitute your actual stdio MCP server command.
 
 | MCP Method | Action | Description |
 | --- | --- | --- |
@@ -242,6 +262,7 @@ Intercepts POST requests to tool-execution endpoints and returns `403` for block
 PicoClaw integrates via its process hook system:
 
 ```bash
+mkdir -p ~/.picoclaw/hooks
 cp /usr/local/lib/defenseclaw/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
 picoclaw config edit
 ```
@@ -254,15 +275,17 @@ Add to `hooks.processes`:
     "enabled": true,
     "priority": 5,
     "transport": "stdio",
-    "command": ["python3", "~/.picoclaw/hooks/defenseclaw_gate.py"],
+    "command": ["python3", "/home/USERNAME/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
       "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
-      "DCLAW_LOG_PATH": "~/edge-connector.log"
+      "DCLAW_LOG_PATH": "/home/USERNAME/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
   }
 }
 ```
+
+Replace `USERNAME` with the real home directory. Process launchers do not necessarily expand `~` in JSON command or environment values.
 
 #### What gets intercepted
 
@@ -305,9 +328,11 @@ lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
 Query the daemon from any process:
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
-  "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
+tool_hash="$(printf exec_shell | sha256sum | cut -d' ' -f1)"
+printf '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{'\
+'"tool_name":"exec_shell","tool_hash":"%s","capabilities":4,'\
+'"destination":"","session_id":1}}\n' "$tool_hash" | \
+  socat - UNIX-CONNECT:/run/defenseclaw/defenseclaw.sock
 ```
 
 ## Tool-to-capability mapping
@@ -316,19 +341,21 @@ Each tool must map to a capability that determines how the Edge Connector handle
 
 | Capability | Flag | Escalation | Behavior |
 | --- | --- | --- | --- |
-| `SENSOR_READ` | `0x40` | speculative | Allow immediately (read-only) |
-| `READ_FS` | `0x01` | speculative | Allow immediately |
-| `NET_FETCH` | `0x08` | speculative | Allow if destination in allowlist |
-| `SEND_MSG` | `0x10` | speculative | Allow if destination in allowlist |
-| `ACTUATE` | `0x20` | sync_block | Block without cloud (physical world) |
-| `EXEC_SHELL` | `0x04` | sync_block | Block without cloud (code execution) |
-| `WRITE_FS` | `0x02` | sync_block | Block without cloud (data modification) |
+| `SENSOR_READ` | `0x40` | Optional speculative mode | Content, rate, and sequence checks |
+| `READ_FS` | `0x01` | Optional speculative mode | Content, rate, and sequence checks |
+| `NET_FETCH` | `0x08` | Optional speculative mode | Destination allowlist and SSRF checks first |
+| `SEND_MSG` | `0x10` | Optional speculative mode | Destination allowlist and SSRF checks first |
+| `ACTUATE` | `0x20` | Always synchronous | Physical action; blocks without a Fleet verdict |
+| `EXEC_SHELL` | `0x04` | Always synchronous | Code execution; blocks without a Fleet verdict |
+| `WRITE_FS` | `0x02` | Always synchronous | File modification; blocks without a Fleet verdict |
+
+Production strict mode waits for a Fleet verdict on an uncached undecided call and blocks when the gateway is unavailable, including for read-only tools. `DCLAW_STRICT_MODE=0` explicitly permits speculative execution only for the first four capabilities when the build supports it. A destination allowlist entry does not itself approve a tool call.
 
 ## MQTT broker setup
 
 The Edge Connector uses MQTT 3.1.1 for verdict escalation (device to gateway) and signed policy/emergency distribution (gateway to device). Any standards-compliant broker works; Eclipse Mosquitto is recommended for simplicity.
 
-**Quick start with Docker:**
+**Anonymous local test with Docker:**
 
 Mosquitto 2.x defaults to local-only mode (no remote connections). You must mount a config file that binds to `0.0.0.0`:
 
@@ -350,6 +377,12 @@ docker run -d --name mosquitto -p 127.0.0.1:1883:1883 \
 </Callout>
 
 **Authenticated local test setup:**
+
+This is an alternative to the preceding container. Stop and remove that disposable `mosquitto` container before running the authenticated example with the same name and port:
+
+```bash
+docker rm -f mosquitto 2>/dev/null || true
+```
 
 ```bash
 # Mosquitto's container runs as UID/GID 1883. Make its bind mount readable.
@@ -379,6 +412,7 @@ For this local test, set credentials on both sides using environment variables (
 export DCLAW_DEVICE_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 
 # Gateway (Go fleet server)
+export DCLAW_DEV_MODE=ON # unmanaged local test only; production rejects zero-key mode
 export DCLAW_MQTT_BROKER_URL=tcp://127.0.0.1:1883
 export DCLAW_MQTT_USER=dclaw
 export DCLAW_MQTT_PASS='<password entered above>'

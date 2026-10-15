@@ -76,8 +76,8 @@ for target in "${TARGETS[@]}"; do
     goarch="${target#*/}"
     stage="${WORK}/stage-${goos}-${goarch}"
     mkdir -p "${stage}"
-    # Match GoReleaser: installed gateways need the same checked-in policy
-    # compiler for Fleet pushes, including offline installer lifecycle tests.
+    # Match GoReleaser: carry the version-matched compiler as an inert payload.
+    # Installers copy it into the active data directory only when Fleet is on.
     mkdir -p "${stage}/edge-connector/tools"
     cp "${WORK}/src/edge-connector/tools/policy_compiler.py" \
         "${stage}/edge-connector/tools/policy_compiler.py"

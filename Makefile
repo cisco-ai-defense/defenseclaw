@@ -578,8 +578,8 @@ sync-openclaw-extension: _checkout-write-preflight
 	    $(PLUGIN_DIR)/dist/ "$$embed_dir/dist/"; \
 	else \
 	  mkdir -p "$$embed_dir/dist"; \
-	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print0 \
-	    | while IFS= read -r -d '' f; do \
+	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print \
+	    | while IFS= read -r f; do \
 	        mkdir -p "../../../$$embed_dir/dist/$$(dirname "$$f")"; \
 	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
 	      done); \
