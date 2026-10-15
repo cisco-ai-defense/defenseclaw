@@ -18,6 +18,7 @@ package notifier
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -74,7 +75,7 @@ func (r *recorder) Drain(want int, timeout time.Duration) []notify.Notification 
 // loader installs (setDefaults in internal/config/config.go).
 func defaultNotificationsConfig() config.NotificationsConfig {
 	return config.NotificationsConfig{
-		Enabled:         config.DefaultNotificationsEnabled,
+		Enabled:         config.DefaultNotificationsEnabledFor(runtime.GOOS),
 		BlockEnforced:   true,
 		BlockWouldBlock: false,
 		HITLApproval:    true,
