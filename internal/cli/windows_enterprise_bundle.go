@@ -233,13 +233,12 @@ type windowsBundleRun struct {
 	sessions *enterprisestatus.SessionRestartStatus
 	// previous is the installed config.yaml before the run: the last good
 	// config while no bundle is current.
-	previous              []byte
-	warnings              []enterprisebundle.Warning
-	anchorStage           string
-	anchorPath            string
-	anchorPrevious        []byte
-	anchorExisted         bool
-	anchorCommitAttempted bool
+	previous       []byte
+	warnings       []enterprisebundle.Warning
+	anchorStage    string
+	anchorPath     string
+	anchorPrevious []byte
+	anchorExisted  bool
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
@@ -811,12 +810,6 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 		result.NoopReason = "already_applied"
 	}
 	if p != nil && p.Receipt != nil && !enterprisebundle.Finished(p.Receipt.State) {
-		if len(result.Errors) == 0 && run.anchorStage != "" {
-			run.anchorCommitAttempted = true
-			if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
-				result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
-			}
-		}
 		sessions := platformBundleSessionStatus(run.ctx)
 		run.sessions = &sessions
 		recordWindowsBundleSessions(p.Receipt, sessions)
@@ -844,19 +837,16 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
-		if p.Receipt.State != enterprisebundle.StateConfirmed && run.anchorCommitAttempted {
-			if err := run.restoreAnchors(); err != nil {
-				result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+err.Error())
-			}
+		// The delivered anchors are committed only once the bundle they
+		// verified is confirmed, so a run killed while Finish waits for the
+		// gateway leaves the previous anchors installed (GAP-0106). Finish
+		// verifies from the private stage, never from the installed file.
+		if p.Receipt.State == enterprisebundle.StateConfirmed && run.anchorStage != "" {
+			run.commitAnchors(result)
 		}
 	}
 	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
-		if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
-			result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
-			if restoreErr := run.restoreAnchors(); restoreErr != nil {
-				result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
-			}
-		}
+		run.commitAnchors(result)
 	}
 	var receipt *enterprisebundle.Receipt
 	if p != nil {
@@ -870,6 +860,17 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 	receipt.SessionsRestartRequired = sessions.Count
 	if sessions.State == "unknown" {
 		receipt.WarningCodes = append(receipt.WarningCodes, "sessions_scan_unknown")
+	}
+}
+
+// commitAnchors installs the staged trust anchors of a confirmed bundle; a
+// failed commit puts the previous anchors back and fails the run.
+func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
+	if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
+		if restoreErr := run.restoreAnchors(); restoreErr != nil {
+			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
+		}
 	}
 }
 
