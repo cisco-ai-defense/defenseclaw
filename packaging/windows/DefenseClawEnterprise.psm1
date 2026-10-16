@@ -23882,6 +23882,20 @@ function Restore-DefenseClawRetainedStateAclsFromTransaction {
     # Only an inactive retained root with an absent gateway preimage reaches
     # this branch. Prove that rollback removed the complete managed service set
     # before removing the deleted gateway SID from the retained tree.
+    # The snapshot does not record the sensor helper, and the uninstall that
+    # retained this root deleted it, so an owned helper here is the one this
+    # Install registered. Rollback deletes the other services it created but
+    # not this one; left in place, the check below refused, the retained ACLs
+    # were never restored (deployment.json kept the installing admin's group)
+    # and every later Setup command failed until a purge.
+    $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName ([string]$Snapshot.gateway_service)
+    if (Test-DefenseClawServiceExists -Name $sensorHelperName) {
+        Assert-DefenseClawStandaloneSensorHelperOwned `
+            -Name $sensorHelperName `
+            -Layout $Layout
+        Remove-DefenseClawService -Name $sensorHelperName
+    }
     $managedServiceNames = @(Get-DefenseClawManagedServiceNames `
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service))

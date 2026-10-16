@@ -155,6 +155,64 @@ $failures = & $module {
             $failures.Add('uninstall does not quiesce the sensor helper between transaction open and the servicing assertion')
         }
 
+        # A failed Install over a non-purge retained StateRoot rolled back
+        # every service it created except the sensor helper, so the
+        # retained-state ACL restore refused ("while service exists") and
+        # left deployment.json with the installing admin's group.
+        function Remove-DefenseClawService {
+            param([string]$Name)
+            $script:TestCalls.Add("remove:$Name")
+            [void]$script:TestServices.Remove($Name)
+        }
+        function Initialize-DefenseClawNativeSecurity {
+            throw 'reached retained-state ACL restore'
+        }
+        $retained = [pscustomobject][ordered]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            state_root = 'C:\RetainedState\DefenseClaw'
+            state_root_created = $false
+            state_root_identity = '0123abcd:0123456789abcdef'
+            prior_deployment_active = $false
+            services = @([pscustomobject]@{ name = 'DefenseClawGateway'; existed = $false; running = $false; start_mode = 0 })
+        }
+        $retainedLayout = @{ StateRoot = 'C:\RetainedState\DefenseClaw' }
+        foreach ($case in @(
+                @{ name = 'owned'; helper = $true; foreign = $false; calls = "owned:$helper|remove:$helper"; error = 'reached retained-state ACL restore' },
+                @{ name = 'foreign'; helper = $true; foreign = $true; calls = "owned:$helper"; error = "refusing to manage foreign service $helper" },
+                @{ name = 'absent'; helper = $false; foreign = $false; calls = ''; error = 'reached retained-state ACL restore' }
+            )) {
+            foreach ($profileName in 'Standalone', 'SecureClient') {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $profileName
+                $script:TestServices.Clear()
+                if ($case.helper) { $script:TestServices[$helper] = $true }
+                $script:TestForeignHelper = $case.foreign
+                function Assert-DefenseClawStandaloneSensorHelperOwned {
+                    param($Name, $Layout)
+                    $script:TestCalls.Add("owned:$Name")
+                    if ($script:TestForeignHelper) { throw "refusing to manage foreign service $Name" }
+                }
+                $script:TestCalls.Clear()
+                $threw = ''
+                try {
+                    Restore-DefenseClawRetainedStateAclsFromTransaction -Snapshot $retained -Layout $retainedLayout
+                }
+                catch {
+                    $threw = $_.Exception.Message
+                }
+                if ($threw -cne $case.error -or (@($script:TestCalls) -join '|') -cne $case.calls) {
+                    $failures.Add("$profileName retained-state rollback with $($case.name) sensor helper: threw '$threw', calls $(@($script:TestCalls) -join ', ')")
+                }
+            }
+        }
+        function Assert-DefenseClawStandaloneSensorHelperOwned {
+            param($Name, $Layout)
+            $script:TestCalls.Add("owned:$Name")
+        }
+        Remove-Item -LiteralPath Function:\Initialize-DefenseClawNativeSecurity
+        Remove-Item -LiteralPath Function:\Remove-DefenseClawService
+        $script:TestServices.Clear()
+
         # GAP-1438: FORCE=1 stopped and disabled the services, and a StateRoot
         # move refused by an open file left them so. Put them back as they were.
         $guardian = 'DefenseClawHookGuardian'
