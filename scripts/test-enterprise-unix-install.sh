@@ -762,10 +762,12 @@ esac
 for dir in "${purged_dirs[@]}"; do
     [ ! -e "$dir" ] || die "$dir remains after purge"
 done
-[ -f "$lifecycle_dir/lifecycle.lock" ] || die "the persistent lifecycle lock is missing after purge"
-[ "$(find "$lifecycle_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "lifecycle state remains after purge"
+# The purge removes the lifecycle lock with the last lifecycle state, and the
+# lifecycle directory with it (GAP-0112, GAP-0101). On macOS the lifecycle
+# directory is in the install root, which goes too once it is empty.
+[ ! -e "$lifecycle_dir" ] || die "lifecycle state remains after purge: $(find "$lifecycle_dir" -mindepth 1 -maxdepth 1 2>/dev/null | tr '\n' ' ')"
 if [ "$platform" = darwin ]; then
-    [ "$(find "$install_root" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "install files remain after purge"
+    [ ! -e "$install_root" ] || die "install files remain after purge: $(find "$install_root" -mindepth 1 -maxdepth 1 2>/dev/null | tr '\n' ' ')"
 fi
 [ "$kind" != deb ] || ! dpkg-query -W "$linux_package_name" >/dev/null 2>&1 || die "dpkg still knows $linux_package_name after purge"
 services_gone
