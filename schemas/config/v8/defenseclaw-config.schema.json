@@ -1749,6 +1749,11 @@
         "connector": {
           "$ref": "#/$defs/boundedString"
         },
+        "proxy_mode": {
+          "type": "string",
+          "enum": ["", "hybrid"],
+          "default": ""
+        },
         "allow_empty_providers": {
           "type": "boolean",
           "default": false
@@ -4494,6 +4499,14 @@
         "enabled": {
           "type": "boolean"
         },
+        "model_selection": {
+          "type": "boolean",
+          "description": "Enable semantic router model selection algorithms (ELO, latency-aware, etc.) for smarter model ranking."
+        },
+        "semantic_cache": {
+          "type": "boolean",
+          "description": "Enable semantic cache to reduce classification latency for repeat/similar queries."
+        },
         "version": {
           "type": "string",
           "enum": [
@@ -4554,12 +4567,52 @@
               "base_url": {
                 "$ref": "#/$defs/boundedString"
               },
+              "host_header": {
+                "$ref": "#/$defs/boundedString"
+              },
+              "auth": {
+                "type": "string",
+                "description": "Authentication mode: passthrough (forward client auth), api_key (use api_key_env), none (strip auth), aws_sigv4 (Phase 2).",
+                "enum": [
+                  "passthrough",
+                  "api_key",
+                  "none",
+                  "aws_sigv4"
+                ]
+              },
               "api_key_env": {
                 "$ref": "#/$defs/envName"
+              },
+              "extra_headers": {
+                "type": "object",
+                "description": "Additional HTTP headers to set on the upstream request (e.g. api-key for Azure-compatible endpoints).",
+                "additionalProperties": { "type": "string" }
+              },
+              "extra_body": {
+                "type": "object",
+                "description": "Additional fields to inject into the upstream request body (e.g. user appkey).",
+                "additionalProperties": { "type": "string" }
+              },
+              "path_override": {
+                "type": "string",
+                "description": "Override the API path (e.g. /chat/completions for providers that don't use /v1/ prefix)."
               },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
               }
+            }
+          }
+        },
+        "embeddings": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Embedding model paths for semantic classification signals.",
+          "properties": {
+            "mmbert_model_path": {
+              "type": "string"
+            },
+            "qwen3_model_path": {
+              "type": "string"
             }
           }
         },
@@ -4604,6 +4657,103 @@
                   }
                 }
               }
+            },
+            "embeddings": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "examples"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "examples": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            "domains": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "categories"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "categories": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            "complexity": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "min_message_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "max_message_length": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "min_tool_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "max_tool_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "indicators": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
             }
           }
         },
@@ -4640,13 +4790,24 @@
                       "type": "string",
                       "enum": [
                         "keyword",
-                        "KEYWORD"
+                        "KEYWORD",
+                        "embedding",
+                        "EMBEDDING",
+                        "domain",
+                        "DOMAIN",
+                        "complexity",
+                        "COMPLEXITY"
                       ]
                     },
                     "name": {
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 128
+                    },
+                    "min_confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
                     }
                   }
                 }

@@ -148,6 +148,8 @@ type ModelRouterDecision struct {
 
 	// TargetURL overrides X-DC-Target-URL (provider base URL).
 	TargetURL string
+	// HostHeader overrides the HTTP Host header for virtual-hosted upstreams.
+	HostHeader string
 	// TargetURLOverride distinguishes clearing the connector's original
 	// upstream from keeping it. Every resolved backend sets this so a route to
 	// a different provider cannot accidentally reuse the original endpoint.
@@ -167,17 +169,29 @@ type ModelRouterDecision struct {
 
 	// Reason is a human-readable explanation for observability.
 	Reason string
+
+	// ExtraHeaders are additional HTTP headers to set on the upstream request.
+	ExtraHeaders map[string]string
+	// ExtraBody are additional fields to inject into the upstream request body.
+	ExtraBody map[string]string
+	// PathOverride replaces the default API path (e.g. /chat/completions instead of /v1/chat/completions).
+	PathOverride string
 }
 
 // ModelRouterBackend is the gateway-owned forwarding target for one model
 // alias returned by the semantic router. Credentials stay in DefenseClaw and
 // are never sent to the classifier.
 type ModelRouterBackend struct {
-	Name      string
-	Provider  string
-	Model     string
-	BaseURL   string
-	APIKeyEnv string
+	Name         string
+	Provider     string
+	Model        string
+	BaseURL      string
+	HostHeader   string
+	Auth         string // passthrough, api_key, none (resolved via EffectiveAuth)
+	APIKeyEnv    string
+	ExtraHeaders map[string]string
+	ExtraBody    map[string]string
+	PathOverride string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.

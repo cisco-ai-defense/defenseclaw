@@ -1,0 +1,368 @@
+{
+  "effortLevel": "medium",
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true
+  },
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-DW6nLutn7D8QfNGpvQ-0VA",
+    "ANTHROPIC_AUTH_TOKEN": "sk-DW6nLutn7D8QfNGpvQ-0VA",
+    "ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:4000/c/claudecode",
+    "ANTHROPIC_MODEL": "global.anthropic.claude-opus-4-6-v1",
+    "AWS_BEARER_TOKEN_BEDROCK": "",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "DEFENSECLAW_FAIL_MODE": "open",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970",
+    "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer bd7a982c5d55379d23bcbd765ccec4fb38fba358b5d07cc7e136ce324bd1079b,x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:18970/v1/logs",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS": "authorization=Bearer bd7a982c5d55379d23bcbd765ccec4fb38fba358b5d07cc7e136ce324bd1079b,x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:18970/v1/metrics",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "authorization=Bearer bd7a982c5d55379d23bcbd765ccec4fb38fba358b5d07cc7e136ce324bd1079b,x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:18970/v1/traces",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "authorization=Bearer bd7a982c5d55379d23bcbd765ccec4fb38fba358b5d07cc7e136ce324bd1079b,x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_LOG_ASSISTANT_RESPONSES": "0",
+    "OTEL_LOG_RAW_API_BODIES": "0",
+    "OTEL_LOG_TOOL_CONTENT": "0",
+    "OTEL_LOG_TOOL_DETAILS": "0",
+    "OTEL_LOG_USER_PROMPTS": "0",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode,service.name=claudecode",
+    "OTEL_SERVICE_NAME": "claudecode",
+    "OTEL_TRACES_EXPORTER": "none"
+  },
+  "hooks": {
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": ".+"
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact|fork"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 90,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/nikhil/.defenseclaw/hooks/claude-code-hook.sh",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+Task 5: Trust Boundary Inference and Pipeline Integration
+===========================================================
+
+STATUS: ✅ COMPLETE
+
+Files Modified:
+--------------
+1. defenseclaw-lite/src/dclaw_core.c
+   - Added #include "content_scanner.h"
+   - Inserted content scan stage 3 (after rate limiting)
+   - Inserted SSRF check in stage 5 (before dest policy)
+   - Updated pipeline to 8 stages
+
+2. defenseclaw-lite/tests/test_evaluate_pipeline.c
+   - Added test_content_scan_blocks_secret_in_pipeline()
+   - Added test_ssrf_blocks_private_ip_in_pipeline()
+   - Added test_no_content_field_backward_compat()
+   - Updated test count: 7 → 10
+
+Pipeline Order (8 stages):
+-------------------------
+1. Input validation
+2. Rate limiting
+3. Content scan (NEW) ← if req->content && req->content_len > 0
+4. Hash deny-list
+5. Destination + SSRF (NEW) ← SSRF before policy table
+6. Correlator
+7. Verdict cache
+8. Cloud escalation
+
+Test Results:
+-------------
+✅ 11/11 test binaries pass
+✅ 10 evaluate_pipeline tests pass (was 7)
+✅ Binary: 46KB < 80KB target
+✅ Zero malloc, C11, -Werror clean
+✅ Backward compatible (NULL content = Phase 1)
+
+Security Properties:
+-------------------
+- Content scan runs before capability checks (defense in depth)
+- SSRF blocks private IPs before policy lookup (fail-secure)
+- Synchronous blocks (no speculative execution for content/SSRF)
+- Audit trail with DCLAW_REASON_CONTENT_BLOCK and DCLAW_REASON_SSRF_BLOCK
+
+Key Design Decisions:
+--------------------
+1. Content scan at stage 3 (early, after rate limit, before hash deny)
+2. SSRF at stage 5 (before policy table, with network cap guard)
+3. Trust boundary inference uses direction (REQUEST=USER_INPUT, RESPONSE=TOOL_OUTPUT)
+4. Backward compat: NULL/zero-length content skips scan
+5. No malloc: scan_ctx on stack, findings array bounded at compile-time
+
+Build Command:
+-------------
+cd defenseclaw-lite/build
+cmake .. -DDCLAW_PROFILE=STANDARD
+make -j4
+ctest --output-on-failure
+

@@ -1,0 +1,26 @@
+{
+  "name": "semantic-router-demo",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "npx remotion studio src/index.ts",
+    "build": "npx remotion render src/index.ts SemanticRouterDemo out/video.mp4",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@remotion/cli": "^4.0.516",
+    "@remotion/player": "^4.0.516",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.516"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "typescript": "^7.0.2"
+  }
+}

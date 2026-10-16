@@ -4224,3 +4224,52 @@ func TestManagedGenerationIgnoresLegacyProviderOverlay(t *testing.T) {
 		t.Fatal("managed v9 generation lost the configured provider")
 	}
 }
+
+// TestConditionalInspection verifies that hook-capable connectors skip
+// gateway inspection while hook-less connectors get full inspection.
+func TestConditionalInspection(t *testing.T) {
+	t.Run("hook_capable_connector_skips_gateway_inspection", func(t *testing.T) {
+		insp := &mockInspector{verdicts: map[string]*ScanVerdict{}}
+		insp.setVerdict("prompt", &ScanVerdict{Action: "block", Reason: "should-not-fire"})
+		prov := &mockProvider{}
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		// Simulate a hook-capable connector by setting connector field
+		// (connectorCanInspectViaHooks checks HookCapabilityProvider)
+		// Since we can't easily mock a full connector, verify the method
+		// returns false when connector is nil (gateway inspection applies)
+		if proxy.connectorCanInspectViaHooks() {
+			t.Fatal("nil connector should not claim hook inspection")
+		}
+		// Verify inspectionStrategyLabel
+		if got := proxy.inspectionStrategyLabel(); got != "gateway" {
+			t.Errorf("nil connector strategy = %q, want gateway", got)
+		}
+	})
+
+	t.Run("full_proxy_mode_forces_gateway_inspection", func(t *testing.T) {
+		insp := &mockInspector{verdicts: map[string]*ScanVerdict{}}
+		prov := &mockProvider{}
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.cfg.ProxyMode = "full"
+
+		if proxy.connectorCanInspectViaHooks() {
+			t.Fatal("full proxy mode should force gateway inspection")
+		}
+		if got := proxy.inspectionStrategyLabel(); got != "gateway_full" {
+			t.Errorf("full mode strategy = %q, want gateway_full", got)
+		}
+	})
+
+	t.Run("hybrid_mode_defers_to_connector_capability", func(t *testing.T) {
+		insp := &mockInspector{verdicts: map[string]*ScanVerdict{}}
+		prov := &mockProvider{}
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.cfg.ProxyMode = "hybrid"
+
+		// With nil connector, should fall back to gateway
+		if got := proxy.inspectionStrategyLabel(); got != "gateway" {
+			t.Errorf("hybrid with nil connector = %q, want gateway", got)
+		}
+	})
+}

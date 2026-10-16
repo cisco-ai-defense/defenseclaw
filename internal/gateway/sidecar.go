@@ -680,10 +680,25 @@ func (s *Sidecar) currentConfig() *config.Config {
 	return s.cfg
 }
 
-// liveGuardrailMode returns name's guardrail mode, "action" or "observe",
-// from the configuration generation in force. The Guardrail status block
-// reads it at every publication, so it agrees with the Connector Mode
-// section after a hot guardrail.mode change (GAP-0905).
+// overlayResolvedGuardrailLLM copies ResolveLLM("guardrail") onto the
+// proxy's GuardrailConfig so top-level llm.base_url / llm.model /
+// llm.api_key_env hydrate hybrid Claude Code passthrough.
+func overlayResolvedGuardrailLLM(gc *config.GuardrailConfig, resolved config.LLMConfig) {
+	if gc == nil {
+		return
+	}
+	gc.LLM = resolved
+	if strings.TrimSpace(gc.Model) == "" {
+		gc.Model = resolved.Model
+	}
+	if strings.TrimSpace(gc.APIKeyEnv) == "" {
+		gc.APIKeyEnv = resolved.APIKeyEnv
+	}
+	if strings.TrimSpace(gc.APIBase) == "" {
+		gc.APIBase = resolved.BaseURL
+	}
+}
+
 func (s *Sidecar) liveGuardrailMode(name string) string {
 	if strings.EqualFold(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(name)), "action") {
 		return "action"
@@ -691,13 +706,8 @@ func (s *Sidecar) liveGuardrailMode(name string) string {
 	return "observe"
 }
 
-// guardrailHealthRefreshInterval is how often a direct-upstream guardrail
-// checks the live mode its status block describes.
 var guardrailHealthRefreshInterval = 5 * time.Second
 
-// republishGuardrailOnModeChange calls publish whenever key, the live mode a
-// direct-upstream Guardrail status block describes, changes after a hot
-// reload. It returns when ctx ends (GAP-0905).
 func (s *Sidecar) republishGuardrailOnModeChange(ctx context.Context, key func() string, publish func()) {
 	last := key()
 	ticker := time.NewTicker(guardrailHealthRefreshInterval)
@@ -751,9 +761,25 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	}
 
 	rcfg := cfg.Routing
+	mmBertPath := ""
+	qwen3Path := ""
+	if rcfg.Embeddings.MMBertModelPath != "" {
+		mmBertPath = rcfg.Embeddings.MMBertModelPath
+	} else if dir := filepath.Join(cfg.DataDir, "models", "mmbert-embed-32k-2d-matryoshka"); dirExists(dir) {
+		mmBertPath = "models/mmbert-embed-32k-2d-matryoshka"
+	}
+	if rcfg.Embeddings.Qwen3ModelPath != "" {
+		qwen3Path = rcfg.Embeddings.Qwen3ModelPath
+	} else if dir := filepath.Join(cfg.DataDir, "models", "mom-embedding-pro"); dirExists(dir) {
+		qwen3Path = "models/mom-embedding-pro"
+	}
 	input := routing.TranslateInput{
-		Port:      rcfg.Port,
-		Algorithm: rcfg.Algorithm,
+		Port:            rcfg.Port,
+		Algorithm:       rcfg.Algorithm,
+		ModelSelection:  rcfg.ModelSelection,
+		SemanticCache:   rcfg.SemanticCache,
+		MMBertModelPath: mmBertPath,
+		Qwen3ModelPath:  qwen3Path,
 	}
 
 	// Models
@@ -768,7 +794,7 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		})
 	}
 
-	// Signals
+	// Signals — keywords
 	for _, k := range rcfg.Signals.Keywords {
 		input.Signals.Keywords = append(input.Signals.Keywords, routing.TranslateKeyword{
 			Name:     k.Name,
@@ -776,8 +802,56 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 			Operator: k.Operator,
 		})
 	}
+	// Signals — embeddings
+	for _, e := range rcfg.Signals.Embeddings {
+		input.Signals.Embeddings = append(input.Signals.Embeddings, routing.TranslateEmbedding{
+			Name:        e.Name,
+			Description: e.Description,
+			Examples:    e.Examples,
+		})
+	}
+	// Signals — domains
+	for _, d := range rcfg.Signals.Domains {
+		input.Signals.Domains = append(input.Signals.Domains, routing.TranslateDomain{
+			Name:       d.Name,
+			Categories: d.Categories,
+		})
+	}
+	// Signals — complexity
+	for _, c := range rcfg.Signals.Complexity {
+		input.Signals.Complexity = append(input.Signals.Complexity, routing.TranslateComplexity{
+			Name:             c.Name,
+			MinMessageLength: c.MinMessageLength,
+			MaxMessageLength: c.MaxMessageLength,
+			MinToolCount:     c.MinToolCount,
+			MaxToolCount:     c.MaxToolCount,
+			Indicators:       c.Indicators,
+		})
+	}
 
-	// Decisions
+	// Auto-generate default signals when embedding models are available
+	// and the user hasn't explicitly configured that signal type. This
+	// enables full SR classification (not just keywords) out of the box.
+	if mmBertPath != "" || qwen3Path != "" {
+		if len(input.Signals.Embeddings) == 0 {
+			input.Signals.Embeddings = defaultEmbeddingSignals()
+			fmt.Fprintf(os.Stderr, "[routing] auto-generated %d default embedding signals (embedding model available)\n", len(input.Signals.Embeddings))
+		}
+	}
+	if len(input.Signals.Domains) == 0 {
+		input.Signals.Domains = defaultDomainSignals()
+	}
+	if len(input.Signals.Complexity) == 0 {
+		input.Signals.Complexity = defaultComplexitySignals()
+	}
+
+	// Decisions — augment keyword-only decisions with embedding fallback
+	// when default embedding signals were auto-generated.
+	hasDefaultEmbeddings := len(input.Signals.Embeddings) > 0 && (mmBertPath != "" || qwen3Path != "")
+	embeddingSignalForKeyword := map[string]string{
+		"planning_intent": "_default_planning",
+		"coding_intent":   "_default_coding",
+	}
 	for _, d := range rcfg.Decisions {
 		dec := routing.TranslateDecision{
 			Name:      d.Name,
@@ -789,14 +863,105 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		for _, c := range d.Conditions {
 			dec.Conditions = append(dec.Conditions, routing.TranslateCondition{
 				Signal:        c.Type,
-				MinConfidence: 0.0,
+				MinConfidence: c.MinConfidence,
 				Value:         c.Name,
 			})
+		}
+		// If the decision only has keyword conditions and we have default
+		// embedding signals, add an embedding condition as OR fallback.
+		// This lets the SR match semantic intent even when keywords miss.
+		if hasDefaultEmbeddings && allConditionsAreKeyword(d.Conditions) {
+			for _, c := range d.Conditions {
+				if embSig, ok := embeddingSignalForKeyword[c.Name]; ok {
+					dec.Conditions = append(dec.Conditions, routing.TranslateCondition{
+						Signal:        "embedding",
+						MinConfidence: 0.7,
+						Value:         embSig,
+					})
+					if dec.Operator == "" {
+						dec.Operator = "OR"
+					}
+				}
+			}
 		}
 		input.Decisions = append(input.Decisions, dec)
 	}
 
 	return input
+}
+
+func allConditionsAreKeyword(conditions []config.RoutingCondition) bool {
+	if len(conditions) == 0 {
+		return false
+	}
+	for _, c := range conditions {
+		if strings.ToLower(strings.TrimSpace(c.Type)) != "keyword" {
+			return false
+		}
+	}
+	return true
+}
+
+func defaultEmbeddingSignals() []routing.TranslateEmbedding {
+	return []routing.TranslateEmbedding{
+		{
+			Name:        "_default_planning",
+			Description: "Architecture, design, planning, and review tasks",
+			Examples: []string{
+				"help me think through the system architecture",
+				"what are the tradeoffs between these approaches",
+				"design a scalable solution for this problem",
+				"review this code for potential issues",
+				"plan the implementation strategy",
+				"evaluate the pros and cons",
+				"write a technical spec for this feature",
+				"how should we approach this migration",
+			},
+		},
+		{
+			Name:        "_default_coding",
+			Description: "Code implementation, debugging, and modification tasks",
+			Examples: []string{
+				"write a function that parses this JSON",
+				"fix the null pointer error on line 42",
+				"add error handling to the HTTP client",
+				"refactor this class to use dependency injection",
+				"implement the login endpoint",
+				"this test is failing with a timeout",
+				"create a unit test for the parser",
+				"optimize this database query",
+			},
+		},
+	}
+}
+
+func defaultDomainSignals() []routing.TranslateDomain {
+	return []routing.TranslateDomain{
+		{
+			Name:       "_default_devops",
+			Categories: []string{"kubernetes", "docker", "terraform", "ci-cd", "infrastructure", "deployment", "helm", "ansible"},
+		},
+		{
+			Name:       "_default_data",
+			Categories: []string{"sql", "database", "analytics", "pipeline", "etl", "data-science", "visualization", "pandas"},
+		},
+	}
+}
+
+func defaultComplexitySignals() []routing.TranslateComplexity {
+	return []routing.TranslateComplexity{
+		{
+			Name:             "_default_simple",
+			MaxMessageLength: 200,
+			Indicators:       []string{"simple", "quick", "short", "one-liner", "hello", "hi", "thanks"},
+		},
+		{
+			Name:             "_default_complex",
+			MinMessageLength: 500,
+			MinToolCount:     3,
+			Indicators:       []string{"multi-step", "cross-file", "architectural", "migration", "refactor entire"},
+		},
+	}
 }
 
 func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
@@ -806,14 +971,65 @@ func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
 	backends := make([]ModelRouterBackend, 0, len(cfg.Routing.Models))
 	for _, model := range cfg.Routing.Models {
 		backends = append(backends, ModelRouterBackend{
-			Name:      model.Name,
-			Provider:  model.Provider,
-			Model:     model.Model,
-			BaseURL:   model.BaseURL,
-			APIKeyEnv: model.APIKeyEnv,
+			Name:         model.Name,
+			Provider:     model.Provider,
+			Model:        model.Model,
+			BaseURL:      model.BaseURL,
+			HostHeader:   model.HostHeader,
+			Auth:         model.EffectiveAuth(),
+			APIKeyEnv:    model.APIKeyEnv,
+			ExtraHeaders: model.ExtraHeaders,
+			ExtraBody:    model.ExtraBody,
+			PathOverride: model.PathOverride,
 		})
 	}
 	return backends
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func buildLocalKeywordSignals(cfg *config.Config) []LocalKeywordSignal {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]LocalKeywordSignal, 0, len(cfg.Routing.Signals.Keywords))
+	for _, k := range cfg.Routing.Signals.Keywords {
+		out = append(out, LocalKeywordSignal{
+			Name:     k.Name,
+			Keywords: k.Keywords,
+			Operator: k.Operator,
+		})
+	}
+	return out
+}
+
+func buildLocalKeywordDecisions(cfg *config.Config) []LocalKeywordDecision {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]LocalKeywordDecision, 0, len(cfg.Routing.Decisions))
+	for _, d := range cfg.Routing.Decisions {
+		signal := ""
+		for _, c := range d.Conditions {
+			if c.Type == "keyword" {
+				signal = c.Name
+				break
+			}
+		}
+		if signal == "" || len(d.ModelRefs) == 0 {
+			continue
+		}
+		out = append(out, LocalKeywordDecision{
+			Name:     d.Name,
+			Priority: d.Priority,
+			Signal:   signal,
+			ModelRef: d.ModelRefs[0],
+		})
+	}
+	return out
 }
 
 func effectiveRoutingHealthDetails(cfg config.RoutingConfig) map[string]interface{} {
@@ -1096,6 +1312,21 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 				timeoutMs,
 				buildModelRouterBackends(s.currentConfig()),
 				filepath.Join(s.currentConfig().DataDir, ".env"),
+			)
+			// Set min_confidence from routing decisions — use the lowest
+			// configured threshold so all decisions are enforced.
+			minConf := 0.0
+			for _, dec := range s.currentConfig().Routing.Decisions {
+				for _, cond := range dec.Conditions {
+					if cond.MinConfidence > 0 && (minConf == 0 || cond.MinConfidence < minConf) {
+						minConf = cond.MinConfidence
+					}
+				}
+			}
+			client.minConfidence = minConf
+			client.SetLocalKeywords(
+				buildLocalKeywordSignals(s.currentConfig()),
+				buildLocalKeywordDecisions(s.currentConfig()),
 			)
 			if !client.Healthy(runCtx) {
 				err := errors.New(modelRouterHealthProbeError)
@@ -1524,7 +1755,11 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		return err
 	}
 	runGuardrailFn := s.runGuardrail
-	if len(s.currentConfig().ActiveConnectors()) > 1 {
+	// Hybrid proxy mode requires the single-connector path so the proxy
+	// can bind alongside hooks. The connectors map still provides
+	// per-connector mode overrides; only the primary connector boots.
+	if len(s.currentConfig().ActiveConnectors()) > 1 &&
+		!strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid") {
 		runGuardrailFn = s.runGuardrailMulti
 	}
 	err := runGuardrailFn(ctx)
@@ -2286,10 +2521,14 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 	}
 
-	if proxy := s.proxySnapshot(); proxy != nil {
-		proxy.ApplyGuardrailConfig(&appliedCfg.Guardrail)
-		proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
-		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
+	if !guardrailRestart {
+		if proxy := s.proxySnapshot(); proxy != nil {
+			gc := appliedCfg.Guardrail
+			overlayResolvedGuardrailLLM(&gc, appliedCfg.ResolveLLM("guardrail"))
+			proxy.ApplyGuardrailConfig(&gc)
+			proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
+			proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
+		}
 	}
 
 	if aiRestart {
@@ -4604,6 +4843,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		AgentVersion:     agentVersion,
 		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
+		HybridProxyMode:  strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:   s.currentConfig().Routing.Enabled,
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
@@ -4790,8 +5031,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	s.health.RetainConnectors(conn.Name())
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
+	guardrailCfg := s.currentConfig().Guardrail
+	overlayResolvedGuardrailLLM(&guardrailCfg, s.currentConfig().ResolveLLM("guardrail"))
 	proxy, err := NewGuardrailProxy(
-		&s.currentConfig().Guardrail,
+		&guardrailCfg,
 		&s.currentConfig().CiscoAIDefense,
 		s.logger,
 		s.health,
@@ -5187,7 +5430,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Set-difference teardown: any connector active on a previous boot but
 	// absent from the current set is torn down once, before setup. Uses a
 	// base opts carrying just the fields Teardown needs.
-	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
+	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr,
+		HybridProxyMode: strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:  s.currentConfig().Routing.Enabled,
+	}
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	var failedRemoved []string
 	setupSeed := multiConnectorSetupTransaction{}
@@ -6534,6 +6780,8 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:         agentVersion,
 		AgentExecutable:      agentExecutable,
 		HookContractID:       contractResolution.Contract.ContractID,
+		HybridProxyMode:      strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:       s.currentConfig().Routing.Enabled,
 	}, nil
 }
 
@@ -6729,9 +6977,15 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	if conn == nil {
 		return true
 	}
+	// Operator override: guardrail.proxy_mode=hybrid forces the proxy to
+	// bind even for hook-only connectors, enabling semantic routing and
+	// full request/response inspection alongside hooks.
+	if gc != nil && strings.EqualFold(strings.TrimSpace(gc.ProxyMode), "hybrid") {
+		return true
+	}
 	if provider, ok := conn.(connector.ConnectorCapabilityProvider); ok {
 		switch provider.Capabilities(connector.SetupOpts{}).LLMTrafficMode {
-		case connector.LLMTrafficModeProxy:
+		case connector.LLMTrafficModeProxy, connector.LLMTrafficModeHybrid:
 			return true
 		case connector.LLMTrafficModeHooksOnly:
 			return false

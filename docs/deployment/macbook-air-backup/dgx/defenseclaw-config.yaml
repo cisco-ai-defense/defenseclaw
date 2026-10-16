@@ -1,0 +1,34 @@
+guardrail:
+  connector: claudecode
+  proxy_mode: hybrid
+  port: 4000
+  allow_private_upstreams:
+    - 192.168.86.211
+    - 100.78.145.123
+  allow_unknown_llm_domains: true
+  enabled: true
+  detection_strategy: regex_judge
+  detection_strategy_prompt: regex_judge
+  detection_strategy_completion: regex_judge
+  scanner_mode: local
+  judge:
+    enabled: true
+    hook_connectors:
+      - claudecode
+  connectors:
+    claudecode:
+      mode: action
+      hook_fail_mode: open
+llm:
+  base_url: http://model.nghodki.ai
+  api_key_env: DGX_API_KEY
+  model: qwen3.8-27b
+  provider: openai
+config_version: 8
+gateway:
+  token_env: DEFENSECLAW_GATEWAY_TOKEN
+claw:
+  mode: claudecode
+observability: {}
+routing:
+  enabled: false

@@ -74,7 +74,8 @@ type SetupOpts struct {
 	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; written to the hook token file, never into a script
+APIToken        string
+HybridProxyMode bool
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -245,19 +246,10 @@ type SetupOpts struct {
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
 
-	// ManagedTargetSID is set only by the Windows enterprise guardian when it
-	// sets up or verifies one per-user target: the target account's SID.
-	// Custody checks then trust that account the way they trust the current
-	// user under its own token (the guardian verifies signed-out users
-	// without one), and setup never launches the user's agent executable
-	// from the guardian process. Empty everywhere else.
-	ManagedTargetSID string
-
-	// FailedSetupFailClosed is set on the Teardown that rolls back a Setup
-	// the gateway could not finish for a fail-closed connector. The connector
-	// is still configured, so a cached hook path keeps blocking and names the
-	// failed start instead of exiting 0 unguarded (GAP-0367).
+	ManagedTargetSID      string
 	FailedSetupFailClosed bool
+
+	RoutingEnabled bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
@@ -488,11 +480,12 @@ func ACPAgentCapabilityForConnector(name string) ACPCapability {
 	return ACPCapability{}
 }
 
-// LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of
-// ConnectorCapabilities.LLMTrafficMode.
+// LLMTrafficModeProxy / LLMTrafficModeHooksOnly / LLMTrafficModeHybrid are
+// the values of ConnectorCapabilities.LLMTrafficMode.
 const (
 	LLMTrafficModeProxy     = "proxy"
 	LLMTrafficModeHooksOnly = "hooks-only"
+	LLMTrafficModeHybrid    = "hybrid"
 )
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
@@ -505,6 +498,23 @@ func LLMTrafficModeForConnector(name string) string {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly
+}
+
+// resolveGatewayTokenForProxyEnv reads the gateway token from the dotenv
+// file at ~/.defenseclaw/.env. Used by standalone env-builder functions
+// that don't have a connector receiver.
+func resolveGatewayTokenForProxyEnv() string {
+	envPath := homePath(".defenseclaw", ".env")
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=") {
+			return strings.TrimPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=")
+		}
+	}
+	return ""
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their

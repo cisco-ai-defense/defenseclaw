@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -159,6 +160,260 @@ func TestHandlePassthrough_DirectProviderHydration(t *testing.T) {
 	}
 	if gotXDC != "" {
 		t.Errorf("upstream X-DC-Target-URL = %q; expected stripped", gotXDC)
+	}
+}
+
+func TestHandlePassthrough_LLMConfigV5Hydration(t *testing.T) {
+	var gotAuthorization string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_v5","object":"response","status":"completed"}`))
+	}))
+	defer upstream.Close()
+
+	v5Env := "DEFENSECLAW_TEST_LLM_KEY_V5_" + sanitizeForEnv(t.Name())
+	t.Setenv(v5Env, "sk-v5-only-key")
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newDirectProviderProxy(t, prov, insp, upstream.URL, "unused-legacy-key")
+	proxy.cfg.Model = ""
+	proxy.cfg.APIKeyEnv = ""
+	proxy.cfg.LLM.Model = "openai/gpt-4.1"
+	proxy.cfg.LLM.APIKeyEnv = v5Env
+	proxy.cfg.LLM.BaseURL = upstream.URL
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-4.1",
+		"input": "Hello from v5 config",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(gotAuthorization, "sk-v5-only-key") {
+		t.Errorf("upstream Authorization = %q; want v5 LLM.APIKeyEnv key", gotAuthorization)
+	}
+}
+
+func TestHandlePassthrough_ModelRouterAnthropicHydration(t *testing.T) {
+	var (
+		gotPath          string
+		gotAuthorization string
+		gotAPIKey        string
+		gotVersion       string
+		gotModel         string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthorization = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		var payload struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		gotModel = payload.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_routed","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer upstream.Close()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newDirectProviderProxy(t, prov, insp, upstream.URL, "sk-unused-llm-key")
+	proxy.cfg.LLM.BaseURL = ""
+	proxy.cfg.Model = ""
+	proxy.SetModelRouter(staticModelRouter{decision: &ModelRouterDecision{
+		Provider:          "anthropic",
+		TargetURL:         upstream.URL + "/anthropic",
+		TargetURLOverride: true,
+		Model:             "global.anthropic.claude-opus-4-6-v1",
+		APIKey:            "sk-routed-bedrock",
+		APIKeyOverride:    true,
+		Reason:            "planning_intent",
+	}})
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "claude-placeholder",
+		"messages": []map[string]string{
+			{"role": "user", "content": "plan the architecture"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/anthropic/v1/messages" {
+		t.Errorf("upstream path = %q, want /anthropic/v1/messages", gotPath)
+	}
+	if gotAPIKey != "sk-routed-bedrock" {
+		t.Errorf("upstream x-api-key = %q; want routed key", gotAPIKey)
+	}
+	if gotAuthorization != "" {
+		t.Errorf("upstream Authorization = %q; Anthropic-compatible Bedrock must use x-api-key", gotAuthorization)
+	}
+	if gotVersion != "2023-06-01" {
+		t.Errorf("anthropic-version = %q, want 2023-06-01", gotVersion)
+	}
+	if gotModel != "global.anthropic.claude-opus-4-6-v1" {
+		t.Errorf("upstream model = %q, want router model", gotModel)
+	}
+}
+
+func TestHandlePassthrough_BedrockInvokeDoesNotInjectModelField(t *testing.T) {
+	var (
+		gotPath          string
+		gotAuthorization string
+		gotAPIKey        string
+		gotBody          map[string]json.RawMessage
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthorization = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}}}`))
+	}))
+	defer upstream.Close()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newDirectProviderProxy(t, prov, insp, upstream.URL, "sk-unused-llm-key")
+	proxy.cfg.LLM.BaseURL = ""
+	proxy.cfg.Model = ""
+	proxy.SetModelRouter(staticModelRouter{decision: &ModelRouterDecision{
+		Provider:          "anthropic",
+		TargetURL:         upstream.URL,
+		TargetURLOverride: true,
+		Model:             "global.anthropic.claude-opus-4-6-v1",
+		APIKey:            "sk-routed-bedrock",
+		APIKeyOverride:    true,
+		Reason:            "planning_intent",
+	}})
+
+	body := mustJSON(t, map[string]interface{}{
+		"anthropic_version": "bedrock-2023-05-31",
+		"max_tokens":        32,
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]string{
+					{"text": "plan the architecture"},
+				},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/model/global.anthropic.claude-opus-4-6-v1/invoke-with-response-stream", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/model/global.anthropic.claude-opus-4-6-v1/invoke-with-response-stream" {
+		t.Errorf("upstream path = %q; want native Bedrock invoke path", gotPath)
+	}
+	if _, hasModel := gotBody["model"]; hasModel {
+		t.Fatalf("upstream body must not contain model; got keys %v", keysOf(gotBody))
+	}
+	if _, ok := gotBody["anthropic_version"]; !ok {
+		t.Errorf("upstream body lost anthropic_version; keys %v", keysOf(gotBody))
+	}
+	if gotAPIKey != "" {
+		t.Errorf("native Bedrock invoke must not send x-api-key; got %q", gotAPIKey)
+	}
+	if !strings.HasPrefix(gotAuthorization, "Bearer ") || !strings.Contains(gotAuthorization, "sk-routed-bedrock") {
+		t.Errorf("upstream Authorization = %q; want Bearer routed Bedrock token", gotAuthorization)
+	}
+}
+
+func TestHandlePassthrough_BedrockInvokeRewritesPathModel(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]json.RawMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}}}`))
+	}))
+	defer upstream.Close()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newDirectProviderProxy(t, prov, insp, upstream.URL, "sk-unused-llm-key")
+	proxy.cfg.LLM.BaseURL = ""
+	proxy.cfg.Model = ""
+	proxy.SetModelRouter(staticModelRouter{decision: &ModelRouterDecision{
+		Provider:          "anthropic",
+		TargetURL:         upstream.URL,
+		TargetURLOverride: true,
+		Model:             "global.anthropic.claude-sonnet-4-6-v1",
+		APIKey:            "sk-routed-bedrock",
+		APIKeyOverride:    true,
+		Reason:            "planning_intent",
+	}})
+
+	body := mustJSON(t, map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": []map[string]string{{"text": "plan the architecture"}}},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/model/global.anthropic.claude-opus-4-6-v1/converse", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/model/global.anthropic.claude-sonnet-4-6-v1/converse" {
+		t.Errorf("upstream path = %q; want rewritten model segment", gotPath)
+	}
+	if _, hasModel := gotBody["model"]; hasModel {
+		t.Fatalf("upstream converse body must not contain model; got keys %v", keysOf(gotBody))
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func TestPassthroughRouteIsAnthropicMessages(t *testing.T) {
+	if passthroughRouteIsAnthropicMessages(nil) {
+		t.Fatal("nil decision must not hydrate")
+	}
+	openai := &ModelRouterDecision{
+		Provider:          "openai",
+		TargetURL:         "http://model.example.test/v1",
+		TargetURLOverride: true,
+		APIKeyOverride:    true,
+		APIKey:            "sk-dgx",
+	}
+	if passthroughRouteIsAnthropicMessages(openai) {
+		t.Fatal("OpenAI-compatible backends must not claim /v1/messages")
+	}
+	anthropic := &ModelRouterDecision{
+		Provider:          "anthropic",
+		TargetURL:         "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+		TargetURLOverride: true,
+	}
+	if !passthroughRouteIsAnthropicMessages(anthropic) {
+		t.Fatal("anthropic provider backends must hydrate /v1/messages")
 	}
 }
 

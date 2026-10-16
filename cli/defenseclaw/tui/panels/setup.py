@@ -158,6 +158,7 @@ class SetupWizard(IntEnum):
     GUARDRAIL_ACTIONS = 19
     REDACTION = 20
     ACP_GUARD = 21
+    SEMANTIC_ROUTING = 22
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -183,6 +184,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Guardrail Actions",
     "Redaction Policy",
     "ACP Guard",
+    "Semantic Routing",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -219,6 +221,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
     SetupWizard.REDACTION: ("setup", "redaction"),
     SetupWizard.ACP_GUARD: ("acp", "setup"),
+    SetupWizard.SEMANTIC_ROUTING: ("setup", "routing"),
 }
 
 # First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
@@ -2210,6 +2213,41 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
+def _semantic_routing_wizard_fields(cfg: object | None = None) -> tuple[WizardFormField, ...]:
+    enabled = "no"
+    model_count = "0"
+    if cfg is not None:
+        routing = getattr(cfg, "routing", None)
+        if routing is not None:
+            enabled = "yes" if getattr(routing, "enabled", False) else "no"
+            models = getattr(routing, "models", None) or []
+            model_count = str(len(models))
+    return (
+        WizardFormField(
+            "Enabled",
+            "choice",
+            value=enabled,
+            default=enabled,
+            options=("yes", "no"),
+            hint="Enable semantic model routing via SR container.",
+        ),
+        WizardFormField(
+            "Models",
+            "label",
+            value=f"{model_count} configured",
+            hint="Configure models via CLI: defenseclaw setup routing --enable --interactive",
+        ),
+        WizardFormField(
+            "Connector",
+            "choice",
+            value="codex",
+            default="codex",
+            options=("codex", "openclaw", "hermes"),
+            hint="Routing is supported for codex, openclaw, and hermes.",
+        ),
+    )
+
+
 def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
     def managed(values: Mapping[str, str]) -> bool:
         return values.get("managed_enrollment") == "yes"
@@ -3226,7 +3264,11 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+<<<<<<< HEAD
+    SetupWizard.SEMANTIC_ROUTING: lambda cfg=None: _semantic_routing_wizard_fields(cfg),
+=======
     SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
+>>>>>>> origin/main
 }
 
 
@@ -4301,6 +4343,11 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
     SetupWizard.REDACTION: _redaction_goals,
     SetupWizard.ACP_GUARD: _acp_goals,
+    SetupWizard.SEMANTIC_ROUTING: lambda cfg=None: (
+        WizardGoal("Enable routing", "Enable semantic model routing (requires Docker + models in config)"),
+        WizardGoal("Disable routing", "Disable semantic model routing"),
+        WizardGoal("Show status", "Show current routing configuration"),
+    ),
 }
 
 
@@ -5837,7 +5884,15 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
     SetupWizard.REDACTION: lambda fields: _build_redaction_args(fields),
     SetupWizard.ACP_GUARD: lambda fields: _build_acp_args(fields),
+    SetupWizard.SEMANTIC_ROUTING: lambda fields: _build_semantic_routing_args(fields),
 }
+
+
+def _build_semantic_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    enabled = wizard_field_value(fields, "Enabled")
+    if enabled == "yes":
+        return ("--enable", "--yes")
+    return ("--disable", "--yes")
 
 
 def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFormField]) -> tuple[str, ...]:
