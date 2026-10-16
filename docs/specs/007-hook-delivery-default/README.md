@@ -23,7 +23,12 @@
   `closed` setting into `open` during repair; policy enforcement mode and hook
   delivery mode are independent. Go and Python policy resolution must agree.
 - Managed macOS and Windows hooks honor their installer-owned delivery policy
-  instead of forcing closed solely because they are managed.
+  instead of forcing closed solely because they are managed. On Windows this
+  includes a gateway service that SCM reports not running (stopped, crashed,
+  or held stopped while Setup services the deployment): the hook contacts no
+  peer and follows its policy, as a refused connection does on macOS. Another
+  process on the gateway port, or a service the hook cannot query, still
+  fails closed.
 - Valid policy denials, runtime integrity, target authorization and protected
   credential custody are not weakened. Strict availability remains a closed
   override.
