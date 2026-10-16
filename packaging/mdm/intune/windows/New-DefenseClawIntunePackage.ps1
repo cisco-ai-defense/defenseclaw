@@ -213,8 +213,11 @@ function Get-GuardrailBlock {
     if ($blocks.Count -ne 1) { throw 'base and bundle configs must each have one plain guardrail: block' }
     $start = $blocks[0]
     $end = $start + 1
-    while ($end -lt $lines.Length -and ($lines[$end] -eq '' -or $lines[$end] -match '^ ')) { $end++ }
-    return ($lines[$start..($end - 1)] -join "`n").TrimEnd([char]10)
+    # A full-line comment, even at column 0, does not end the mapping in
+    # YAML: the keys after it are still guardrail keys, so the block runs on
+    # across it and leaves comment lines out of the compare.
+    while ($end -lt $lines.Length -and ($lines[$end] -eq '' -or $lines[$end] -match '^ ' -or $lines[$end] -match '^#')) { $end++ }
+    return (@($lines[$start..($end - 1)] | Where-Object { $_ -notmatch '^\s*#' }) -join "`n").TrimEnd([char]10)
 }
 
 function Get-CustomPackPath {

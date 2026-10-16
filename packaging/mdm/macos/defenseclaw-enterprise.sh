@@ -1003,12 +1003,15 @@ dc_extract_payload() {
 }
 
 # dc_guardrail_block <config>: the config's top-level guardrail: block with
-# LF line ends and without trailing blank lines. Fails unless the file has
-# exactly one plain guardrail: line.
+# LF line ends and without full-line comments or trailing blank lines. A
+# comment, even at column 0, does not end the block: in YAML the keys after
+# it are still guardrail keys. Fails unless the file has exactly one plain
+# guardrail: line.
 dc_guardrail_block() {
     awk '
         { sub(/\r$/, "") }
         $0 == "guardrail:" { count++; inside = (count == 1); if (inside) { n = 1; block[1] = $0 }; next }
+        inside && /^[ \t]*#/ { next }
         inside && ($0 == "" || substr($0, 1, 1) == " ") { block[++n] = $0; next }
         { inside = 0 }
         END {

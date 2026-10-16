@@ -138,6 +138,12 @@ def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
          "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n", "must define custom_packs.b"),
         ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n", ("a",),
          "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: packs/a\n", "absolute, preinstalled path"),
+        # A full-line comment, even at column 0, does not end the guardrail
+        # block: the keys after it are compared, and comments are not.
+        ("guardrail:\n  rule_pack: default\n# threshold\n  block_at: HIGH\n", (),
+         "guardrail:\n  rule_pack: default\n# threshold\n  block_at: CRITICAL\n", "guardrail policy differs"),
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (),
+         "guardrail:\n  # threshold\n  block_at: HIGH\n# pack\n  rule_pack: default\n", ""),
         # GAP-0090: the hook modes the hooks take before the guardrail mode,
         # and application_protection, must be the bundle's or absent from both.
         *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra, f"base CONFIG= {key}: block differs")

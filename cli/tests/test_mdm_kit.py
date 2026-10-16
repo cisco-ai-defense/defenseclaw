@@ -1065,6 +1065,14 @@ def test_unix_wrapper_base_config_must_carry_the_bundle_guardrail_policy(tmp_pat
         "refused: the base config must define custom_packs.p2int"), shell
     # Blank lines that end the guardrail block are not part of it.
     assert check(base_ok + "\n\n" + "ai_discovery:\n  enabled: true\n") == "ok", shell
+    # A full-line comment, even at column 0, does not end the guardrail
+    # block: the keys after it are compared, and comments are not.
+    commented = _parity_bundle(tmp_path / "commented.dcbundle", bundle_config.replace("  connectors:\n", "# agents\n  connectors:\n"))
+    commented_base = base_ok.replace("  connectors:\n", "# agents\n  connectors:\n")
+    assert check(commented_base, commented) == "ok", shell
+    assert check(commented_base.replace("      enabled: true\n", "      enabled: false\n"), commented).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    assert check(base_ok.replace("  connectors:\n", "  # agents\n  connectors:\n")) == "ok", shell
     # A bundle on a built-in pack needs an identical guardrail block.
     builtin = "guardrail:\n  enabled: true\n  mode: action\n  block_at: HIGH\n  rule_pack: default\n"
     builtin_bundle = _parity_bundle(tmp_path / "builtin.dcbundle", "config_version: 9\n" + builtin, packs=())
