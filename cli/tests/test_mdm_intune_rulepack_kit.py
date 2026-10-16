@@ -501,7 +501,7 @@ def test_packager_names_the_rule_pack_prerequisite(tmp_path: Path, pack_path: st
     setup.write_bytes(b"packager-only stub")
     config = tmp_path / "config.yaml"
     config.write_text(
-        "guardrail:\n  block_at: HIGH\n  rule_pack: p2int\n  custom_packs:\n    p2int:\n"
+        "config_version: 9\nguardrail:\n  block_at: HIGH\n  rule_pack: p2int\n  custom_packs:\n    p2int:\n"
         f"      path: {pack_path}\n      digest: sha256:{'a' * 64}\n",
         encoding="ascii",
     )
@@ -531,7 +531,7 @@ def test_packager_without_custom_packs_prints_no_prerequisite(tmp_path: Path) ->
     setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
     setup.write_bytes(b"packager-only stub")
     config = tmp_path / "config.yaml"
-    config.write_text("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", encoding="ascii")
+    config.write_text("config_version: 9\nguardrail:\n  block_at: HIGH\n  rule_pack: default\n", encoding="ascii")
     run = _pwsh(
         "-File",
         str(PACKAGER),

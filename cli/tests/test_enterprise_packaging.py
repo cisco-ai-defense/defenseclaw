@@ -1089,15 +1089,17 @@ def test_linux_preremove_goes_on_when_a_concurrent_purge_removed_the_deployment(
     assert any(call.startswith("systemctl stop ") for call in calls), calls
 
 
-# The preremove aborts the package removal only on a busy lock (75) and on a
-# refused hook-removal precheck; every other uninstall outcome, the
-# not_installed no-op above included, lets the removal go on.
-def test_linux_preremove_aborts_only_on_busy_or_a_refused_precheck() -> None:
+# The preremove aborts the package removal only on a busy lock (75), a
+# refused hook-removal precheck and an uninstall that stopped before removing
+# the binaries (uninstall_incomplete, GAP-1519); every other uninstall
+# outcome, the not_installed no-op above included, lets the removal go on.
+def test_linux_preremove_aborts_only_on_busy_a_refused_precheck_or_an_incomplete_uninstall() -> None:
     text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
     aborts = [line.strip() for line in text.splitlines() if re.match(r"\s*exit [1-9]", line)]
-    assert aborts == ["exit 1", "exit 1"], aborts  # busy, precheck
+    assert aborts == ["exit 1", "exit 1", "exit 1"], aborts  # busy, precheck, incomplete
     assert 'if [ "$status" = 75 ]; then' in text
     assert 'if [ "$precheck_refused" = 1 ]; then' in text
+    assert 'if [ "$incomplete" = 1 ]; then' in text
 
 
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
