@@ -53,6 +53,10 @@ func TestEnterpriseHookReconcileLeavesEarlierReleaseTargetsToTheNextSignIn(t *te
 	}
 	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
 	enterpriseHookManifestFileTrustCheck = func(string) error { return nil }
+	// The standalone Windows guardian: a same-release target keeps failing.
+	previousSecureClient := enterpriseHookReconcileSecureClient
+	t.Cleanup(func() { enterpriseHookReconcileSecureClient = previousSecureClient })
+	enterpriseHookReconcileSecureClient = func() bool { return false }
 	// Off Windows only a standalone manifest may carry deferred rows; the
 	// rows here are the Windows standalone enumerator's.
 	previousStandaloneUnix := enterprisehooks.StandaloneUnix()
@@ -247,9 +251,12 @@ func TestEnterpriseHookReconcileLeavesEarlierReleaseTargetsToTheNextSignIn(t *te
 // the signed-out failure.
 func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInOnlyForDeferredEarlierRelease(t *testing.T) {
 	previousVerifier, previousSession, previousRelease := enterpriseHookReconcileVerifier, enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease
+	previousSecureClient := enterpriseHookReconcileSecureClient
 	t.Cleanup(func() {
 		enterpriseHookReconcileVerifier, enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease = previousVerifier, previousSession, previousRelease
+		enterpriseHookReconcileSecureClient = previousSecureClient
 	})
+	enterpriseHookReconcileSecureClient = func() bool { return false }
 	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		return enterprisehooks.InstallResult{}, errors.New("lock drift")
 	}

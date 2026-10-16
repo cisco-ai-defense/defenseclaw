@@ -516,11 +516,12 @@ type enterpriseHookReconcileRow struct {
 	// deployments never set them, so their records are unchanged.
 	UID       int    `json:"uid,omitempty"`
 	HomeInode uint64 `json:"home_inode,omitempty"`
-	// RevokeProtection marks a failed standalone Unix target whose account
+	// RevokeProtection marks a target whose prior protected row must not be
+	// carried forward: a failed standalone Unix target whose account
 	// identity changed (its name now maps to another uid, or its old uid
-	// now belongs to another account): the prior protected row, which
-	// still carries the old uid, must not be carried forward. It is never
-	// serialized and only the standalone Unix reconcile sets it.
+	// now belongs to another account), and a Windows Secure Client target a
+	// non-purge uninstall retired, which is pending now. It is never
+	// serialized.
 	RevokeProtection bool `json:"-"`
 }
 
@@ -549,6 +550,12 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileSecureClient reports a Secure Client guardian.
+	// Tests replace it.
+	enterpriseHookReconcileSecureClient = enterprisehooks.WindowsSecureClientProfileProcess
+	// enterpriseHookSessionCheckNotLocalSystem reports a session check
+	// refused because this process is not LocalSystem. Tests replace it.
+	enterpriseHookSessionCheckNotLocalSystem = enterprisehooks.IsWindowsEnterpriseNotLocalSystem
 	// The reconcile's deferred-session check and machine-enrollment steps.
 	// Tests replace them.
 	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookDeferredTargetSessionAvailable
@@ -571,6 +578,13 @@ const enterpriseHookAwaitingSignInPrefix = "enterprise hooks: protected target w
 // errEnterpriseHookAwaitingSignIn marks the reconcile error of such a
 // target, so the reconcile counts exactly the rows it left waiting.
 var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPrefix)
+
+// errEnterpriseHookProtectionRetired marks a Secure Client deferred target a
+// committed non-purge uninstall retired: its protected records survived in
+// the retained StateRoot, but its machine enrollment and runtime selector
+// are gone, so it holds nothing protected and is pending like an account
+// DefenseClaw never protected.
+var errEnterpriseHookProtectionRetired = errors.New("enterprise hooks: protected target was retired by an uninstall")
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
@@ -595,10 +609,15 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		// Only a deferred target of the standalone profile whose lock
-		// another release wrote waits for the sign-in. One this release
-		// protected that no longer verifies was changed while its account
-		// was signed out, and stays a failure; Secure Client is unchanged.
+		// Only a deferred target whose lock another release wrote waits for
+		// the sign-in. One this release protected that no longer verifies
+		// was changed while its account was signed out, and stays a failure,
+		// unless on Secure Client a committed non-purge uninstall retired it:
+		// a reinstall over the retained StateRoot then found every
+		// signed-out account's target drifted and failed with 1603. With no
+		// runtime selected for it (the pending proof), it holds nothing
+		// protected and is pending until the account signs in, its hooks
+		// failing closed as a pending target's do.
 		if target.IsDeferred() {
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
@@ -607,6 +626,15 @@ func enterpriseHookVerifyOrRepairTarget(
 						"it at the account's next sign-in (verification: %v)",
 					errEnterpriseHookAwaitingSignIn, written, verifyErr,
 				)
+			}
+			if enterpriseHookReconcileSecureClient() {
+				if available, pendingErr := enterpriseHookReconcileDeferredSessionAvailable(target); pendingErr == nil && !available {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w (verification: %v): %w",
+						errEnterpriseHookProtectionRetired, verifyErr,
+						&enterprisehooks.WindowsTargetSessionUnavailableError{SID: strings.TrimSpace(target.SID)},
+					)
+				}
 			}
 		}
 		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
@@ -1053,17 +1081,18 @@ func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, 
 	return removed, awaiting
 }
 
-// enterpriseHookAwaitingSignInRow reports, on a standalone deployment only,
-// a guardian row that waits for its signed-out account's next sign-in
-// (enterpriseHookAwaitingSignInPrefix). It is not protected until the
-// guardian repairs it then.
+// enterpriseHookAwaitingSignInRow reports, on a standalone or Secure Client
+// deployment, a guardian row that waits for its signed-out account's next
+// sign-in (enterpriseHookAwaitingSignInPrefix). It is not protected until
+// the guardian repairs it then.
 func enterpriseHookAwaitingSignInRow(row enterpriseHookReconcileRow) bool {
-	return cfg != nil && cfg.StandaloneEnterprise() && enterpriseHookAwaitingSignInError(row)
+	return cfg != nil && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration()) &&
+		enterpriseHookAwaitingSignInError(row)
 }
 
 // enterpriseHookAwaitingSignInError is enterpriseHookAwaitingSignInRow for
-// readers of the standalone Windows guardian's own records, which load no
-// config; only that guardian writes the error.
+// readers of the Windows guardian's own records, which load no config; only
+// that guardian writes the error.
 func enterpriseHookAwaitingSignInError(row enterpriseHookReconcileRow) bool {
 	return !row.OK && !row.Pending &&
 		strings.HasPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix)
@@ -1460,6 +1489,14 @@ func enterpriseHookVerifyAwaitingSignIn(
 		return false
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
+	if err != nil && enterpriseHookReconcileSecureClient() && enterpriseHookSessionCheckNotLocalSystem(err) {
+		// Setup's own verify runs as the elevated administrator, which
+		// cannot query another account's session. On Secure Client the
+		// guardian's fresh protected record of the wait stands, as status
+		// reads it: the LocalSystem guardian proved the session absent when
+		// it wrote the row, and repairs the target once the account signs in.
+		return true
+	}
 	return err == nil && !available
 }
 
@@ -2259,13 +2296,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 		}
 		var deferredPending bool
+		retired := errors.Is(err, errEnterpriseHookProtectionRetired)
 		deferredPending, err = enterpriseHookDeferredPendingAfterSessionError(
 			target,
-			previousProtection.PreviouslyProtected,
+			previousProtection.PreviouslyProtected && !retired,
 			err,
 		)
 		if deferredPending {
 			row.Pending = true
+			// A retired target is not protected now: its prior protected
+			// row must not be carried forward into the authorization.
+			row.RevokeProtection = retired
 			pending++
 			pendingTargets = append(pendingTargets, target)
 			rows = append(rows, row)
@@ -3713,9 +3754,9 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		if row.Pending && enterpriseHooksStandaloneUnixActive() {
 			continue
 		}
-		// A reused or reassigned uid must not inherit the previous
-		// account's authorization through the carried-forward row.
-		if row.RevokeProtection && enterpriseHooksStandaloneUnixActive() {
+		// A reused or reassigned uid, or a retired Windows target, must not
+		// inherit the previous authorization through the carried-forward row.
+		if row.RevokeProtection {
 			continue
 		}
 		if prior, ok := previousByKey[key]; ok {

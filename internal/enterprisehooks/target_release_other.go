@@ -11,3 +11,13 @@ package enterprisehooks
 func WindowsProtectedTargetFromOtherRelease(InstallOptions) (string, bool, error) {
 	return "", false, nil
 }
+
+// WindowsSecureClientProfileProcess is the native Windows check.
+func WindowsSecureClientProfileProcess() bool {
+	return false
+}
+
+// IsWindowsEnterpriseNotLocalSystem is the native Windows check.
+func IsWindowsEnterpriseNotLocalSystem(error) bool {
+	return false
+}
