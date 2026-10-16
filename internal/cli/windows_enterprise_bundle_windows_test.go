@@ -1215,9 +1215,10 @@ func TestWindowsRefusedBundleKeepsInstalledAnchors(t *testing.T) {
 			}
 			candidate := filepath.Join(e.dir, "candidate-anchors.json")
 			replacement := bytes.Replace(before, []byte(`"min_version":0`), []byte(`"min_version":1`), 1)
-			if kind == "key_revoked" {
+			switch kind {
+			case "key_revoked":
 				replacement = bytes.Replace(replacement, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1)
-			} else if kind == "version_not_newer" {
+			case "version_not_newer":
 				replacement = bytes.Replace(replacement, []byte(`"min_version":1`), []byte(`"min_version":6`), 1)
 			}
 			writeBundleTestFile(t, candidate, replacement)
