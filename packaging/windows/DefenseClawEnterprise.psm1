@@ -30644,10 +30644,14 @@ function Get-DefenseClawManagedUserRuntimeEntryNames {
         .hookcfg.<connector> and hook tokens, and the runtime generations;
         hook_contract_lock.json and its lock file are the hook contract
         lock; inventory.db and its SQLite sidecars are the gateway's
-        inventory. Nothing else in the folder is removed.
+        inventory; logs holds hook-failures.jsonl, which the managed hook
+        appends to when a hook fails or fails open (hookexec
+        logHookFailure). Nothing else in the folder is removed, and a folder
+        that carries a per-user install's markers is never touched.
     #>
     return @(
         'hooks',
+        'logs',
         'hook_contract_lock.json',
         'hook_contract_lock.json.lock',
         'inventory.db',
