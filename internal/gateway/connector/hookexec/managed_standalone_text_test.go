@@ -141,16 +141,21 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		if explain != held || strings.Contains(out.String(), "not running") {
 			t.Fatalf("explain=%v: stdout = %q failures = %q, want the held-port text only for the standalone hook", explain, out.String(), failures)
 		}
+		// Another process on the port is never a stopped service: Secure
+		// Client fails closed here even in open mode.
+		if !explain && !strings.Contains(out.String(), failedClosed) {
+			t.Fatalf("secure client: stdout = %q, want a fail-closed answer for a held port in open mode", out.String())
+		}
 	}
 }
 
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
 // service is stopped fails closed with the plain text and says the service
 // is not running, in the agent's denial and in hook-failures.jsonl
-// (GAP-0013). Secure Client keeps the peer-unverified reason and the
-// generic text.
+// (GAP-0013). A Secure Client hook follows its fail mode instead: open allows
+// the call, closed keeps the generic text; both log the not-running reason.
 func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
-	run := func(explain bool) (int, string, string, string) {
+	run := func(explain bool, failMode string) (int, string, string, string) {
 		home := t.TempDir()
 		token := "managed-test-token"
 		var out, errb bytes.Buffer
@@ -161,7 +166,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 			APIAddr:                   "127.0.0.1:1",
 			Home:                      home,
 			HookDir:                   filepath.Join(home, "hooks"),
-			FailMode:                  "open",
+			FailMode:                  failMode,
 			ManagedEnterprise:         true,
 			ExplainUnenrolledAccount:  explain,
 			AuthenticatedManagedToken: &token,
@@ -173,7 +178,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 		return code, out.String(), errb.String(), string(failures)
 	}
-	code, stdout, stderr, failures := run(true)
+	code, stdout, stderr, failures := run(true, "open")
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
 		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
 		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"
@@ -183,9 +188,14 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	if !strings.Contains(failures, managedGatewayNotRunningReason) {
 		t.Fatalf("hook-failures.jsonl = %q, want %s", failures, managedGatewayNotRunningReason)
 	}
-	_, stdout, _, failures = run(false)
-	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayPeerUnverifiedReason) {
-		t.Fatalf("secure client: stdout = %q failures = %q, want the unchanged text and reason", stdout, failures)
+	code, stdout, _, failures = run(false, "open")
+	if code != 0 || strings.Contains(stdout, "deny") || strings.Contains(stdout, failedClosed) ||
+		!strings.Contains(failures, managedGatewayNotRunningReason) || !strings.Contains(failures, `"outcome":"fail_open"`) {
+		t.Fatalf("secure client open: code = %d stdout = %q failures = %q, want an allow logged as not running", code, stdout, failures)
+	}
+	_, stdout, _, failures = run(false, "closed")
+	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayNotRunningReason) {
+		t.Fatalf("secure client closed: stdout = %q failures = %q, want the generic text and the not-running reason", stdout, failures)
 	}
 }
 

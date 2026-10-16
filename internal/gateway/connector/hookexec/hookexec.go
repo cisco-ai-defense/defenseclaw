@@ -70,7 +70,8 @@ var (
 	errManagedGatewayPeerUnverified = errors.New("enterprise managed gateway peer unverified")
 	// errManagedGatewayNotRunning wraps a peer-verification failure whose
 	// cause is that the managed gateway service is not running (Windows SCM
-	// reports it stopped). The hook still fails closed.
+	// reports it stopped). The hook fails closed, except a Secure Client hook,
+	// which follows its fail mode (managedPeerFailMode).
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
@@ -490,7 +491,7 @@ func Run(ctx context.Context, opts Options) int {
 				)
 			}
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+				return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -727,11 +728,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			reason = errGatewayStartFailing.Error()
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
-			// Managed peer-verification failure must fail closed on the transport
-			// surface too, mirroring the up-front client-build path. A managed
+			// Managed peer-verification failure fails closed on the transport
+			// surface too, mirroring the up-front client-build path: a managed
 			// hook launched with FailMode="open" must not let an unverified
-			// gateway peer surface as an allow-by-default.
-			return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+			// gateway peer surface as an allow-by-default. The one exception
+			// is a Secure Client gateway service that is not running (see
+			// managedPeerFailMode).
+			return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -1675,9 +1678,9 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
 	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason {
-		// Only a standalone hook gets these reasons (managedPeerFailureReason,
-		// the foreign-hook guard); say the service is stopped and who starts
-		// it, or that another program holds its port.
+		// Say the service is stopped and who starts it, or that another
+		// program holds its port (managedPeerFailureReason, the foreign-hook
+		// guard).
 		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
 	}
 	message := mustJSONString(text)
@@ -1892,13 +1895,28 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 	return opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && sp.connector != "copilot"
 }
 
+// managedPeerFailMode is the fail mode of a managed peer-verification
+// failure. A Secure Client hook whose gateway service is simply not running
+// (stopped, crashed, or held stopped while Setup services the deployment)
+// follows its own fail mode, as a refused connection already does on macOS:
+// the hook contacted no peer, so nothing unverified can answer it, and only
+// an administrator can stop the service. Every other peer failure (another
+// process on the gateway port, a service the hook cannot query) and every
+// standalone hook fail closed.
+func managedPeerFailMode(opts Options, failMode string, err error) string {
+	if secureClientHook(opts) && errors.Is(err, errManagedGatewayNotRunning) {
+		return failMode
+	}
+	return "closed"
+}
+
 // managedPeerFailureReason is the hook-failure reason of a managed
-// peer-verification failure: a standalone hook (Windows, or a Unix hook whose
-// socket is missing or refuses the connection) says when the gateway service
-// is simply not running; the Secure Client profile keeps
-// managedGatewayPeerUnverifiedReason.
+// peer-verification failure: every managed hook says when the gateway
+// service is simply not running (a stopped Windows service, or a Unix
+// standalone socket that is missing or refuses the connection); any other
+// Secure Client peer failure keeps managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
-	if (opts.ExplainUnenrolledAccount || managedStandaloneHook(opts)) && errors.Is(err, errManagedGatewayNotRunning) {
+	if errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
 	}
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
