@@ -70,6 +70,9 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 	cfg.Enterprise.Profile = managed.ProfileStandalone
+	// An enforcing managed device; in observe mode a recovered evaluation
+	// error allows the call, as on every other profile.
+	cfg.Guardrail.Mode = "action"
 	api := &APIServer{scannerCfg: cfg}
 	for _, tc := range []struct {
 		connector, toolEvent, nativeField string
