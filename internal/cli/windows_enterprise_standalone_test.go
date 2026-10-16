@@ -1117,6 +1117,52 @@ func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.
 	}
 }
 
+// A pending-transaction repair that ends with a report, even a failed one,
+// made its own decision about the services: a recovery that could not
+// reactivate the restored release leaves it stopped and disabled on purpose.
+// Only an installer that ended without a report (timed out or killed) has
+// its startup modes put back.
+func TestWindowsEnterpriseEnsureFailedRepairReportKeepsServiceStartModes(t *testing.T) {
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	previousRestore := windowsEnterpriseRestoreStartModes
+	t.Cleanup(func() { windowsEnterpriseRestoreStartModes = previousRestore })
+	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error {
+		t.Fatal("a repair that returned its report had its service startup modes restored")
+		return nil
+	}
+	repairs := 0
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		reply := map[string]any{
+			"schema_version": 1, "ok": true, "action": "status", "installed": true,
+			"transaction_pending": true, "installed_version": "1.4.0", "gateway_service": "DefenseClawGateway",
+			"service_start_modes": map[string]string{"DefenseClawGateway": "auto"},
+		}
+		run := windowsEnterpriseStandaloneRun{}
+		if windowsEnterpriseInstallerAction(args) == "Repair" {
+			repairs++
+			reply = map[string]any{
+				"schema_version": 1, "ok": false, "action": "repair", "transaction_pending": true,
+				"error": "the restored release could not be reactivated", "errors": []string{"the restored release could not be reactivated"},
+			}
+			run.ExitCode = 1
+		}
+		body, err := json.Marshal(reply)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Output = body
+		return run, nil
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if err == nil || repairs != 1 {
+		t.Fatalf("ensure error = %v after %d repairs, want a failed repair", err, repairs)
+	}
+}
+
 func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
 	for _, body := range []string{
 		`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`,

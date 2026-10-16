@@ -2840,10 +2840,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	serviceMutationAttempted := false
 	lastMutationCommitted := false
+	// childTerminated is whether the last installer run that changed the
+	// host ended without a report: it timed out or was killed before its
+	// own rollback ran. Only then does ensure put the startup modes back. A
+	// parsed report, even a failed one or a recovery that deliberately left
+	// a release it could not reactivate stopped and disabled, is the
+	// installer's decision and stays as it is.
+	childTerminated := false
 	// Restore before Finish writes JSON and the lifecycle log, so an SCM
 	// failure is visible to the caller that must arrange further recovery.
 	finishEnsure := func(code int) error {
-		if serviceMutationAttempted && !lastMutationCommitted &&
+		if serviceMutationAttempted && !lastMutationCommitted && childTerminated &&
 			statusReport != nil && !statusReport.probeFailed {
 			if err := windowsEnterpriseRestoreStartModes(statusReport); err != nil {
 				result.AddError("startup_mode_restore_failed", "restore prior service startup modes: "+err.Error())
@@ -3048,6 +3055,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	serviceMutationAttempted = true
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 	lastMutationCommitted = err == nil && report != nil && report.OK && !report.TransactionPending && run.ExitCode == 0
+	childTerminated = err != nil && report == nil
 	if beforeGatewayPID != 0 {
 		if afterGatewayPID := windowsStandaloneGatewayPID(); afterGatewayPID != 0 && beforeGatewayPID != afterGatewayPID {
 			opts.bundle.gatewayRestarted = true
@@ -3089,6 +3097,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 		lastMutationCommitted = err == nil && report != nil && report.OK && !report.TransactionPending && run.ExitCode == 0
+		childTerminated = err != nil && report == nil
 		if err != nil {
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
@@ -3128,6 +3137,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				actionOpts.jsonOutput = true
 				report, run, err = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs(plan.Action, &actionOpts))
 				lastMutationCommitted = err == nil && report != nil && report.OK && !report.TransactionPending && run.ExitCode == 0
+				childTerminated = err != nil && report == nil
 				if err != nil {
 					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 					return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
