@@ -132,7 +132,8 @@ def windows_kit(tmp_path: Path) -> dict[str, Path | str]:
     anchors.write_text('{"schema_version":1,"anchors":[]}', encoding="ascii")
     config = tmp_path / "config.yaml"
     config.write_text(
-        bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"),
+        "config_version: 9\n"
+        + bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"),
         encoding="ascii",
     )
     return {

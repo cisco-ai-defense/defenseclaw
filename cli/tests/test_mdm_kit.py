@@ -1002,7 +1002,7 @@ echo ok
 '''
 
 
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
 @pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
 def test_unix_wrapper_base_config_must_carry_the_bundle_guardrail_policy(tmp_path: Path, shell: str) -> None:
     # GAP-0090: a base config delivered with a signed bundle is what the
@@ -1088,7 +1088,7 @@ _HOOK_MODE_REFUSAL = {
 }
 
 
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
 @pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
 def test_unix_wrapper_base_config_must_carry_the_bundle_hook_modes(tmp_path: Path, shell: str) -> None:
     # GAP-0090 verify r1: hookModeForConfig takes claude_code.mode,
@@ -1155,7 +1155,7 @@ def _other_letters(key: str) -> str:
     return f"writes the top-level key {key} in other letters; write it in lowercase"
 
 
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
 @pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
 def test_unix_wrapper_base_config_must_be_written_plainly(tmp_path: Path, shell: str) -> None:
     # GAP-0090 verify r2: the compare finds a key by its text. The product's
@@ -1221,7 +1221,7 @@ def _not_ascii(what: str) -> str:
 _LONE_CR = "a carriage return (CR) that is not followed by a line feed (LF)"
 
 
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
 @pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
 def test_unix_wrapper_base_config_must_be_plain_ascii(tmp_path: Path, shell: str) -> None:
     # GAP-0090 verify r3: the loader also starts a new line at a lone CR, NEL,
@@ -1284,7 +1284,7 @@ def test_unix_wrapper_base_config_must_be_plain_ascii(tmp_path: Path, shell: str
     assert check(base_ok, prelude="od() { :; }\n") == "refused: the base config could not be read byte by byte", shell
 
 
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs sha256sum")
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
 def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(tmp_path: Path) -> None:
     # GAP-0090: with a base config and a bundle, the wrapper refuses a
     # mismatch before the package step, applies the base config before the
