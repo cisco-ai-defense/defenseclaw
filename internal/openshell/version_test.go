@@ -66,6 +66,27 @@ func TestInstallerPin(t *testing.T) {
 	}
 }
 
+// #1224: the MicroVM driver archive of each Linux architecture has its
+// digest compiled in for InstallerVersion, and the doctor's install command
+// checks it against that digest, without fetching a checksum file.
+func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
+	want := map[string]string{
+		"amd64": "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
+		"arm64": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
+	}
+	for goarch, digest := range want {
+		archive := vmDriverArchive(goarch)
+		if got := TarballPins[InstallerVersion][archive]; archive == "" || got != digest {
+			t.Errorf("%s: pinned digest of %q for %s = %q, want %q", goarch, archive, InstallerVersion, got, digest)
+		}
+		fix := InstallVMDriverFix(goarch)
+		if fix == nil || !strings.Contains(fix.Command, "echo '"+digest+"  "+archive+"' | sha256sum -c -") ||
+			strings.Contains(fix.Command, "checksums") || !strings.Contains(fix.Command, TarballBaseURL+InstallerTag+"/"+archive) {
+			t.Errorf("%s: install command %q does not check the pinned digest", goarch, fix.Command)
+		}
+	}
+}
+
 func TestCheckSupportedWindow(t *testing.T) {
 	// The advice matches what Installer does: clean up before 0.0.37,
 	// upgrade in place from 0.0.37 on.

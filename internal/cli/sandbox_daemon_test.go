@@ -33,8 +33,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 type fakeSandboxStopper struct {
@@ -249,7 +251,9 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("the shim refuses root")
 	}
-	root := t.TempDir()
+	// The administrator's e2fsprogs folder below must sit under ancestors
+	// every account can traverse, or the access rule refuses it first.
+	root := testenv.TraversableTempDir(t)
 	home := filepath.Join(root, "home")
 	configDir := filepath.Join(root, "etc")
 	for _, dir := range []string{filepath.Join(home, ".local", "bin"), filepath.Join(configDir, "openshell")} {
@@ -338,19 +342,95 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(userSbin, "mke2fs"), nil, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(userSbin, "debugfs"), nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
 	if err != nil || !slices.Contains(plan.env, "PATH="+userSbin+":"+filepath.Join(home, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin") {
 		t.Fatalf("user e2fsprogs: %v %v", err, plan.env)
 	}
-	adminE2fs = "/opt/cisco/defenseclaw-deps/e2fsprogs"
-	plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
-	if err != nil || !strings.HasPrefix(envValue(plan.env, "PATH"), adminE2fs+"/sbin:") {
-		t.Fatalf("admin e2fsprogs: %v %v", err, plan.env)
+	// The administrator's e2fsprogs_dir follows the rule ensure checks
+	// (GAP-0506): its install prefix (tools in sbin) or the folder holding
+	// the tools both put that folder first; a folder without both refuses.
+	adminE2fs = filepath.Join(root, "e2fsprogs")
+	adminSbin := filepath.Join(adminE2fs, "sbin")
+	if err := os.MkdirAll(adminSbin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminSbin, "mke2fs"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("admin e2fsprogs without debugfs: %v", err)
+	}
+	checkDoctor := func(admin string) openshell.Check {
+		d := &openshell.Doctor{GOOS: "darwin", Managed: true, AdminE2fsprogsKnown: true,
+			AdminE2fsprogsDir: admin, HomeDir: func() (string, error) { return home, nil },
+			TrustedE2fsprogsDir: openShellExecTrustedDir, TrustedE2fsprogsFile: openShellExecTrustedFile}
+		return d.ManagedE2fsprogsCheck()
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, adminE2fs) || row.Fix == nil || !strings.Contains(row.Fix.Summary, "install prefix or the folder") {
+		t.Fatalf("doctor accepted the missing debugfs: %+v", row)
+	}
+	if err := os.WriteFile(filepath.Join(adminSbin, "debugfs"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range []string{adminE2fs, adminSbin} {
+		adminE2fs = configured
+		plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
+		if err != nil || !strings.HasPrefix(envValue(plan.env, "PATH"), adminSbin+":") {
+			t.Fatalf("admin e2fsprogs %s: %v %v", configured, err, plan.env)
+		}
+		if row := checkDoctor(configured); row.Status != openshell.StatusPass || !strings.Contains(row.Detail, adminSbin) {
+			t.Fatalf("doctor and gateway disagree on %s: %+v", configured, row)
+		}
+	}
+	if err := os.Chmod(adminSbin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("private admin tool folder: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "cannot be traversed") || row.Fix == nil || !strings.Contains(row.Fix.Summary, "chmod o+x") {
+		t.Fatalf("doctor accepted the private tool folder: %+v", row)
+	}
+	if err := os.Chmod(adminSbin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(adminSbin, "debugfs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("non-executable admin tool: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "cannot be executed") {
+		t.Fatalf("doctor accepted the non-executable tool: %+v", row)
+	}
+	if err := os.Chmod(filepath.Join(adminSbin, "debugfs"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	openShellExecTrustedDir = func(string, string) error { return errors.New("owned by dcm-sv1") }
 	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
 		t.Fatalf("untrusted admin e2fsprogs: %v", err)
 	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "not trusted") {
+		t.Fatalf("doctor accepted the untrusted folder: %+v", row)
+	}
+	openShellExecTrustedDir = func(string, string) error { return nil }
+	baseTrustedFile := openShellExecTrustedFile
+	openShellExecTrustedFile = func(path, label string) error {
+		if path == filepath.Join(adminSbin, "debugfs") {
+			return errors.New("owned by a user")
+		}
+		return baseTrustedFile(path, label)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("untrusted admin tool: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "not trusted") {
+		t.Fatalf("doctor accepted the untrusted tool: %+v", row)
+	}
+	openShellExecTrustedFile = baseTrustedFile
 
 	// An untrusted rendered config or a binary another account can change
 	// refuses.
@@ -389,11 +469,11 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if err := os.WriteFile(admin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin := sandboxDaemonHost, openShellExecHome,
-		openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary
+	restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin, restoreVMDriver := sandboxDaemonHost, openShellExecHome,
+		openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary, openShellExecRenderedVMDriver
 	t.Cleanup(func() {
-		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary =
-			restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin
+		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary, openShellExecRenderedVMDriver =
+			restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin, restoreVMDriver
 	})
 	sandboxDaemonHost = func(string) (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{ConfigDir: configDir}, &managed.RuntimeDescriptor{}, nil
@@ -423,12 +503,23 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "openshell-gateway"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	cfgPath := filepath.Join(configDir, "openshell", "gateway.toml")
+	writeConfig := func(driver openshell.ComputeDriver, dir string) {
+		t.Helper()
+		data, err := (openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: driver, DriverDir: dir}).TOML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(openshell.DriverDocker, "")
 
 	plan, err := planSandboxOpenShellExec(context.Background(), "linux", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := filepath.Join(configDir, "openshell", "gateway.toml")
 	if plan.binary != admin || !slices.Equal(plan.argv, []string{admin, "--config", cfgPath}) {
 		t.Fatalf("plan = %+v", plan)
 	}
@@ -443,6 +534,26 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if strings.Contains(envValue(plan.env, "PATH"), ".local") {
 		t.Fatalf("PATH holds the account's folder: %s", envValue(plan.env, "PATH"))
 	}
+
+	// An older rendered VM path overrides OpenShell's conventional search.
+	// The shim refuses it before the gateway would wait and exit, even when
+	// the administrator has moved the trusted driver to another accepted dir.
+	openShellExecRenderedVMDriver = func(_, dir string) (string, string) {
+		if dir == "/usr/local/libexec/openshell" {
+			return dir + "/openshell-driver-vm", ""
+		}
+		return "", "the rendered MicroVM driver_dir " + dir + " has no executable openshell-driver-vm"
+	}
+	writeConfig(openshell.DriverVM, "/usr/libexec/openshell")
+	if _, err := planSandboxOpenShellExec(context.Background(), "linux", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) ||
+		!strings.Contains(err.Error(), "/usr/libexec/openshell") {
+		t.Fatalf("stale rendered driver_dir: %v", err)
+	}
+	writeConfig(openshell.DriverVM, "/usr/local/libexec/openshell")
+	if _, err := planSandboxOpenShellExec(context.Background(), "linux", nil); err != nil {
+		t.Fatalf("rendered driver_dir with the trusted driver: %v", err)
+	}
+	writeConfig(openshell.DriverDocker, "")
 
 	// The administrator's binary an account could change is refused, with
 	// what to do.

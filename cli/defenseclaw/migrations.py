@@ -992,7 +992,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         new_lines.append(line)
     if rewritten == 0:
         return
-    if not _atomic_write_text(config_path, "".join(new_lines), mode=0o600):
+    if not _atomic_write_config(config_path, "".join(new_lines), mode=0o600):
         return
     ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 
@@ -1097,7 +1097,7 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     rewrite is anchored to the ``claw:`` block (via
     ``_find_top_level_block``) so a stray ``mode: nemoclaw`` somewhere
     else in config.yaml is not touched. Reading through
-    ``_read_config_text`` + writing through ``_atomic_write_text``
+    ``_read_config_text`` + writing through ``_atomic_write_config``
     preserves the file's line endings, so a CRLF config is rewritten in
     place rather than flattened to LF.
 
@@ -1150,7 +1150,7 @@ def _migrate_0_4_0_normalize_claw_mode(ctx: MigrationContext) -> None:
     new_text = text[: block.start("body")] + new_body + text[block.end("body") :]
     if new_text == text:
         return
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
 
 
@@ -1281,7 +1281,7 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if new_text == text:
         return
 
-    if _atomic_write_text(cfg_path, new_text):
+    if _atomic_write_config(cfg_path, new_text):
         ctx.changes.append(
             "seeded guardrail.hook_fail_mode='open' in config.yaml "
             "(legacy fail-open behavior preserved for upgraders; v4 "
@@ -1511,24 +1511,28 @@ def _dotenv_update_keys_locked(
     return _atomic_write_text(path, "".join(out_lines), mode=0o600)
 
 
-def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
-    """Write ``body`` to ``path``; a config.yaml write takes the config
-    writer's lock and records a ``config.generation.json`` generation (actor
-    ``migration``). The 0.x import steps write config shapes the v8
-    validator does not accept, so they skip the writer's validation."""
-    if os.path.basename(path) != "config.yaml":
-        return _atomic_write_text_unlocked(path, body, mode=mode)
+def _atomic_write_config(path: str, body: str, *, mode: int = 0o644) -> bool:
+    """Write the config document ``path`` under the config writer's lock and
+    record a ``config.generation.json`` generation (actor ``migration``).
+
+    ``path`` is ``MigrationContext.active_config_path()``: ``config.yaml``, or
+    the file ``DEFENSECLAW_CONFIG`` names, whatever its name. Taking the lock
+    only for a file named ``config.yaml`` let the 0.x import rewrite such a
+    config next to a running writer, with no generation (GAP-1455). The 0.x
+    import steps write config shapes the v8 validator does not accept, so
+    they skip the writer's validation."""
     from defenseclaw.config_writer import ACTOR_MIGRATION, hold_lock, record_generation
 
     with hold_lock(path, timeout_s=None):
-        if not _atomic_write_text_unlocked(path, body, mode=mode):
+        if not _atomic_write_text(path, body, mode=mode):
             return False
         record_generation(path, hashlib.sha256(body.encode("utf-8")).hexdigest(), ACTOR_MIGRATION, "0.x import")
     return True
 
 
-def _atomic_write_text_unlocked(path: str, body: str, *, mode: int = 0o644) -> bool:
-    """Atomically write ``body`` to ``path``.
+def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
+    """Atomically write ``body`` to ``path``. The config document goes
+    through :func:`_atomic_write_config`, which also takes the writer's lock.
 
     The temp-file creation is hardened: it uses :func:`tempfile.mkstemp`
     in the *target* directory so the bytes never exist on disk under a
@@ -1635,7 +1639,7 @@ def _read_config_text(cfg_path: str) -> str | None:
     ``newline=""`` disables Python's universal-newline translation so a
     CRLF file (a Windows operator's config, or one copied from a Windows
     host) keeps its ``\\r\\n`` bytes verbatim. Paired with
-    ``_atomic_write_text`` (which also writes byte-for-byte), a migration
+    ``_atomic_write_config`` (which also writes byte-for-byte), a migration
     that edits a single line does not silently reflow the whole file from
     CRLF to LF. Returns ``None`` (after warning) when the file cannot be
     read so callers can bail without special-casing the error themselves.
@@ -2137,7 +2141,7 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
     if not removed:
         return
 
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
 
@@ -2281,7 +2285,7 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     if new_text == text:
         return
 
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
 
@@ -2380,7 +2384,7 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
             indent="    ",
         )
         return
-    if new_text != text and not _atomic_write_text(cfg_path, new_text):
+    if new_text != text and not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
 
@@ -2627,7 +2631,7 @@ def _migrate_0_8_0_preserve_legacy_audit_sink_tls(ctx: MigrationContext) -> None
     if new_text == text:
         return
 
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
 
@@ -2771,7 +2775,7 @@ def _persist_retired_desktop_connector(ctx: MigrationContext) -> None:
         surgical_ok = False
     if not surgical_ok:
         new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
     ctx.changes.extend(notices)
@@ -3307,7 +3311,7 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
         surgical_ok = False
     if not surgical_ok:
         new_text = yaml.safe_dump(migrated, default_flow_style=False, sort_keys=False)
-    if not _atomic_write_text(cfg_path, new_text):
+    if not _atomic_write_config(cfg_path, new_text):
         ux.warn(f"could not write {cfg_path}", indent="    ")
         return
     ctx.changes.append(

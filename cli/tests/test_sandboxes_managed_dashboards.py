@@ -88,6 +88,16 @@ def test_board_covers_every_managed_record_and_names_no_person() -> None:
     assert not PERSON.search(joined)
 
 
+def test_board_counts_registrations_without_a_guest() -> None:
+    board = json.loads(BOARD.read_text(encoding="utf-8"))
+    panel = next(p for p in board["panels"] if p.get("title") == "Sandbox registrations without a guest")
+    assert panel["type"] == "stat"
+    assert panel["fieldConfig"]["defaults"]["noValue"] == "0"
+    assert 'defenseclaw_event_name="sandbox.registration_without_guest"' in panel["targets"][0]["expr"]
+    assert "defenseclaw_bucket" not in panel["targets"][0]["expr"]
+    assert "or vector(0)" in panel["targets"][0]["expr"]
+
+
 def test_saved_searches_cover_every_managed_record_and_names_no_person() -> None:
     searches = _sandbox_searches()
     assert len(searches) >= 11

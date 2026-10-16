@@ -5,6 +5,7 @@
 
 import type { GuardrailCategory, Policy, SeverityUpper } from '../types';
 import { SEVERITIES_UPPER } from '../types';
+import { GUARDRAIL_MODE_CHOICES, getGuardrailModeChoice, setGuardrailModeChoice } from '../lib/guardrail-mode';
 import { SegmentedControl } from '../ui/segmented-control';
 import { TextField } from '../ui/text-field';
 import { Toggle } from '../ui/toggle';
@@ -63,13 +64,16 @@ export function GuardrailSection({
         <SegmentedControl
           name="guardrail_mode"
           size="sm"
-          value={policy.guardrail.mode ?? 'observe'}
-          options={[
-            { value: 'observe', label: 'observe' },
-            { value: 'action', label: 'action' },
-          ]}
-          onChange={(v) => setG({ mode: v })}
+          value={getGuardrailModeChoice(policy.guardrail)}
+          options={GUARDRAIL_MODE_CHOICES}
+          onChange={(v) => onPolicyChange({
+            ...policy,
+            guardrail: setGuardrailModeChoice(policy.guardrail, v),
+          })}
         />
+        <span className="text-[11px] text-fd-muted-foreground">
+          Unset leaves the mode already configured on the host; the preview then runs as observe (the host default).
+        </span>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <ThresholdPicker
@@ -112,7 +116,9 @@ export function GuardrailSection({
           hint="When enabled, the gateway pauses on findings ≥ min_severity until a human responds."
           checked={policy.guardrail.hilt.enabled}
           onChange={(v) =>
-            setG({ mode: v ? 'action' : policy.guardrail.mode, hilt: { ...policy.guardrail.hilt, enabled: v } })
+            setG(v
+              ? { mode: 'action', hilt: { ...policy.guardrail.hilt, enabled: true } }
+              : { hilt: { ...policy.guardrail.hilt, enabled: false } })
           }
         />
         <div className="flex items-center gap-2">

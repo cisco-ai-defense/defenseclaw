@@ -23,12 +23,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"sync/atomic"
 	"time"
 
+	dm "github.com/NVIDIA/OpenShell/sdk/go/proto/datamodelv1"
+	pb "github.com/NVIDIA/OpenShell/sdk/go/proto/openshellv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -81,27 +86,42 @@ func (r *Registration) caPool() (*x509.CertPool, error) {
 }
 
 // ErrGatewayExposed means someone other than the caller could drive the
-// gateway: it accepted a TLS session from a client that presented no
-// certificate, or its configuration turns off TLS or client certificate
-// authentication, enables OIDC or unauthenticated users, or listens
-// beyond loopback.
+// gateway: a client that presented no certificate got past its TLS
+// handshake and was not turned away by its API, or its configuration turns
+// off TLS or client certificate authentication, enables OIDC or
+// unauthenticated users, or listens beyond loopback.
 var ErrGatewayExposed = errors.New("openshell: the gateway can be reached without the registration's client certificate")
 
 // Client-auth probe bounds. A gateway that requires a certificate sends
 // its alert as soon as it reads the client's empty one, right after the
-// handshake; on loopback two seconds are plenty.
+// handshake; on loopback two seconds are plenty. A gateway that lets the
+// client through the handshake answers its API call and its OIDC settings
+// request at once.
 const (
 	probeTimeout     = 10 * time.Second
 	probeAlertWindow = 2 * time.Second
+	probeCallTimeout = 3 * time.Second
 )
 
 // ProbeClientAuth connects to the registration's gateway over TLS, trusting
 // only the registration's CA, as a client with no certificate, and returns
-// nil only when the gateway asks for a certificate and then refuses the
-// client for having none. It returns ErrGatewayExposed when the gateway
-// lets the client in instead, and another error when it cannot tell: the
-// gateway is down, does not speak TLS, or presents a certificate the
-// registration's CA did not sign. Nothing is sent after the handshake.
+// nil only when the gateway asks for a certificate and then turns the
+// client away for having none, in one of two ways:
+//
+//   - at the TLS handshake, as OpenShell 0.1.2 and earlier do;
+//   - at its API, as OpenShell 0.1.3 and later do: their TLS listener
+//     lets a client without a certificate through the handshake, since
+//     sandbox supervisors have none and authenticate with gateway-minted
+//     bearer tokens, and their API refuses every call but Health from a
+//     caller with neither a verified certificate nor a token
+//     (Unauthenticated). Past the handshake the probe asks the gateway
+//     to list its sandboxes and for its OIDC settings (refusesAtAPI).
+//
+// It returns ErrGatewayExposed when the gateway lets the client in
+// instead, and another error when it cannot tell: the gateway is down,
+// does not speak TLS, or presents a certificate the registration's CA did
+// not sign. The probe sends no certificate and no credential, and only
+// read-only requests.
 func ProbeClientAuth(ctx context.Context, reg *Registration) error {
 	if reg == nil || reg.AuthMode != AuthModeMTLS || reg.TLS == nil {
 		return errors.New("openshell: registration is not an mtls registration")
@@ -118,7 +138,7 @@ func ProbeClientAuth(ctx context.Context, reg *Registration) error {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	var requested atomic.Bool
-	d := &tls.Dialer{Config: &tls.Config{
+	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: host, NextProtos: []string{"h2"},
 		// Called when the server sends a CertificateRequest; the empty
 		// certificate sends none.
@@ -126,28 +146,108 @@ func ProbeClientAuth(ctx context.Context, reg *Registration) error {
 			requested.Store(true)
 			return &tls.Certificate{}, nil
 		},
-	}}
-	conn, err := d.DialContext(ctx, "tcp", target)
+	}
+	conn, err := (&tls.Dialer{Config: cfg}).DialContext(ctx, "tcp", target)
 	if err == nil {
-		defer conn.Close()
 		// A TLS 1.3 server checks the client's certificate after the
 		// client's side of the handshake is done; its verdict is the first
 		// record it sends.
 		_ = conn.SetReadDeadline(time.Now().Add(probeAlertWindow))
 		var b [1]byte
 		_, err = conn.Read(b[:])
+		_ = conn.Close()
 		var nerr net.Error
+		var session string
 		switch {
 		case err == nil:
-			return fmt.Errorf("%w: %s accepted a TLS session from a client with no certificate", ErrGatewayExposed, reg.Endpoint)
+			session = "accepted a TLS session from a client with no certificate"
 		case errors.As(err, &nerr) && nerr.Timeout() && ctx.Err() == nil:
-			return fmt.Errorf("%w: %s kept a TLS session with a client with no certificate open", ErrGatewayExposed, reg.Endpoint)
+			session = "kept a TLS session with a client with no certificate open"
+		}
+		if session != "" {
+			if !requested.Load() {
+				return fmt.Errorf("%w: %s %s and never asked it for one", ErrGatewayExposed, reg.Endpoint, session)
+			}
+			if err := refusesAtAPI(ctx, target, cfg); err != nil {
+				return fmt.Errorf("%w: %s %s, and %v", ErrGatewayExposed, reg.Endpoint, session, err)
+			}
+			return nil
 		}
 	}
 	if requested.Load() && missingCertAlert(err) {
 		return nil
 	}
 	return fmt.Errorf("openshell: could not confirm that %s requires a client certificate: %w", reg.Endpoint, err)
+}
+
+// refusesAtAPI checks a gateway at target that let a client without a
+// certificate through its TLS handshake, as that client (cfg sends no
+// certificate) and with no token. It returns nil only when the gateway
+// refuses that client the list of its sandboxes (listRefused) and has no
+// OIDC issuer (noOIDCIssuer); otherwise it says what the gateway did
+// instead.
+func refusesAtAPI(ctx context.Context, target string, cfg *tls.Config) error {
+	if err := listRefused(ctx, target, cfg); err != nil {
+		return err
+	}
+	return noOIDCIssuer(ctx, target, cfg)
+}
+
+// listRefused asks for the sandboxes of the default workspace and returns
+// nil only when the gateway answers Unauthenticated. ListSandboxes is
+// read-only and, like every OpenShell call but Health, needs a user.
+func listRefused(ctx context.Context, target string, cfg *tls.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
+	defer cancel()
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(cfg.Clone())), grpc.WithNoProxy())
+	if err != nil {
+		return fmt.Errorf("could not ask it for its sandboxes: %w", err)
+	}
+	defer conn.Close()
+	_, err = pb.NewOpenShellClient(conn).ListSandboxes(ctx, &pb.ListSandboxesRequest{
+		WorkspaceScope: &dm.WorkspaceSelector{Selection: &dm.WorkspaceSelector_Workspace{Workspace: DefaultWorkspace}},
+	})
+	switch status.Code(err) {
+	case codes.Unauthenticated:
+		return nil
+	case codes.OK:
+		return errors.New("listed its sandboxes for it")
+	}
+	return fmt.Errorf("did not refuse it the list of its sandboxes: %w", err)
+}
+
+// noOIDCIssuer returns nil only when the gateway's /auth/oidc-config,
+// which OpenShell serves to anyone, answers 404: a gateway with an OIDC
+// issuer lets the holders of that issuer's tokens in without a
+// certificate, and an issuer set on its command line is in neither of the
+// files gatewayExposure reads.
+func noOIDCIssuer(ctx context.Context, target string, cfg *tls.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
+	defer cancel()
+	httpCfg := cfg.Clone()
+	httpCfg.NextProtos = []string{"http/1.1"}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: httpCfg, DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+target+"/auth/oidc-config", nil)
+	if err != nil {
+		return fmt.Errorf("could not ask it for its OIDC settings: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not ask it for its OIDC settings: %w", err)
+	}
+	_ = resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return nil
+	case http.StatusOK:
+		return errors.New("has an OIDC issuer (/auth/oidc-config), whose token holders need no client certificate")
+	}
+	return fmt.Errorf("did not show that it has no OIDC issuer: /auth/oidc-config answered %s", resp.Status)
 }
 
 // missingCertAlert reports whether err is a TLS alert a server sends a

@@ -32,16 +32,38 @@ func init() {
 // standard account cannot read its config or gateway token.
 func pinEnterpriseDiscoveryEnv() error {
 	if runtimeCommand != nil && runtimeCommand.Name() != "discovery" {
-		// An identity view (enterprise_identity_views.go).
-		view := "enterprise windows " + runtimeCommand.Name()
+		// An identity view (enterprise_identity_views.go) or a sandbox view
+		// (enterprise_sandbox_views.go).
+		what, view, adminArgs := windowsEnterpriseAdminViewCommand(runtimeCommand)
 		return pinManagedAdministratorEnvironment(view, func() string {
-			return windowsManagedStandardUserViewAnswer("the identity views", view)
+			return windowsManagedStandardUserViewAnswer(what, adminArgs)
 		})
 	}
 	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
 			"enterprise windows discovery --user "+managedHostCurrentAccountName())
 	})
+}
+
+// windowsEnterpriseAdminViewCommand names an administrator view for a
+// standard account's refusal: what it shows, its command path below the
+// root, and the arguments an administrator runs it with. The path is the
+// command's own: "enterprise windows " + its leaf named `enterprise windows
+// list`, which does not exist, for `enterprise windows sandbox list`
+// (#1201). A --user the caller gave is kept.
+func windowsEnterpriseAdminViewCommand(cmd *cobra.Command) (what, view, adminArgs string) {
+	view = strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
+	what = "the identity views"
+	if parent := cmd.Parent(); parent != nil && parent.Name() == "sandbox" {
+		what = "the sandbox registrations"
+	}
+	adminArgs = view
+	if flag := cmd.Flags().Lookup("user"); flag != nil && flag.Changed {
+		if user := strings.TrimSpace(flag.Value.String()); user != "" {
+			adminArgs += " --user " + user
+		}
+	}
+	return what, view, adminArgs
 }
 
 // newWindowsDiscoveryCommand is `enterprise windows discovery`, the Windows

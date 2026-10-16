@@ -110,7 +110,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
 		"status":             "Report the deployment state (read-only)",
 		"verify":             "Verify every file, permission, service and readiness check (read-only)",
-		"uninstall":          "Stop and remove the deployment, its machine state and every account's hooks (each account keeps ~/.defenseclaw); --purge removes everything",
+		"uninstall":          "Stop and remove the deployment, its machine state and every account's hooks (each account keeps ~/.defenseclaw and its sandboxes, and the gateway keeps its registrations of those sandboxes); --purge removes everything",
 	}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure", "reconcile", "rotate-credentials", "status", "verify", "uninstall"} {
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))

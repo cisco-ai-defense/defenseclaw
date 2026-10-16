@@ -8,12 +8,16 @@ package cli
 
 import (
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -38,6 +42,30 @@ func TestManagedScanGatewayEndpointUsesInstalledAPIPort(t *testing.T) {
 	endpoint, token, managedHost, err := managedScanGatewayEndpoint()
 	if err != nil || !managedHost || endpoint != "http://127.0.0.1:18971" || token != "test-token" {
 		t.Fatalf("endpoint = %q, token = %q, managed = %v, err = %v", endpoint, token, managedHost, err)
+	}
+}
+
+// GAP-1391: a standard account's scan on a managed computer failed with
+// "read installed managed gateway config: open C:/ProgramData/...: Access is
+// denied". It now says an administrator runs it, without the private path.
+func TestManagedScanGatewayEndpointRefusesAStandardAccountPlainly(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	previousHost, previousLayout, previousRead := managedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile
+	t.Cleanup(func() {
+		managedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile = previousHost, previousLayout, previousRead
+	})
+	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
+	}
+	managedScanReadFile = func(path string, _ int64) ([]byte, error) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: windows.ERROR_ACCESS_DENIED}
+	}
+	_, _, managedHost, err := managedScanGatewayEndpoint()
+	if !managedHost || err == nil || strings.Contains(err.Error(), configPath) || strings.Contains(err.Error(), "Access is denied") ||
+		!strings.Contains(err.Error(), "elevated Administrator prompt") {
+		t.Fatalf("standard account scan: managed = %v, err = %v", managedHost, err)
 	}
 }
 

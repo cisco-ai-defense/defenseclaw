@@ -1156,7 +1156,13 @@ def _shell_function(text: str, name: str) -> str:
 # the version already installed (empty: not installed).
 _PACKAGE_STUBS = {
     "dpkg-deb": """case "$3" in Package) echo defenseclaw-enterprise ;; Version) echo "$DC_TEST_VERSION" ;; Architecture) echo amd64 ;; esac""",
-    "dpkg": """case "$1" in --print-architecture) echo amd64 ;; esac""",
+    "dpkg": """case "$1" in
+    --print-architecture) echo amd64 ;;
+    --compare-versions)
+        [ "$3" = lt ] && [ "$2" != "$4" ] && [ "$(printf '%s\\n%s\\n' "$2" "$4" | sort -V | head -n 1)" = "$2" ]
+        exit $?
+        ;;
+esac""",
     "dpkg-query": """[ -n "$DC_TEST_INSTALLED" ] || exit 1
 printf 'install ok installed %s' "$DC_TEST_INSTALLED\"""",
     "rpm": """case "$1" in
@@ -1304,6 +1310,27 @@ def test_linux_postremove_keeps_the_vendor_policies_while_the_deployment_stays(t
     result = host.run(script, "remove")
     assert result.returncode == 0, result.stderr
     assert (pack / "pack.yaml").is_file() is deployment_kept
+
+
+# GAP-0706: the Fleet compiler ships under share/fleet, so a Fleet-off
+# package removal left share/fleet, share and the install root behind.
+def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    opt = tmp_path / "opt"
+    for sub in ("share/fleet", "share/opencode", "bin"):
+        (opt / sub).mkdir(parents=True)
+    script = _rooted(
+        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
+        {
+            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
+            "/opt/defenseclaw": str(opt),
+            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
+            "/run/systemd/system": str(host.run_systemd),
+        },
+    )
+    result = host.run(script, "remove")
+    assert result.returncode == 0, result.stderr
+    assert not opt.exists()
 
 
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored

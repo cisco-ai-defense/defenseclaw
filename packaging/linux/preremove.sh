@@ -4,11 +4,24 @@
 #
 # defenseclaw-enterprise package: stop and unregister the managed deployment
 # before its files are removed. An upgrade is left to the new package's
-# postinstall. The removal fails when another lifecycle run keeps the lock
-# for the whole wait or when the hook-removal precheck refuses. Removing the
-# files then would leave machine policy or per-user hooks naming a deleted
-# binary. Later lifecycle problems are reported without stopping the package
-# transaction.
+# postinstall. The removal fails, and the package keeps its files, in three
+# cases, each matched by its exact result:
+#   - another lifecycle run keeps the lock for the whole wait (exit 75);
+#   - the hook-removal precheck refuses (uninstall_precheck_refused): nothing
+#     was changed;
+#   - the uninstall stopped before removing the binaries because per-user
+#     hook registrations or vendor machine policy still name them
+#     (uninstall_incomplete): it started the services again (GAP-1519).
+# Removing the files then would leave machine policy or per-user hooks
+# naming a deleted binary. Other lifecycle problems are reported without
+# stopping the package transaction.
+#
+# To finish a removal that stopped, fix the cause the result names (a
+# read-only or immutable vendor policy or hook config file, for example; the
+# result names the account and connector) and run `apt remove` or
+# `dnf remove` again. A package that must go while the cause stays: on RHEL
+# `rpm -e --nopreun defenseclaw-enterprise` skips this script; the listed
+# registrations then name a deleted binary until they are removed by hand.
 #
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
 # and apt purge, and rpm has no purge. It removes the machine state (config,
@@ -142,9 +155,13 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     "$gateway" enterprise linux uninstall --json --lock-wait 8m >"$work/last-package-result.json" 2>"$work/last-package-result.log"
     status=$?
     precheck_refused=0
-    if [ "$status" != 0 ] &&
-        grep -Eq '"code"[[:space:]]*:[[:space:]]*"uninstall_precheck_refused"' "$work/last-package-result.json"; then
-        precheck_refused=1
+    incomplete=0
+    if [ "$status" != 0 ]; then
+        if grep -Eq '"code"[[:space:]]*:[[:space:]]*"uninstall_precheck_refused"' "$work/last-package-result.json"; then
+            precheck_refused=1
+        elif grep -Eq '"code"[[:space:]]*:[[:space:]]*"uninstall_incomplete"' "$work/last-package-result.json"; then
+            incomplete=1
+        fi
     fi
     if [ "$status" != 0 ]; then
         mkdir -p "$state" &&
@@ -157,6 +174,10 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     fi
     if [ "$precheck_refused" = 1 ]; then
         echo "defenseclaw-enterprise: hook-removal precheck refused; package files were kept. See $state/last-package-result.json and retry removal after fixing the listed accounts." >&2
+        exit 1
+    fi
+    if [ "$incomplete" = 1 ]; then
+        echo "defenseclaw-enterprise: the uninstall stopped before removing the binaries, because per-user hook registrations or vendor machine policy still name them; package files were kept and the services started again. See $state/last-package-result.json, fix the cause it names and retry the removal." >&2
         exit 1
     fi
     [ "$status" = 0 ] ||

@@ -29,6 +29,14 @@ import (
 // ran a call the profile blocks, while status, verify and the Setup result
 // said nothing (GAP-0967). They now name each such session per account, as
 // the Linux and macOS lifecycles do (agent_sessions_restart_required).
+//
+// The same holds after the hook guardian puts back hooks a standard user
+// changed or removed: a Hermes session started while the hooks block was
+// empty kept running without DefenseClaw after the restore, and status read
+// security_complete (GAP-0440). Hermes keeps the callbacks it loaded and has
+// no reload the guardian could trigger, so status, verify and ensure name
+// that account's sessions of the connector that started before the restore
+// and report security_complete false until they are restarted.
 
 const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 
@@ -97,7 +105,41 @@ var (
 		}
 		return sid.String()
 	}
+	// windowsEnterpriseGuardianRestores returns when the hook guardian last
+	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey,
+	// or an error when its record stays unreadable.
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		layout, err := managed.StandaloneWindowsLayout()
+		if err != nil {
+			return nil, err
+		}
+		return readEnterpriseHookGuardianRestores(layout.DataDir)
+	}
 )
+
+// windowsMachinePolicyHookConnectors keep DefenseClaw's hook registration in
+// administrator-owned vendor machine policy on a standalone Windows
+// deployment (Claude Code managed settings, Codex machine requirements,
+// Cursor's machine hooks file), which a standard user cannot change. Their
+// per-user target holds only the runtime the hook binary reads at each call,
+// so once the guardian puts that back a running session is inspected again
+// at its next call and needs no restart (GAP-0440).
+var windowsMachinePolicyHookConnectors = map[string]bool{"claudecode": true, "codex": true, "cursor": true}
+
+// windowsEnterpriseRecoveredFailedInstallCode is the warning an ensure adds
+// when its repair rolled back a failed initial install before it installed.
+const windowsEnterpriseRecoveredFailedInstallCode = "recovered_failed_install"
+
+// windowsEnterpriseResultRecoveredFailedInstall reports whether this run
+// rolled back a failed initial install (GAP-1366).
+func windowsEnterpriseResultRecoveredFailedInstall(result *enterprisestatus.Result) bool {
+	for _, warning := range result.Warnings {
+		if warning.Code == windowsEnterpriseRecoveredFailedInstallCode {
+			return true
+		}
+	}
+	return false
+}
 
 // windowsEnterpriseStandaloneInstalled reports a standalone deployment that
 // is installed now; a change action reads it before it runs.
@@ -130,8 +172,15 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
 	record, activated := readWindowsEnterpriseActivation(path)
 	// A first install and a staged first install still use the deployment
-	// activation time. Later upgrades can enable individual connectors.
-	firstInstall := !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && len(result.Errors) == 0
+	// activation time. Later upgrades can enable individual connectors. An
+	// ensure that rolled back a failed initial install and then installed is
+	// a first install too: the failed install had written deployment.json, so
+	// the host looked installed before the run (GAP-1366). A missing
+	// activation record is not the signal: an upgrade from a build that
+	// predates the record has none either, and must not warn.
+	firstInstall := !opts.activationStartedAt.IsZero() &&
+		(!opts.installedBeforeRun || windowsEnterpriseResultRecoveredFailedInstall(result)) &&
+		len(result.Errors) == 0
 	activatePending := !opts.activationStartedAt.IsZero() && record.Pending && !opts.noStart &&
 		len(result.Errors) == 0 && result.Readiness.Gateway
 	writeRecord := firstInstall || activatePending
@@ -249,11 +298,17 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
-	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 {
-		return
+	// An unreadable restore record leaves each session's restart status
+	// unknown, which is named instead of read as "no restore".
+	restores, restoresErr := windowsEnterpriseGuardianRestores()
+	if restoresErr != nil {
+		result.SecurityComplete = false
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
 	if err != nil {
+		if restoresErr != nil {
+			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record and running agent sessions could not be read")
+		}
 		return
 	}
 	// A session another warning of this run already names (the hot config
@@ -275,21 +330,42 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	byUser := map[string][]string{}
 	connectorSessions := map[string]map[string][]string{}
 	enrollmentSessions := map[string]map[string][]string{}
+	restoredSessions := map[string]map[string][]string{}
+	unknownSessions := map[string][]string{}
+	unknownOwners := map[string][]string{}
+	// Sessions whose account name did not resolve (a deleted account whose
+	// process kept running, or an unreachable directory): judged by their SID
+	// below, and named as unknown if no verdict and no enrolled target covers
+	// them (GAP-0591).
+	type sidOnlySession struct{ sid, connector, label string }
+	var sidOnly []sidOnlySession
 	sids := map[string]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
-		if user == "" || process.StartedAt.IsZero() || windowsServiceIdentity(user) {
+		sid := process.OwnerSID
+		name := strings.ToLower(process.Connector)
+		if name == "" || windowsServiceIdentity(user) || windowsServiceSID(sid) {
 			continue
 		}
 		label := fmt.Sprintf("%s (pid %d)", process.Connector, process.PID)
 		if alreadyNamed(label) {
 			continue
 		}
+		if user == "" && sid == "" {
+			unknownOwners[name] = append(unknownOwners[name], label)
+			continue
+		}
+		if user == "" {
+			user = sid
+			sidOnly = append(sidOnly, sidOnlySession{sid: sid, connector: name, label: label})
+		}
+		if process.StartedAt.IsZero() {
+			continue
+		}
 		if !activated.IsZero() && process.StartedAt.Before(activated) {
 			byUser[user] = append(byUser[user], label)
 			continue
 		}
-		name := strings.ToLower(process.Connector)
 		if currentErr != nil || !currentSet[name] {
 			continue
 		}
@@ -300,15 +376,21 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			connectorSessions[user][name] = append(connectorSessions[user][name], label)
 			continue
 		}
-		if len(record.EnrollmentActivatedAt) == 0 {
+		if len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 && restoresErr == nil {
 			continue
 		}
-		sid, resolved := sids[user]
-		if !resolved {
-			sid = windowsEnterpriseAccountSID(user)
-			sids[user] = sid
+		if sid == "" {
+			var resolved bool
+			sid, resolved = sids[user]
+			if !resolved {
+				sid = windowsEnterpriseAccountSID(user)
+				sids[user] = sid
+			}
 		}
 		if sid == "" {
+			if restoresErr != nil && !windowsMachinePolicyHookConnectors[name] {
+				unknownSessions[user] = append(unknownSessions[user], label)
+			}
 			continue
 		}
 		key := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: name})
@@ -317,6 +399,20 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				enrollmentSessions[user] = map[string][]string{}
 			}
 			enrollmentSessions[user][key] = append(enrollmentSessions[user][key], label)
+			continue
+		}
+		if windowsMachinePolicyHookConnectors[name] {
+			continue
+		}
+		if restoresErr != nil {
+			unknownSessions[user] = append(unknownSessions[user], label)
+			continue
+		}
+		if at, ok := restores[key]; ok && process.StartedAt.Before(at) {
+			if restoredSessions[user] == nil {
+				restoredSessions[user] = map[string][]string{}
+			}
+			restoredSessions[user][key] = append(restoredSessions[user][key], label)
 		}
 	}
 	users := make([]string, 0, len(byUser))
@@ -363,6 +459,61 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				user, strings.Join(enrollmentSessions[user][key], ", "), record.EnrollmentActivatedAt[key]))
 		}
 	}
+	users = users[:0]
+	for user := range restoredSessions {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		keys := make([]string, 0, len(restoredSessions[user]))
+		for key := range restoredSessions[user] {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			_, connectorName, _ := strings.Cut(key, "\x00")
+			result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+				"user %s runs %s, started before the hook guardian put back the account's changed or removed %s hooks at %s; an agent keeps the hooks it loaded when it started, so a session started while they were missing runs without DefenseClaw until it is restarted: ask that user to restart these sessions",
+				user, strings.Join(restoredSessions[user][key], ", "), connectorName, restores[key].UTC().Format(time.RFC3339)))
+		}
+	}
+	users = users[:0]
+	for user := range unknownSessions {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+			"user %s runs %s; restart status unknown: the hook guardian's restore record could not be read (%v), so DefenseClaw cannot tell whether these sessions started before the guardian put back the account's hooks and run without DefenseClaw: ask that user to restart them",
+			user, strings.Join(unknownSessions[user], ", "), restoresErr))
+	}
+	if restoresErr != nil && len(unknownSessions) == 0 {
+		result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record could not be read")
+	}
+	if len(sidOnly) > 0 {
+		// A SID no enabled target enrolls has no activation, enrollment or
+		// restore time to judge its session by, so silence would read as "no
+		// session to restart" while it runs without DefenseClaw. An unreadable
+		// manifest or connector set is no proof of coverage either.
+		targets, targetsErr := windowsEnterpriseEnrolledTargets()
+		for _, session := range sidOnly {
+			if (currentErr == nil && !currentSet[session.connector]) ||
+				windowsEnterpriseSessionNamed(session.sid, session.label,
+					[]map[string][]string{byUser, unknownSessions},
+					[]map[string]map[string][]string{connectorSessions, enrollmentSessions, restoredSessions}) {
+				continue
+			}
+			key := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: session.sid, Connector: session.connector})
+			if targetsErr == nil && targets[key] {
+				continue
+			}
+			unknownOwners[session.connector] = append(unknownOwners[session.connector], session.label+" as "+session.sid)
+		}
+	}
+	warnWindowsEnterpriseUnknownOwnerSessions(result, unknownOwners)
+	if len(restoredSessions) > 0 {
+		result.SecurityComplete = false
+	}
 }
 
 func readWindowsEnterpriseActivation(path string) (windowsEnterpriseActivationRecord, time.Time) {
@@ -390,6 +541,61 @@ func windowsServiceIdentity(user string) bool {
 		return true
 	}
 	return false
+}
+
+// windowsServiceSID reports built-in and virtual service identities that may
+// have no account name in a process snapshot.
+func windowsServiceSID(sid string) bool {
+	sid = strings.ToUpper(strings.TrimSpace(sid))
+	switch sid {
+	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
+		return true
+	}
+	return strings.HasPrefix(sid, "S-1-5-80-") ||
+		strings.HasPrefix(sid, "S-1-5-90-") ||
+		strings.HasPrefix(sid, "S-1-5-96-")
+}
+
+// windowsEnterpriseSessionNamed reports whether a restart-status verdict of
+// this run already names label for user.
+func windowsEnterpriseSessionNamed(user, label string, flat []map[string][]string, nested []map[string]map[string][]string) bool {
+	lists := make([][]string, 0, len(flat)+len(nested))
+	for _, byUser := range flat {
+		lists = append(lists, byUser[user])
+	}
+	for _, byUser := range nested {
+		for _, labels := range byUser[user] {
+			lists = append(lists, labels)
+		}
+	}
+	for _, labels := range lists {
+		for _, named := range labels {
+			if named == label {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// warnWindowsEnterpriseUnknownOwnerSessions keeps the restart status
+// incomplete when the account behind a running agent cannot be identified.
+func warnWindowsEnterpriseUnknownOwnerSessions(result *enterprisestatus.Result, sessions map[string][]string) {
+	connectors := make([]string, 0, len(sessions))
+	for connector := range sessions {
+		connectors = append(connectors, connector)
+	}
+	sort.Strings(connectors)
+	for _, connector := range connectors {
+		labels := sessions[connector]
+		sort.Strings(labels)
+		result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+			"restart status unknown: the account running each agent session %s could not be identified, so DefenseClaw cannot tell whether it started before hooks were installed, enabled or put back and runs without DefenseClaw; ask that these sessions be restarted",
+			strings.Join(labels, ", ")))
+	}
+	if len(connectors) > 0 {
+		result.SecurityComplete = false
+	}
 }
 
 // warnWindowsEnterpriseHotAgentSessions names sessions that opened before a
@@ -425,13 +631,26 @@ func warnWindowsEnterpriseHotAgentSessions(result *enterprisestatus.Result, prev
 		return
 	}
 	byUser := map[string][]string{}
+	unknownOwners := map[string][]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
-		if user == "" || windowsServiceIdentity(user) || process.StartedAt.IsZero() ||
-			!process.StartedAt.Before(changedAt) || !enabled[strings.ToLower(process.Connector)] {
+		sid := process.OwnerSID
+		name := strings.ToLower(process.Connector)
+		if !enabled[name] || windowsServiceIdentity(user) || windowsServiceSID(sid) {
 			continue
 		}
-		byUser[user] = append(byUser[user], fmt.Sprintf("%s (pid %d)", process.Connector, process.PID))
+		label := fmt.Sprintf("%s (pid %d)", process.Connector, process.PID)
+		if user == "" && sid == "" {
+			unknownOwners[name] = append(unknownOwners[name], label)
+			continue
+		}
+		if process.StartedAt.IsZero() || !process.StartedAt.Before(changedAt) {
+			continue
+		}
+		if user == "" {
+			user = sid
+		}
+		byUser[user] = append(byUser[user], label)
 	}
 	users := make([]string, 0, len(byUser))
 	for user := range byUser {
@@ -444,4 +663,5 @@ func warnWindowsEnterpriseHotAgentSessions(result *enterprisestatus.Result, prev
 			"user %s runs %s, started before its connector was enabled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions",
 			user, strings.Join(byUser[user], ", "), changedAt.Format(time.RFC3339)))
 	}
+	warnWindowsEnterpriseUnknownOwnerSessions(result, unknownOwners)
 }

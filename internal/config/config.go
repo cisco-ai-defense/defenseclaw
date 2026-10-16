@@ -279,6 +279,13 @@ type Config struct {
 	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
 	// never rewrites an explicit value. Set only by the loader.
 	rulePackDirDeclared bool
+	// openShellPackDirDeclared records that the config source sets
+	// openshell.pack_dir, which the standalone sandbox packs default never
+	// rewrites; legacyOpenShellPackDir is the pre-1.0.2 default folder a
+	// standalone host still reads its packs from
+	// (standaloneOpenShellPackDirDefault). Set only by the loader.
+	openShellPackDirDeclared bool
+	legacyOpenShellPackDir   string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -2241,6 +2248,12 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 // behavior; action mode falls through to the global value. Pass "" to resolve
 // the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
+	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector))
+}
+
+// effectiveHookFailModeForMode keeps the configured precedence when a request
+// profile selects a different decision mode from the connector default.
+func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) string {
 	if g == nil {
 		return "closed"
 	}
@@ -2257,7 +2270,7 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			return "closed"
 		}
 	}
-	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
 		return "open"
 	}
 	return g.EffectiveHookFailMode()
@@ -2810,6 +2823,9 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 	}
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
+		if candidate.StandaloneEnterprise() {
+			standaloneOpenShellPackDirDefault(candidate, dataDir)
+		}
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = join(dataDir, "device.key")
@@ -2944,6 +2960,7 @@ func loadConfigSourceCheckedWithLayout(
 	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.

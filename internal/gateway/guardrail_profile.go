@@ -772,7 +772,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 // explainEnrollmentExempt reports whether enterprise.enrollment.exempt_users
 // lists the explained account, matched as the gateway matches a caller:
 // on Linux and macOS by its uid or its account name as the account database
-// gives it (managedHookAuthorizer.exempt); on Windows by SID, account name or
+// gives it, never root (managedHookAuthorizer.hostRunExempt); on Windows by SID, account name or
 // DOMAIN\account (requireSandboxAccountListed). Explain names the exemption
 // and what it does not change (GAP-0328).
 func explainEnrollmentExempt(cfg *config.Config, subject *profileSubject) bool {
@@ -790,11 +790,13 @@ func explainEnrollmentExempt(cfg *config.Config, subject *profileSubject) bool {
 		})
 	}
 	uid, err := strconv.Atoi(subject.UserID)
-	if err != nil {
+	if err != nil || uid == 0 {
+		// Root is never exempt: enterprise.enrollment.root governs it, and
+		// the hook socket never marks its calls exempt (hostRunExempt).
 		return false
 	}
 	name := firstNonEmpty(subject.accountName, subject.UserName)
-	if (&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).exempt(managedHookPeer{UID: uid, Name: name}) {
+	if (&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(managedHookPeer{UID: uid, Name: name}) {
 		return true
 	}
 	// The explained subject's own facts, which the hook cache takes from
@@ -823,13 +825,13 @@ func lookupLocalProfileSubject(name string) (profileSubject, error) {
 }
 
 func localProfileSubject(account *osuser.User) profileSubject {
+	local, known := profileAccountLocality(account)
 	subject := profileSubject{
-		UserID:   account.Uid,
-		IDKind:   useridentity.KindForID(account.Uid),
-		UserName: useridentity.BareAccountName(account.Username),
-	}
-	if strings.ContainsAny(account.Username, `\@`) {
-		subject.Principal = account.Username
+		UserID:          account.Uid,
+		IDKind:          useridentity.KindForID(account.Uid),
+		UserName:        useridentity.BareAccountName(account.Username),
+		localAccount:    local,
+		nameUnconfirmed: !known,
 	}
 	groups, err := accountGroups(account)
 	subject.Groups = groups
@@ -1584,6 +1586,22 @@ func auditGuardrailProfileChanges(logger *audit.Logger, changes []guardrailProfi
 	}
 }
 
+// profileEnrollmentExemption describes the hook's exemption decision in a
+// profile explanation. The no-profile answer must not refer to a profile.
+func profileEnrollmentExemption(cfg *config.Config, subject *profileSubject, withProfile bool) (map[string]any, string) {
+	if !explainEnrollmentExempt(cfg, subject) {
+		return nil, ""
+	}
+	warning := "this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses " +
+		"its host runs, but its calls are still inspected under "
+	if withProfile {
+		warning += "the profile above, which blocks findings at its block_at, and logged "
+	} else {
+		warning += "the guardrail settings and logged "
+	}
+	return map[string]any{"exempt": true}, warning + "(defenseclaw.user.enrollment: exempt)"
+}
+
 // handleGuardrailProfileResolve serves GET
 // /api/v1/guardrail/profiles/resolve?user=&connector=&agent=: which profile
 // the named subject would get, for `defenseclaw guardrail profile explain`.
@@ -1685,8 +1703,16 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["profile"] = ""
 		out["match"] = ""
 		out["effective"] = profileEffectiveView(base, connectorName)
+		var warnings []string
+		if enrollment, warning := profileEnrollmentExemption(base, subject, false); enrollment != nil {
+			out["enrollment"] = enrollment
+			warnings = append(warnings, warning)
+		}
 		if note := inertHILTWarning(base, connectorName); note != "" {
-			out["warnings"] = []string{note}
+			warnings = append(warnings, note)
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = warnings
 		}
 		a.writeJSON(w, http.StatusOK, out)
 		return
@@ -1726,13 +1752,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
 		out["directory"] = view
 	}
-	if explainEnrollmentExempt(base, subject) {
+	if enrollment, warning := profileEnrollmentExemption(base, subject, true); enrollment != nil {
 		// exempt_users skips enrollment and the sandbox requirement only;
 		// the profile still inspects and blocks (GAP-0328).
-		out["enrollment"] = map[string]any{"exempt": true}
-		warnings = append(warnings, "this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses "+
-			"its host runs, but its calls are still inspected under the profile above, which blocks findings at its block_at, and logged "+
-			"(defenseclaw.user.enrollment: exempt)")
+		out["enrollment"] = enrollment
+		warnings = append(warnings, warning)
 	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {

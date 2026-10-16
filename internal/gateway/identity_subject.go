@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -436,11 +437,37 @@ func applyIdentityPosture(cfg *config.Config) {
 	}
 	setManagedHookPeerHomeStore(homes)
 	blocking := false
+	var groups []string
 	for _, assignment := range cfg.Guardrail.ProfileAssignments {
 		if len(assignment.Match.Groups) > 0 || len(assignment.Match.Users) > 0 {
 			blocking = true
-			break
 		}
+		groups = append(groups, assignment.Match.Groups...)
 	}
 	setIdentityLookupBlocking(enabled && blocking)
+	if !enabled {
+		groups = nil
+	}
+	setProfileAssignmentGroups(groups)
+}
+
+// profileAssignmentGroupNames are the groups the committed guardrail profile
+// assignments select by. macOS checks the account's membership of each by its
+// uid when it resolves the account's groups, as its own group list leaves out
+// nested directory groups (accountGroupIDs, GAP-0528). The config is
+// recorded before the profile set is published, and a changed assignment
+// list refreshes the cached facts (refreshDirectoryFactsOnProfileChange).
+var profileAssignmentGroupNames atomic.Pointer[[]string]
+
+func setProfileAssignmentGroups(groups []string) {
+	groups = slices.Clone(groups)
+	profileAssignmentGroupNames.Store(&groups)
+}
+
+// profileAssignmentGroups returns the groups profile assignments select by.
+func profileAssignmentGroups() []string {
+	if groups := profileAssignmentGroupNames.Load(); groups != nil {
+		return *groups
+	}
+	return nil
 }

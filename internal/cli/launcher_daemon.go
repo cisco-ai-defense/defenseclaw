@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -36,10 +37,13 @@ import (
 // package arrived has not started it, so the launcher starts it on demand,
 // and applies a daemon update the lifecycle deferred while sandboxes ran.
 const (
-	launcherSocketUnit  = "defenseclaw-sandbox.socket"
-	launcherServiceUnit = "defenseclaw-sandbox.service"
-	launcherAgentLabel  = "com.cisco.defenseclaw.sandbox"
-	launcherAgentPlist  = "/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist"
+	launcherSocketUnit    = "defenseclaw-sandbox.socket"
+	launcherServiceUnit   = "defenseclaw-sandbox.service"
+	launcherAgentLabel    = "com.cisco.defenseclaw.sandbox"
+	launcherAgentPlist    = "/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist"
+	launcherGatewayLabel  = "com.cisco.defenseclaw.openshell-gateway"
+	launcherGatewayPlist  = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
+	launcherRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
 
 	launcherSystemctl = "/usr/bin/systemctl"
 	launcherLaunchctl = "/bin/launchctl"
@@ -97,8 +101,12 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 		if startErr := launcherStartDaemon(ctx, goos, uid); startErr != nil {
 			return nil, fmt.Errorf("your sandbox service is not running and could not be started: %v", startErr)
 		}
-		if status, err = launcherAwait(ctx, client); err != nil {
-			return nil, fmt.Errorf("your sandbox service was started but does not answer: %v; `defenseclaw sandbox doctor` shows why", err)
+		if status, err = launcherAwaitWithRecovery(ctx, client, goos, uid); err != nil {
+			var reloadErr *launcherDaemonError
+			if errors.As(err, &reloadErr) {
+				return nil, err
+			}
+			return nil, &launcherDaemonError{msg: "your sandbox service was started but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 	}
 	if status.Managed != nil && status.Managed.PendingRestart && status.Running == 0 {
@@ -106,14 +114,31 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 		if err := launcherRestartDaemon(ctx, goos, uid); err != nil {
 			return status, fmt.Errorf("your sandbox service waits for a restart that failed: %v", err)
 		}
-		restarted, err := launcherAwait(ctx, client)
+		restarted, err := launcherAwaitWithRecovery(ctx, client, goos, uid)
 		if err != nil {
-			return nil, fmt.Errorf("your sandbox service was restarted but does not answer: %v; `defenseclaw sandbox doctor` shows why", err)
+			var reloadErr *launcherDaemonError
+			if errors.As(err, &reloadErr) {
+				return nil, err
+			}
+			return nil, &launcherDaemonError{msg: "your sandbox service was restarted but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 		status = restarted
 	}
 	return status, nil
 }
+
+// launcherDaemonError is a sentence for the person about a sandbox service
+// that does not answer. The transport error it wraps names the daemon's
+// internal URL ("Get http://sandbox-daemon/api/v1/sandbox/status: context
+// deadline exceeded"), which tells the person nothing; `sandbox doctor`
+// has the detail (#1202).
+type launcherDaemonError struct {
+	msg string
+	err error
+}
+
+func (e *launcherDaemonError) Error() string { return e.msg }
+func (e *launcherDaemonError) Unwrap() error { return e.err }
 
 // launcherProbe asks the daemon for its status within timeout.
 func launcherProbe(ctx context.Context, client launcherStatusClient, timeout time.Duration) (*sandboxapi.Status, error) {
@@ -152,10 +177,8 @@ func launcherStartDaemon(ctx context.Context, goos string, uid int) error {
 	case "darwin":
 		domain := launcherLaunchDomain(ctx, uid)
 		target := domain + "/" + launcherAgentLabel
-		if _, err := launcherRun(ctx, launcherLaunchctl, "print", target); err != nil {
-			if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, launcherAgentPlist); err != nil {
-				return err
-			}
+		if _, err := launcherInspectAndReload(ctx, domain, true); err != nil {
+			return err
 		}
 		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", target)
 	}
@@ -168,9 +191,67 @@ func launcherRestartDaemon(ctx context.Context, goos string, uid int) error {
 	case "linux":
 		return launcherRunChecked(ctx, launcherSystemctl, "--user", "restart", launcherServiceUnit)
 	case "darwin":
-		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", "-k", launcherLaunchDomain(ctx, uid)+"/"+launcherAgentLabel)
+		domain := launcherLaunchDomain(ctx, uid)
+		if _, err := launcherInspectAndReload(ctx, domain, false); err != nil {
+			return err
+		}
+		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", "-k", domain+"/"+launcherAgentLabel)
 	}
 	return fmt.Errorf("sandboxes run on Linux and macOS only")
+}
+
+// launcherInspectAndReload refreshes only loaded failed DefenseClaw jobs in
+// the caller's selected launchd domain. A missing sandbox job is bootstrapped
+// on first start, as before; a missing gateway job is left to its daemon.
+func launcherInspectAndReload(ctx context.Context, domain string, bootstrapSandbox bool) (bool, error) {
+	reloaded := false
+	for _, job := range []struct{ label, plist string }{
+		{launcherAgentLabel, launcherAgentPlist},
+		{launcherGatewayLabel, launcherGatewayPlist},
+	} {
+		target := domain + "/" + job.label
+		out, err := launcherRun(ctx, launcherLaunchctl, "print", target)
+		if err != nil {
+			if bootstrapSandbox && job.label == launcherAgentLabel {
+				if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, job.plist); err != nil {
+					return false, err
+				}
+			}
+			continue
+		}
+		if openshell.ParseLaunchAgentState([]byte(out)).Failure(false) == "" {
+			continue
+		}
+		// A failed bootout may mean the job has already exited. Bootstrap
+		// decides whether the account can recover it.
+		_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", target)
+		if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, job.plist); err != nil {
+			return false, &launcherDaemonError{msg: "your DefenseClaw LaunchAgent could not be reloaded; run `" + launcherRepairCommand + "`", err: err}
+		}
+		reloaded = true
+	}
+	return reloaded, nil
+}
+
+// launcherAwaitWithRecovery checks for a code-signing kill that appeared only
+// after the first kickstart. It makes one reload attempt and one retry.
+func launcherAwaitWithRecovery(ctx context.Context, client launcherStatusClient, goos string, uid int) (*sandboxapi.Status, error) {
+	status, awaitErr := launcherAwait(ctx, client)
+	if awaitErr == nil || goos != "darwin" {
+		return status, awaitErr
+	}
+	domain := launcherLaunchDomain(ctx, uid)
+	reloaded, err := launcherInspectAndReload(ctx, domain, false)
+	if err != nil {
+		return nil, err
+	}
+	if !reloaded {
+		return nil, awaitErr
+	}
+	if err := launcherRunChecked(ctx, launcherLaunchctl, "kickstart", domain+"/"+launcherAgentLabel); err != nil {
+		return nil, err
+	}
+	return launcherAwait(ctx, client)
 }
 
 // launcherLaunchDomain is the launchd domain of the caller's sandbox agent:

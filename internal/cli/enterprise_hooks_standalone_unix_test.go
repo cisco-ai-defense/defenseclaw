@@ -1600,19 +1600,23 @@ func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
 	state := enterpriseHookGuardianState{FailureCount: 1, Results: []enterpriseHookReconcileRow{
 		{User: "carol", Connector: "claudecode", Error: `enterprise hooks: target account "carol" does not exist: no such account`},
 	}}
-	if got := enterpriseHookRemovedAccountFailures(state); got != 1 {
+	removedAccountFailures := func(state enterpriseHookGuardianState) int {
+		removed, _ := enterpriseHookExcusedFailures(state)
+		return removed
+	}
+	if got := removedAccountFailures(state); got != 1 {
 		t.Fatalf("deleted local account: excused = %d, want 1", got)
 	}
 	state.Results[0] = enterpriseHookReconcileRow{User: "okta-carol", Connector: "claudecode", Error: "enterprise hooks: hook config is group/other writable"}
-	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+	if got := removedAccountFailures(state); got != 0 {
 		t.Fatalf("directory outage with failed hook: excused = %d, want 0", got)
 	}
 	state.Results[0].Error = `enterprise hooks: target account "okta-carol" does not exist: no such account`
-	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+	if got := removedAccountFailures(state); got != 0 {
 		t.Fatalf("directory outage with missing-account error: excused = %d, want 0", got)
 	}
 	state.Results[0] = enterpriseHookReconcileRow{User: "alice", Connector: "codex", Error: "enterprise hooks: hook config is group/other writable"}
-	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+	if got := removedAccountFailures(state); got != 0 {
 		t.Fatalf("account that resolves: excused = %d, want 0", got)
 	}
 }

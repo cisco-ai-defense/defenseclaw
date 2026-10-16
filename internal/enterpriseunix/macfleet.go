@@ -21,7 +21,7 @@ func (e *Env) checkMacFleetPython() error {
 		check = fleetpolicy.CheckManagedMacOSPython
 	}
 	if _, err := check(); err != nil {
-		return fmt.Errorf("Fleet on managed macOS requires a protected Python.org Python 3.10+ with PyYAML; provision it before enabling fleet.enabled: %w", err)
+		return fmt.Errorf("managed macOS: Fleet requires a protected Python.org Python 3.10+ with PyYAML; provision it before enabling fleet.enabled: %w", err)
 	}
 	return nil
 }

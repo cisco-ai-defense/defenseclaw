@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -39,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -1549,7 +1551,7 @@ type scannerVersionCache struct {
 // at the same path invalidate the cache, including binaries found on PATH.
 func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	binary = strings.TrimSpace(binary)
-	if binary == "" {
+	if binary == "" || refuseScannerVersionProbe(runtime.GOOS) {
 		return ""
 	}
 	if w.cfg != nil && w.cfg.SecureClientIntegration() {
@@ -1578,6 +1580,19 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	probed := w.probeScannerBinaryVersion(resolved)
 	w.binaryVersions.Store(binary, scannerVersionCache{info: info, version: probed})
 	return probed
+}
+
+// refuseScannerVersionProbe reports whether the fingerprint must not run a
+// scanner to read its version: a standalone managed Windows gateway runs as
+// LocalSystem, and the probe ran the configured name (a bare one looked up on
+// PATH) before the scanner runtime admission each scan applies
+// (scannerRuntimePreflight). Its scanners ship with the DefenseClaw build,
+// which the fingerprint names, so it carries no scanner version there
+// (GAP-1120).
+func refuseScannerVersionProbe(goos string) bool {
+	return goos == "windows" &&
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
 }
 
 // mcpRulePackFingerprint includes both the effective rule layers and the

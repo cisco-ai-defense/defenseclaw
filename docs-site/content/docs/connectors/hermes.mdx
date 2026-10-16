@@ -175,7 +175,11 @@ message response; the TUI can review the audit event but cannot resume the
 call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
 `fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
 output, auth failure, or gateway outage cannot create Hermes enforcement and
-remains fail-open.
+remains fail-open. Such a call is recorded in
+`~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports it as a
+`guardrail-degraded` alert when it starts again. On a managed standalone host
+the administrator-owned Hermes hook is stricter: it blocks `pre_tool_call`
+while the gateway service is not running.
 
 </Tab>
 

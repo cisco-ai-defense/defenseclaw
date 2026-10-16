@@ -251,6 +251,8 @@ $failures = & $module {
                 $result = Invoke-DefenseClawForcedUninstall `
                     -Layout @{
                         StateRoot = $stateRoot
+                        # Every Get-DefenseClawLayout layout names the receipt; none exists here.
+                        InstallRollbackIntentPath = ''
                         GatewayPath = ''
                         ManifestPath = ''
                         SensorHelperPath = ''
@@ -277,6 +279,66 @@ $failures = & $module {
             }
             elseif ($threw -or $stateBack -or $null -eq $result -or -not [bool]$result.forced -or $calls -cne ($stopped -join '|')) {
                 $failures.Add("completed forced purge ($threw): StateRoot back=$stateBack calls $calls")
+            }
+        }
+
+        # GAP-1365: a failed initial install's preparation receipt is bound to
+        # the pending transaction in StateRoot, which the preparation moved
+        # aside, so the recovery refused it and every forced retry failed.
+        # The receipt is out of the recovery's way, back in place when the
+        # forced uninstall is refused, and gone when it completes; a receipt
+        # of a committed install stays for the recovery.
+        function Invoke-DefenseClawPreLayoutRecovery {
+            param($Action, $Layout, $Sources, $GatewayServiceName, $GuardianServiceName, [switch]$Purge,
+                $RequestedCertificationCodexHome, [switch]$RequestedCoreHardeningCertification, $SelfUninstallCallerPID)
+            $script:TestCalls.Add("receipt:$([IO.File]::Exists($Layout.InstallRollbackIntentPath))")
+            if ($script:TestPurgeRefuses) {
+                throw 'purge refused: marker sharing violation'
+            }
+            return [pscustomobject]@{ handled = $true; result = [pscustomobject]@{ ok = $true } }
+        }
+        foreach ($case in @(
+                @{ phase = 'preparing_layout'; refuses = $true; seen = 'receipt:False'; kept = $true },
+                @{ phase = 'preparing_layout'; refuses = $false; seen = 'receipt:False'; kept = $false },
+                @{ phase = 'committed'; refuses = $false; seen = 'receipt:True'; kept = $true }
+            )) {
+            $script:TestPurgeRefuses = $case.refuses
+            $root = [IO.Path]::Combine([IO.Path]::GetFullPath($ScratchRoot), 'dc-forced-' + [Guid]::NewGuid().ToString('N'))
+            $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
+            $lockDirectory = [IO.Path]::Combine($root, 'lifecycle')
+            [void][IO.Directory]::CreateDirectory($stateRoot)
+            [void][IO.Directory]::CreateDirectory($lockDirectory)
+            $receipt = [IO.Path]::Combine($lockDirectory, 'install-rollback-scope.json')
+            $receiptJson = '{"phase":"' + $case.phase + '","snapshot_path":"C:\\x\\transactions\\t.json"}'
+            [IO.File]::WriteAllText($receipt, $receiptJson)
+            $script:TestCalls.Clear()
+            $threw = ''
+            $result = $null
+            try {
+                $result = Invoke-DefenseClawForcedUninstall `
+                    -Layout @{
+                        StateRoot = $stateRoot
+                        InstallRollbackIntentPath = $receipt
+                        GatewayPath = ''
+                        ManifestPath = ''
+                        SensorHelperPath = ''
+                        SensorHelperServiceName = $helper
+                    } `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName $guardian `
+                    -Purge
+            }
+            catch {
+                $threw = $_.Exception.Message
+            }
+            $receiptBack = [IO.File]::Exists($receipt) -and ([IO.File]::ReadAllText($receipt) -ceq $receiptJson)
+            $leftovers = @([IO.Directory]::GetFiles($lockDirectory) | Microsoft.PowerShell.Core\Where-Object { $_ -cne $receipt })
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            $seen = @($script:TestCalls) -contains $case.seen
+            if (-not $seen -or $receiptBack -ne $case.kept -or $leftovers.Count -ne 0 -or
+                ($case.refuses -and $threw -cne 'purge refused: marker sharing violation') -or
+                (-not $case.refuses -and ($threw -or $null -eq $result -or -not [bool]$result.forced))) {
+                $failures.Add("forced uninstall with a $($case.phase) receipt (refused=$($case.refuses), $threw): saw=$seen receipt back=$receiptBack leftovers=$($leftovers -join ', ') calls $(@($script:TestCalls) -join ', ')")
             }
         }
 

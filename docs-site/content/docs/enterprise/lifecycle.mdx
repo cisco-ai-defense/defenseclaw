@@ -76,6 +76,11 @@ On Linux and macOS, a user's sandbox daemon is not restarted while that user has
 a sandbox running; `ensure` reports "pending restart" and the launcher restarts
 an idle, outdated daemon on the next command. Rollback and uninstall cover the
 sandbox units, the `defenseclaw` launcher and the rendered OpenShell settings.
+An upgrade from 1.0.1 with the docker driver or the docker fallback keeps the
+sandboxes users kept under 1.0.1 working: each such user's gateway stays in
+OpenShell's `default` namespace until they keep no sandbox there, so nothing
+needs to be pulled before the upgrade (the 1.0.1 upgrade bridge, removed when
+1.0.1 is out of support).
 See [Upgrade, roll back, uninstall](/docs/enterprise/sandboxes#upgrade-roll-back-uninstall).
 
 ### Windows
@@ -186,6 +191,8 @@ fleet.
 
 Every lifecycle refuses an older release unless you ask for the rollback
 (`downgrade_refused`).
+For an Intune Win32 deployment, remove the superseding **Required** assignment
+before assigning the older app; otherwise Intune can reapply the newer release.
 
 **Going back to a release that reads `config_version: 8`.** An
 upgrade rewrites a `config_version: 8` administrator config as
@@ -488,6 +495,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   it unpacked to disk before its own install run starts, the MDM detection
   script reports a host with empty binaries as not installed, and the MDM
   wrapper reinstalls the same package version on such a host.
+  If `rpm -q defenseclaw-enterprise` lists two versions after an interrupted
+  upgrade, run `sudo dnf remove --duplicates defenseclaw-enterprise`, then
+  `sudo dnf reinstall defenseclaw-enterprise`. `ensure --from-package` does not
+  repair the package database.
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:
@@ -589,18 +600,27 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
-It also removes the machine state: the config, credentials, state and logs.
+On a standalone deployment it also removes the config, credentials, most
+machine state and logs, with the kept-sandbox exception below.
 Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
 A purge removes everything, each enrolled user's folder and per-user binaries
 included. The Secure Client profile keeps its machine state unless you purge.
 
-On Linux and macOS, the default uninstall removes the deployment and its
-machine state: the config, credentials, gateway and guardian state, logs,
-lifecycle state and the service account. The root-owned `lifecycle.lock` stays
-in its lifecycle directory so waiting runs keep using the same lock. On Linux
-the files in your policies folder, `/etc/defenseclaw/policies`, stay; the
-vendor policies in `/opt/defenseclaw/share/policies` and any policy folder
-left without a file go, and `ensure` writes the vendor policies again. To turn the
+On Linux and macOS, the default uninstall removes the deployment, config,
+credentials, logs, most gateway and guardian state, most lifecycle state and
+the service account. When an account keeps sandboxes, the gateway's registration
+store (`/var/lib/defenseclaw/sandbox` on Linux or
+`/opt/cisco/defenseclaw/runtime/sandbox` on macOS) stays if it contains a
+file, and its key (`/var/lib/defenseclaw/redaction-correlation.key` or
+`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stays if it is a
+regular file. They are root-owned while the service account is gone; the next
+`ensure` adopts them.
+The root-owned `lifecycle.lock` stays in its lifecycle directory so waiting
+runs keep using the same lock. Use `--purge` for a clean image or to remove the
+retained sandbox store and key. On Linux, the files in your policies folder,
+`/etc/defenseclaw/policies`, stay. The vendor policies in
+`/opt/defenseclaw/share/policies` and any policy folder left without a file
+go; `ensure` writes the vendor policies again. To turn the
 deployment on again with the same config, run `ensure --from-package --config
 <file>` on a package host; a payload uninstall removes the binaries, so stage
 the payload again and run its `ensure --payload <dir> --config <file>`. A purge
@@ -608,7 +628,7 @@ removes the policies. Each user keeps `~/.defenseclaw` and the per-user
 binaries; `--purge` removes those too. Add `--keep-state`
 to keep the machine state for a reinstall instead.
 
-| Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |
+| Install channel | Remove the deployment and keep each user's data (Linux/macOS may keep sandbox state) | Remove everything |
 | --- | --- | --- |
 | Linux payload | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` | Add `--purge` |
 | Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo apt purge defenseclaw-enterprise` |
@@ -617,11 +637,12 @@ to keep the machine state for a reinstall instead.
 | Windows | Setup `/uninstall JSON=1`, or `defenseclaw.exe enterprise windows uninstall --profile standalone --json` | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
 
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
-  first, without purge, which removes the machine state and the
-  `defenseclaw` account, also when the package install itself failed and
-  rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
-  left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
-  `/var/lib/defenseclaw-hook-guardian`, and `/var/log/defenseclaw`;
+  first, without purge, which removes most machine state and the
+  `defenseclaw` account; the kept sandbox store and key above
+  stay when an account keeps sandboxes. This also runs when a package install
+  failed and rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
+  left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including a kept sandbox
+  store and key), `/var/lib/defenseclaw-hook-guardian`, and `/var/log/defenseclaw`;
   it clears the lifecycle directory except for `lifecycle.lock`. Each user
   keeps `~/.defenseclaw` and the
   per-user binaries: by then the gateway that removes them as each user is
@@ -629,6 +650,12 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+  A removal refused with `uninstall_precheck_refused` or stopped with
+  `uninstall_incomplete` keeps the package files. Read
+  `/var/lib/defenseclaw-enterprise/last-package-result.json`, fix the named
+  cause and run the removal again. On RHEL, the last-resort
+  `rpm -e --nopreun defenseclaw-enterprise` removes the files without cleaning
+  registrations, which then name a missing binary until removed manually.
 - **Tetragon (Linux).** Uninstall deletes the `defenseclaw-*` policies the
   sensor helper loaded in Tetragon before it removes any file, so no control
   keeps denying after the helper is gone. With the machine state it then
@@ -648,16 +675,23 @@ to keep the machine state for a reinstall instead.
   the package.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
-- **Registrations left (Linux and macOS).** Each user's registrations are
-  removed as that user. If one cannot be removed, the result has the error
-  `per_user_hooks_remaining` for that user and agent, with the reason, and
-  the uninstall stops before it removes the binaries those registrations run:
-  the deployment record and state stay. Fix the cause, or remove
-  DefenseClaw's entries from that user's agent config, and run the same
-  uninstall again. `ensure` restores the deployment instead. A user's worker
-  that runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage
-  after a reboot, say) is retried once with five minutes; one that times out
-  again says what usually holds it up.
+- **Registrations left, warning (Linux and macOS).** Each user's registrations
+  are removed as that user. If the user's home is unavailable, the directory
+  gives a removed account no home while its recorded home remains, or a
+  re-homed account's current home was cleaned but its old home cannot be
+  trusted, uninstall warns with `per_user_hooks_remaining` and goes on. The
+  warning names what may remain. When the home is available, remove
+  DefenseClaw's entries from the named agent config; for a re-homed account,
+  follow the current-home and old-home clearing paths in
+  [Warnings](/docs/enterprise/troubleshooting#warnings).
+- **Registrations left, error (Linux and macOS).** Other registration removal
+  failures report `per_user_hooks_remaining` for each user and agent and stop
+  uninstall before removing the binaries those registrations run. The
+  deployment record and state stay. Fix the reported cause and rerun the same
+  uninstall; `ensure` restores the deployment instead. A user's worker that
+  runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage after
+  a reboot, say) is retried once with five minutes; one that times out again
+  says what usually holds it up.
 - **Manifest rows (Linux and macOS).** Uninstall resolves each row of
   `targets.yaml` to its account the way reconcile does, so a row with only
   `user` or `user_home` works. When a row does not resolve (the account does

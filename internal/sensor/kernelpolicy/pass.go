@@ -272,9 +272,10 @@ func sortedApplied(m map[string]Applied) []string {
 
 func (c *Controller) markApplied(name string, family Family, mode PolicyMode, pid int, pending bool) {
 	// A configure keeps the policy loaded, and with it the sessions Tetragon
-	// marked since the load.
-	loadTicks := c.st.Applied[name].LoadTicks
-	c.st.Applied[name] = Applied{Family: family, Mode: mode, PID: pid, At: c.cfg.Now().UTC(), Pending: pending, LoadTicks: loadTicks}
+	// marked since the load and the anchor that marked them.
+	prev := c.st.Applied[name]
+	c.st.Applied[name] = Applied{Family: family, Mode: mode, PID: pid, At: c.cfg.Now().UTC(), Pending: pending,
+		LoadTicks: prev.LoadTicks, BinaryUID: prev.BinaryUID, Binaries: prev.Binaries}
 	c.syncTally()
 }
 
@@ -282,14 +283,18 @@ func (c *Controller) markApplied(name string, family Family, mode PolicyMode, pi
 // process alive right after a load: every agent session that started no
 // later than it may predate the load, and Tetragon marks an agent's
 // processes for matchBinaries followChildren only when the agent starts, so
-// such a session is not denied. 0 when the scan fails (nothing is then
-// reported as predating).
+// such a session is not denied. 0 when the scan fails: the load time is not
+// known, so nothing is reported as predating it and no later session counts
+// as marked by it. A scan that finds no process (a boot, where Tetragon lost
+// its policies and the helper loads them again before any enrolled user
+// logs in) proves that every later session started after the load, so it
+// gives 1, not 0 (#1156).
 func (c *Controller) loadTicks() uint64 {
 	procs, err := c.cfg.Procs(c.enrollment.Has)
 	if err != nil {
 		return 0
 	}
-	var newest uint64
+	newest := uint64(1)
 	for _, p := range procs {
 		newest = max(newest, p.StartTicks)
 	}
@@ -343,6 +348,7 @@ func (c *Controller) load(ctx context.Context, g guardedClient, agent Agent, p P
 	if isControlsFamily(p.Family) {
 		applied := c.st.Applied[p.Name]
 		applied.LoadTicks = c.loadTicks()
+		applied.BinaryUID, applied.Binaries = anchorOf(p)
 		c.st.Applied[p.Name] = applied
 	}
 	writePolicyCopy(c.cfg.Dirs, p.Name, p.YAML)
@@ -462,10 +468,17 @@ func (c *Controller) apply(ctx context.Context, g guardedClient, agent Agent, li
 		}
 	}
 
-	// D. delete.
+	// D. delete. An enforcing controls policy the plan replaced stays while a
+	// live session only it marked runs (#1156): Tetragon marks a session for
+	// the binaries anchor when it starts, so its replacement does not deny
+	// for it.
+	c.retain(desired, byName, wantEnforce)
 	if !failed {
 		for _, name := range sortedKeys(c.recorded) {
 			if _, want := desired[name]; want {
+				continue
+			}
+			if c.retained[name] > 0 {
 				continue
 			}
 			_, present := byName[name]
@@ -478,7 +491,10 @@ func (c *Controller) apply(ctx context.Context, g guardedClient, agent Agent, li
 }
 
 // failSafe moves every enforcing policy the helper loaded to monitor mode.
+// A replaced policy kept for its sessions is no longer kept: in monitor it
+// denies nothing, and the next pass that succeeds deletes it.
 func (c *Controller) failSafe(ctx context.Context, g guardedClient, agent Agent) {
+	c.retained, c.retainedRoots = nil, nil
 	listed, err := g.ListTracingPolicies(ctx)
 	if err != nil {
 		return
@@ -518,6 +534,12 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		desired[p.Name] = p
 		if !isControlsFamily(p.Family) {
 			continue
+		}
+		if applied, ok := c.st.Applied[p.Name]; ok && applied.BinaryUID == 0 && len(applied.Binaries) == 0 && p.BinaryUID > 0 {
+			// Loaded by a helper that did not record its anchor (or adopted):
+			// the policy is still the one compiled now, so its anchor is.
+			applied.BinaryUID, applied.Binaries = anchorOf(p)
+			c.st.Applied[p.Name] = applied
 		}
 		if lp, ok := byName[p.Name]; ok && c.recorded[p.Name] && lp.State == StateEnabled {
 			if p.BinaryUID > 0 && len(p.Binaries) > 0 {
@@ -581,6 +603,8 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 			if plan.Paused && p.Mode == PolicyEnforce {
 				status.DesiredMode = PolicyMonitor // held there by the pause
 			}
+		} else if n := c.retained[name]; n > 0 {
+			status.DesiredMode, status.RetainedSessions = PolicyEnforce, n
 		}
 		if lp, ok := byName[name]; ok {
 			status.ObservedMode, status.State, status.Error = lp.Mode, lp.State, lp.Error
@@ -593,7 +617,7 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		}
 		status.ChangedAt = c.cfg.Now().UTC()
 		if old, ok := previous[name]; ok && old.ObservedMode == status.ObservedMode && old.State == status.State &&
-			old.DesiredMode == status.DesiredMode {
+			old.DesiredMode == status.DesiredMode && old.RetainedSessions == status.RetainedSessions {
 			status.ChangedAt = old.ChangedAt
 		}
 		c.st.Policies = append(c.st.Policies, status)
@@ -696,6 +720,9 @@ func (c *Controller) notePredating(compiled Compiled) {
 	counts := map[Observed]int{}
 	total := 0
 	for _, root := range c.roots.Roots {
+		if c.retainedRoots[rootKey{root.PID, root.StartTicks}] {
+			continue // still denied through the policy it started under (#1156)
+		}
 		if root.Native && root.UID == binaryUID && root.StartTicks <= loadTicks {
 			counts[Observed{UID: root.UID, Reason: ReasonPredatesControls, Connector: root.Connector}]++
 			total++

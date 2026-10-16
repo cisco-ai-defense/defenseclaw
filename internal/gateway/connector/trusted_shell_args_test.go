@@ -278,6 +278,8 @@ func TestShellCommandArgs(t *testing.T) {
 		{"omnigent", "omnigent", "sys_os_shell", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"connector-case", " Cursor ", "Shell", `{"command":"ls","cwd":7}`, `{"command":"ls"}`},
+		// A case twin of the command key stays, for the conflict check.
+		{"case-twin", "opencode", "bash", `{"command":"true","Command":"rm -rf ~/","extra":"x"}`, `{"Command":"rm -rf ~/","command":"true"}`},
 		// Refused.
 		{"blank", "opencode", "bash", `{"command":"  ","dc_unlisted_arg":1}`, ""},
 		{"null", "opencode", "bash", `{"command":null}`, ""},
@@ -285,6 +287,7 @@ func TestShellCommandArgs(t *testing.T) {
 		{"empty-argv", "opencode", "bash", `{"command":[]}`, ""},
 		{"argv-not-text", "opencode", "bash", `{"command":["ls",1]}`, ""},
 		{"no-command", "opencode", "bash", `{"workdir":"/w"}`, ""},
+		{"case-twin-only", "opencode", "bash", `{"Command":"ls","extra":"x"}`, ""},
 		{"other-key", "antigravity", "run_command", `{"command":"ls"}`, ""},
 		{"not-an-object", "opencode", "bash", `"ls"`, ""},
 		{"invalid-json", "opencode", "bash", `{"command":"ls"`, ""},

@@ -111,33 +111,28 @@ func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T
 	}
 }
 
-func TestSecureClientFleetSourcePreflightRunsBeforeLifecycleMutation(t *testing.T) {
+// TestSecureClientLifecycleRunsNoFleetStep pins DAMAGE-678 A2: Secure Client
+// Install, Upgrade and Repair keep their 1.0.1 behaviour. The gateway alone
+// refuses a Secure Client config with fleet.enabled.
+func TestSecureClientLifecycleRunsNoFleetStep(t *testing.T) {
 	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
+	for _, forbidden := range []string{
+		"preflight-secure-client-fleet",
+		"Assert-DefenseClawSecureClientFleetSourcePreflight",
+	} {
+		if strings.Contains(module, forbidden) {
+			t.Fatalf("Secure Client lifecycle runs a Fleet step again: %q", forbidden)
+		}
+	}
 	entry := strings.Index(module, "function Invoke-DefenseClawEnterpriseLifecycle {")
 	if entry < 0 {
 		t.Fatal("enterprise lifecycle entry point is missing")
 	}
 	lifecycle := module[entry:]
-	for _, required := range []string{
-		"Assert-DefenseClawSourceDescriptorCurrent -Source $configSource",
-		"Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource",
-		"'preflight-secure-client-fleet'",
-	} {
-		if !strings.Contains(module, required) {
-			t.Fatalf("Secure Client Fleet source preflight omits %q", required)
-		}
-	}
-	current := strings.Index(lifecycle, "Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources")
-	newGatewayGuard := -1
-	if current >= 0 {
-		if offset := strings.Index(lifecycle[current:], "$sources.ContainsKey('gateway')) {"); offset >= 0 {
-			newGatewayGuard = current + offset
-		}
-	}
-	preflight := strings.Index(lifecycle, "Assert-DefenseClawSecureClientFleetSourcePreflight `")
-	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
-	if current < 0 || newGatewayGuard < current || preflight < newGatewayGuard || mutation < preflight {
-		t.Fatalf("Secure Client Fleet source preflight must use the new gateway after authentication and before managed-root mutation (source %d, gateway guard %d, preflight %d, mutation %d)", current, newGatewayGuard, preflight, mutation)
+	profile := strings.Index(lifecycle, "if (Test-DefenseClawStandaloneProfile) {")
+	inspect := strings.Index(lifecycle, "$standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `")
+	if profile < 0 || inspect < profile {
+		t.Fatalf("Fleet source inspection must stay inside the standalone branch (profile %d, inspect %d)", profile, inspect)
 	}
 }
 

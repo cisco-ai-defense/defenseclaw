@@ -391,6 +391,11 @@ func (c *UnixClient) Relay(ctx context.Context, call RelayCall) (RelayResponse, 
 	if err != nil {
 		return RelayResponse{}, fmt.Errorf("sandboxrelay: build request: %w", err)
 	}
+	if call.Class == RouteHook {
+		if v := EncodeEgressRefusals(call.EgressRefusals); v != "" {
+			header.Set(EgressRefusalsHeader, v)
+		}
+	}
 	req.Header = header
 	req.ContentLength = int64(len(call.Body))
 	resp, err := c.do(req)

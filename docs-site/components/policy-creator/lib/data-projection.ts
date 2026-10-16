@@ -46,6 +46,7 @@ export interface OpaData {
   }>;
   severity_ranking: Record<string, number>;
   guardrail: {
+    mode: 'observe' | 'action';
     severity_rank: Record<string, number>;
     block_threshold: number;
     alert_threshold: number;
@@ -150,6 +151,7 @@ export function projectPolicyToData(policy: Policy): OpaData {
     first_party_allow_list: policy.first_party_allow_list,
     severity_ranking: { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 },
     guardrail: {
+      mode: policy.guardrail.mode ?? 'observe',
       severity_rank: { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 },
       block_threshold: policy.guardrail.block_threshold,
       alert_threshold: policy.guardrail.alert_threshold,
@@ -173,10 +175,11 @@ export function projectPolicyToData(policy: Policy): OpaData {
 
 /**
  * The evaluation input of a domain: since config_version 9, admission.rego
- * reads only input.admission and guardrail.rego only input.thresholds and
- * input.hilt, which the gateway compiles from config.yaml. They are built
- * here from the projection the same way (the type's actions over the shared
- * ones, its first-party entries), unless the test input sets them itself.
+ * reads input.admission while guardrail.rego reads input.thresholds,
+ * input.hilt and input.mode, which the gateway compiles from config.yaml.
+ * Shared values come from the projection unless test input sets them itself.
+ * Guardrail mode is the exception: the selected policy mode must override
+ * the canned scenario's hard-coded mode.
  */
 export function withPolicyInput(domain: string, input: unknown, data: OpaData): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
@@ -213,6 +216,7 @@ export function withPolicyInput(domain: string, input: unknown, data: OpaData): 
       },
       hilt: { ...data.guardrail.hilt },
       ...base,
+      mode: data.guardrail.mode,
     };
   }
   return input;

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,14 @@ var managedHookPeerAccountsStamp = func() string {
 	return stamp
 }
 
+func managedHookPeerStamp() string {
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps main's lifetime (#1092).
+		return ""
+	}
+	return managedHookPeerAccountsStamp()
+}
+
 // managedHookPeerHome resolves the home directory of a kernel-verified
 // hook-socket caller through the platform account database (NSS on Linux,
 // DirectoryService-backed os/user on macOS). Directory users therefore
@@ -98,7 +107,7 @@ type managedHookPeerHomeCache struct {
 	mu          sync.Mutex
 	resolver    unixidentity.Resolver
 	resolvedAt  time.Time
-	stamp       string // managedHookPeerAccountsStamp when resolver was made
+	stamp       string // managedHookPeerStamp when resolver was made
 	newResolver func() unixidentity.Resolver
 	now         func() time.Time
 	// accounts holds one answer per uid. A lookup in flight is shared by
@@ -126,12 +135,15 @@ type managedHookPeerHomeCache struct {
 	// Secure Client).
 	homesFile   string
 	homesLoaded bool
-	// holders is the account (name and home) each uid's cached directory
-	// facts were used for. When another account holds the uid (a removed
-	// account's uid given to a new one), its facts are dropped: the new
-	// person must not get the old holder's groups and profile until the
-	// facts expire (GAP-0720).
-	holders map[int]string
+	// holders are useful only while the corresponding directory facts are
+	// still served. Outside Secure Client, a local account database change
+	// also rechecks a holder before it can make a live namesake ambiguous.
+	holders map[int]managedHookPeerHolder
+}
+
+type managedHookPeerHolder struct {
+	name, home string
+	stamp      string
 }
 
 // managedHookPeerHomesFileMax bounds the persisted homes file read at start.
@@ -220,10 +232,11 @@ func setManagedHookPeerHomeStore(path string) { managedHookPeerHomes.setStore(pa
 const managedHookPeerHomesMax = 16384
 
 type managedHookPeerAccount struct {
-	ready   chan struct{} // closed once account, ok and expires are set
-	account unixidentity.Account
-	ok      bool
-	expires time.Time
+	ready    chan struct{} // closed once account, ok and expires are set
+	account  unixidentity.Account
+	ok       bool
+	notFound bool
+	expires  time.Time
 }
 
 // account resolves uid through the cached platform resolver; false when the
@@ -234,11 +247,7 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	if uid < 0 {
 		return unixidentity.Account{}, false
 	}
-	stamp := ""
-	if !ManagedEnterpriseActive() {
-		// Secure Client keeps main's lifetime (#1092).
-		stamp = managedHookPeerAccountsStamp()
-	}
+	stamp := managedHookPeerStamp()
 	c.mu.Lock()
 	now := c.now()
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
@@ -287,7 +296,7 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		}
 	}
 	c.mu.Lock()
-	entry.account, entry.ok, entry.expires = account, ok, c.now().Add(retain)
+	entry.account, entry.ok, entry.notFound, entry.expires = account, ok, unixidentity.IsNotFound(err), c.now().Add(retain)
 	c.mu.Unlock()
 	close(entry.ready)
 	return account, ok
@@ -300,25 +309,51 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 		return useridentity.DirectoryFacts{}, false
 	}
 	key := strconv.Itoa(uid)
-	if !identityFactsEnabled.Load() {
-		return c.directoryCache().get(key, block)
-	}
-	if account, ok := c.account(uid); ok {
-		holder := account.Name + "\x00" + account.Home
-		c.mu.Lock()
-		previous, known := c.holders[uid]
-		if !known && len(c.holders) < managedHookPeerHomesMax || known && previous != holder {
-			if c.holders == nil {
-				c.holders = make(map[int]string)
-			}
-			c.holders[uid] = holder
-		}
-		c.mu.Unlock()
-		if known && previous != holder {
-			c.directoryCache().forget(key)
-		}
-	}
+	c.noteHolder(uid, key)
 	return c.directoryCache().get(key, block)
+}
+
+// explainDirectory is directory for `guardrail profile explain`: the facts a
+// hook call of uid gets after explain's own lookup (explainDirectoryFacts),
+// or why it gets none. Explain records the account it resolved as the holder
+// of uid's facts, as a hook call does. Explain's lookup refreshes the facts
+// hooks read, but only a hook call recorded whose they were, so an account
+// explained before a directory outage and not yet seen by a hook kept the
+// profile of those facts in its hooks while explain by name answered
+// default_lookup_failed: a looser live decision than the one explain showed
+// (GAP-0529).
+func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.DirectoryFacts, error) {
+	key := strconv.Itoa(uid)
+	c.noteHolder(uid, key)
+	return explainDirectoryFacts(c.directoryCache(), key)
+}
+
+// noteHolder records the account (name and home) that uid's cached
+// directory facts are used for, when the account database names uid now.
+// When another account holds the uid (a removed account's uid given to a new
+// one), its facts are dropped first (GAP-0720).
+func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
+	if uid < 0 || !identityFactsEnabled.Load() {
+		return
+	}
+	account, ok := c.account(uid)
+	if !ok {
+		return
+	}
+	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp()}
+	c.mu.Lock()
+	previous, known := c.holders[uid]
+	changed := known && (previous.name != holder.name || previous.home != holder.home)
+	if !known && len(c.holders) < managedHookPeerHomesMax || known {
+		if c.holders == nil {
+			c.holders = make(map[int]managedHookPeerHolder)
+		}
+		c.holders[uid] = holder
+	}
+	c.mu.Unlock()
+	if changed {
+		c.directoryCache().forget(key)
+	}
 }
 
 // directoryCache returns the cache of verified directory facts per uid,
@@ -401,15 +436,88 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 // case) or under the uid name spells.
 func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool) {
 	name = strings.TrimSpace(name)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for uid, holder := range c.holders {
-		holderName, _, _ := strings.Cut(holder, "\x00")
-		if holderName != "" && (useridentity.EqualFold(holderName, name) || strconv.Itoa(uid) == name) {
-			return uid, holderName, true
+	holders := c.liveHolders()
+	if uid, err := strconv.Atoi(name); err == nil && strconv.Itoa(uid) == name {
+		if holder, ok := holders[uid]; ok {
+			return uid, holder.name, holder.name != ""
+		}
+		return 0, "", false
+	}
+	var foundUID int
+	var foundName string
+	for uid, holder := range holders {
+		if holder.name != "" && useridentity.EqualFold(holder.name, name) {
+			if foundName != "" {
+				return 0, "", false
+			}
+			foundUID, foundName = uid, holder.name
 		}
 	}
-	return 0, "", false
+	return foundUID, foundName, foundName != ""
+}
+
+// cachedNamesakes lists other verified uids last held under a bare name.
+// The account database may temporarily stop answering for a directory uid,
+// while explain can still use its cached facts by that uid.
+func (c *managedHookPeerHomeCache) cachedNamesakes(name string, exceptUID int) []unixidentity.Account {
+	var accounts []unixidentity.Account
+	for uid, holder := range c.liveHolders() {
+		if uid != exceptUID && holder.name != "" && useridentity.EqualFold(holder.name, name) {
+			accounts = append(accounts, unixidentity.Account{UID: uid, Name: holder.name})
+		}
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].UID < accounts[j].UID })
+	return accounts
+}
+
+// liveHolders keeps only holders whose facts a hook still gets. A changed
+// local account database makes a definitive missing local uid stale at once;
+// an offline directory can report the same lookup error, so its holder stays
+// while the verified facts are served. No resolver call holds c.mu.
+func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
+	c.mu.Lock()
+	holders := make(map[int]managedHookPeerHolder, len(c.holders))
+	for uid, holder := range c.holders {
+		holders[uid] = holder
+	}
+	c.mu.Unlock()
+	stamp := managedHookPeerStamp()
+	for uid, holder := range holders {
+		facts, _, served := c.directoryCache().peek(strconv.Itoa(uid))
+		forgetFacts := false
+		if served && stamp != "" && stamp != holder.stamp {
+			account, ok := c.account(uid)
+			switch {
+			case ok && (account.Name != holder.name || account.Home != holder.home):
+				served, forgetFacts = false, true
+			case !ok && facts.Directory == useridentity.DirectoryLocal:
+				c.mu.Lock()
+				entry := c.accounts[uid]
+				missing := entry != nil && entry.notFound
+				c.mu.Unlock()
+				served, forgetFacts = !missing, missing
+			case ok:
+				holder.stamp = stamp
+				c.mu.Lock()
+				if c.holders[uid] == holders[uid] {
+					c.holders[uid] = holder
+				}
+				c.mu.Unlock()
+			}
+		}
+		if !served {
+			c.mu.Lock()
+			if c.holders[uid] == holders[uid] {
+				delete(c.holders, uid)
+			}
+			c.mu.Unlock()
+			delete(holders, uid)
+			if forgetFacts {
+				c.directoryCache().forget(strconv.Itoa(uid))
+			}
+		}
+	}
+	return holders
 }
 
 func (c *managedHookPeerHomeCache) lookupName(uid int) string {

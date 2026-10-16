@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -123,13 +124,20 @@ func generateOpenShellCerts(plan openShellExecPlan) error {
 
 // Seams for tests.
 var (
-	openShellExecHome        = sandboxAccountHome
-	openShellExecTrustedFile = managed.ValidateTrustedFilePath
-	openShellExecTrustedDir  = managed.ValidateTrustedRuntimeDir
-	openShellExecSettings    = sandboxOpenShellAdminSettings
-	openShellExecAdminBinary = openshell.AdminBinary
-	openShellExecRenderedEnv = openshell.RenderedEnvironment
-	openShellExecVMProbe     = sandboxOpenShellVMProbe
+	openShellExecHome             = sandboxAccountHome
+	openShellExecTrustedFile      = managed.ValidateTrustedFilePath
+	openShellExecTrustedDir       = managed.ValidateTrustedRuntimeDir
+	openShellExecSettings         = sandboxOpenShellAdminSettings
+	openShellExecAdminBinary      = openshell.AdminBinary
+	openShellExecRenderedEnv      = openshell.RenderedEnvironment
+	openShellExecVMProbe          = sandboxOpenShellVMProbe
+	openShellExecRenderedVMDriver = func(goos, dir string) (string, string) {
+		return openshell.RenderedAdminVMDriver(goos, dir, openshell.ExecutableVMDriver,
+			func(p string) error { return openShellExecTrustedFile(p, "OpenShell MicroVM driver") })
+	}
+	// openShellExecUpstreamTelemetry reports whether the account's own
+	// floor allows OpenShell's own telemetry (es:GAP-0144).
+	openShellExecUpstreamTelemetry = sandboxOpenShellUpstreamTelemetry
 )
 
 // planSandboxOpenShellExec checks the managed host and the OpenShell of the
@@ -148,7 +156,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	configPath := filepath.Join(layout.ConfigDir, "openshell", "gateway.toml")
 	if err := openShellExecTrustedFile(configPath, "OpenShell gateway configuration"); err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway configuration %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	home, err := openShellExecHome()
 	if err != nil {
@@ -157,6 +165,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	settings := openShellExecSettings(ctx)
 	if goos == "linux" {
 		configPath = openShellExecConfigFor(configPath, home, settings.DriverFallback)
+		configPath = openShellExecBridgeFor(configPath, home)
 	}
 	install := settings.Install
 	if install == "" {
@@ -165,6 +174,11 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		install = config.EnterpriseOpenShellInstallPrerequisite
 		if ownFileOnly(filepath.Join(home, ".local", "bin", openshell.GatewayBinary)) == nil {
 			install = config.EnterpriseOpenShellInstallSetup
+		}
+	}
+	if goos == "linux" && install == config.EnterpriseOpenShellInstallPrerequisite {
+		if err := openShellExecVMDriver(configPath, goos); err != nil {
+			return openShellExecPlan{}, fmt.Errorf("%w: %v (an administrator refreshes it with `enterprise linux ensure`)", errOpenShellPrerequisiteMissing, err)
 		}
 	}
 	var binary, binDir string
@@ -219,9 +233,18 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	rendered, err := openShellExecRenderedEnv(envPath)
 	if err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway environment %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	env = append(env, rendered...)
+	if !openShellExecUpstreamTelemetry(ctx) {
+		// The rendered file is the host's: the organization's floor. The
+		// account's own profile may turn OpenShell's telemetry off
+		// (allow_upstream_telemetry: false), and so does a managed gateway
+		// that did not answer; it never turns it on (es:GAP-0144). The one
+		// entry is replaced, not repeated: getenv reads the first.
+		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, openshell.EnvTelemetryEnabled+"=") })
+		env = append(env, openshell.EnvTelemetryEnabled+"=false")
+	}
 	// Every MicroVM runs as the account: the images are built for its uid
 	// and gid, which no value in the one rendered file can be (GAP-0254).
 	env = append(env, openshell.AccountVMEnvironment(os.Getuid(), os.Getegid())...)
@@ -236,6 +259,30 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	argv := append([]string{binary, "--config", configPath}, args...)
 	certs := []string{"generate-certs", "--output-dir", tlsDir, "--server-san", openShellServerSAN}
 	return openShellExecPlan{binary: binary, argv: argv, env: env, tlsDir: tlsDir, certs: certs}, nil
+}
+
+// openShellExecVMDriver checks the driver_dir the gateway will actually
+// read. An explicit stale path overrides OpenShell's conventional search,
+// even when another trusted driver is installed elsewhere (GAP-0573).
+func openShellExecVMDriver(configPath, goos string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read the administrator's rendered gateway configuration %s: %w", configPath, err)
+	}
+	rendered, err := openshell.ParseRenderedGateway(data, nil)
+	if err != nil {
+		return err
+	}
+	if err := rendered.Validate(); err != nil {
+		return err
+	}
+	if rendered.ComputeDriver != openshell.DriverVM {
+		return nil
+	}
+	if _, problem := openShellExecRenderedVMDriver(goos, rendered.DriverDir); problem != "" {
+		return errors.New(problem)
+	}
+	return nil
 }
 
 // dockerContextHost is the Docker endpoint the account's gateway is to use:
@@ -273,24 +320,24 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 }
 
 // openShellE2fsprogs is the e2fsprogs directory the macOS MicroVM driver
-// gets first on its PATH (D5): the administrator's
-// enterprise.openshell.e2fsprogs_dir when it passes the managed trust
-// check, else the user's own ~/.local/opt/e2fsprogs build. Nothing else, so
-// the driver never picks up another account's Homebrew keg (GAP-0004).
+// gets first on its PATH (D5): the folder of the administrator's
+// enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
+// by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
+// when it passes the managed trust check. Without an administrator value,
+// only the account's own build is used, never a Homebrew keg (GAP-0004).
+// The managed doctor calls the same selection rule.
 func openShellE2fsprogs(adminDir, home string) (string, error) {
-	if adminDir != "" {
-		sbin := filepath.Join(adminDir, "sbin")
-		if err := openShellExecTrustedDir(sbin, "e2fsprogs"); err != nil {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s is not trusted: %v", errOpenShellPrerequisiteMissing, sbin, err)
-		}
-		return sbin, nil
+	dir, problem := openshell.ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(),
+		func(path string, file bool) error {
+			if file {
+				return openShellExecTrustedFile(path, "e2fsprogs tool")
+			}
+			return openShellExecTrustedDir(path, "e2fsprogs")
+		})
+	if dir == "" {
+		return "", fmt.Errorf("%w: %s (an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, problem)
 	}
-	sbin := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
-	if err := ownFileOnly(filepath.Join(sbin, "mke2fs")); err != nil {
-		return "", fmt.Errorf("%w: MicroVM sandboxes need e2fsprogs: your administrator sets enterprise.openshell.e2fsprogs_dir, "+
-			"or you build it into ~/.local/opt/e2fsprogs (%v)", errOpenShellPrerequisiteMissing, err)
-	}
-	return sbin, nil
+	return dir, nil
 }
 
 // openShellExecConfigFor is the rendered configuration this account's
@@ -317,6 +364,37 @@ func openShellExecConfigFor(configPath, home, fallback string) string {
 	return fallbackPath
 }
 
+// openShellExecBridgeFor is the 1.0.1 upgrade bridge (GAP-0587): the docker
+// configuration without a sandbox_label (gateway-docker-default-namespace.toml,
+// which the lifecycle renders only on a host upgraded from a 1.0.1 docker
+// record) when configPath starts a docker gateway and the account still
+// keeps a sandbox in OpenShell's default namespace, where 1.0.1's managed
+// gateway made them, and none in the managed one. Its kept sandboxes then
+// list, start, connect and pull as before; an account without one, or once
+// it deleted the last one (or a purge did), starts in the managed namespace.
+// The gateway's own state folder is ~/.local/state (the shim passes HOME and
+// no XDG_STATE_HOME). 1.0.1 upgrade bridge, remove when 1.0.1 is out of
+// support.
+func openShellExecBridgeFor(configPath, home string) string {
+	bridgePath := filepath.Join(filepath.Dir(configPath), openshell.GatewayDefaultNamespaceTOMLFile)
+	if _, err := os.Lstat(bridgePath); err != nil || openShellExecTrustedFile(bridgePath, "OpenShell docker configuration of the 1.0.1 upgrade bridge") != nil {
+		return configPath
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return configPath
+	}
+	if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil || rendered.ComputeDriver != openshell.DriverDocker {
+		return configPath
+	}
+	stateHome := filepath.Join(home, ".local", "state")
+	if !openshell.DockerNamespaceInUse(stateHome, openshell.DefaultDockerNamespace) ||
+		openshell.DockerNamespaceInUse(stateHome, openshell.ManagedDockerNamespace) {
+		return configPath
+	}
+	return bridgePath
+}
+
 // sandboxOpenShellVMProbe is the account's MicroVM probe as the user: CPU
 // flags, /dev/kvm read-write, and openshell-driver-vm in the rendered
 // driver_dir, ~/.local/libexec/openshell or the system directories.
@@ -335,9 +413,25 @@ func sandboxOpenShellVMProbe(home, configPath string) openshell.VMProbeResult {
 // mode, the administrator's e2fsprogs directory and the caller's own docker
 // fallback.
 func sandboxOpenShellAdminSettings(ctx context.Context) sandboxrelay.EnterpriseOpenShell {
+	settings, _ := sandboxOpenShellDaemonSettings(ctx)
+	return settings.Enterprise
+}
+
+// sandboxOpenShellUpstreamTelemetry reports whether the managed gateway's
+// settings for the account allow OpenShell's own telemetry: the floor of
+// the account's own profile (sandbox_authority_routes.go sandboxOperational),
+// false when the gateway does not answer.
+func sandboxOpenShellUpstreamTelemetry(ctx context.Context) bool {
+	settings, ok := sandboxOpenShellDaemonSettings(ctx)
+	return ok && settings.Operational.UpstreamTelemetry
+}
+
+// sandboxOpenShellDaemonSettings asks the managed gateway's hook socket for
+// the account's settings; ok is false when it does not answer.
+func sandboxOpenShellDaemonSettings(ctx context.Context) (sandboxrelay.DaemonSettings, bool) {
 	layout, descriptor, err := sandboxDaemonHost(runtime.GOOS)
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
 	socket := descriptor.HookSocket
 	if socket == "" {
@@ -349,14 +443,14 @@ func sandboxOpenShellAdminSettings(ctx context.Context) sandboxrelay.EnterpriseO
 	}
 	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: socket, TrustedOwners: trusted, Timeout: 10 * time.Second})
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
 	defer relay.Close()
 	settings, err := relay.Settings(ctx)
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
-	return settings.Enterprise
+	return settings, true
 }
 
 // ownFileOnly checks that path is a regular file the caller owns that no
@@ -371,12 +465,4 @@ func ownFileOnly(path string) error {
 		return fmt.Errorf("%s is not a file of your own that only you can change", path)
 	}
 	return nil
-}
-
-// sandboxPlatformName is the `enterprise` subcommand of goos.
-func sandboxPlatformName(goos string) string {
-	if goos == "darwin" {
-		return "macos"
-	}
-	return goos
 }

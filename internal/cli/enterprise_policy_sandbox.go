@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 )
@@ -41,6 +42,10 @@ type enterprisePolicySandbox struct {
 	Group   string `json:"matched_group,omitempty"`
 	// Note says why the profile is not known (the gateway did not answer).
 	Note string `json:"note,omitempty"`
+	// EnrollmentExempt says enterprise.enrollment.exempt_users exempts the
+	// account as the hook socket matches it (the gateway's answer or its
+	// uid or account-database name): required_for refuses none of its host runs (GAP-0555).
+	EnrollmentExempt bool `json:"enrollment_exempt,omitempty"`
 	// FloorDigest is the digest of the resolved sandbox floor F, Pack and
 	// PackDigest the required pack it names and that pack's content digest,
 	// and Sources the layer each sandbox key comes from (organization or
@@ -60,21 +65,25 @@ type enterprisePolicySandboxRow struct {
 }
 
 // enterprisePolicySandboxProfile asks the gateway which profile an account
-// gets (the same answer as profile-explain); replaceable in tests.
-var enterprisePolicySandboxProfile = func(account string) (name, match, group string, err error) {
+// gets and whether exempt_users exempts it, as its hooks are matched (the
+// same answer as profile-explain); replaceable in tests.
+var enterprisePolicySandboxProfile = func(account string) (name, match, group string, exempt bool, err error) {
 	var answer struct {
 		Profile      string `json:"profile"`
 		Match        string `json:"match"`
 		MatchedGroup string `json:"matched_group"`
 		LookupError  string `json:"lookup_error"`
+		Enrollment   struct {
+			Exempt bool `json:"exempt"`
+		} `json:"enrollment"`
 	}
 	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(account), &answer); err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	if answer.LookupError != "" {
-		return answer.Profile, answer.Match, answer.MatchedGroup, fmt.Errorf("%s", answer.LookupError)
+		return answer.Profile, answer.Match, answer.MatchedGroup, answer.Enrollment.Exempt, fmt.Errorf("%s", answer.LookupError)
 	}
-	return answer.Profile, answer.Match, answer.MatchedGroup, nil
+	return answer.Profile, answer.Match, answer.MatchedGroup, answer.Enrollment.Exempt, nil
 }
 
 // enterpriseAccountGroups names the groups of an account (accountGroupNames
@@ -106,11 +115,15 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 		return nil
 	}
 	out := &enterprisePolicySandbox{Rows: []enterprisePolicySandboxRow{}}
-	name, match, group, err := enterprisePolicySandboxProfile(account)
+	name, match, group, exempt, err := enterprisePolicySandboxProfile(account)
 	if err != nil {
 		out.Note = "the profile of " + account + " could not be resolved (" + err.Error() + "); the organization's keys apply as the default profile would"
 	}
-	out.Profile, out.Match, out.Group = name, match, group
+	// The local uid/account-name rule is a subset of the hook's rule and
+	// covers older gateways that omit enrollment on a no-profile answer.
+	// Discard any partial gateway bit on an error; root follows enrollment.root.
+	exempt = uid != 0 && ((err == nil && exempt) || gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, uid, account))
+	out.Profile, out.Match, out.Group, out.EnrollmentExempt = name, match, group, exempt
 	view := sandboxPolicyOf(c, name)
 	floor := view.floor
 	if !view.hasFloor {
@@ -127,13 +140,27 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 		out.Rows = append(out.Rows, enterprisePolicySandboxRow{Check: check, Connector: connector, State: state, Detail: detail})
 	}
 	if floor.Allowed != nil && !*floor.Allowed {
-		add("allowed", "", sandboxRowWarn, "sandboxes are not allowed for this account; a required agent is refused outright")
+		detail := "sandboxes are not allowed for this account; a required agent is refused outright"
+		if len(floor.RequiredFor) > 0 && gateway.RequireSandboxHostGate(floor.RequiredFor, floor.RequiredFor[0], exempt) == gateway.RequireSandboxHostRunExempt {
+			detail = "sandboxes are not allowed for this account; its exempt host runs remain allowed"
+		}
+		add("allowed", "", sandboxRowWarn, detail)
 	}
 	byConnector := map[string]enterprisepolicy.State{}
 	for _, s := range states {
 		byConnector[s.Connector] = s
 	}
+	// required: some agent's host run is refused, so where no sandbox can
+	// start for the account that agent runs nowhere.
+	required := false
 	for _, conn := range floor.RequiredFor {
+		// The hook's own rule decides the host run (GAP-0555).
+		if gateway.RequireSandboxHostGate(floor.RequiredFor, conn, exempt) == gateway.RequireSandboxHostRunExempt {
+			add("required", conn, sandboxRowWarn, "required_for lists it, but the account is exempt from enrollment (enterprise.enrollment.exempt_users), "+
+				"so required_for doesn't apply: a host run is allowed, and its calls are inspected and logged")
+			continue
+		}
+		required = true
 		state, known := byConnector[conn]
 		switch {
 		case known && state.Route == enterprisepolicy.RouteMachinePolicy && state.Covered:
@@ -144,7 +171,6 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 			add("required", conn, sandboxRowWarn, "runs only in a sandbox, but this computer has no machine-owned hook for it: a host run is refused only where the account's own hook is installed")
 		}
 	}
-	required := len(floor.RequiredFor) > 0
 	// A pack or floor that does not resolve stops every sandbox of the
 	// profile: a failure where a required agent then runs nowhere, a
 	// warning otherwise.

@@ -1130,6 +1130,10 @@ func validateWindowsManagedHooksGuardianActivation(
 	expected := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	active := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	pendingTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
+	// awaitingSignIn counts the failed rows of deferred targets an earlier
+	// release protected that wait for their signed-out account's next
+	// sign-in (enterpriseHookAwaitingSignInPrefix, GAP-0644).
+	awaitingSignIn := 0
 	for _, target := range ctx.targets {
 		key := strings.ToLower(target.Connector) + "\x00" + strings.ToUpper(target.SID)
 		if _, exists := targetsByKey[key]; exists {
@@ -1153,7 +1157,12 @@ func validateWindowsManagedHooksGuardianActivation(
 			return nil, errors.New("protected Guardian state contains a duplicate target")
 		}
 		seen[key] = struct{}{}
-		if row.OK == row.Pending {
+		// The guardian keeps such a waiting row protected: its last protected
+		// row is carried forward and its SID stays enrolled, so teardown
+		// revokes it as an active target of a signed-out account. Any other
+		// failed row is still refused.
+		waiting := target.Deferred && enterpriseHookAwaitingSignInError(row)
+		if row.OK == row.Pending && !waiting {
 			return nil, errors.New("protected Guardian state contains an ambiguous target disposition")
 		}
 		if home := strings.TrimSpace(row.UserHome); home != "" &&
@@ -1169,6 +1178,12 @@ func validateWindowsManagedHooksGuardianActivation(
 			}
 			pendingTargets = append(pendingTargets, target)
 			continue
+		}
+		if waiting {
+			if row.Result != nil {
+				return nil, errors.New("protected Guardian target waiting for a sign-in contains contradictory runtime evidence")
+			}
+			awaitingSignIn++
 		}
 		active = append(active, enterpriseHookReconcileRow{
 			SID:       target.SID,
@@ -1204,18 +1219,18 @@ func validateWindowsManagedHooksGuardianActivation(
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
-		!activation.OK || activation.FailureCount != 0 ||
-		activation.SuccessCount != len(active) ||
+		activation.OK != (awaitingSignIn == 0) || activation.FailureCount != awaitingSignIn ||
+		activation.SuccessCount != len(active)-awaitingSignIn ||
 		activation.PendingCount != len(pendingTargets) ||
 		activation.TargetCount != len(ctx.targets) ||
 		len(activation.ProtectedTargets) != len(active) ||
-		!authorization.OK || authorization.FailureCount != 0 ||
-		authorization.SuccessCount != len(active) ||
+		authorization.OK != (awaitingSignIn == 0) || authorization.FailureCount != awaitingSignIn ||
+		authorization.SuccessCount != len(active)-awaitingSignIn ||
 		authorization.PendingCount != len(pendingTargets) ||
 		authorization.TargetCount != len(ctx.targets) ||
 		len(authorization.ProtectedTargets) != len(active) ||
-		!state.OK || state.FailureCount != 0 ||
-		state.SuccessCount != len(active) || state.PendingCount != len(pendingTargets) ||
+		state.OK != (awaitingSignIn == 0) || state.FailureCount != awaitingSignIn ||
+		state.SuccessCount != len(active)-awaitingSignIn || state.PendingCount != len(pendingTargets) ||
 		state.TargetCount != len(ctx.targets) ||
 		len(state.Results) != len(ctx.targets) ||
 		activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||

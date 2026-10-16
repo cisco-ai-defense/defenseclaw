@@ -188,8 +188,9 @@ changes its digest, so the gateway rejects the change and keeps enforcing the
 previous generation until you pin the new digest. `doctor` fails the **Policy**
 row and the gateway `/health` output shows `policy.last_reload_error` until
 then. [Rules and custom packs](/docs/policies/rules#change-a-pinned-pack) shows
-both ways to apply an edit on purpose. The pinned digest does not cover the
-optional `defenseclaw-pack.json` posture file; it sets the pack's default
+both ways to apply an edit on purpose. The pinned digest also covers the
+optional `defenseclaw-pack.json` posture file. Adding or editing it changes
+the digest, and its posture sets the pack's default
 [block and alert levels](/docs/policies/thresholds#rule-pack-default-posture).
 
 ## Safe editing loop

@@ -171,3 +171,49 @@ func (dsclLoginRunner) Run(_ context.Context, name string, args ...string) (Comm
 	}
 	return CommandResult{ExitCode: 1}, errors.New("unexpected attribute")
 }
+
+// GAP-0769: a macOS uninstall that could not delete the service account
+// repeated dscl's raw output (exit 40, "DS Error: -14120
+// (eDSPermissionError)") next to the command that deletes it by hand. It
+// names the record and the Open Directory error instead.
+func TestDsclDeleteErrorNamesTheRecordAndTheError(t *testing.T) {
+	raw := errors.New("dscl . -delete /Users/_defenseclaw: exit status 40: <main> delete status: eDSPermissionError\nDS Error: -14120 (eDSPermissionError)")
+	got := dsclDeleteError("/Users/_defenseclaw", raw).Error()
+	if got != "macOS refused to delete the directory record /Users/_defenseclaw (eDSPermissionError)" {
+		t.Fatalf("message = %q", got)
+	}
+	other := errors.New("dscl: exit status 1: unexpected")
+	if got := dsclDeleteError("/Groups/_defenseclaw", other); !errors.Is(got, other) || !strings.Contains(got.Error(), "remove /Groups/_defenseclaw") {
+		t.Fatalf("an error without an Open Directory name = %v", got)
+	}
+}
+
+// appearingLoginAccountRunner answers no defenseclaw account until
+// systemd-sysusers ran, then a login account: a directory account NSS could
+// not reach at the first lookup, which sysusers found and left alone.
+type appearingLoginAccountRunner struct{ sysusersRan bool }
+
+func (r *appearingLoginAccountRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	switch {
+	case name == "systemd-sysusers":
+		r.sysusersRan = true
+		return CommandResult{}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "passwd" && r.sysusersRan:
+		return CommandResult{Stdout: []byte("defenseclaw:x:1404:1404:Dee Fense:/home/defenseclaw:/bin/bash\n")}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "group" && r.sysusersRan:
+		return CommandResult{Stdout: []byte("defenseclaw:x:1404:\n")}, nil
+	}
+	return CommandResult{ExitCode: 2}, errors.New("exit status 2")
+}
+
+// GAP-1457: the lookup after systemd-sysusers recorded any account it found
+// as created, also a login account that existed before (sysusers found it
+// and created nothing), which the uninstall then deleted. It is refused like
+// a login account found before.
+func TestLinuxAccountEnsureRefusesALoginAccountFoundAfterSysusers(t *testing.T) {
+	accounts := &linuxAccounts{env: &Env{GOOS: "linux", Runner: &appearingLoginAccountRunner{}}}
+	account, err := accounts.Ensure(context.Background(), "defenseclaw")
+	if err == nil || account.Created || !strings.Contains(err.Error(), "login shell /bin/bash") {
+		t.Fatalf("Ensure = %+v, %v; want a login-account refusal", account, err)
+	}
+}

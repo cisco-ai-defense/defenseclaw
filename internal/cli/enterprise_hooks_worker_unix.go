@@ -219,6 +219,10 @@ type enterpriseHookWorkerTargetResult struct {
 	Pending  bool                           `json:"pending,omitempty"`
 	Error    string                         `json:"error,omitempty"`
 	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// AgentConfig is the result's connector.AgentConfigStatus code (a
+	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
+	// out of the result, which the guardian state stores.
+	AgentConfig string `json:"agent_config,omitempty"`
 	// Purged is what a purge target found and removed (booleans only, so
 	// nothing the account controls reaches the administrator's output).
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
@@ -603,6 +607,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			outcome.OK = true
 			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
 				outcome.Result = &result
+				outcome.AgentConfig = result.AgentConfig
 			}
 		}
 		results = append(results, outcome)

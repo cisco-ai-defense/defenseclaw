@@ -146,6 +146,11 @@ Assign it to device groups. On each run the wrapper downloads the pkg,
 verifies it, installs it only when its version differs from the installed
 one, runs `ensure` with the config, and exits with the lifecycle's code. The
 script's run status in Intune is Success for exit `0` and Failed otherwise.
+If payload staging fills, the wrapper reports `mdm_staging_full` (exit `1`).
+A secret containing a NUL byte is refused as `mdm_invalid_arguments` (exit
+`2`); a cancelled run stops the lifecycle child and reports `mdm_cancelled`
+(exit `1`). A version 8 inline config migration warning names **MDM inline
+config** as its source, rather than the private staging file.
 
 ### 4. Report the version with a custom attribute
 
@@ -264,9 +269,13 @@ and that removal stays in effect at the next check-in. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
-forgets the pkg receipt. It also removes the config, the key, the state and
-the logs. Set `DC_PURGE=1` in its settings block to also remove each enrolled
-user's `~/.defenseclaw` and per-user binaries. On a Mac with nothing installed
+forgets the pkg receipt. It also removes the config, the key, most of the state and the logs. If an
+account keeps sandboxes, the gateway's sandbox registration store
+(`/opt/cisco/defenseclaw/runtime/sandbox`) and its key
+(`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay, root-owned,
+until the next `ensure` adopts them. Set `DC_PURGE=1` in its settings block to
+also remove each enrolled user's `~/.defenseclaw`, per-user binaries and the
+kept sandbox store and key. On a Mac with nothing installed
 it exits `0`.
 
 ## Troubleshoot

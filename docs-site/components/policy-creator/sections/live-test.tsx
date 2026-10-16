@@ -318,6 +318,9 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
   const expected = scenario?.expectedVerdict;
   const matchesExpected =
     source === 'scenario' && expected != null && verdict === expected;
+  const observeHint = domain === 'guardrail' && data.guardrail.mode === 'observe'
+    ? 'The preview runs in observe mode; switch Guardrail mode to action to see enforcement.'
+    : null;
 
   return (
     // Outer shell keeps the title pinned; body scrolls. min-h-0 is
@@ -420,6 +423,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           domain={domain}
           results={corpusResults}
           running={corpusRunning}
+          observeHint={observeHint}
         />
       ) : source === 'scenario' ? (
         <div className="flex flex-col gap-2">
@@ -487,7 +491,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           >
             {matchesExpected
               ? `Matches expected verdict (${expected}).`
-              : `Differs from expected verdict (${expected}). Tweak the relevant section to align.`}
+              : `Differs from expected verdict (${expected}). ${observeHint ?? 'Tweak the relevant section to align.'}`}
           </p>
         )}
         {source === 'custom' && available && !error && (
@@ -515,6 +519,7 @@ function CorpusReplay({
   domain,
   results,
   running,
+  observeHint,
 }: {
   domain: Scenario['domain'];
   results: Array<{
@@ -527,6 +532,7 @@ function CorpusReplay({
     errored: boolean;
   }>;
   running: boolean;
+  observeHint: string | null;
 }) {
   if (results.length === 0) {
     return (
@@ -587,6 +593,7 @@ function CorpusReplay({
               <div className="mt-1 text-[10px] text-fd-muted-foreground">
                 expected <code className="font-mono">{r.expected}</code>
                 {r.reason && <> · {r.reason}</>}
+                {observeHint && <> · {observeHint}</>}
               </div>
             )}
             {r.errored && r.reason && (

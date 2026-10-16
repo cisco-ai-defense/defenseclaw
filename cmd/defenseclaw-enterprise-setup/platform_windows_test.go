@@ -119,6 +119,23 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 	}
 }
 
+// TestEnterpriseLifecycleArgumentsOmitWithheldPolicyCompiler pins DAMAGE-678
+// A1: a signed Setup whose outer signature did not verify forwards no
+// compiler, so the lifecycle and /ensure run without Fleet.
+func TestEnterpriseLifecycleArgumentsOmitWithheldPolicyCompiler(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
+		got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{
+			Action: action, Standalone: true, OmitPolicyCompiler: true,
+		})
+		for _, argument := range got {
+			if argument == "--policy-compiler" {
+				t.Fatalf("%s forwarded a withheld compiler: %#v", action, got)
+			}
+		}
+	}
+}
+
 func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.T) {
 	for _, value := range []string{
 		"config.yaml",

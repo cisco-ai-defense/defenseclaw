@@ -1478,32 +1478,9 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			return findings
 		}
 	}
-	enforcementFacts := facts.EnforcementProjection()
 	if request.EnforcementCapable &&
-		(enforcementFacts.EnforcementEligible() &&
-			(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
-				sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
-			homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
-			trustedStaticStatementAuthorizedKeysWrite(input) ||
-			trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
-			trustedHereStringAuthorizedKeysWrite(input) ||
-			trustedDDOutputAuthorizedKeysWrite(input) ||
-			trustedSedInPlaceAuthorizedKeysWrite(input) ||
-			trustedAssignedAuthorizedKeysWrite(input) ||
-			trustedAuthorizedKeysGlobWrite(input) ||
-			trustedAuthorizedKeysSymlinkWrite(input) ||
-			symlinkWrite ||
-			trustedFindExecAuthorizedKeysWrite(input) ||
-			trustedHomeDirectoryAuthorizedKeysWrite(input) ||
-			trustedWindowsLocationAuthorizedKeysWrite(input) ||
-			trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
-			trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-			trustedInlineAuthorizedKeysWrite(facts) ||
-			trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
-			trustedCMDAuthorizedKeysWrite(input) ||
-			trustedNamedOutFileAuthorizedKeysWrite(input) ||
-			trustedGitBashAuthorizedKeysWrite(input) ||
-			trustedNestedAuthorizedKeysWrite(input, facts)) {
+		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite) ||
+			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
 			kept := findings[:0]
@@ -1529,6 +1506,78 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
+// call writes an authorized-keys file. input is the request's input with
+// the command text of a shell tool filled in.
+func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
+	enforcementFacts := facts.EnforcementProjection()
+	return enforcementFacts.EnforcementEligible() &&
+		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+			sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
+		trustedUnknownKeyAuthorizedKeysWrite(input, facts) ||
+		homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
+		trustedStaticStatementAuthorizedKeysWrite(input) ||
+		trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
+		trustedHereStringAuthorizedKeysWrite(input) ||
+		trustedDDOutputAuthorizedKeysWrite(input) ||
+		trustedSedInPlaceAuthorizedKeysWrite(input) ||
+		trustedAssignedAuthorizedKeysWrite(input) ||
+		trustedAuthorizedKeysGlobWrite(input) ||
+		trustedAuthorizedKeysSymlinkWrite(input) ||
+		symlinkWrite ||
+		trustedFindExecAuthorizedKeysWrite(input) ||
+		trustedHomeDirectoryAuthorizedKeysWrite(input) ||
+		trustedWindowsLocationAuthorizedKeysWrite(input) ||
+		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
+		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
+		trustedInlineAuthorizedKeysWrite(facts) ||
+		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
+		trustedCMDAuthorizedKeysWrite(input) ||
+		trustedNamedOutFileAuthorizedKeysWrite(input) ||
+		trustedGitBashAuthorizedKeysWrite(input) ||
+		trustedNestedAuthorizedKeysWrite(input, facts)
+}
+
+// trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
+// file-write tool call (write, edit, multiedit, create) whose arguments
+// carry a key outside the tool's reviewed schema: the harness still writes
+// the file its target key names, so each such target is judged as the same
+// tool's structured write (actionfacts.UnknownKeyWriteTargetViews). Only a
+// match counts.
+func trustedUnknownKeyAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
+	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
+		projected := view.EnforcementProjection()
+		if projected.EnforcementEligible() && sshAuthorizedKeysStructuredPrerequisite(projected) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedSandboxGuestAuthorizedKeysWrite judges a sandbox call once more in
+// the guest's own namespace. The request's working directory is the host
+// directory the guest's one is mounted from (or none), while "~" is the
+// guest home, so a relative target is resolved where the guest does not
+// write it. The guest resolves it against its own working directory
+// (request.SandboxGuestCWD, lexical): the call is analyzed with that
+// directory and the authorized-keys proofs run on it. Only a match counts;
+// host-side checks that read files are left out.
+func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
+	guestCWD := request.SandboxGuestCWD
+	if guestCWD == "" || guestCWD == request.Input.CWD {
+		return false
+	}
+	input := request.Input
+	input.CWD = guestCWD
+	facts := actionfacts.Analyze(input)
+	if input.Command == "" {
+		if command, ok := trustedBashCommandInput(input); ok {
+			input.Command = command
+		}
+	}
+	return trustedAuthorizedKeysWriteProof(input, facts, false)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(
@@ -1666,7 +1715,7 @@ func integrityStructuredFileMutator(
 		"writefile", "write_file", "write-file",
 		"fswrite", "fs_write", "fs-write", "fs.write", "fs.write_file",
 		"filewrite", "file_write", "file-write",
-		"createfile", "create_file", "create-file",
+		"create", "createfile", "create_file", "create-file",
 		"editfile", "edit_file", "edit-file",
 		"applypatch", "apply_patch", "apply-patch",
 		"appendfile", "append_file", "append-file",

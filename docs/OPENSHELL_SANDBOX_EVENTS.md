@@ -75,6 +75,7 @@ go through `audit.SandboxManagedTelemetry`
 - `log.sandbox.access_refused`: a destination the managed policy refused, with the rule (`defenseclaw.sandbox.policy.rule`) and `server.address`; the rule is the caller's own match only.
 - `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container`: a sandbox on the user's OpenShell gateway that DefenseClaw did not create (stopped, deleted when it cannot stop, or reported) and an agent container started outside DefenseClaw (reported only). Both carry the account's own profile match and the detected agent connector, including without a registered sandbox. Deletion is recorded as action `stop`, including a failed deletion.
 - `log.sandbox.settings_drift`: an OpenShell setting differs from `enterprise.openshell` (`defenseclaw.openshell.settings.field` names the key, never the value), which pauses the user's sandboxes.
+- `log.sandbox.registration_without_guest`: after a five-minute grace, a watched registration was used on an admitted relay call (`relay_without_guest`) or reported running (`running_without_guest`) without an accepted guest record since bind. The record names the account, connector, registration, sandbox id and name, and the gateway's running state as `ready` or `stopped` phase. It is a `compliance.activity` alert with no outcome and changes no decision; the same account can post lifecycle records, and a dropped first record can cause one alert. Only registrations bound by a build with this signal are watched. The first accepted record ends the watch, so a guest that disappears later is not reported by this tripwire for the simple case. Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched; re-create those sandboxes after the upgrade to bring them under the signal. Root-owned attestation in a later release replaces this signal. The Sandboxes dashboard stat is **Sandbox registrations without a guest**.
 
 A refusal (including a failed policy resolution), a removal or stop, a re-match and an ask decision are mandatory and
 reach the audit floor whatever a route's collection settings say.
@@ -107,6 +108,7 @@ sandbox) and `deleted` (after it is gone).
 | `RecordSandboxForeignSandbox` | `sandbox.managed` | `log.sandbox.foreign_sandbox` | `enforcement.action` | A stop (`enforced_outcome`) |
 | `RecordSandboxForeignContainer` | `sandbox.managed` | `log.sandbox.foreign_container` | `compliance.activity` | No (alert only) |
 | `RecordSandboxSettingsDrift` | `sandbox.managed` | `log.sandbox.settings_drift` | `enforcement.action` | Always (`enforced_outcome`) |
+| `RecordSandboxRegistrationWithoutGuest` | `sandbox.managed` | `log.sandbox.registration_without_guest` | `compliance.activity` | No (alert only; no outcome) |
 
 The manager stamps every record with what it knows of the sandbox and the
 producer does not: the launching host account as `user.id`,

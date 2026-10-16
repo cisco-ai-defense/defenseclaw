@@ -267,6 +267,13 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except OSError:
             had = False
 
+    if env_name in _gateway_token_names(app.cfg):
+        from defenseclaw.logger import keep_running_gateway_token
+
+        # The running gateway accepts only the token it loaded until it
+        # restarts; the audit event below sent the new one, got 401 and the
+        # command failed after the key was saved (GAP-0490).
+        keep_running_gateway_token(app.logger, app.cfg.data_dir, app.cfg.gateway.resolved_token(), value)
     _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
     if app.logger:
         from defenseclaw.logger import CanonicalObservabilityUnavailableError

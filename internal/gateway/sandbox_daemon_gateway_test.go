@@ -154,6 +154,8 @@ func TestAccountOpenShellManagedGatewayCommandDrift(t *testing.T) {
 	}{
 		{"/usr/bin/openshell-gateway --config " + cfg, false},
 		{"/usr/bin/openshell-gateway --config " + filepath.Join(dir, openshell.GatewayFallbackTOMLFile), false},
+		// The 1.0.1 upgrade bridge's docker configuration (GAP-0587).
+		{"/usr/bin/openshell-gateway --config " + filepath.Join(dir, openshell.GatewayDefaultNamespaceTOMLFile), false},
 		{"/usr/bin/openshell-gateway --config " + filepath.Join(r.o.home, ".config", "openshell", "gateway.toml"), true},
 		{"/usr/bin/openshell-gateway --config " + cfg + " --bind-address 0.0.0.0:17670", true},
 		{filepath.Join(r.o.home, ".local", "bin", "openshell-gateway") + " --config " + cfg, true},

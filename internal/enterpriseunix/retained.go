@@ -13,9 +13,11 @@
 package enterpriseunix
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -36,6 +38,14 @@ import (
 // fresh random value inside each kept directory and records only its hash;
 // a recreated directory has no marker, and nobody but root can read one to
 // copy it.
+//
+// The owner is checked too, with one exception: when uninstall removed the
+// service account it handed the kept folder to root, and a package
+// reinstall (rpm -e or apt remove, then an install; the MDM uninstall then
+// install) creates a new service account and runs the package's tmpfiles.d
+// entry for the folder before ensure, which re-owns the folder (and only the
+// folder) to that account. The marker is the proof of identity, so a folder
+// recorded as root's may now belong to the current service account.
 const (
 	retainedStateFileName      = "retained-state.json"
 	retainedStateSchemaVersion = 2
@@ -66,7 +76,9 @@ func retainedMarkerPath(dir string) string {
 	return filepath.Join(dir, retainedMarkerName)
 }
 
-func directoryIdentity(path string) (retainedDir, bool) {
+// directoryIdentity reads a directory's device and inode, and its owner
+// through OwnerOf, the owner read every other lifecycle check uses.
+func (e *Env) directoryIdentity(path string) (retainedDir, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() {
 		return retainedDir{}, false
@@ -75,7 +87,11 @@ func directoryIdentity(path string) (retainedDir, bool) {
 	if !ok {
 		return retainedDir{}, false
 	}
-	return retainedDir{Dev: uint64(stat.Dev), Inode: uint64(stat.Ino), UID: stat.Uid}, true //nolint:unconvert // Dev is int32 on darwin
+	uid, _, err := e.OwnerOf(path)
+	if err != nil || uid < 0 || int64(uid) > math.MaxUint32 {
+		return retainedDir{}, false
+	}
+	return retainedDir{Dev: uint64(stat.Dev), Inode: uint64(stat.Ino), UID: uint32(uid)}, true //nolint:unconvert // Dev is int32 on darwin
 }
 
 // writeRetainedMarker replaces the marker in dir with a fresh random value
@@ -129,7 +145,7 @@ func (e *Env) recordRetainedState() error {
 		if err != nil || len(entries) == 0 {
 			continue
 		}
-		identity, ok := directoryIdentity(e.P(dir))
+		identity, ok := e.directoryIdentity(e.P(dir))
 		if !ok {
 			continue
 		}
@@ -173,17 +189,34 @@ func (e *Env) loadRetainedState() map[string]retainedDir {
 }
 
 // retainedByLifecycle reports whether dir is the same directory a previous
-// non-purge uninstall recorded as kept: same device, inode and owner, and
+// non-purge uninstall recorded as kept: same device and inode, the recorded
+// owner (or the service account, for a folder recorded as root's), and
 // still holding the marker that uninstall wrote.
 func (e *Env) retainedByLifecycle(dir string, retained map[string]retainedDir) bool {
 	want, ok := retained[dir]
 	if !ok {
 		return false
 	}
-	got, ok := directoryIdentity(e.P(dir))
-	if !ok || got.Dev != want.Dev || got.Inode != want.Inode || got.UID != want.UID {
+	got, ok := e.directoryIdentity(e.P(dir))
+	if !ok || got.Dev != want.Dev || got.Inode != want.Inode || !e.retainedOwnerMatches(got.UID, want.UID) {
 		return false
 	}
 	marker, ok := e.retainedMarkerSHA(e.P(dir))
 	return ok && marker == want.MarkerSHA256
+}
+
+// retainedOwnerMatches reports whether a kept directory's current owner is
+// the one uninstall recorded or, for a directory recorded as root's, the
+// current service account: the package's tmpfiles.d entry re-owns the
+// folder to the account a reinstall created (GAP-0598). Any other owner is
+// refused.
+func (e *Env) retainedOwnerMatches(current, recorded uint32) bool {
+	if current == recorded {
+		return true
+	}
+	if recorded != 0 {
+		return false
+	}
+	account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+	return err == nil && ok && account.UID > 0 && int64(account.UID) == int64(current)
 }

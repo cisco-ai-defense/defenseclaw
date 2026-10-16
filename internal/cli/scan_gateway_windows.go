@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,17 @@ import (
 )
 
 var managedScanWindowsLayout = managed.StandaloneWindowsLayout
+
+// managedScanReadFile reads the managed gateway's config and token file; a
+// seam for tests.
+var managedScanReadFile = readWindowsEnterpriseBoundedFile
+
+// managedScanAdministratorOnly is the answer to a standard account whose
+// scan goes through the managed gateway: its config and token are readable
+// only by administrators. The private path and the raw "Access is denied"
+// are left out (GAP-1391).
+const managedScanAdministratorOnly = "on this managed computer a scan runs through the DefenseClaw gateway, whose config and token only an administrator can read; " +
+	"run it from an elevated Administrator prompt, or ask your administrator to run it. Nothing was scanned"
 
 // managedScanGatewayEndpoint binds the scan commands to the standalone
 // managed gateway: its configured API port and the gateway token in its data
@@ -35,12 +47,15 @@ func managedScanGatewayEndpoint() (string, string, bool, error) {
 		return "", "", true, err
 	}
 	base, err := managedWindowsGatewayBase(layout)
+	if errors.Is(err, fs.ErrPermission) {
+		return "", "", true, errors.New(managedScanAdministratorOnly)
+	}
 	if err != nil {
 		return "", "", true, err
 	}
-	body, err := readWindowsEnterpriseBoundedFile(filepath.Join(layout.DataDir, ".env"), 1<<20)
+	body, err := managedScanReadFile(filepath.Join(layout.DataDir, ".env"), 1<<20)
 	if err != nil {
-		return "", "", true, errors.New("the managed gateway token is readable only from an elevated Administrator prompt")
+		return "", "", true, errors.New(managedScanAdministratorOnly)
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
@@ -56,7 +71,7 @@ func managedScanGatewayEndpoint() (string, string, bool, error) {
 // gateway's API: the gateway.api_port of the installed config, or the
 // layout's default port when the config sets none.
 func managedWindowsGatewayBase(layout managed.StandaloneLayout) (string, error) {
-	configBody, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 4<<20)
+	configBody, err := managedScanReadFile(layout.ConfigPath, 4<<20)
 	if err != nil {
 		return "", fmt.Errorf("read installed managed gateway config: %w", err)
 	}

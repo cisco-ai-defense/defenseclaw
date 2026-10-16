@@ -211,11 +211,12 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			}
 		}
 		message := "the gateway's effective policy digest differs from the signed expected digest"
-		if code == enterprisebundle.WarnDigestUnverifiable {
+		switch code {
+		case enterprisebundle.WarnDigestUnverifiable:
 			message = "the signed expected digest cannot be compared with the gateway's effective policy digest on this product version or platform"
-		} else if code == enterprisebundle.WarnDigestLayoutUnverifiable {
+		case enterprisebundle.WarnDigestLayoutUnverifiable:
 			message = "the device's non-standard managed layout changed the effective digest; the gateway's enforcing digest was recorded"
-		} else if code == "capability_disabled" {
+		case "capability_disabled":
 			message = "the bundle disabled: " + strings.Join(currentReceipt.DisabledByBundle, ", ")
 		}
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: message})

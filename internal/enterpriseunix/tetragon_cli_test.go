@@ -867,7 +867,7 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 		"  Pause:           in force for every user on this host (untrusted pause file: ",
 		"  Override:        connect deleted by an operator at ",
 		"defenseclaw-controls-0a1b2c3d", "dcr-std1 (1001)", "reset by a hit", "12.0h of 168h (7%)",
-		"      dcr-std1 (1001): would block ssh_private_key_read 1x, last ", "        ~/.ssh/id_ed25519 by /usr/bin/cat\n",
+		"      dcr-std1 (1001): would block ssh_private_key_read 1x, last ", "        ~/.ssh/id_ed25519 by /usr/bin/cat (1)\n",
 		"Observed, not enforced: 1 session\n", "    dcr-std1 (uid 1001): 1, looks like an agent by name only (heuristic_root) (langchain)",
 		"  Over the pid limit: 1 live root observed only\n",
 		// GAP-0096: the count and the verb agree for one session.
@@ -1233,8 +1233,8 @@ func TestTetragonStatusTextInObserveWithAResetUser(t *testing.T) {
 		"    dcr-std1 (1001)  ready for enforce  claudecode  168.0h of 168h, ready         0\n",
 		"    dcr-std2 (1002)  in burn-in         claudecode  40.5h of 168h (24%), ~9 days  0\n",
 		"    dcr-std3 (1003)  reset by a hit     claudecode  0.0h of 168h (0%), measuring  1\n",
-		"      dcr-std3 (1003): would block ssh_private_key_read 1x, last 2026-10-07T09:12:00Z\n        ~/.ssh/id_ed25519 by /usr/bin/python3.11\n",
-		"Next: 1 of 3 users is ready; the next is ready in ~9 days at the current rate. Check with:\n" +
+		"      dcr-std3 (1003): would block ssh_private_key_read 1x, last 2026-10-07T09:12:00Z\n        ~/.ssh/id_ed25519 by /usr/bin/python3.11 (1)\n",
+		"Next: 1 of 3 users is ready for enforce; the next in ~9 days at the current rate. Check with:\n" +
 			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -1277,7 +1277,7 @@ func TestTetragonStatusTextNamesMonitorOnlyUsers(t *testing.T) {
 		"    dcr-std1 (1001)  monitor only    codex*      168.0h of 168h                0\n",
 		"    * through vendor machine policy: an eligible account without a targets.yaml row\n",
 		"      dcr-std1 (1001): monitor only: connector in observe mode\n",
-		"Next: 0 of 3 users are ready; the next is ready in ~9 days at the current rate. Check with:\n",
+		"Next: 0 of 3 users are ready for enforce; the next in ~9 days at the current rate. Check with:\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("text lacks %q:\n%s", want, got)
@@ -1285,6 +1285,84 @@ func TestTetragonStatusTextNamesMonitorOnlyUsers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rep.Users[0].MachinePolicy, []string{"codex"}) || !reflect.DeepEqual(rep.Users[1].MachinePolicy, []string{}) {
 		t.Fatalf("machine_policy = %v / %v", rep.Users[0].MachinePolicy, rep.Users[1].MachinePolicy)
+	}
+	assertStatusColumns(t, got)
+}
+
+// #1152: the Next: footer said "N of M users are ready" in observe and in
+// enforce, the word the BURN-IN column uses for a finished burn-in. Observe
+// now counts the users ready for enforce (the STATE column's words), and
+// enforce counts the users it denies for now.
+func TestTetragonStatusNextSeparatesEnforcedFromReady(t *testing.T) {
+	stubTetragonAccounts(t)
+	observe := withUsers(readyInputs("observe"))
+	got := statusNext(observe, readyProbes, readinessNow)
+	if len(got) != 2 || got[0] != "Next: 1 of 3 users is ready for enforce; the next in ~9 days at the current rate. Check with:" {
+		t.Fatalf("observe footer %q", got)
+	}
+
+	enforce := withUsers(readyInputs("enforce"))
+	enforce.Intent.EnforceAck = []string{kernelpolicy.Digest()}
+	enforce.State.UIDs[0].State, enforce.State.UIDs[0].Reason = kernelpolicy.UIDEnforcing, ""
+	got = statusNext(enforce, readyProbes, readinessNow)
+	if len(got) != 2 || got[0] != "Next: 1 of 3 users enforced; the next in ~9 days at the current rate. Check with:" {
+		t.Fatalf("enforce footer %q", got)
+	}
+	for _, line := range got {
+		if strings.Contains(line, "ready;") || strings.Contains(line, "is ready") || strings.Contains(line, "are ready") {
+			t.Fatalf("enforce footer still says ready: %q", got)
+		}
+	}
+	// Burn-in finished but not denied for (another user holds the binary
+	// anchor): ready, yet not counted as enforced.
+	enforce.State.UIDs[0].State, enforce.State.UIDs[0].Reason = kernelpolicy.UIDMonitor, kernelpolicy.WarnBinaryScopeLimited
+	if got = statusNext(enforce, readyProbes, readinessNow); len(got) != 2 || !strings.HasPrefix(got[0], "Next: 0 of 3 users enforced") {
+		t.Fatalf("enforce footer with no enforced user %q", got)
+	}
+}
+
+// GAP-0128 (#1246): a hit line named only the most frequent binary. It now
+// names the top binaries with their counts, at most three and "+N more".
+func TestHitLinesNameTheTopBinariesWithTheirCounts(t *testing.T) {
+	stubTetragonAccounts(t)
+	hits := []TetragonHits{{Control: "kernel.ssh_private_key_read", Count: 17, Last: "2026-10-07T09:12:00Z",
+		Paths: []TetragonCount{{Value: "/home/dcr-std1/.ssh/id_ed25519", Count: 17}},
+		Binaries: []TetragonCount{{Value: "/usr/bin/curl", Count: 12}, {Value: "/usr/bin/python3", Count: 3},
+			{Value: "/usr/bin/cat", Count: 1}, {Value: "/usr/bin/ssh-add", Count: 1}}}}
+	got := hitLines("would block", hits, 1001)
+	want := [2]string{"would block ssh_private_key_read 17x, last 2026-10-07T09:12:00Z",
+		"~/.ssh/id_ed25519 by /usr/bin/curl (12), /usr/bin/python3 (3), /usr/bin/cat (1), +1 more"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("hit lines %q, want %q", got, want)
+	}
+	hits[0].Binaries = hits[0].Binaries[:2]
+	if got := hitLines("blocked", hits, 1001); got[0][1] != "~/.ssh/id_ed25519 by /usr/bin/curl (12), /usr/bin/python3 (3)" {
+		t.Fatalf("two binaries %q", got[0][1])
+	}
+	hits[0].Binaries = nil
+	if got := hitLines("blocked", hits, 1001); got[0][1] != "~/.ssh/id_ed25519" {
+		t.Fatalf("no binary %q", got[0][1])
+	}
+}
+
+// #1156: a controls policy the plan replaced stays loaded for the running
+// sessions only it marked; status names it under the policies table, and
+// the JSON report keeps its shape.
+func TestTetragonStatusTextNamesAKeptControlsPolicy(t *testing.T) {
+	state := publishedState(kernelpolicy.ModeEnforce)
+	state.Policies = []kernelpolicy.PolicyStatus{
+		{Name: "defenseclaw-controls-0a1b2c3d", Family: kernelpolicy.FamilyControls, DesiredMode: kernelpolicy.PolicyEnforce,
+			ObservedMode: kernelpolicy.LoadedEnforce, State: kernelpolicy.StateEnabled, RetainedSessions: 2},
+		{Name: "defenseclaw-controls-4e5f6a7b", Family: kernelpolicy.FamilyControls, DesiredMode: kernelpolicy.PolicyEnforce,
+			ObservedMode: kernelpolicy.LoadedEnforce, State: kernelpolicy.StateEnabled},
+	}
+	h := statusHost(t, "    mode: enforce\n    enforce_ack: "+kernelpolicy.Digest()+"\n", state, nil)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	validateTetragonReport(t, compileTetragonStatusSchema(t), rep)
+	got := statusText(t, rep)
+	if !strings.Contains(got, "    defenseclaw-controls-0a1b2c3d keeps denying for 2 sessions that predate its replacement\n") ||
+		strings.Contains(got, "defenseclaw-controls-4e5f6a7b keeps") {
+		t.Fatalf("text:\n%s", got)
 	}
 	assertStatusColumns(t, got)
 }

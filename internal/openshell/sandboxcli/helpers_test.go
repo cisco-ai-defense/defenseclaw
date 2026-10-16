@@ -67,6 +67,8 @@ type fakeDaemon struct {
 	explain   sandboxapi.Explain
 	review    sandboxapi.ReviewResponse
 	undo      sandboxapi.UndoResponse
+	// managed answers an unblock as a managed computer's daemon does.
+	managed bool
 	// errors maps "METHOD path" to the error the fake answers with.
 	errors map[string]*sandboxapi.Error
 	// onGet runs before a sandbox is returned (hook counters move during
@@ -285,11 +287,14 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 	case path == sandboxapi.PathEgressUnblock:
 		var req sandboxapi.UnblockRequest
 		_ = json.Unmarshal(body, &req)
-		scope := "sandbox"
+		scope, msg := "sandbox", "unblocked "+req.Host+" for sandbox "+req.Sandbox
 		if req.Always {
-			scope = "always"
+			scope, msg = "always", "unblocked "+req.Host+" for every sandbox (saved to openshell.egress.unblocked)"
 		}
-		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope})
+		if d.managed {
+			msg = "unblocked " + req.Host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway)"
+		}
+		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope, Message: msg})
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
 		events := d.events

@@ -66,8 +66,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-var fleetAPITokenConfigured = os.Getenv("DCLAW_FLEET_API_TOKEN") != ""
-
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
@@ -3796,15 +3794,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Fleet API routes carry their own DCLAW_FLEET_API_TOKEN auth
-		// (see fleet.API.authMiddleware). Only exempt them from the
-		// gateway's main token check when the fleet token is actually
-		// configured — otherwise leave the gateway auth in place so the
-		// fleet surface is never unauthenticated.
-		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && fleetAPITokenConfigured {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if r.URL.Path == connector.UserScopedListenerProofPath && a.userScopedCredentialsRequired() {
 			// A standalone in-agent plugin on loopback TCP makes the
 			// listener prove it is the gateway before it sends its per-user
@@ -3827,6 +3816,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if requestCarriesSandboxCredential(r) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		// Fleet API routes carry their own token auth (fleet.API's
+		// authMiddleware). Skip the gateway token only when Fleet is wired
+		// and its token is configured, decided per request: a token read
+		// from the environment at package init missed the .env Fleet setup
+		// writes, and exempted the prefix with Fleet off (DAMAGE-678 B3).
+		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && a.fleetAPI.AuthConfigured() {
+			next.ServeHTTP(w, r)
 			return
 		}
 		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
@@ -4320,11 +4318,17 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 }
 
 // evaluateAdmissionPolicy evaluates admission with the input built from the
-// live config: the compiled admission: and the asset_policy lists. The
-// built-in Go twin runs only when OPA fails. OPA is the live generation's
-// prepared query (prepared once for an API server without a generation).
+// config of the generation the request is pinned to (else the live config):
+// the compiled admission: and the asset_policy lists. The built-in Go twin
+// runs only when OPA fails. OPA is that generation's prepared query
+// (prepared once for an API server without a generation), so a reload during
+// the request cannot pair one generation's query with another's lists
+// (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
 	cfg := a.liveConfig()
+	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
+		cfg = g.Config
+	}
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})

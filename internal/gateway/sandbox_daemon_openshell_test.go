@@ -247,7 +247,16 @@ func TestAccountOpenShellGatewayNeverListens(t *testing.T) {
 	}
 	r2 := newOpenShellRig(t, "linux")
 	r2.fail["systemctl --user start"] = "Unit defenseclaw-openshell-gateway.service not found."
-	if _, err := r2.o.Prepare(context.Background(), setupSettings()); !strings.Contains(fmtErr(err), "not found") {
+	run := r2.o.run
+	r2.o.run = func(ctx context.Context, name string, args, env []string) (string, error) {
+		if len(args) > 1 && args[1] == "show" {
+			return "LoadState=not-found\nActiveState=inactive\nSubState=dead\nExecMainStatus=0", nil
+		}
+		return run(ctx, name, args, env)
+	}
+	// The unit's state in words, not systemctl's command line (#1202).
+	if _, err := r2.o.Prepare(context.Background(), setupSettings()); !strings.Contains(fmtErr(err), "its service unit was not found") ||
+		strings.Contains(fmtErr(err), "systemctl") {
 		t.Fatalf("unit missing: %v", err)
 	}
 }

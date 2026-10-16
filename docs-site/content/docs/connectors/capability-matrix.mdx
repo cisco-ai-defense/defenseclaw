@@ -45,9 +45,10 @@ because no recorded test with the official client has shown that.
 </Callout>
 
 <Callout title="A prompt rule blocks only where the agent can block a prompt">
-Claude Code, Codex, Cursor, Devin and Kiro have a prompt hook that can
-block, so a prompt that matches a rule in action mode is stopped before the
-model sees it. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no
+Claude Code, Codex, Cursor and Devin have a prompt hook that can block, so a
+prompt that matches a rule in action mode is stopped before the model sees it.
+Kiro blocks a matching prompt only in Kiro IDE; `kiro-cli` sends it to the
+model. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no
 such hook: their only block events are the tool-call ones listed for each
 connector. On those connectors a prompt that matches a rule is not blocked,
 and the agent sends it to the model. Tool-call rules still block there, so a
@@ -150,4 +151,4 @@ Every sandbox hook fails closed.
 
 Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex, OpenHands and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
 
-Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.
+Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. On a managed standalone host (Linux, macOS and Windows) the administrator-owned GitHub Copilot CLI and Hermes hooks still block a tool call while the gateway service is down; a managed hook never fails open on a gateway outage. On a per-user install a fail-open call is not silent: when the gateway starts again it records a `guardrail-degraded` alert per connector for the calls that ran unchecked ([Fail modes](/docs/reference/fail-modes#reporting-and-diagnosis)). Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.

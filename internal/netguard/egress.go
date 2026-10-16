@@ -42,9 +42,12 @@ func ParseEgressProxyURL(raw string) (*url.URL, error) {
 	if raw == "" {
 		return nil, errors.New("proxy URL is empty")
 	}
+	if !strings.Contains(raw, "://") {
+		return nil, errors.New("proxy URL needs a scheme: use http://host:port or https://host:port")
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("proxy URL is malformed: %w", err)
+		return nil, errors.New("proxy URL is malformed: use http://host:port or https://host:port")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("proxy URL scheme %q must be http or https", u.Scheme)

@@ -140,7 +140,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -178,6 +178,9 @@ try {
                 }
                 if ($RemovedAccountFailures -gt 0) {
                     $report['removed_account_failures'] = $RemovedAccountFailures
+                }
+                if ($AwaitingSignInFailures -gt 0) {
+                    $report['awaiting_sign_in_failures'] = $AwaitingSignInFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -286,6 +289,18 @@ try {
                 -InstalledManifestSHA256 $republishedSHA256
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("a deleted account's failing rows refused the adoption: $($adoption.reason)")
+            }
+            # GAP-0644: a target an earlier release protected waits for its
+            # signed-out account's next sign-in; status counts it, and the
+            # adoption accepts it, as verify and status do.
+            Set-TestGuardian $true $republishedSHA256 2 1 -AwaitingSignInFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a row waiting for its account's next sign-in refused the adoption: $($adoption.reason)")
             }
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'

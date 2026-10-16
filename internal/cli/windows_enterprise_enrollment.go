@@ -35,7 +35,10 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 	failures := map[string]string{}
 	for _, row := range rows {
 		key := windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome)
-		if !row.OK && !row.Pending && strings.TrimSpace(row.Error) != "" && failures[key] == "" {
+		// A row that waits for its account's next sign-in is pending, not
+		// failed (GAP-0644).
+		if !row.OK && !row.Pending && !enterpriseHookAwaitingSignInError(row) &&
+			strings.TrimSpace(row.Error) != "" && failures[key] == "" {
 			failures[key] = strings.TrimSpace(row.Connector) + ": " + boundedEnterpriseHookUserCleanupText(strings.TrimSpace(row.Error))
 		}
 	}

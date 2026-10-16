@@ -10,6 +10,7 @@
 package winpath
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -66,30 +67,49 @@ func UTF16Ptr(path string) (*uint16, error) {
 	return windows.UTF16PtrFromString(extended)
 }
 
-// RejectReparseChain rejects any existing reparse point between path and its
-// volume root. Missing path elements are allowed so callers can validate a
-// destination before creating it.
+// windowsPathAttributes reads the attributes of one element. Tests replace it
+// to check that no element below a refused or missing one is read.
+var windowsPathAttributes = func(path string) (uint32, error) {
+	ptr, err := UTF16Ptr(path)
+	if err != nil {
+		return 0, err
+	}
+	return windows.GetFileAttributes(ptr)
+}
+
+// RejectReparseChain checks from the volume root down and rejects any existing
+// reparse point before reading an element below it. A missing element ends the
+// walk without reading below it, so callers can validate a destination before
+// creating it.
 func RejectReparseChain(path string) error {
-	current, err := filepath.Abs(path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	for {
-		ptr, err := UTF16Ptr(current)
-		if err != nil {
-			return err
-		}
-		attributes, err := windows.GetFileAttributes(ptr)
-		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("reparse point in path: %s", current)
-		}
-		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
-			return err
-		}
+	// Keep conversion errors observable even when an ancestor is missing.
+	if _, err := UTF16Ptr(abs); err != nil {
+		return err
+	}
+	var chain []string
+	for current := abs; ; {
+		chain = append(chain, current)
 		parent := filepath.Dir(current)
 		if parent == current {
-			return nil
+			break
 		}
 		current = parent
 	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		attributes, err := windowsPathAttributes(chain[i])
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return fmt.Errorf("reparse point in path: %s", chain[i])
+		}
+	}
+	return nil
 }

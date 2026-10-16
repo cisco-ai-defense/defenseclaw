@@ -127,6 +127,58 @@ type sandboxRelayState struct {
 	registrationID string
 	tamperTier     string
 	sink           *sandboxRelayDecisionSink
+	// reg is the registration sandboxRelayAdmit admitted: the gateway's
+	// unblock lookup of the call (sandboxRelayUnblock) reads its saved
+	// decisions and floor.
+	reg sandboxreg.Registration
+	// egressRefusals are the daemon's untold refusals of the sandbox the
+	// call carried (sandboxrelay.EgressRefusalsHeader), handed out once
+	// (takeEgressRefusals).
+	egressMu       sync.Mutex
+	egressRefusals []SandboxEgressRefusal
+}
+
+// takeEgressRefusals hands out the refusals the call carried, once, and
+// marks the answer as telling the agent of them (the trailer's
+// egress_told), so the daemon marks them told.
+func (s *sandboxRelayState) takeEgressRefusals() []SandboxEgressRefusal {
+	s.egressMu.Lock()
+	out := s.egressRefusals
+	s.egressRefusals = nil
+	s.egressMu.Unlock()
+	if len(out) > 0 {
+		s.sink.markEgressTold()
+	}
+	return out
+}
+
+// sandboxRelayEgressRefusals reads the refusals a relayed hook call
+// carries: one EgressRefusalsHeader value, or none (several are ignored).
+func sandboxRelayEgressRefusals(h http.Header) []SandboxEgressRefusal {
+	values := h.Values(sandboxrelay.EgressRefusalsHeader)
+	if len(values) != 1 {
+		return nil
+	}
+	wire := sandboxrelay.ParseEgressRefusals(values[0])
+	if len(wire) == 0 {
+		return nil
+	}
+	out := make([]SandboxEgressRefusal, 0, len(wire))
+	for _, r := range wire {
+		out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+			Cut: r.Cut, Sent: r.Sent, Note: r.Note})
+	}
+	return out
+}
+
+// sandboxRelayWireRefusals is refusals as the relay carries them.
+func sandboxRelayWireRefusals(refusals []SandboxEgressRefusal) []sandboxrelay.EgressRefusal {
+	out := make([]sandboxrelay.EgressRefusal, 0, len(refusals))
+	for _, r := range refusals {
+		out = append(out, sandboxrelay.EgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+			Cut: r.Cut, Sent: r.Sent, Note: r.Note})
+	}
+	return out
 }
 
 type sandboxRelayStateKey struct{}
@@ -174,7 +226,7 @@ func sandboxRelayContext(ctx context.Context, reg sandboxreg.Registration, class
 	ctx = context.WithValue(ctx, claimedSessionContextKey{}, nil)
 	ctx = context.WithValue(ctx, enterpriseExemptUserContextKey{}, false)
 	ctx = sandboxauth.WithRequest(ctx, binding, sandboxauth.NewFSView(binding, nil))
-	state := &sandboxRelayState{registrationID: reg.ID, tamperTier: reg.TamperTier, sink: &sandboxRelayDecisionSink{}}
+	state := &sandboxRelayState{registrationID: reg.ID, tamperTier: reg.TamperTier, sink: &sandboxRelayDecisionSink{}, reg: reg}
 	ctx = context.WithValue(ctx, sandboxRelayStateKey{}, state)
 	ctx = withSandboxIngressRoute(ctx, class)
 	ctx, _ = withSandboxHookOutcome(ctx)
@@ -259,6 +311,10 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			return
 		}
 		ctx, binding, state := sandboxRelayContext(ctx, reg, route.class)
+		if route.class == sandboxauth.RouteHook {
+			// Read before the scrub drops every sandbox relay header.
+			state.egressRefusals = sandboxRelayEgressRefusals(r.Header)
+		}
 		r = r.WithContext(ctx)
 		sandboxRelayScrubHeaders(r.Header)
 		// The handler sees the path it serves on a local sandbox ingress.
@@ -345,6 +401,14 @@ func (w *sandboxRelayResponseWriter) finalStatus() int {
 type sandboxRelayDecisionSink struct {
 	mu       sync.Mutex
 	decision *sandboxrelay.HookDecision
+	// egressTold: the answer told the agent of the call's refusals.
+	egressTold bool
+}
+
+func (s *sandboxRelayDecisionSink) markEgressTold() {
+	s.mu.Lock()
+	s.egressTold = true
+	s.mu.Unlock()
 }
 
 func sandboxRelayDecisionSinkFrom(ctx context.Context) *sandboxRelayDecisionSink {
@@ -371,6 +435,7 @@ func (s *sandboxRelayDecisionSink) put(d SandboxHookDecision) {
 		Reason:       d.Reason,
 		ModelError:   d.ModelError,
 		ModelStatus:  d.ModelStatus,
+		AlertsLow:    d.AlertsLow,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -381,12 +446,14 @@ func (s *sandboxRelayDecisionSink) put(d SandboxHookDecision) {
 // handler recorded none.
 func (s *sandboxRelayDecisionSink) trailer() (string, bool) {
 	s.mu.Lock()
-	d := s.decision
+	d, told := s.decision, s.egressTold
 	s.mu.Unlock()
 	if d == nil {
 		return "", false
 	}
-	return encodeSandboxRelayDecision(*d)
+	out := *d
+	out.EgressTold = told
+	return encodeSandboxRelayDecision(out)
 }
 
 // encodeSandboxRelayDecision is d as trailer JSON of at most

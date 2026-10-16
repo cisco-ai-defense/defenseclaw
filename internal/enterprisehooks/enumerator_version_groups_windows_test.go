@@ -122,8 +122,10 @@ func TestStandaloneKnownRowReportsAnUnverifiedUpgrade(t *testing.T) {
 func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	stubActiveSessions(t, nil)
-	// Another user is enrolled for Cursor, so its machine hooks are in force.
+	// Other users are enrolled for Cursor and Codex, so their machine hooks
+	// are in force.
 	stubCursorMachinePolicyPublished(t, true)
+	stubCodexMachinePolicyPublished(t, true)
 	cursorHome := cursorProfile(t, "4.1.0")
 	codexHome := codexProfile(t, "0.125.0")
 	injectWindowsProfileList(t, map[string]string{

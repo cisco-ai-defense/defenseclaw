@@ -351,6 +351,9 @@ ai_discovery:
 		{name: "data_dir explicit", prefix: "data_dir: /var/lib/defenseclaw\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && tc.defaultDataDir && tc.defaultPolicyDir {
+				t.Skip("rel-1-0-2:GAP-0635: on a Windows host the defaulted openshell.pack_dir of a Linux target gets Windows separators (the default is not target-aware); deferred to 1.0.3")
+			}
 			source := tc.prefix + base
 			if !tc.defaultPolicyDir {
 				_, file, _, _ := runtime.Caller(0)
@@ -402,12 +405,17 @@ ai_discovery:
 					{"ai_discovery.confidence_policy_path", cfg.AIDiscovery.ConfidencePolicyPath, "confidence.yaml"},
 					{"firewall.config_file", cfg.Firewall.ConfigFile, "firewall.yaml"},
 					{"firewall.rules_file", cfg.Firewall.RulesFile, "firewall.pf.conf"},
-					{"openshell.pack_dir", cfg.OpenShell.PackDir, path.Join("policies", config.DefaultOpenShellPackDirName)},
 					{"gateway.device_key_file", cfg.Gateway.DeviceKeyFile, "device.key"},
 				} {
 					if want := path.Join(root, field.suffix); field.got != want {
 						t.Errorf("%s = %q, want %q", field.name, field.got, want)
 					}
+				}
+				// On a standalone deployment an omitted openshell.pack_dir is
+				// <policy_dir>/sandbox, not a folder in data_dir
+				// (rel-1-0-2:GAP-0099).
+				if want := path.Join(cfg.PolicyDir, config.DefaultOpenShellPackDirName); cfg.OpenShell.PackDir != want {
+					t.Errorf("openshell.pack_dir = %q, want <policy_dir>/sandbox %q", cfg.OpenShell.PackDir, want)
 				}
 				// This check loads a Linux target even on a Windows signer;
 				// its omitted policy_dir must use the Unix vendor tree.

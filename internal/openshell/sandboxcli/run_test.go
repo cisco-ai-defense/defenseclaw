@@ -411,7 +411,7 @@ func TestRunSaysTheDirectoryIsDownBeforeCopying(t *testing.T) {
 	ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
 	ta.AccountCheck = func() error { return outage }
 	err := ta.Run(bg, RunOptions{Harness: "claude", Copy: true})
-	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.", "Need an exception? Contact it@example.invalid")
+	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.", "If it lasts, tell IT: it@example.invalid.")
 	if strings.Contains(err.Error(), "ssh") || ta.creates() != 0 || len(ta.copy.steps) != 0 {
 		t.Fatalf("err = %v, creates %d, copy steps %v; want a refusal before any copy", err, ta.creates(), ta.copy.steps)
 	}

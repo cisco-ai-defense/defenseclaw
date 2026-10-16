@@ -76,3 +76,16 @@ def test_primary_gid_mismatch_stops_before_user_and_membership_writes(monkeypatc
                              "home_template": "/home/{name}", "shell": "/bin/bash"})()
     assert okta.cmd_assign_posix(Client(), args) == 1
     assert writes == []
+
+
+def test_existing_group_gid_outside_sssd_range_is_refused(monkeypatch, capsys):
+    group = {"id": "group", "type": "OKTA_GROUP",
+             "profile": {"name": "linux-users", "gidNumber": 1730000}}
+    monkeypatch.setattr(okta, "find_group", lambda client, name: group)
+    report = okta.Report(False)
+    okta.ensure_group(object(), report, "linux-users", None, {1730000}, 1720000)
+    output = capsys.readouterr().out
+    assert report.problems == 1
+    assert "linux-users" in output
+    assert "1730000" in output
+    assert "1710000" in output and "1729999" in output

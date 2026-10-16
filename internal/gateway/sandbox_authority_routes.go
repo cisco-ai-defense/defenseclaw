@@ -777,6 +777,10 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	// Every live registration's daemon polls once a minute: the fleet's
+	// active-sandbox gauge is exported again on them, so a sandbox that runs
+	// quietly does not go stale on the Sandboxes board (#1241).
+	a.refreshManagedSandboxActive(r.Context())
 	if report && reg.State != sandboxreg.StateRevoked {
 		next, err := auth.store.Report(peer.UID, reg.ID, state.Running)
 		switch {
@@ -787,7 +791,13 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return
 		}
+		if state.Running && reg.State != sandboxreg.StateRevoked {
+			a.sandboxGuestSignal(r.Context(), auth, reg, audit.SandboxGuestRunningWithoutGuest)
+		}
 	}
+	// A running sandbox counts again on its daemon's first poll after a
+	// gateway restart, not only at its next phase change (#1241).
+	a.trackManagedSandboxActive(r.Context(), auth, peer.UID, reg)
 	cfg := a.liveBaseConfig(r.Context())
 	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
 	if err != nil {
@@ -796,7 +806,7 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	}
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
+		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
@@ -925,6 +935,13 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		ProcessTree: floor.ProcessTree != nil && *floor.ProcessTree, DeleteStoppedAfter: floor.DeleteStoppedAfter,
 		RequestAccess:  sandboxRequestAccess(floor),
 		DriverFallback: sandboxDriverFallbackFor(cfg, runtime.GOOS, floor),
+	}
+	// Give the caller the same host-run gate the hook applies (GAP-0555).
+	if len(floor.RequiredFor) > 0 {
+		authorizer, _ := r.Context().Value(sandboxRouteAuthorizerKey{}).(*managedHookAuthorizer)
+		exempt := authorizer != nil && authorizer.hostRunExempt(peer)
+		out.HostRunGate = requireSandboxHostGate(true, exempt)
+		out.EnrollmentExempt = out.HostRunGate == requireSandboxExempt
 	}
 	// The posture is the authoritative resolution of the explained run
 	// under the caller's floor, its required pack and profile minimum

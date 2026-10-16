@@ -83,6 +83,18 @@ STREAM_DISABLED_WAIT = 60.0
 # Under this many columns the panel drops its button bar: the KEYS line
 # names the same keys, and the rows need the room.
 SANDBOX_BUTTON_BAR_MIN_WIDTH = 100
+# Exit status of a `sandbox stop` that kept the sandbox running because
+# stopping it would lose work (sandboxcli.ExitStopKept, #1144).
+SANDBOX_STOP_KEPT_EXIT = 5
+
+
+def sandbox_stop_kept_text(name: str) -> str:
+    """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk is full and holds unpulled work."""
+    return (
+        f"{name} keeps running: its MicroVM disk is full, and a MicroVM stopped like that cannot start again, "
+        f"so its work that was not pulled would be lost. Free some space in it (defenseclaw sandbox exec {name} "
+        f"-- df -h /), pull its work (P), then stop it; delete it (d) to give that work up."
+    )
 
 # Buttons of the panel's control bar, mapped to the key they press.
 SANDBOX_BUTTON_KEYS: dict[str, str] = {
@@ -848,16 +860,28 @@ class SandboxPanelMixin:
             self._apply_sandbox_action(model.handle_key(key))
 
     async def _sandbox_unblock(self, sandbox: str, host: str) -> None:
+        # A managed computer's daemon ends a session unblock at the sandbox's
+        # next start and keeps an "always" one in the organization's gateway,
+        # not in openshell.egress.unblocked (#1205, GAP-0435).
+        managed = self.sandbox_model.managed
         actions = []
         if sandbox:
-            actions.append(
-                MenuAction("sandbox", f"Only in {sandbox}", "Lifts the block for this sandbox until it is deleted.")
+            lifts = (
+                "Lifts the block for this session of the sandbox; it ends when the sandbox starts again."
+                if managed
+                else "Lifts the block for this sandbox until it is deleted."
             )
+            actions.append(MenuAction("sandbox", f"Only in {sandbox}", lifts))
         actions.append(
             MenuAction(
                 "always",
                 "In every sandbox (always)…",
-                "Adds the host to openshell.egress.unblocked (asks first); private networks stay closed.",
+                (
+                    "Your organization's DefenseClaw gateway keeps it for every sandbox of yours while your "
+                    "organization's policy allows it (asks first); private networks stay closed."
+                    if managed
+                    else "Adds the host to openshell.egress.unblocked (asks first); private networks stay closed."
+                ),
             )
         )
         actions.append(MenuAction("cancel", "Cancel"))
@@ -885,8 +909,13 @@ class SandboxPanelMixin:
             # later, may reach the host.
             confirmed = await self._confirm(
                 f"Unblock {host} in every sandbox?",
-                "Every sandbox, now and future, may reach it (openshell.egress.unblocked). "
-                "Private networks and this machine stay closed.",
+                (
+                    "Every sandbox of yours, now and future, may reach it while your organization's policy allows it "
+                    "(kept by your organization's DefenseClaw gateway). "
+                    if managed
+                    else "Every sandbox, now and future, may reach it (openshell.egress.unblocked). "
+                )
+                + "Private networks and this machine stay closed.",
                 MenuAction("always", "Unblock everywhere", variant="warning"),
                 cancel_first=True,
             )
@@ -914,7 +943,12 @@ class SandboxPanelMixin:
                 return
             confirmed = await self._confirm(
                 f"Always allow {target}?",
-                "Every future sandbox may reach it too (openshell.egress.unblocked).",
+                (
+                    "Every future sandbox of yours may reach it too (kept by your organization's DefenseClaw gateway "
+                    "while your organization's policy allows it)."
+                    if self.sandbox_model.managed
+                    else "Every future sandbox may reach it too (openshell.egress.unblocked)."
+                ),
                 MenuAction("always", "Always allow", variant="warning"),
                 cancel_first=True,
             )
@@ -927,7 +961,12 @@ class SandboxPanelMixin:
         message = str(result.get("message") or "")
         if approve and action.always:
             # The daemon's message is the one-time approve's; say what was saved.
-            saved = " (saved to openshell.egress.unblocked)" if result.get("persisted") else ""
+            kept = (
+                " (kept by your organization's DefenseClaw gateway)"
+                if self.sandbox_model.managed
+                else " (saved to openshell.egress.unblocked)"
+            )
+            saved = kept if result.get("persisted") else ""
             message = f"always allowed {target}{saved}" + (f"; {message}" if message else "")
         elif not message:
             verb = "approved" if approve else "rejected"
@@ -1095,7 +1134,13 @@ class SandboxPanelMixin:
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
             return
-        self._run_sandbox_cli("stop", name)
+        code = self._run_sandbox_terminal(SandboxLaunch(("sandbox", "stop", name), os.getcwd(), f"sandbox stop {name}"))
+        if code == SANDBOX_STOP_KEPT_EXIT:
+            # #1144: the command line kept a copy-mode MicroVM with a full
+            # disk running, because stopping it would lose its unpulled work.
+            message = sandbox_stop_kept_text(name)
+            self._set_status(message)  # type: ignore[attr-defined]
+            self.notify_toast("warn", message)  # type: ignore[attr-defined]
 
     async def _sandbox_delete(self, name: str) -> bool:
         """Delete ``name`` through the command line, which asks; whether it is gone.

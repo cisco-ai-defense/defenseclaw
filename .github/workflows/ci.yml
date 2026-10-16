@@ -107,6 +107,9 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          # golangci-lint reports issues on the lines changed since the merge
+          # base with the target branch, so the job needs that history (#1228).
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -121,7 +124,10 @@ jobs:
       - run: make plugin
       - name: Type-check Amp policy plugin against official API
         run: make amp-plugin-typecheck
-      - run: make go-lint
+      - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
+        env:
+          GOLANGCI_LINT_BASE: origin/${{ github.base_ref || 'main' }}
+        run: make go-lint
 
   go-test-gateway:
     name: Go Gateway Test (shard ${{ matrix.shard }})
@@ -1003,14 +1009,32 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      # GoReleaser comes straight from its GitHub release, pinned by version
+      # and by the sha256 of goreleaser_Linux_x86_64.tar.gz in that release's
+      # checksums.txt (cosign-verified against goreleaser's release workflow).
+      # goreleaser-action looked the version up on goreleaser.com first, and an
+      # outage there failed the build with an empty error (rel-1-0-1:CI-a).
+      # release.yaml and ci.yml pin the same version and checksum.
+      - name: Install GoReleaser
+        env:
+          GORELEASER_VERSION: v2.15.4
+          GORELEASER_SHA256: aae00c71a4a6d55e08cce9273a1516bdce33c1e07cffb7e502fa6fec4377dede
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)/$(uname -m)" == Linux/x86_64 ]] || { echo "::error::the pinned GoReleaser checksum is for Linux x86_64"; exit 1; }
+          dir="$RUNNER_TEMP/goreleaser"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused -o "$dir/goreleaser.tar.gz" \
+            "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz"
+          echo "${GORELEASER_SHA256}  $dir/goreleaser.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/goreleaser.tar.gz" -C "$dir" goreleaser
+          "$dir/goreleaser" --version
+          echo "$dir" >> "$GITHUB_PATH"
       - name: Build the Linux packages with the release GoReleaser config
-        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
-        with:
-          version: "v2.15.4"
-          args: release --snapshot --clean --skip=sbom,sign,publish,validate
         env:
           # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
           GORELEASER_CURRENT_TAG: v9.9.9
+        run: goreleaser release --snapshot --clean --skip=sbom,sign,publish,validate
       - name: Collect the linux/amd64 packages
         id: linux
         shell: bash

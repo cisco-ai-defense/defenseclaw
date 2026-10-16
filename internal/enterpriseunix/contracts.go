@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -163,6 +164,9 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range userPaths {
 		r.AddWarning(codeGuardianTargetUserPath, message)
 	}
+	for _, message := range l.agentConfigNotices() {
+		r.AddWarning(codeAgentSettingsNotRestored, message)
+	}
 	if len(unverified)+len(failed) == 0 {
 		return
 	}
@@ -175,6 +179,47 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
 	r.SecurityComplete = false
+}
+
+// codeAgentSettingsNotRestored names an account whose agent config the
+// guardian had to recreate or put back from a copy (GAP-0564): the hooks are
+// in place, but the account's own settings are missing or older.
+const codeAgentSettingsNotRestored = "agent_settings_not_restored"
+
+// guardianNoticesFile is the guardian's record of the protected targets
+// whose agent config its last reconcile put back from a copy or recreated
+// (hookGuardianNoticesFile in internal/cli).
+const guardianNoticesFile = "hook_guardian_notices.json"
+
+// agentConfigNotices words the guardian's agent config notices, one per
+// account and connector, sorted. A protected target whose agent config lost
+// the account's own settings is that account's to fix: a warning, not a
+// protection failure. Only the known codes are worded: the per-user worker
+// that reports them runs as the account.
+func (l *lifecycle) agentConfigNotices() []string {
+	data, err := readBounded(l.env.P(filepath.Join(l.env.Layout.DataDir, guardianNoticesFile)), 1<<20)
+	if err != nil {
+		return nil
+	}
+	var record struct {
+		Version int `json:"version"`
+		Targets []struct {
+			User        string `json:"user"`
+			Connector   string `json:"connector"`
+			AgentConfig string `json:"agent_config"`
+		} `json:"targets"`
+	}
+	if json.Unmarshal(data, &record) != nil || record.Version != 1 {
+		return nil
+	}
+	var out []string
+	for _, target := range record.Targets {
+		if message, ok := connector.AgentConfigNotice(target.Connector, boundedGuardianReason(target.User), target.AgentConfig); ok {
+			out = append(out, message)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // codeGuardianReportPending names a change whose guardian report did not

@@ -488,6 +488,28 @@ func TestStartOnDockerStopsASandboxNotAsPrepared(t *testing.T) {
 	}
 }
 
+// When the stop after a failed check fails too, the sandbox still runs:
+// the refusal says so, not that it was stopped, and names the stop that
+// ends it (rel-1-0-2:GAP-0014 fix-up).
+func TestStartSaysASandboxNotAsPreparedStillRunsWhenItCannotBeStopped(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "dkkeep"})
+	e.stopBox("dkkeep")
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil))
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "driver busy"})
+	_, err := e.m.Start(t.Context(), "dkkeep", sandboxapi.StartRequest{})
+	apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected)
+	if strings.Contains(apiErr.Message, "stopped it again") || strings.Contains(err.Error(), "driver busy") ||
+		!strings.HasPrefix(apiErr.Message, "sandbox dkkeep does not run as DefenseClaw prepared it; ") ||
+		!strings.HasSuffix(apiErr.Message, "so it is still running: stop it with `defenseclaw sandbox stop dkkeep`") {
+		t.Fatalf("refusal = %+v", apiErr)
+	}
+	if got, _ := e.client.GetSandbox(t.Context(), "dkkeep"); got.Status.Phase == openshell.PhaseStopped {
+		t.Fatal("the fake gateway stopped the sandbox although its stop failed")
+	}
+	e.stopBox("dkkeep")
+}
+
 // A record that does not say what its create delivered (every create
 // records it) cannot be checked: its start is refused the same way, and
 // the sandbox stopped again.

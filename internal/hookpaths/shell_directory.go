@@ -96,15 +96,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	state := shellDirectoryState{logical: filepath.Clean(cwd)}
 	state.physical, state.known = physical(state.logical)
 	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
-	safetyByOffset := make(map[int]bool, len(safety))
-	for _, occurrence := range safety {
-		safetyByOffset[occurrence.Offset] = occurrence.Safe
-	}
+	redirectIndex := 0
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
-	functions := map[string]*syntax.FuncDecl{}
-	activeFunctions := map[string]bool{}
-	functionCalls := 0
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
 		// The command substitution of a word runs in another shell. Only the
 		// statement's own redirects belong to this directory state.
@@ -114,10 +108,10 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			return
 		}
 		statement := rendered.String()
-		redirects := make([]RedirectOccurrence, 0, len(stmt.Redirs))
+		redirects := make([]string, 0, len(stmt.Redirs))
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
-			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 			default:
 				continue
 			}
@@ -132,26 +126,26 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
 				unknown = true
 			}
-			occurrence := RedirectOccurrence{Path: OperandPath(name, s.logical)}
-			if redirect.Word != nil {
-				occurrence.Offset = int(redirect.Word.Pos().Offset())
-				occurrence.Safe = safetyByOffset[occurrence.Offset]
-			}
-			redirects = append(redirects, occurrence)
+			redirects = append(redirects, OperandPath(name, s.logical))
 		}
 		if !s.changed {
+			redirectIndex += len(redirects)
 			return
 		}
 		literals := LiteralWriteOperands(statement, s.logical, home)
-		extras := ShellExtraWriteOperands(statement, s.logical, home)
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
-		writes := append(make([]RedirectOccurrence, 0, len(redirects)+len(literals)+len(extras)), redirects...)
+		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
+		for _, redirect := range redirects {
+			occurrence := RedirectOccurrence{Path: redirect}
+			if redirectIndex < len(safety) {
+				occurrence.Safe = safety[redirectIndex].Safe
+			}
+			redirectIndex++
+			writes = append(writes, occurrence)
+		}
 		for _, literal := range literals {
 			writes = append(writes, RedirectOccurrence{Path: literal})
-		}
-		for _, extra := range extras {
-			writes = append(writes, RedirectOccurrence{Path: extra.Path})
 		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -170,7 +164,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				target = OperandPath(candidate.Value, s.logical)
 			}
 			if target != "" && filepath.IsAbs(target) {
-				if redirectPathPresent(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
+				if slices.Contains(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
 					continue
 				}
 				writes = append(writes, RedirectOccurrence{Path: target})
@@ -213,18 +207,6 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				walkList(file.Stmts, s)
 			} else {
 				s.known, s.stack = false, nil
-			}
-			return false
-		}
-		if program == "trap" {
-			// A DEBUG, RETURN or ERR action runs before or after later
-			// commands and may change the directory there. Only listing
-			// traps leaves the directory known.
-			for _, word := range call.Args[arg:] {
-				if value, ok := StaticWord(word, home); !ok || value != "-p" && value != "-l" && value != "--" {
-					s.known, s.changed, s.stack = false, true, nil
-					break
-				}
 			}
 			return false
 		}
@@ -427,31 +409,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 		case *syntax.TimeClause:
 			walk(cmd.Stmt, s)
-		case *syntax.FuncDecl:
-			if cmd.Name != nil {
-				functions[cmd.Name.Value] = cmd
-			}
-			write(stmt, s)
-		case *syntax.CoprocClause:
-			child := s.clone()
-			walk(cmd.Stmt, &child)
 		case *syntax.CallExpr:
 			if change(cmd, s) {
 				break
-			}
-			if program, _, static := shellCommandWord(cmd, home); static {
-				if function := functions[program]; function != nil {
-					write(stmt, s)
-					if activeFunctions[program] || functionCalls >= 32 {
-						s.known, s.changed, s.stack = false, true, nil
-						return
-					}
-					activeFunctions[program] = true
-					functionCalls++
-					walk(function.Body, s)
-					activeFunctions[program] = false
-					return
-				}
 			}
 			if directory, inner, tail, recognized := shellEnvChdir(cmd, home); recognized {
 				child := s.clone()
@@ -471,8 +431,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 			write(stmt, s)
 		default:
-			// An unmodeled command may change the directory. Its redirects
-			// are still inspected using the state at this point.
+			// An unmodeled command, such as a function definition, may change
+			// the directory later. Its redirects are still inspected using the
+			// state at this point.
 			syntax.Walk(cmd, func(node syntax.Node) bool {
 				if call, ok := node.(*syntax.CallExpr); ok {
 					if program, _, static := shellCommandWord(call, home); !static ||
@@ -526,15 +487,6 @@ func shellAuthorizedKeysBase(name string) bool {
 		base = strings.ToLower(base)
 	}
 	return base == "authorized_keys" || base == "authorized_keys2"
-}
-
-func redirectPathPresent(redirects []RedirectOccurrence, target string) bool {
-	for _, redirect := range redirects {
-		if redirect.Path == target {
-			return true
-		}
-	}
-	return false
 }
 
 func sameShellDirectory(a, b string) bool { return a != "" && filepath.Clean(a) == filepath.Clean(b) }

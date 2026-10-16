@@ -3025,7 +3025,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 		        schema_version, content_hash, generation, binary_version,
 		        agent_id, sidecar_instance_id,
 		        connector, step_idx, enforced, rule_pack_dir
-		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM audit_events ORDER BY `+s.auditEventsNewestFirst()+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list events: %w", err)
@@ -3043,11 +3043,25 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
-// scanAuditEventRow centralises the column-scan logic for ListEvents
-// and ListEventsByTarget so the Observability Phase 6 columns
-// (session_id, turn_id, agent_name, agent_instance_id, policy_id,
-// destination_app, tool_name, tool_id) only have to be threaded
-// through the struct in a single place.
+// auditEventsNewestFirst is the ORDER BY of ListEvents: newest first by the
+// exact instant the retention trigger parses from the timestamp text, then
+// insert order. The RFC3339Nano text itself does not sort in time order: it
+// drops trailing zeros (".12345Z" sorts after ".123451Z") and keeps the zone
+// offset, so macOS microsecond clocks listed sandbox phases out of order
+// (rel-1-0-2:GAP-0484). A read-only store over a database from before the
+// v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
+// upgrades are supported) has no such column and sorts by julianday instead.
+func (s *Store) auditEventsNewestFirst() string {
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return "retention_timestamp_unix_nano DESC, rowid DESC"
+	}
+	return "julianday(timestamp) DESC, rowid DESC"
+}
+
+// scanAuditEventRow holds the column-scan logic of ListEvents so the
+// Observability Phase 6 columns (session_id, turn_id, agent_name,
+// agent_instance_id, policy_id, destination_app, tool_name, tool_id) are
+// threaded through the struct in a single place.
 func scanAuditEventRow(rows rowScanner) (Event, error) {
 	var e Event
 	var (
@@ -3125,9 +3139,8 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	return e, nil
 }
 
-// rowScanner lets scanAuditEventRow accept *sql.Rows from either
-// ListEvents or ListEventsByTarget without importing database/sql at
-// the call site.
+// rowScanner lets scanAuditEventRow accept *sql.Rows without importing
+// database/sql at the call site.
 type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
@@ -3933,39 +3946,6 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		e.RequestID = requestID.String
 		e.Connector = connector.String
 		e.Enforced = enforced.Bool
-		events = append(events, e)
-	}
-	return events, rows.Err()
-}
-
-// ListEventsByTarget returns recent audit events for a given target path.
-func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
-		        run_id, trace_id, request_id,
-		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
-		        destination_app, tool_name, tool_id,
-		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id,
-		        connector, step_idx, enforced, rule_pack_dir
-		 FROM audit_events
-		 WHERE target = ?
-		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("audit: list events by target: %w", err)
-	}
-	defer rows.Close()
-
-	var events []Event
-	for rows.Next() {
-		e, err := scanAuditEventRow(rows)
-		if err != nil {
-			return nil, err
-		}
 		events = append(events, e)
 	}
 	return events, rows.Err()

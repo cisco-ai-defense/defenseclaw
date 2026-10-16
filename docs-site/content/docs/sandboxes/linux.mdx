@@ -105,14 +105,14 @@ like this (the install plan and build lines are shortened):
 ```text
 DefenseClaw sandbox setup
   Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
-Install OpenShell 0.1.2 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
+Install OpenShell 0.1.3 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
 OpenShell install plan
-  Release     v0.1.2 (NVIDIA OpenShell upstream installer)
+  Release     v0.1.3 (NVIDIA OpenShell upstream installer)
   SHA-256     … (verified)
   Privileges  the script uses sudo to install the openshell package, then enables and
               starts the openshell-gateway user service (systemd --user)
 Run this plan? [y/N] y
-  ✓ OpenShell 0.1.2 installed, gateway running
+  ✓ OpenShell 0.1.3 installed, gateway running
 Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n]
 Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
   OpenShell gateway configuration changes
@@ -142,14 +142,14 @@ some lines are shortened):
 
 ```text
 DefenseClaw sandbox setup
-  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.2 available)
+  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.3 available)
   ✗ Gateway service: openshell-gateway is inactive (dead)
 Fix "Gateway service" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n]
   fixing "Gateway service"…
   ✓ fixed "Gateway service"
-Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's 0.1.2 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [y/N]
-  OpenShell 0.1.1 at /bin/openshell; OpenShell 0.1.2 fixes a supervisor bug that can stall a sandbox's first connection, and cuts the CPU an idle sandbox uses
-  → upgrade OpenShell to 0.1.2 in place (this pulls its supervisor images from ghcr.io and restarts the gateway, which drops the connections of every sandbox on it): defenseclaw sandbox setup --install-openshell
+Upgrade OpenShell 0.1.1 to 0.1.3 in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's 0.1.3 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [y/N]
+  OpenShell 0.1.1 at /bin/openshell; OpenShell 0.1.3 fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2) and ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3)
+  → upgrade OpenShell to 0.1.3 in place (this pulls its supervisor images from ghcr.io and restarts the gateway, which drops the connections of every sandbox on it): defenseclaw sandbox setup --install-openshell
 Allow sandboxes to mount the project folder you launch from? (…) [Y/n]
 Disable OpenShell's anonymous usage telemetry? (…) [Y/n]
 Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the "podman" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n]
@@ -164,8 +164,8 @@ Switch your local OpenShell gateway to the docker compute driver? (its configura
   …
 ```
 
-The same setup on a machine whose OpenShell is already at 0.1.2, replayed from a
-real run:
+The same setup on a machine whose OpenShell was already at 0.1.2, replayed from a
+real run (on 0.1.2 setup now also offers the upgrade to 0.1.3):
 
 <TerminalAnimation
   cwd="~/code/myapp"
@@ -227,11 +227,11 @@ real run:
 
 ### Understand what it changed
 
-- **OpenShell 0.1.2** is installed with NVIDIA's installer, whose script is
+- **OpenShell 0.1.3** is installed with NVIDIA's installer, whose script is
   checked against a pinned SHA-256 before it runs. It uses `sudo` for the
   package, then enables and starts the `openshell-gateway` user service.
   DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2. On
-  OpenShell 0.1.1 setup offers the upgrade to 0.1.2 in place (see
+  OpenShell 0.1.1 or 0.1.2 setup offers the upgrade to 0.1.3 in place (see
   [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 - **The gateway** listens on `localhost:17670` with mTLS, so only you can
   call it. Setup turns on project-folder mounts in
@@ -278,18 +278,18 @@ defenseclaw sandbox doctor
   ✓ Disk space                 40.0 GiB free under /var/lib/docker
   ✓ systemd linger             enabled for alice
   ✓ Gateway service            openshell-gateway active (running)
-  ✓ OpenShell CLI              0.1.2 at /usr/bin/openshell
+  ✓ OpenShell CLI              0.1.3 at /usr/bin/openshell
   ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
   ✓ Gateway registration       openshell at https://127.0.0.1:17670 (mtls)
   ✓ Gateway mTLS files         private key is owner-only
-  ✓ Gateway                    0.1.2 healthy at https://127.0.0.1:17670
+  ✓ Gateway                    0.1.3 healthy at https://127.0.0.1:17670
   ✓ Gateway compute driver     docker
   ✓ Global policy              none; sandbox policies apply
   ✓ Project bind mounts        enabled for the docker driver
   ✓ OpenShell telemetry        OpenShell usage telemetry is off
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.2 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.3 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              no sandbox is running
   ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
   ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
@@ -490,7 +490,8 @@ and runs as the `openshell-gateway` user service of the account that
 started it. A machine runs one gateway, so only that account can run
 sandboxes: a second account's gateway cannot get the port. On a second
 account, `sandbox setup` and `sandbox doctor` say that the gateway's port
-is held by a process of another account, and start nothing. The doctor
+is held by a process of another account, even if OpenShell is not installed
+in the second account. Setup installs and starts nothing there. The doctor
 skips the checks that follow from it (`not checked: the OpenShell gateway
 on this machine is another account's`): the gateway, its registration and
 Docker, whose fixes would not help. `sandbox list`, `sandbox status`,
@@ -508,7 +509,8 @@ not, taking the port back:
 systemctl --user disable --now openshell-gateway
 ```
 
-Then run `defenseclaw sandbox setup` in the other account.
+Then run `defenseclaw sandbox setup` in the other account, adding
+`--install-openshell` if OpenShell is not installed there.
 
 <Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
 When the gateway stops, every sandbox it runs stops with it, and an agent

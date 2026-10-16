@@ -959,6 +959,95 @@ def test_intune_package_rejects_inline_key_before_copying_setup() -> None:
     assert script.index("if ($configText -match") < script.index("New-Item -ItemType Directory -Path $content")
 
 
+def test_intune_package_requires_current_config_version(tmp_path: Path) -> None:
+    script = MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1"
+    source = _text(script)
+    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not pwsh:
+        pytest.skip("PowerShell is unavailable")
+    setup = tmp_path / "Setup.exe"
+    setup.write_bytes(b"fixture setup")
+    pin = hashlib.sha256(setup.read_bytes()).hexdigest()
+    config = tmp_path / "config.yaml"
+
+    def build(version: str) -> subprocess.CompletedProcess[str]:
+        config.write_text(version, encoding="utf-8")
+        return subprocess.run(
+            [pwsh, "-NoProfile", "-File", str(script), "-SetupPath", str(setup),
+             "-Sha256", pin, "-ConfigPath", str(config), "-OutputDirectory", str(tmp_path / "out")],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    old = build("# config_version: 9\n  config_version: 9\nconfig_version: 8\n")
+    assert old.returncode != 0
+    assert "config_version 8" in old.stderr and "Setup migrates it on install" in old.stderr
+    assert not (tmp_path / "out" / "content").exists()
+    current = build("config_version: 9\n")
+    assert current.returncode == 0, current.stderr
+    content = tmp_path / "out" / "content"
+    pins = json.loads((content / "intune-package.json").read_text(encoding="utf-8"))
+    assert pins["config_sha256"] == hashlib.sha256(config.read_bytes()).hexdigest()
+    assert "Setup migrates it on install" in source
+
+
+@pytest.mark.parametrize(
+    ("config_bytes", "accepted", "error_text"),
+    [
+        (b"config_version: 9\r\n", True, ""),
+        (b"\xef\xbb\xbfconfig_version: 9\r\n", True, ""),
+        (b"config_version: 8\r\n", False, "config_version 8"),
+    ],
+)
+def test_intune_package_config_version_with_crlf(
+    tmp_path: Path, config_bytes: bytes, accepted: bool, error_text: str,
+) -> None:
+    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not pwsh:
+        pytest.skip("PowerShell is unavailable")
+    setup = tmp_path / "Setup.exe"
+    setup.write_bytes(b"fixture setup")
+    config = tmp_path / "config.yaml"
+    config.write_bytes(config_bytes)
+    output = tmp_path / "out"
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(MDM / "intune/windows/New-DefenseClawIntunePackage.ps1"),
+         "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+         "-ConfigPath", str(config), "-OutputDirectory", str(output)],
+        capture_output=True, text=True, timeout=30,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        pins = json.loads((output / "content/intune-package.json").read_text(encoding="utf-8"))
+        assert pins["config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+    else:
+        assert result.returncode != 0
+        assert error_text in result.stderr and "Setup migrates it on install" in result.stderr
+        assert not (output / "content").exists()
+
+
+def test_intune_config_change_docs_explain_the_version_pin() -> None:
+    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune-windows.mdx")
+    section = page.split("**Change the config.**", 1)[1].split("**Roll back.**", 1)[0]
+    assert "config_version: 9" in section
+    assert "packager\nrefuses a missing or older version" in section
+    assert "installed hash would differ from the hash pinned" in section
+
+
+def test_posix_kit_modules_skip_on_windows() -> None:
+    modules = (
+        "test_mdm_kit_cancel.py",
+        "test_mdm_kit_config_origin.py",
+        "test_mdm_kit_deb_downgrade.py",
+        "test_mdm_kit_primary_group.py",
+        "test_mdm_kit_secret_nul.py",
+        "test_mdm_kit_staging_full.py",
+        "test_identity_kit_entra_fg13.py",
+    )
+    for name in modules:
+        source = _text(ROOT / "cli/tests" / name)
+        assert 'pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")' in source, name
+
+
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.
 PS7_ONLY = [
     (re.compile(r"\?\?"), "null-coalescing ??"),
@@ -1291,8 +1380,7 @@ def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() ->
     text, which names Setup /repair."""
 
     text = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text(encoding="utf-8")
-    branch = text[text.index("$runtime = @($document.warnings)") :]
-    branch = branch[: branch.index("elseif ($document.ok -and $document.noop)")]
-    assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
-    assert "$code = 1603" in branch
-    assert "$($runtime.message)" in branch
+    block = text.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
+    assert "$_.code -eq 'scanner_runtime_unavailable'" in block
+    assert block.index("$code = 1603") < block.index("$recovered =")
+    assert "not repaired (scanner_runtime_unavailable)" in block

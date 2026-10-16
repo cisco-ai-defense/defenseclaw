@@ -512,6 +512,28 @@ def exact_scope_rules(cfg: Any, target_type: str, name: str, connector: str, dec
     return [rule for rule in rules or [] if _same_asset(rule, name, connector, target_type)]
 
 
+def scoped_rule_connectors(cfg: Any, target_type: str, name: str) -> list[str]:
+    """The connectors of the connector-scoped asset_policy rules for ``name``.
+
+    A bare allow or unblock fans out to every connector that holds state for
+    the asset. A scoped rule can live in config.yaml alone (a hand edit, a
+    TUI or config-set write, a 1.0.x upgrade that moved the journal rows), so
+    the journal rows are not the whole set (GAP-1307). Secure Client keeps
+    its decisions in the actions rows only.
+    """
+    if is_secure_client(cfg):
+        return []
+    holder = getattr(getattr(cfg, "asset_policy", None), target_type, None)
+    if holder is None:
+        return []
+    connectors: list[str] = []
+    for rule in [*(getattr(holder, "denied", None) or []), *(getattr(holder, "allowed", None) or [])]:
+        connector = str(getattr(rule, "connector", "") or "").strip()
+        if connector and connector not in connectors and _same_name(getattr(rule, "name", ""), name, target_type):
+            connectors.append(connector)
+    return connectors
+
+
 def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) -> None:
     """Replace ``holder``'s denied/allowed lists, and their save baseline,
     with the ones in config.yaml now (the caller holds the writer lock)."""

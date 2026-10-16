@@ -208,15 +208,12 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			_ = os.RemoveAll(f.e2fsprogs)
 		}, want: checkWant{"vm-driver", fail, "e2fsprogs is not installed where the MicroVM driver looks for it"},
 			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir", manual: true}},
-		// GAP-0004: on a managed host a keg other accounts can change (the
-		// Cellar of whoever ran brew, writable by the admin group) is
-		// refused, not used silently; the user's own build is taken.
-		{name: "managed host: another account's e2fsprogs keg", setup: func(f *doctorFixture) {
+		// Managed accounts do not use a Homebrew keg, even when its files and
+		// directory chain look trusted by the old owner check.
+		{name: "managed host: a Homebrew keg is not used", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
-			if err := os.Chmod(f.e2fsprogs, 0o777); err != nil {
-				f.t.Fatal(err)
-			}
-		}, want: checkWant{"vm-driver", fail, "which another account can change"},
+			f.doctor.E2fsprogsDirs = []string{f.e2fsprogs}
+		}, want: checkWant{"vm-driver", fail, "enterprise.openshell.e2fsprogs_dir"},
 			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer", manual: true}},
 		{name: "managed host: the user's own e2fsprogs build", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
@@ -227,6 +224,9 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 		}, want: checkWant{"vm-driver", pass, filepath.Join(".local", "opt", "e2fsprogs", "sbin") + "; "}},
 		{name: "managed host: driver not signed", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				touchExecutable(f.t, filepath.Join(f.home, ".local", "opt", "e2fsprogs", "sbin", tool))
+			}
 			f.runner.On(codesign, f.vmDriverPath()+": code object is not signed at all", errors.New("exit status 1"))
 		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not signed for Apple's Hypervisor"},
 			fix: &fixWant{text: "ask your administrator for an OpenShell whose MicroVM driver is signed", manual: true}},

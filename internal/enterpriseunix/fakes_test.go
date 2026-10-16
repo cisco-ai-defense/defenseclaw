@@ -392,6 +392,15 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		t.Fatal(err)
 	}
 	h := &testHost{t: t, runner: &fakeRunner{versions: map[string]string{}}, healthy: true, owners: map[string][2]int{}}
+	if goos == "darwin" {
+		// A fake macOS host never reads a real process's argv: the fake ps
+		// lists made-up PIDs, and kern.procargs2 of a live PID with the same
+		// number would decide the session instead of the ps line. Tests that
+		// model argv replace this after newTestHost (setDarwinProcessArgv).
+		previous := darwinProcessArgv
+		darwinProcessArgv = func(int) ([]string, error) { return nil, errors.New("fake macOS host: no process argv") }
+		t.Cleanup(func() { darwinProcessArgv = previous })
+	}
 	env := &Env{
 		GOOS:           goos,
 		Root:           t.TempDir(),

@@ -13,7 +13,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
@@ -22,12 +26,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// TestSafeEvaluateHook_RecoversAndReturnsFailOpen exercises
-// safeEvaluateHook directly: a panicking evaluator must not propagate
-// the panic, must mark panicked=true, and must return a fail-open
-// response with would_block=true and a stable Reason so SIEM dashboards
-// can find it.
-func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
+// TestSafeEvaluateHook_ObserveRecovery exercises safeEvaluateHook directly:
+// a recovered evaluation error keeps observe mode and its audit fields.
+func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := &APIServer{}
 	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
@@ -41,17 +42,11 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	if !panicked {
 		t.Fatal("safeEvaluateHook panicked=false, want true")
 	}
-	if evalResp.Action != "allow" || !evalResp.WouldBlock {
-		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-open allow + would_block", evalResp)
+	if evalResp.Action != "allow" || evalResp.Mode != "observe" || !evalResp.WouldBlock {
+		t.Fatalf("safeEvaluateHook panic response = %+v, want observe allow + would_block", evalResp)
 	}
 
-	resp := safeHookPanicResponse("codex", "PreToolUse", "stack trace would go here")
-	if resp.Action != "allow" {
-		t.Errorf("panic action = %q, want allow", resp.Action)
-	}
-	if !resp.WouldBlock {
-		t.Errorf("panic WouldBlock = false, want true (deny posture in stricter mode)")
-	}
+	resp := safeHookPanicResponse("codex", "PreToolUse")
 	if resp.Severity != "WARN" {
 		t.Errorf("panic Severity = %q, want WARN", resp.Severity)
 	}
@@ -102,7 +97,7 @@ func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200 (panic must fail-open, not fail the request) body=%s",
+		t.Fatalf("status=%d want 200 with a valid response body=%s",
 			w.Code, w.Body.String())
 	}
 
@@ -111,7 +106,10 @@ func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 		t.Fatalf("response body is not valid JSON after panic: %v body=%s", err, w.Body.String())
 	}
 	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want allow (panic fail-open)", got)
+		t.Errorf("response action = %q, want observe allow", got)
+	}
+	if got, _ := parsed["mode"].(string); got != "observe" {
+		t.Errorf("response mode = %q, want observe", got)
 	}
 	if got, _ := parsed["would_block"].(bool); !got {
 		t.Errorf("response would_block = false, want true (panic carries guardrail intent)")
@@ -154,7 +152,10 @@ func TestHandleAgentHook_EmitPanicReturnsSafeResponse(t *testing.T) {
 		t.Fatalf("response body is not valid JSON after emit panic: %v body=%s", err, w.Body.String())
 	}
 	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want allow", got)
+		t.Errorf("response action = %q, want observe allow", got)
+	}
+	if got, _ := parsed["mode"].(string); got != "observe" {
+		t.Errorf("response mode = %q, want observe", got)
 	}
 	if got, _ := parsed["would_block"].(bool); !got {
 		t.Errorf("response would_block = false, want true")
@@ -170,8 +171,7 @@ func TestHandleAgentHook_EmitPanicReturnsSafeResponse(t *testing.T) {
 //  2. Sets span status to Error so trace backends (Tempo, Jaeger,
 //     Honeycomb) surface the failure via their built-in
 //     `status=error` filters and error-rate panels, even though the
-//     HTTP response itself is 200 (we fail-open with
-//     would_block=true — see safeEvaluateHook for the rationale).
+//     HTTP response itself is 200 and carries the configured verdict.
 //
 // Regressing either half would silently swallow panic-recovered
 // hook spans from the operator's error dashboards.
@@ -212,8 +212,8 @@ func TestEnrichAgentHookSpanPanic_MarksErrorAndAttribute(t *testing.T) {
 // TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan guards the
 // defensive nil + non-recording short-circuit: callers may invoke
 // the helper from a ctx with no span (a handler running outside an
-// HTTP wrapper), and panicking inside a panic-
-// recovery code path would defeat the whole fail-open contract.
+// HTTP wrapper), and panicking inside a recovery path would defeat the
+// configured fail-mode response.
 func TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan(t *testing.T) {
 	// No tracer provider installed → SpanFromContext returns a
 	// non-recording span. The helper must short-circuit safely.
@@ -348,8 +348,7 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 // TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
 // a sandbox binding is blocked, with a reason that says DefenseClaw failed,
 // when the evaluator panics or when a panic after evaluation reaches the
-// handler's outer recover, instead of taking the host's fail-open path. The
-// sandbox hook is the only gate on the tool call.
+// handler's outer recover. The sandbox hook is the only gate on the tool call.
 func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -403,5 +402,230 @@ func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
 				t.Fatalf("sandbox panic verdict = %v, want a block with %q", parsed, sandboxInternalErrorReason)
 			}
 		})
+	}
+}
+
+func postDecisionForTest(t *testing.T, api *APIServer, connectorName, event, command string) map[string]any {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"hook_event_name": event, "session_id": "statement-test-" + t.Name(),
+		"tool_name": "Bash", "cwd": t.TempDir(),
+		"tool_input": map[string]any{"command": command},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if command != "" && connectorName == "codex" {
+		req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+	}
+	if connectorName == "codex" {
+		setTestCodexHookBinding(req, event, defaultTestCodexHookContract)
+	}
+	w := httptest.NewRecorder()
+	api.handleAgentHook(connectorName).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return parsed
+}
+
+func soleHookDecisionForTest(t *testing.T, store *audit.Store) audit.Event {
+	t.Helper()
+	events, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []audit.Event
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) || event.Action == string(audit.ActionConnectorHookSynthetic) {
+			rows = append(rows, event)
+		}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("hook decision rows=%d, want one", len(rows))
+	}
+	return rows[0]
+}
+
+func decisionIsDenied(output any) bool {
+	m, ok := output.(map[string]any)
+	if !ok {
+		return false
+	}
+	if m["permissionDecision"] == "deny" || m["decision"] == "deny" || m["decision"] == "block" {
+		return true
+	}
+	for _, value := range m {
+		if decisionIsDenied(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
+	for _, tc := range []struct {
+		connector, event, mode, failMode, wantAction string
+	}{
+		{"claudecode", "PreToolUse", "action", "closed", "block"},
+		{"codex", "PreToolUse", "action", "closed", "block"},
+		{"hermes", "pre_tool_call", "action", "closed", "block"},
+		{"claudecode", "PreToolUse", "action", "open", "allow"},
+		{"codex", "PreToolUse", "action", "open", "allow"},
+		{"hermes", "pre_tool_call", "action", "open", "allow"},
+		{"claudecode", "PreToolUse", "observe", "closed", "allow"},
+		{"codex", "PreToolUse", "observe", "closed", "allow"},
+		{"hermes", "pre_tool_call", "observe", "closed", "allow"},
+		{"claudecode", "PostToolUse", "action", "closed", "allow"},
+	} {
+		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
+			previous, had := hookProfileRuntimes[tc.connector]
+			hookProfileRuntimes[tc.connector] = func(profile connector.HookProfile) hookProfileRuntime {
+				runtime := defaultHookProfileRuntime(profile)
+				runtime.Evaluate = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+					panic("injected evaluator error")
+				}
+				return runtime
+			}
+			t.Cleanup(func() {
+				if had {
+					hookProfileRuntimes[tc.connector] = previous
+				} else {
+					delete(hookProfileRuntimes, tc.connector)
+				}
+			})
+			store, logger := testStoreAndLogger(t)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = tc.mode
+			cfg.Guardrail.HookFailMode = tc.failMode
+			cfg.Guardrail.Connector = tc.connector
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			response := postDecisionForTest(t, api, tc.connector, tc.event, "echo done")
+			wantWouldBlock := tc.wantAction != "block"
+			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != tc.mode || response["would_block"] != wantWouldBlock {
+				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, tc.mode, wantWouldBlock)
+			}
+			if tc.wantAction == "block" && tc.event == "PreToolUse" {
+				field := "hook_output"
+				switch tc.connector {
+				case "claudecode":
+					field = "claude_code_output"
+				case "codex":
+					field = "codex_output"
+				}
+				if !decisionIsDenied(response[field]) {
+					t.Fatalf("%s=%v, want a denial", field, response[field])
+				}
+			}
+			row := soleHookDecisionForTest(t, store)
+			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
+				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
+			}
+			if tc.event == "PostToolUse" {
+				if decisionIsDenied(response["claude_code_output"]) {
+					t.Fatalf("post-tool output=%v, want a nonblocking advisory", response["claude_code_output"])
+				}
+			}
+			extra, _ := row.Structured["extra"].(map[string]any)
+			if extra["panic"] != "true" {
+				t.Fatalf("audit extra=%v, want panic=true", extra)
+			}
+		})
+	}
+}
+
+func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name, connectorFail, globalFail, want string
+	}{
+		{"observe connector default", "", "", "block"},
+		{"global open", "", "open", "allow"},
+		{"connector open", "open", "", "allow"},
+		{"connector closed over global open", "closed", "open", "block"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "observe"
+			cfg.Codex.Mode = "action"
+			cfg.Guardrail.HookFailMode = tc.globalFail
+			cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+				"codex": {HookFailMode: tc.connectorFail},
+			}
+			api := &APIServer{scannerCfg: cfg}
+			resp, panicked := api.safeEvaluateHook(t.Context(), "codex", agentHookRequest{
+				HookEventName: "PreToolUse", ConnectorName: "codex",
+			}, nil, nil, hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+				panic("injected evaluator error")
+			}})
+			if !panicked || resp.Mode != "action" || resp.Action != tc.want || resp.RawAction != "block" {
+				t.Fatalf("response=%+v, want %s/action", resp, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleAgentHookSynthetic_RecoveredEvaluationUsesFailMode(t *testing.T) {
+	previous := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("injected synthetic error") }
+	defer func() { hookEvaluatorPanicHook = previous }()
+
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	req := agentHookRequest{
+		ConnectorName: "codex", HookEventName: "Stop", SessionID: "synthetic-panic",
+		Payload: map[string]interface{}{"hook_event_name": "Stop"},
+	}
+	resp := api.handleAgentHookSynthetic(t.Context(), "codex", req, nil)
+	if resp.Action != "block" || resp.RawAction != "block" || resp.Mode != "action" || resp.WouldBlock {
+		t.Fatalf("synthetic response=%+v, want block/action", resp)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
+		t.Fatalf("synthetic audit=%v, want panic/block", row.Structured)
+	}
+}
+
+func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
+	previousManaged := managedEnterpriseActive.Load()
+	managedEnterpriseActive.Store(true)
+	defer managedEnterpriseActive.Store(previousManaged)
+	previous, had := hookProfileRuntimes["hermes"]
+	hookProfileRuntimes["hermes"] = func(profile connector.HookProfile) hookProfileRuntime {
+		runtime := defaultHookProfileRuntime(profile)
+		runtime.EmitLLMEvent = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}, []string) {
+			panic("injected post-evaluation error")
+		}
+		return runtime
+	}
+	defer func() {
+		if had {
+			hookProfileRuntimes["hermes"] = previous
+		} else {
+			delete(hookProfileRuntimes, "hermes")
+		}
+	}()
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "hermes"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	response := postDecisionForTest(t, api, "hermes", "pre_tool_call", "echo done")
+	if response["action"] != "allow" || response["raw_action"] != "block" || response["would_block"] != true || decisionIsDenied(response["hook_output"]) {
+		t.Fatalf("response=%v, want Secure Client allow with would_block", response)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if row.Action != string(audit.ActionConnectorHook) || row.Enforced {
+		t.Fatalf("audit=%+v, want one non-enforcing connector-hook row", row)
 	}
 }

@@ -151,11 +151,20 @@ func (m *Manager) Decider() (*egress.Decider, error) {
 	return m.egressDecider(cfg, base)
 }
 
+// A daemon has one active manager. Keep overlapping refreshes ordered even
+// when a configuration check and an explicit adoption arrive together.
+var refreshEgressMu sync.Mutex
+
 // refreshEgress re-resolves every sandbox's policy, re-registers its proxy
 // credential with its rebuilt decider, and swaps in a new default decider,
 // which also retires the proxy's pooled upstream connections. It runs after
 // creates, deletes and configuration changes.
 func (m *Manager) refreshEgress() {
+	// The config loop can still be resolving the closed floor when a
+	// managed daemon confirms a registration. Serialize the refreshes so
+	// an older resolution cannot overwrite the confirmed sandbox view.
+	refreshEgressMu.Lock()
+	defer refreshEgressMu.Unlock()
 	cfg := m.opts.Config()
 	m.mu.Lock()
 	m.cfgSeen = cfg
@@ -185,6 +194,13 @@ func (m *Manager) refreshEgress() {
 		m.logf("egress decider: %v", err)
 	}
 }
+
+// RefreshPolicies re-resolves every sandbox's policy now, as the next
+// configuration check would (refreshEgress): a managed daemon that changed
+// the floor its configuration carries (a registration the managed gateway
+// confirmed) answers the next status with the new policy instead of the one
+// judged before (GAP-0462).
+func (m *Manager) RefreshPolicies() { m.refreshEgress() }
 
 // syncCredential registers a sandbox's egress proxy credential with its
 // current principal and decider, or suspends it while the sandbox's network
@@ -527,7 +543,10 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		resp.Scope, resp.Persisted = string(audit.SandboxApprovalScopeAlways), true
 		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.unblocked)"
 		if m.managedMode() {
-			resp.Message = "unblocked " + host + " for every sandbox (kept by your organization's DefenseClaw gateway)"
+			// Where it is kept, in terms the person can use: no
+			// configuration key they could edit (#1205).
+			resp.Message = "unblocked " + host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway " +
+				"while your organization's policy allows it)"
 		}
 	} else {
 		// The managed gateway re-checks a session unblock against the

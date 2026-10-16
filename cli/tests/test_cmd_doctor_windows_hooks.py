@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import defenseclaw.doctor_hooks as doctor_hooks
 import yaml
-from defenseclaw.hook_integrity import _read_agent_config
+from defenseclaw.hook_integrity import CLAUDE_LAUNCHER_GUARD_WORDS, _read_agent_config
 
 try:
     import tomllib
@@ -1058,7 +1058,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         processor = ntpath.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "cmd.exe")
         guard = [
             "/d", "/c", "if", "exist", str(runtime), "(", str(runtime), "hook", "--connector", "claudecode", ")",
-            "else", "(", "echo", *doctor_hooks._CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+            "else", "(", "echo", *CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
         ]
         config = self._config("claudecode", str(runtime))
         document = json.loads(config.read_text(encoding="utf-8"))

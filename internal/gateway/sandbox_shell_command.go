@@ -28,13 +28,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// sandboxShellCommand returns the command of a sandbox request's shell tool
+// sandboxShellCommand returns the command of a hook request's shell tool
 // call in the plain shell shape, and the tool to judge it as: actionTool,
 // the tool the call's arguments are judged as, or "shell" for Cursor's
-// beforeShellExecution, whose payload is the call. It returns nil for host
-// traffic and for any call that is not a shell tool call with a command.
+// beforeShellExecution, whose payload is the call. It returns nil for any
+// call that is not a shell tool call with a command, and for a Codex shell
+// call on a host where Codex runs it in PowerShell: there the Codex hook
+// judges the command alone as PowerShell (codexPowerShellCommand).
+//
+// Host traffic is judged this way too (GAP-0686): an argument key the
+// connector's projection does not know left the parse partial, so the
+// command reached no rule and a call the same command alone blocks was
+// allowed. Harnesses such as OpenCode ignore such keys and run the command.
 func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, actionTool string, args json.RawMessage) (json.RawMessage, string) {
-	if !sandboxHookForConnector(ctx, connectorName) {
+	if codexShellRunsPowerShell && !sandboxHookForConnector(ctx, connectorName) &&
+		strings.EqualFold(strings.TrimSpace(connectorName), "codex") {
 		return nil, ""
 	}
 	if strings.EqualFold(strings.TrimSpace(connectorName), "cursor") {
@@ -49,11 +57,14 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 }
 
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
-// hook tool call, which for a sandbox shell tool call also judges the
-// command on its own. command is the call's command in the plain shell
-// shape and commandTool the tool to judge it as (sandboxShellCommand, or
+// hook tool call, which for a shell tool call also judges the command on
+// its own. command is the call's command in the plain shell shape and
+// commandTool the tool to judge it as (sandboxShellCommand, or
 // codexPowerShellCommand for a Codex shell call on Windows); with no command
-// it is inspectTrustedToolPolicyCtx.
+// it is inspectTrustedToolPolicyCtx, except for a connector's shell tool
+// (connector.IsShellTool) whose parse is not complete: with no single
+// command argument to judge, that call cannot be verified and takes a
+// conservative CRITICAL finding (unverifiedShellCommandFinding).
 //
 // A shell call's arguments reach the trusted-action parser through the
 // connector's projection, which takes out only the arguments it knows with
@@ -62,7 +73,8 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // CRITICAL command finding stays an allowed candidate. A sandbox's hooks are
 // the only gate on its tool calls, and its harness usually runs with its own
 // permission prompts off, so there one unlisted argument turned a block into
-// an allow. When the call's parse is not complete, the command is judged
+// an allow; on a host, a harness that ignores the unknown argument runs the
+// command just the same. When the call's parse is not complete, the command is judged
 // again in the plain shape, in the call's working directory, and the verdict
 // takes the stronger of the two. The plain shape only ever adds to the
 // verdict: the arguments it drops may change how the command runs, so it
@@ -75,7 +87,12 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	command json.RawMessage,
 	commandTool string,
 ) *ToolInspectVerdict {
-	if len(command) == 0 {
+	connectorName := action.Connector
+	if req != nil {
+		connectorName = firstNonEmpty(req.Connector, action.Connector)
+	}
+	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool)
+	if len(command) == 0 && !unverified {
 		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 	}
 	var primary actionfacts.Facts
@@ -88,12 +105,29 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		}
 	}
 	verdict := a.inspectTrustedToolPolicyCtx(ctx, req, action)
-	if verdict == nil || !dispatched || primary.Authoritative() ||
-		(commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args)) {
+	if verdict == nil || !dispatched || primary.Authoritative() {
+		return verdict
+	}
+	if unverified {
+		// Any parse that is not complete: partial or ambiguous with extra
+		// keys, and invalid or not applicable when the command key is
+		// missing or holds no command string (a number, null, blank text,
+		// an object).
+		return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict,
+			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
+	}
+	if commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args) {
 		return verdict
 	}
 	input := action.Input
 	input.Tool, input.Args = commandTool, command
+	if action.windowsShellDialect {
+		// The full call's hint was inferred from arguments whose parse is
+		// not complete, so it may be empty; the command alone is judged in
+		// the dialect inferred from it, as the same call without the extra
+		// keys is (GAP-0686).
+		input.DialectHint = agentHookWindowsShellDialect(input)
+	}
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
 		Input:                         input,
 		LegacyText:                    string(command),
@@ -102,8 +136,37 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
-	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
+	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict, findings)
+}
+
+const (
+	// unverifiedShellCommandRuleID is the conservative finding of a shell
+	// tool call whose parse is not complete and that has no single command
+	// argument to judge on its own.
+	unverifiedShellCommandRuleID = "TOOL-ARGS-UNVERIFIED"
+	unverifiedShellCommandTitle  = "Shell tool call without one command argument that can be verified"
+)
+
+// unverifiedShellCommandFinding is the conservative CRITICAL finding of a
+// shell tool call that cannot be verified (GAP-0686). Like every finding, it
+// only blocks where the call is enforcement-capable (observe mode records
+// would_block).
+func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
+	enforcement := findingEnforcementAllowed
+	if !enforcementCapable {
+		enforcement = findingEnforcementDetectionOnly
+	}
+	return RuleFinding{
+		RuleID:      unverifiedShellCommandRuleID,
+		Title:       unverifiedShellCommandTitle,
+		Severity:    "CRITICAL",
+		Confidence:  1,
+		Tags:        []string{"tool-arguments"},
+		LineNumber:  1,
+		enforcement: enforcement,
+	}
 }
 
 // mergeSandboxShellCommandVerdict raises verdict to the action findings, the

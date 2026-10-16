@@ -137,6 +137,7 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	}))
 	obs := &sandboxObserver{}
 	var generation atomic.Uint64
+	var generationOf atomic.Pointer[string]
 	registered := true
 	f := newSandboxIngressFixture(t, obs.observe, func(c *SandboxIngressConfig) {
 		c.Relay = client
@@ -146,7 +147,7 @@ func TestSandboxRelayForwarding(t *testing.T) {
 			}
 			return "reg-" + strings.TrimPrefix(b.SandboxName, "dc-"), true
 		}
-		c.OnGeneration = func(g uint64) { generation.Store(g) }
+		c.OnGeneration = func(registration string, g uint64) { generationOf.Store(&registration); generation.Store(g) }
 	})
 	path := ingressHookPath(t, f.api, "claudecode")
 	body := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`
@@ -213,8 +214,8 @@ func TestSandboxRelayForwarding(t *testing.T) {
 		got.Reason != want.Reason || got.ModelError != want.ModelError || got.ModelStatus != want.ModelStatus {
 		t.Fatalf("decision = %+v, want %+v", got, want)
 	}
-	if generation.Load() != 7 {
-		t.Fatalf("generation = %d", generation.Load())
+	if of := generationOf.Load(); generation.Load() != 7 || of == nil || *of != "reg-"+strings.TrimPrefix(f.claude.SandboxName, "dc-") {
+		t.Fatalf("generation = %d of %v", generation.Load(), of)
 	}
 
 	// A 2xx without a trailer records nothing.

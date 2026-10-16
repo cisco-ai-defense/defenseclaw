@@ -278,14 +278,18 @@ SENSOR_HELPER_EXE="${STAGE_DIR}/defenseclaw-sensor-helper.exe"
 ACP_EXE="${STAGE_DIR}/defenseclaw-acp.exe"
 # main.commit defaults to "unknown", which the enterprise Setup builder's
 # Assert-DefenseClawBinaryIdentity rejects. Stamp the exact HEAD sha we
-# derived above so identity verification passes.
-LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+# derived above so identity verification passes. main.date is the commit's
+# UTC time, so a rebuild of the same commit stamps the same value; without it
+# `defenseclaw-gateway --version` showed an unknown build time (#1249).
+SOURCE_DATE="$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+STAMP="-X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=${SOURCE_DATE}"
+LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 ${STAMP}"
+LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
+LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
 # -H=windowsgui for the same reason the broker uses it: this runs under the
 # SCM with no console, and a console subsystem binary flashes a window.
-LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui ${STAMP}"
+LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 ${STAMP}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw-gateway.exe (windows/amd64 tags=cmid)"

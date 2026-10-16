@@ -102,7 +102,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | Command | What it shows |
 | --- | --- |
 | `status` | The gateway's health, its subsystems, and its connectors and their modes |
-| `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment` |
+| `enterprise hooks status` | The guardian's summary, then an Enrollment section for per-user hook rows: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment`. When every connector uses machine policy, the Enrollment section can be absent while eligible users remain protected; check `status` and `verify` for coverage |
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
@@ -508,15 +508,18 @@ If a user you expect is missing, see
 ### When a user breaks their own setup (Linux and macOS)
 
 A user can break the files DefenseClaw needs in their own account, for
-example by making `~/.defenseclaw` unreadable, replacing an agent's config
-folder with a file or a symbolic link, or leaving an agent config the agent
-cannot parse. That account is then not protected for the affected agents.
+example by replacing an agent's config folder with a file or a symbolic link,
+or leaving an agent config the agent cannot parse. That account is then not
+protected for the affected per-user agents. On a machine-policy-only account,
+`~/.defenseclaw` holds session facts; the managed hook policy is not stored
+there. The guardian repairs the mode of a user-owned `~/.defenseclaw` or its
+`hooks` directory to `0700` before it checks per-user hooks.
 Every other account stays protected and the services stay ready. Once the
 account is fixed, the next reconcile (within a minute) clears the warning.
 
 When the guardian is refused by a path in the user's own home (a link, a
-file where a folder belongs or a folder where a file belongs, or a folder
-the user made unreadable), `status`, `verify` and `reconcile` report it for
+file where a folder belongs or a folder where a file belongs, or another
+folder the worker cannot read), `status`, `verify` and `reconcile` report it for
 that account as the warning `guardian_target_user_path`, which names the
 path. It does not fail `reconcile`, `verify`, `detect.sh --require-healthy`
 or `security_complete`, because only that account is affected and the user
@@ -530,8 +533,8 @@ owns in the account:
 
 - DefenseClaw's registration or plugin, removed or edited in the agent's
   default config;
-- the modes of `~/.defenseclaw` and its hooks folder, restored to
-  owner-only (`0700`);
+- the modes of a user-owned `~/.defenseclaw` and its hooks folder, restored to
+  owner-only (`0700`) before per-user hook checks;
 - a deleted or edited hook script, and a hook runtime whose fail mode no
   longer matches the config;
 - a missing `~/.kiro` or `~/.kiro/hooks` folder, which Kiro does not create;
@@ -658,10 +661,17 @@ state:
 
 Prefer an image without that state: capture the template before you install
 DefenseClaw and install it on each clone at first boot (through your MDM or
-the first-boot script), or run `enterprise linux uninstall --json` (macOS:
-`enterprise macos uninstall --json`) on the template just before you capture
-it. The plain uninstall removes the machine state, the keys included; keep
-`--keep-state` off.
+the first-boot script), or run `enterprise linux uninstall --purge --json`
+(macOS: `enterprise macos uninstall --purge --json`) on the template just
+before you capture it. A plain uninstall removes most machine state, but if
+an account keeps sandboxes it keeps the gateway's registration store
+(`/var/lib/defenseclaw/sandbox` on Linux,
+`/opt/cisco/defenseclaw/runtime/sandbox` on macOS) and
+`redaction-correlation.key` (`/var/lib/defenseclaw/redaction-correlation.key`
+or `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`). They are
+root-owned while the service account is gone; the next `ensure` adopts them.
+The key is per-machine; a clone must not share it. Use `--purge` for a clean
+image if the template ever held sandboxes, and keep `--keep-state` off.
 
 For clones that already run it, on each clone:
 
@@ -785,4 +795,6 @@ Two rules apply on a managed host:
 - The gateway runs in a sandbox. On Linux it can write only inside
   `/var/lib/defenseclaw` and `/var/log/defenseclaw`, so a `jsonl` file
   destination must use a path there. Your log agent can collect the file from
-  there.
+  there only if it runs as root or the `defenseclaw` service account: the
+  file is `0600` inside a service-owned `0750` folder. Use a privileged
+  collector to forward it to a separate destination for other readers.

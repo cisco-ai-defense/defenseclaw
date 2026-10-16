@@ -111,9 +111,12 @@ correlator patterns, which are compiled in and always run, so it adds nothing to
 
 <Step>
 
-**Step 3 — What to allow.** Two cards: first-party plugins, which skip admission scans through
-`first_party_allow_list`, and internal domains to plan separately (the generated policy does not allow them through the firewall). Free-form text inputs
-let you add your own globs and domains. To tune LLM-judge noise, use the Suppressions section in
+**Step 3 — What to allow.** Choose internal domains to plan separately; the
+generated policy does not allow them through the firewall. Add more internal
+domains as planning notes. Configure first-party admission in Playground →
+Admission with an exact asset name and at least one `source_path_contains` path
+pin; see [First-party assets](/docs/policies/admission#first-party-assets).
+To tune LLM-judge noise, use the Suppressions section in
 the Playground and the [suppression cookbook](/docs/policies/suppression-cookbook).
 
 </Step>
@@ -140,7 +143,10 @@ a generic webhook does not send the HEC Authorization header. Secrets are refere
 
 **Step 6 — Review.** Inline policy summary plus the OPA/Rego-only Live Test pane: pick a canned scenario (a
 CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined plugin), see the
-verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
+verdict and any mode hint, and tweak earlier steps until it matches intent.
+The canned guardrail scenarios show the verdict expected in action mode; Live Test
+and **Run all scenarios** use the selected policy mode. Observe mode reports
+`alert` for the bundled CRITICAL guardrail cases and shows a mode hint.
 Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
 Review section there renders every YAML file; copy them into
 `~/.defenseclaw/policies/` (or run the bundled install script) and activate the policy, which
@@ -150,7 +156,11 @@ writes it into `config.yaml`:
 defenseclaw policy activate my-policy
 ```
 
-`policy activate` copies the admission policy, guardrail mode and levels into `config.yaml`; it does not
+`policy activate` copies the admission policy and guardrail levels into `config.yaml`.
+Playground's **keep host mode** choice omits `guardrail.mode` from the exported
+YAML, so activation keeps the host's configured mode; the browser previews it
+as the host default, `observe`. Choosing `observe` or `action` exports the mode.
+Activation does not
 change your HITL setting (`defenseclaw guardrail hilt`) or the rule pack. The rule pack the creator wrote to
 `~/.defenseclaw/policies/guardrail/my-policy/` (rules, suppressions, sensitive tools and judges)
 isn't enforced until you validate it and switch to it. `use-pack` pins the pack's digest in
@@ -179,7 +189,7 @@ The **Backed by** column names the keys in the exported policy file. `policy act
 | Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-type `scanner_overrides.<type>.<sev>`; activation writes them to `admission.defaults`, `admission.skill` and `admission.<type>.actions`. |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
-| Guardrail        | `guardrail.mode`, `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. Activation copies the mode, levels, and trust level; it keeps your HITL setting (`defenseclaw guardrail hilt`), so the preset's `hilt` is not applied. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
+| Guardrail        | Optional `guardrail.mode`, `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. Activation copies an explicit mode, levels, and trust level; with **keep host mode**, it keeps the configured mode. It keeps your HITL setting (`defenseclaw guardrail hilt`), so the preset's `hilt` is not applied. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
 | Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
@@ -199,7 +209,7 @@ The **Backed by** column names the keys in the exported policy file. `policy act
 ## Limits to know about
 
 - **Live Test is OPA/Rego-only.** It evaluates the two bundled WASM policy domains, admission
-  and guardrail, with the policy as `input.admission` and `input.thresholds`
+  and guardrail, with the policy as `input.admission`, `input.thresholds` and `input.mode`
   the way the gateway compiles it from `config.yaml`. It does not run the Go ActionFacts parser, compile
   CEL, execute RE2 rules, scan MCP descriptions with YARA, or replay bounded chains. Use the exported
   policy on a DefenseClaw host and run the repository test/benchmark harness for those lanes.

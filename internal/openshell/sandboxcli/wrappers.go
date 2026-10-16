@@ -110,7 +110,8 @@ func (a *App) wrapperPreflight(spec *harness.Spec) (API, error) {
 // sandboxRequired reports that the organization requires spec to run only in
 // a sandbox on this managed computer: a bypass of the wrapper is refused
 // there, so the receipt does not offer one (GAP-0292). It is false when the
-// daemon does not say.
+// daemon does not say, and for an account exempt from enrollment, whose
+// host runs the managed gateway allows (GAP-0555).
 func (a *App) sandboxRequired(api API, spec *harness.Spec) bool {
 	if !a.ManagedHost() {
 		return false
@@ -118,7 +119,7 @@ func (a *App) sandboxRequired(api API, spec *harness.Spec) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Harness: spec.Name})
-	return err == nil && ex.Managed != nil && slices.Contains(ex.Managed.RequiredFor, spec.Name)
+	return err == nil && ex.Managed.HostRunRefused(spec.Name)
 }
 
 // enableWrapper writes the wrapper; setup calls it directly while it is

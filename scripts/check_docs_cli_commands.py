@@ -213,6 +213,79 @@ def documented_commands() -> list[DocumentedCommand]:
     return commands
 
 
+@dataclass(frozen=True)
+class DocumentedFlag:
+    """A flag a documented flags table (a TypeTable under a heading) lists."""
+
+    path: Path
+    line: int
+    command: tuple[str, ...]
+    flag: str
+
+
+# A heading that names one command's flags, "## All `quickstart` flags" or
+# "### `setup provider add` flags", and the TypeTable keys under it, such as
+# "--with-judge / --no-judge".
+_FLAG_TABLE_HEADING = re.compile(r"^#{2,4}\s.*?`(?:defenseclaw\s+)?([a-z][a-z0-9 -]*)`\s+flags\s*$")
+_FLAG_TABLE_KEY = re.compile(r'^\s*"(--[^"]+)"\s*:')
+
+
+def flag_table_entries(path: Path, text: str) -> list[DocumentedFlag]:
+    """Return the flags of each TypeTable under a command's flags heading in *text*.
+
+    GAP-0468: the first-run page listed `quickstart --yes` and
+    `--non-interactive` in such a table after the command dropped them, and
+    only shell fences and inline references were checked.
+    """
+
+    entries: list[DocumentedFlag] = []
+    command: tuple[str, ...] | None = None
+    in_table = False
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if line.startswith("#"):
+            heading = _FLAG_TABLE_HEADING.match(line.strip())
+            command = tuple(heading.group(1).split()) if heading else None
+            in_table = False
+            continue
+        if command is None:
+            continue
+        if "<TypeTable" in line:
+            in_table = True
+            continue
+        if in_table and line.strip().startswith("/>"):
+            command, in_table = None, False
+            continue
+        key = _FLAG_TABLE_KEY.match(line) if in_table else None
+        if key:
+            for flag in key.group(1).split("/"):
+                if flag.strip().startswith("--"):
+                    entries.append(DocumentedFlag(path, line_number, command, flag.strip()))
+    return entries
+
+
+def documented_flags() -> list[DocumentedFlag]:
+    """Collect the flags of every command flags table in the public docs."""
+
+    entries: list[DocumentedFlag] = []
+    for path in PUBLIC_DOCS_ROOT.rglob("*.mdx"):
+        entries.extend(flag_table_entries(path, path.read_text(encoding="utf-8")))
+    return sorted(entries, key=lambda e: (str(e.path), e.line, e.flag))
+
+
+def validate_flag(command: click.Command, documented: DocumentedFlag) -> str | None:
+    """Return an error when the documented command lacks the documented flag."""
+
+    node = command
+    for token in documented.command:
+        if not isinstance(node, click.Group) or token not in node.commands:
+            return f"unknown command path {' '.join(documented.command)!r}"
+        node = node.commands[token]
+    names = {name for param in node.params for name in (*param.opts, *param.secondary_opts)}
+    if documented.flag not in names:
+        return f"`{COMMAND_NAME} {' '.join(documented.command)}` has no option {documented.flag}"
+    return None
+
+
 def _no_op_command_tree() -> click.Command:
     """Clone the Click tree with callbacks and filesystem existence checks disabled."""
 
@@ -326,6 +399,11 @@ def validate() -> list[str]:
         detail = result.output.strip().replace("\n", " | ")
         failures.append(f"{location}: {documented.text}\n  {detail}")
 
+    for flag in documented_flags():
+        error = validate_flag(command, flag)
+        if error is not None:
+            failures.append(f"{flag.path.relative_to(REPO_ROOT)}:{flag.line}: {flag.flag}\n  {error}")
+
     return failures
 
 
@@ -340,7 +418,10 @@ def main() -> int:
         return 1
 
     count = len(documented_commands())
-    print(f"Validated {count} documented defenseclaw commands across {len(documentation_paths())} documentation files.")
+    print(
+        f"Validated {count} documented defenseclaw commands and {len(documented_flags())} flags-table flags "
+        f"across {len(documentation_paths())} documentation files."
+    )
     return 0
 
 

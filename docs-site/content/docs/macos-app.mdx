@@ -146,7 +146,8 @@ The panel has four parts:
   - **Stop…** asks first, then runs `defenseclaw sandbox stop <name> --yes`;
     `defenseclaw sandbox connect <name>` resumes it. A detached run still
     going ends: DefenseClaw marks it interrupted and keeps its log for
-    `defenseclaw sandbox logs <name>`.
+    `defenseclaw sandbox logs <name>`. A full-disk MicroVM with work not yet
+    pulled keeps running and the stop exits `5`, even with `--yes`.
   - **Review changes** runs `defenseclaw sandbox review <name>`.
   - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
     which stops the sandbox and puts the project folder back to its
@@ -204,8 +205,8 @@ starts the gateway with `brew services`:
 defenseclaw sandbox setup --install-openshell
 ```
 
-On OpenShell 0.1.1 the same command also upgrades OpenShell to 0.1.2 in
-place, which restarts the gateway. Setup keeps 0.1.1 while a MicroVM sandbox
+On OpenShell 0.1.1 or 0.1.2 the same command also upgrades OpenShell to
+0.1.3 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox
 runs, so stop them first with `defenseclaw sandbox stop NAME` (see
 [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 

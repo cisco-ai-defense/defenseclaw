@@ -2944,3 +2944,79 @@ async def test_a_detail_key_acts_on_the_item_the_detail_showed(fetch, monkeypatc
         assert len(seen) == 1 and seen[0].kind == "hint" and "no longer waiting" in seen[0].hint
     else:
         assert seen == [expected]
+
+
+# --- managed computers: where an unblock or an always answer is kept (#1205, GAP-0435) ---
+
+MANAGED_STATUS = {
+    **STATUS,
+    "managed": {
+        "profile": "contractors",
+        "effective_digest": "sha256:7f3a" + "0" * 60,
+        "updated_at": "2026-09-27T11:58:00Z",
+        "install_mode": "setup",
+        "driver": "docker",
+        "openshell_version": "0.1.3",
+    },
+}
+
+
+def _capture_screens(monkeypatch: pytest.MonkeyPatch, app: Any, *answers: Any) -> list[Any]:
+    reply = _screen_answers(*answers)
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await reply(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    return screens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_the_unblock_texts_say_how_long_and_where_it_is_kept(fetch, monkeypatch, managed) -> None:
+    # The managed daemon ends a session unblock at the next start and keeps
+    # an always one in the organization's gateway: no per-user key, no
+    # "until it is deleted". The per-user texts stay as they were.
+    if managed:
+        fetch.status = MANAGED_STATUS
+        monkeypatch.setattr(sandbox_panel, "fetch_managed_explain", lambda _config: None)
+    app = DefenseClawTUI(config=_config())
+    monkeypatch.setattr(app, "_sandbox_call", _Calls({"message": "unblocked webhook.site for every sandbox"}))
+    screens = _capture_screens(monkeypatch, app, "always", "always")
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        assert app.sandbox_model.managed is managed
+        await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
+    menu = {action.action_id: action.description for action in screens[0].actions}
+    confirm = screens[1].subtitle
+    if managed:
+        assert menu["sandbox"] == "Lifts the block for this session of the sandbox; it ends when the sandbox starts again."
+        assert "kept" not in menu["sandbox"] and "deleted" not in menu["sandbox"]
+        assert "organization's DefenseClaw gateway keeps it for every sandbox of yours" in menu["always"]
+        assert "kept by your organization's DefenseClaw gateway" in confirm
+        assert all("openshell.egress.unblocked" not in text for text in (*menu.values(), confirm))
+    else:
+        assert menu["sandbox"] == "Lifts the block for this sandbox until it is deleted."
+        assert menu["always"] == "Adds the host to openshell.egress.unblocked (asks first); private networks stay closed."
+        assert confirm.startswith("Every sandbox, now and future, may reach it (openshell.egress.unblocked). ")
+
+
+@pytest.mark.asyncio
+async def test_a_managed_always_approve_says_the_organization_keeps_it(fetch, monkeypatch) -> None:
+    fetch.status = MANAGED_STATUS
+    fetch.approvals = [PUBLIC_ASK]
+    monkeypatch.setattr(sandbox_panel, "fetch_managed_explain", lambda _config: None)
+    app = DefenseClawTUI(config=_config())
+    monkeypatch.setattr(app, "_sandbox_call", _Calls({"message": "approved", "persisted": True}))
+    toasts: list[tuple[str, str]] = []
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    screens = _capture_screens(monkeypatch, app, "always")
+    action = SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2", always=True)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_decide(action, approve=True)  # noqa: SLF001
+    assert "kept by your organization's DefenseClaw gateway" in screens[0].subtitle
+    assert "openshell.egress.unblocked" not in screens[0].subtitle
+    assert toasts[-1] == ("success", "always allowed www.example.com (kept by your organization's DefenseClaw gateway); approved")

@@ -226,7 +226,7 @@ class BootstrapEnvTests(unittest.TestCase):
         cfg.gateway.port = 18789
         seen_ports = []
 
-        def fake_setup(app, save_config):
+        def fake_setup(app, save_config, workspace_dir=None):
             seen_ports.append(app.cfg.gateway.port)
             return True, []
 
@@ -289,7 +289,7 @@ class BootstrapEnvTests(unittest.TestCase):
         os.makedirs(hooks_dir)
         with open(os.path.join(hooks_dir, "defenseclaw.json"), "w", encoding="utf-8") as fh:
             fh.write("{}\n")
-        with patch("defenseclaw.bootstrap.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
+        with patch("defenseclaw.connector_paths.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
             found = _connector_readiness(cfg, "kiro")
             os.remove(os.path.join(hooks_dir, "defenseclaw.json"))
             missing = _connector_readiness(cfg, "kiro")
@@ -1233,11 +1233,13 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     hooks.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: ambient)
 
-    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=str(workspace)))
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    cfg.claw.workspace_dir = str(workspace)
     result = _connector_readiness(cfg, "devin")
 
     assert result.status == "pass"
-
 
 
 def test_devin_readiness_without_workspace_checks_user_global_hooks(
@@ -1245,11 +1247,14 @@ def test_devin_readiness_without_workspace_checks_user_global_hooks(
 ) -> None:
     """MAC-U3-08: init told every user to pin a Devin workspace, which
     re-scopes all connectors; Devin is guarded by its user-global hooks."""
-    from defenseclaw import bootstrap
+    from defenseclaw import connector_paths
 
     config = tmp_path / "config.json"
-    monkeypatch.setattr(bootstrap, "devin_user_config_path", lambda: str(config))
-    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=""))
+    monkeypatch.setattr(connector_paths, "devin_user_config_path", lambda: str(config))
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    cfg.claw.workspace_dir = ""
 
     config.write_text('{"theme": "dark"}', encoding="utf-8")
     missing = _connector_readiness(cfg, "devin")

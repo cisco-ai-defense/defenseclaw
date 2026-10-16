@@ -2544,6 +2544,27 @@ class TestAttachErrorHandler(unittest.TestCase):
             MCPScannerWrapper._scan_remote(fake, object(), "http://x/mcp", None)
         self.assertEqual(stderr.getvalue(), "")
 
+class TestMCPBareUnblockConfigScopes(MCPCommandTestBase):
+    """GAP-1307: a bare unblock fans out to connector rules in config.yaml alone."""
+
+    def test_bare_unblock_clears_the_unscoped_and_a_config_only_connector_block(self):
+        from defenseclaw.enforce import asset_lists
+
+        url = "http://demo.example.com"
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.block("mcp", url, "global")
+        pe.block_for_connector("mcp", url, "codex", "scoped")
+        self.assertTrue(asset_lists.has_entry(self.app.cfg, self.app.store, "mcp", url, "codex", "block"))
+
+        result = self.invoke(["unblock", url])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"[mcp] Unblocked '{url}' (codex).", result.output)
+        self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "mcp", url, "codex", "block"))
+        self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "mcp", url, "", "block"))
+
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -200,6 +200,16 @@ class UninstallPlan:
     # live_sandboxes are the live-mounted sandboxes the daemon listed: the
     # teardown stops them and their undo points go (GAP-0295).
     live_sandboxes: tuple[str, ...] = ()
+    # running_sandboxes are the sandboxes the daemon listed as running, as
+    # (name, workdir mode). They stop the run before any change, unless
+    # stop_sandboxes (--stop-sandboxes) lets the teardown stop and delete
+    # them (GAP-0368).
+    running_sandboxes: tuple[tuple[str, str], ...] = ()
+    stop_sandboxes: bool = False
+    # sandbox_list_error is why ``sandbox list`` could not say which
+    # sandboxes run ("" when it did). The teardown would delete whatever
+    # runs, so an unknown answer stops the run too, unless stop_sandboxes.
+    sandbox_list_error: str = ""
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -294,6 +304,14 @@ class _WindowsProcessWaiter:
         "(when Docker or OpenShell are gone or broken); 'defenseclaw-gateway sandbox teardown' removes them later."
     ),
 )
+@click.option(
+    "--stop-sandboxes",
+    is_flag=True,
+    help=(
+        "Stop and delete running OpenShell sandboxes with the sandbox teardown (work a copy-mode sandbox "
+        "never pulled back is lost). Without it a running sandbox stops the run before any change."
+    ),
+)
 @click.option("--dry-run", is_flag=True, help="Show what would happen without touching the system.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def uninstall_cmd(
@@ -303,6 +321,7 @@ def uninstall_cmd(
     skip_sandbox_teardown: bool,
     dry_run: bool,
     yes: bool,
+    stop_sandboxes: bool = False,
 ) -> None:
     """Uninstall DefenseClaw (reversibly by default)."""
     if _dispatch_native_windows_uninstall(
@@ -320,19 +339,19 @@ def uninstall_cmd(
         remove_plugin=not keep_openclaw,
         skip_sandbox_teardown=skip_sandbox_teardown,
     )
-    if plan.sandbox_teardown:
-        plan = replace(plan, live_sandboxes=_live_mounted_sandboxes(plan.gateway_path))
+    plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
 
     if dry_run:
-        refusal = _open_tui_refusal(plan)
+        refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
         if refusal:
             # The real run stops at plan validation (GAP-2585).
             ux.warn(f"a real run would stop before any change: {refusal}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
+    _refuse_running_sandboxes(plan)
     if not yes and not click.confirm("  Proceed?", default=False):
         ux.subhead("Cancelled.")
         raise SystemExit(1)
@@ -562,8 +581,16 @@ def _remove_script_install_after_native_setup(platform_name: str) -> None:
         "(when Docker or OpenShell are gone or broken)."
     ),
 )
+@click.option(
+    "--stop-sandboxes",
+    is_flag=True,
+    help=(
+        "Stop and delete running OpenShell sandboxes with the sandbox teardown (work a copy-mode sandbox "
+        "never pulled back is lost). Without it a running sandbox stops the run before any change."
+    ),
+)
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
-def reset_cmd(skip_sandbox_teardown: bool, yes: bool) -> None:
+def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = False) -> None:
     """Wipe user state so 'defenseclaw quickstart' starts clean.
 
     Keeps a managed .venv runtime, binaries, and the OpenClaw plugin
@@ -578,9 +605,11 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool) -> None:
         preserve_data_entries=_RESET_PRESERVED_ENTRIES,
         skip_sandbox_teardown=skip_sandbox_teardown,
     )
+    plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
 
+    _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
         f"  This will DELETE resettable state under {plan.data_dir}. Continue?",
         default=False,
@@ -1473,35 +1502,106 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _sandbox_tree_has_state(root: str, *, empty_files_are_state: bool = False) -> bool:
+    """Find state in a tree without following links out of it."""
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if path == root:
+                return False
+            return True  # an entry disappeared during the scan
+        except OSError:
+            return True
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                with os.scandir(path) as entries:
+                    pending.extend(entry.path for entry in entries)
+            except OSError:
+                return True  # let teardown report inaccessible state
+        elif not stat.S_ISREG(info.st_mode):
+            return True  # links and special files may hold state
+        elif info.st_size or empty_files_are_state:
+            return True
+        else:
+            try:
+                if not os.access(path, os.R_OK, follow_symlinks=False):
+                    return True
+            except (OSError, NotImplementedError):
+                return True
+    return False
+
+
 def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
     """Report whether DefenseClaw may hold OpenShell sandbox state.
 
-    OpenShell sandboxes run on Linux and macOS only. Teardown is planned when
-    sandboxes are enabled or the data directory holds sandbox state (images,
-    records, the setup receipt), so a host that never used them is untouched.
+    OpenShell sandboxes run on Linux and macOS only. A fresh install may have
+    an empty image-store lock even though it has never set up sandboxes.
     """
     if platform_name == "win32":
         return False
     openshell = getattr(cfg, "openshell", None) if cfg is not None else None
     if openshell is not None and (getattr(openshell, "enabled", False) or getattr(openshell, "wrappers", None)):
         return True
-    root = os.path.join(data_dir, "sandboxes")
-    if not os.path.isdir(root):
-        return False
+    sandbox_dir = os.path.join(data_dir, "sandboxes")
     try:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                # The manager creates its directory before any sandbox. An
-                # empty directory is not a teardown receipt.
-                if entry.name == "manager" and entry.is_dir(follow_symlinks=False):
-                    with os.scandir(entry.path) as records:
-                        if any(records):
-                            return True
-                else:
-                    return True
+        mode = os.lstat(sandbox_dir).st_mode
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True  # let teardown report inaccessible state instead of deleting it
-    return False
+        return True
+    if stat.S_ISLNK(mode):
+        return True
+    if not stat.S_ISDIR(mode):
+        return False
+    if _sandbox_tree_has_state(sandbox_dir):
+        return True
+
+    # The old preflight ignored an empty tree and a single empty manager
+    # directory. Preserve that decision even if OpenShell has separate state.
+    # Other empty entries used to request teardown, so check for a related
+    # OpenShell setup before treating those entries as disposable markers.
+    try:
+        with os.scandir(sandbox_dir) as entries:
+            for entry in entries:
+                if entry.name != "manager":
+                    break
+                with os.scandir(entry.path) as manager_entries:
+                    if next(manager_entries, None) is not None:
+                        break
+            else:
+                return False
+    except OSError:
+        return True
+
+    home = os.path.expanduser("~")
+    # OpenShell state and user gateway config are tie-breakers for empty
+    # markers under sandboxes, not independent teardown triggers.
+    state_roots = {os.path.join(home, ".local", "state", "openshell")}
+    if xdg_state := os.environ.get("XDG_STATE_HOME"):
+        if os.path.isabs(xdg_state):
+            state_roots.add(os.path.join(xdg_state, "openshell"))
+    # UserConfigDir in Go uses XDG_CONFIG_HOME, else ~/.config. Gateway
+    # registration and gateway.toml/env live here; their absence matters even
+    # when the DefenseClaw setup receipt has not been written. An empty
+    # config directory alone is not a gateway configuration.
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config and not os.path.isabs(xdg_config):
+        return True  # Go cannot resolve a relative XDG_CONFIG_HOME
+    config_roots = {os.path.join(home, ".config", "openshell")}
+    if xdg_config:
+        config_roots.add(os.path.join(xdg_config, "openshell"))
+    for path in state_roots:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    return any(_sandbox_tree_has_state(path, empty_files_are_state=True) for path in config_roots)
 
 
 def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
@@ -1728,6 +1828,24 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             "agent already wrote in your folder stays as it is (before you uninstall, `defenseclaw sandbox review "
             "NAME` shows it and `defenseclaw sandbox undo NAME` reverts it)"
         )
+        if plan.running_sandboxes:
+            running = ", ".join(name for name, _ in plan.running_sandboxes)
+            if plan.stop_sandboxes:
+                ux.echo(f"      {ux.dim('·')} running sandboxes ({running}) are stopped and deleted (--stop-sandboxes)")
+            else:
+                ux.echo(
+                    f"      {ux.dim('·')} running sandboxes ({running}) stop this run before any change: stop them "
+                    "first, or add --stop-sandboxes"
+                )
+        elif plan.sandbox_list_error:
+            unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
+            if plan.stop_sandboxes:
+                ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            else:
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
+                    "`defenseclaw sandbox list`, or add --stop-sandboxes"
+                )
     elif plan.sandbox_teardown_skipped:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
         # What teardown needs to find DefenseClaw's sandboxes later lives in
@@ -1744,6 +1862,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
+    else:
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (no OpenShell sandbox state)")
     feed = _sandbox_kernel_feed_hint(plan)
     if feed:
         ux.echo(f"  • {ux.bold('sandbox kernel feed:')} stays (a root service); {feed}")
@@ -2271,6 +2391,7 @@ def _open_tui_refusal(plan: UninstallPlan) -> str:
 
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
+    _refuse_running_sandboxes(plan)
     if plan.remove_data_dir:
         refusal = _open_tui_refusal(plan)
         if refusal:
@@ -2750,29 +2871,146 @@ def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNI
     return f"remove it with `sudo {_SANDBOX_FEED_HELPER} --sandbox-feed --uninstall`"
 
 
-def _live_mounted_sandboxes(gateway_path: str) -> tuple[str, ...]:
-    """The live-mounted sandboxes the daemon lists, or () when it cannot say (GAP-0295)."""
+# How long ``sandbox list`` may take before the run treats it as unanswered.
+_SANDBOX_LIST_TIMEOUT_SECONDS = 10
+
+
+def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
+    """The sandbox rows ``sandbox list`` prints, and why it could not say ('' when it did).
+
+    No gateway binary, or a gateway that reports sandboxes unsupported here,
+    answers with no rows: no sandbox can run, and the teardown deletes none.
+    A failed, timed-out or unreadable list is an unknown answer (GAP-0448).
+    """
     if not gateway_path or not os.path.isfile(gateway_path):
-        return ()
+        return [], ""
     try:
         proc = subprocess.run(
             [gateway_path, "sandbox", "list", "--output", "json"],
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
         )
-        rows = json.loads(proc.stdout or "{}").get("sandboxes") if proc.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
-        return ()
+    except subprocess.TimeoutExpired:
+        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds"
+    except OSError as exc:
+        return [], f"`sandbox list` could not run: {exc.strerror or exc}"
+    if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
+        return [], ""
+    if proc.returncode != 0:
+        lines = [
+            line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
+            for line in (proc.stderr or "").splitlines()
+            if line.strip()
+        ]
+        reason = lines[-1][:300] if lines else f"it exited with status {proc.returncode}"
+        return [], f"`sandbox list` failed: {reason}"
+    try:
+        rows = json.loads(proc.stdout or "").get("sandboxes")
+    except (ValueError, AttributeError):
+        rows = None
+    if not isinstance(rows, list):
+        return [], "`sandbox list` printed no sandbox list"
+    return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
+
+
+def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
+    """The live-mounted sandboxes in *rows* (GAP-0295)."""
+    return tuple(
+        sorted(str(row["name"]) for row in rows if row.get("workdir_mode") == "mount" and row.get("phase") != "deleted")
+    )
+
+
+# The phases (lowercased by the daemon) of a sandbox whose workload no longer
+# runs: stopped, completed (its workload ended), deleted (gone, its snapshot
+# kept) and missing (OpenShell no longer has it). Every other phase may run:
+# creating, provisioning, starting, ready, stopping, deleting, unknown, and
+# error, which may still run its containers (manager.foreignOne) (GAP-0449).
+_STOPPED_SANDBOX_PHASES = frozenset({"stopped", "completed", "deleted", "missing"})
+
+
+def _running_sandboxes(rows: list) -> tuple[tuple[str, str], ...]:
+    """The sandboxes in *rows* that may run, as (name, workdir mode) (GAP-0368)."""
     return tuple(
         sorted(
-            str(row["name"])
-            for row in rows or ()
-            if isinstance(row, dict) and row.get("name") and row.get("workdir_mode") == "mount"
-            and row.get("phase") != "deleted"
+            (str(row["name"]), str(row.get("workdir_mode") or ""))
+            for row in rows
+            if str(row.get("phase") or "").strip().lower() not in _STOPPED_SANDBOX_PHASES
         )
     )
+
+
+def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> UninstallPlan:
+    """*plan* with the sandboxes its teardown would stop, from one ``sandbox list``."""
+    if not plan.sandbox_teardown:
+        return plan
+    rows, error = _listed_sandboxes(plan.gateway_path)
+    if error and not _gateway_supports_sandbox_teardown(plan.gateway_path):
+        # A gateway without ``sandbox teardown`` deletes no sandbox
+        # (_sandbox_teardown), so there is nothing to protect.
+        error = ""
+    return replace(
+        plan,
+        live_sandboxes=_live_mounted_sandboxes(rows),
+        running_sandboxes=_running_sandboxes(rows),
+        stop_sandboxes=stop_sandboxes,
+        sandbox_list_error=error,
+    )
+
+
+def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
+    """Why running sandboxes stop this run before any change ('' when they do not).
+
+    The teardown stops and deletes every sandbox, with the work a copy-mode
+    one holds that was never pulled back. A conversion to a managed install
+    ran into the sandboxes users still worked in (GAP-0368), so a running
+    sandbox needs the user to stop it, or --stop-sandboxes.
+    """
+    if not plan.sandbox_teardown or plan.stop_sandboxes:
+        return ""
+    if plan.sandbox_list_error:
+        # A destructive step does not go ahead on an unknown answer (GAP-0448).
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. Run `defenseclaw sandbox list` "
+            "to check (`defenseclaw sandbox pull NAME --branch` keeps a copy-mode sandbox's work, "
+            "`defenseclaw sandbox stop NAME` stops one), then run this command again, or add --stop-sandboxes to "
+            "stop and delete any running sandbox with the teardown."
+        )
+    if not plan.running_sandboxes:
+        return ""
+    import shlex
+
+    steps = []
+    for name, mode in plan.running_sandboxes:
+        quoted = shlex.quote(name)
+        stop = f"`defenseclaw sandbox stop {quoted}`"
+        if mode == "copy":
+            steps.append(
+                f"`defenseclaw sandbox pull {quoted} --branch` keeps its work on branch dc/{name}, then {stop}"
+            )
+        elif mode == "mount":
+            steps.append(f"`defenseclaw sandbox review {quoted}` shows what it changed in your folder, then {stop}")
+        else:
+            steps.append(stop)
+    count = len(plan.running_sandboxes)
+    names = ", ".join(name for name, _ in plan.running_sandboxes)
+    return (
+        f"{count} OpenShell {'sandbox runs' if count == 1 else 'sandboxes run'} for this account ({names}), and the "
+        "sandbox teardown would stop and delete "
+        f"{'it' if count == 1 else 'them'} with any work never pulled back; nothing was changed. "
+        + "; ".join(steps)
+        + ". Then run this command again, or add --stop-sandboxes to stop and delete "
+        f"{'it' if count == 1 else 'them'} with the teardown."
+    )
+
+
+def _refuse_running_sandboxes(plan: UninstallPlan) -> None:
+    refusal = _running_sandboxes_refusal(plan)
+    if refusal:
+        raise click.ClickException(refusal)
 
 
 def _gateway_supports_sandbox_teardown(gateway_path: str) -> bool:
@@ -2813,6 +3051,8 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
     if not _gateway_supports_sandbox_teardown(gw):
         ux.subhead("this gateway has no OpenShell sandbox support — nothing to tear down")
         return
+    # Its output comes at the end, and deleting a sandbox can take minutes.
+    ux.subhead("tearing down DefenseClaw's OpenShell sandboxes (deleting a sandbox can take a few minutes)")
     try:
         proc = subprocess.run(
             [gw, "sandbox", "teardown", "--yes"],
@@ -2823,10 +3063,20 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
+    # GAP-1073: with the data directory removed, --skip-sandbox-teardown also
+    # deletes the receipt a later teardown restores the OpenShell gateway
+    # configuration from, so the way on keeps the data instead.
+    later = (
+        "rerun uninstall with --skip-sandbox-teardown and without --all or --binaries (that keeps the data "
+        "directory, with the receipt teardown restores the OpenShell gateway configuration from, and the gateway), "
+        "then run `defenseclaw-gateway sandbox teardown` once Docker and OpenShell work, and uninstall again"
+        if plan.remove_data_dir or plan.remove_binaries
+        else "rerun uninstall with --skip-sandbox-teardown"
+    )
     for line in (proc.stdout or "").splitlines():
         if line.strip():
             # The gateway hint is for its teardown command, not uninstall.
-            hint = line.replace("rerun with --keep-images", "rerun uninstall with --skip-sandbox-teardown")
+            hint = line.replace("rerun with --keep-images", later)
             ux.echo(f"  {ux.dim('·')} {hint.strip()}")
     detail = (proc.stderr or "").strip().splitlines()
     # GAP-0282: teardown goes on past a failed step, so the last line is the
@@ -2847,8 +3097,12 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
             "aborting uninstall: sandbox teardown failed"
             + (f" ({reason})" if reason else "")
             + (f"; {undone} step(s) listed above already ran and stay done" if undone else "")
-            + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, "
-            + "or rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
+            + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, or "
+            + (
+                later
+                if plan.remove_data_dir or plan.remove_binaries
+                else "rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
+            )
         )
     ux.ok("sandbox teardown complete")
 

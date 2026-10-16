@@ -150,10 +150,22 @@ type Registration struct {
 	// policy is the one resolved at CreatedAt (PolicyUpdatedAt).
 	PolicyAt time.Time `json:"policy_at,omitzero"`
 	BoundAt  time.Time `json:"bound_at,omitzero"`
+	// GuestWatch marks registrations bound by this build. Registrations bound
+	// before the upgrade to 1.0.2 (for example by 1.0.1) are not watched;
+	// re-create those sandboxes after the upgrade to bring them under the
+	// signal. Root-owned attestation in a later release replaces this signal.
+	GuestWatch bool `json:"guest_watch,omitempty"`
+	// GuestSeenAt is the gateway receipt time of the first accepted lifecycle
+	// or egress record after bind. It ends this registration's watch.
+	GuestSeenAt time.Time `json:"guest_seen_at,omitzero"`
 	// SeenAt is when the daemon last reported the sandbox running; the
 	// LiveLease counts from it (from BoundAt before the first report).
 	SeenAt    time.Time `json:"seen_at,omitzero"`
 	RevokedAt time.Time `json:"revoked_at,omitzero"`
+	// SessionAt is when the sandbox last started a new session: the running
+	// report that followed a stop (Report). Zero while it runs the session
+	// it was bound in (SessionStart).
+	SessionAt time.Time `json:"session_at,omitzero"`
 }
 
 // Decision is one saved decision, kept under

@@ -120,6 +120,10 @@ type profileGroupSIDs struct {
 	// nextCheck is when (UnixNano) the next re-check of resolved names is
 	// due, so a request skips the lock until then.
 	nextCheck atomic.Int64
+	// inflight counts the entries with a lookup in flight. A re-check that
+	// finishes after its hook stopped waiting is absorbed by the next
+	// request, not a minute later at the next re-check (GAP-1509).
+	inflight atomic.Int64
 }
 
 type profileGroupSIDEntry struct {
@@ -159,6 +163,7 @@ func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(str
 	}
 	s.unresolved.Store(int64(len(s.entries)))
 	s.nextCheck.Store(now.Add(profileGroupSIDRecheckInterval).UnixNano())
+	s.countInflightLocked()
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	for _, entry := range s.entries {
@@ -190,7 +195,7 @@ func (s *profileGroupSIDs) refresh(now time.Time, wait bool) {
 		return
 	}
 	recheck := now.UnixNano() >= s.nextCheck.Load()
-	if s.unresolved.Load() == 0 && !recheck {
+	if s.unresolved.Load() == 0 && !recheck && s.inflight.Load() == 0 {
 		return
 	}
 	s.mu.Lock()
@@ -222,6 +227,7 @@ func (s *profileGroupSIDs) refresh(now time.Time, wait bool) {
 			}
 		}
 	}
+	s.countInflightLocked()
 	s.mu.Unlock()
 	if !wait || len(pending) == 0 {
 		return
@@ -286,6 +292,18 @@ func (s *profileGroupSIDs) absorbLocked(now time.Time) {
 			entry.nextTry = now.Add(profileGroupSIDRetryInterval)
 		}
 	}
+	s.countInflightLocked()
+}
+
+// countInflightLocked records how many entries have a lookup in flight.
+func (s *profileGroupSIDs) countInflightLocked() {
+	var n int64
+	for _, entry := range s.entries {
+		if entry.call != nil {
+			n++
+		}
+	}
+	s.inflight.Store(n)
 }
 
 // sid returns the SID of an assignment group name, or false while it has none

@@ -150,11 +150,19 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 // rollback restarted the previous deployment. inputsChanged then sees it and
 // the apply trigger runs ensure for it once this run ends. A config.yaml
 // written again since the rollback put its file in place is newer still and
-// stays (GAP-1379).
+// stays (GAP-1379), also one with the same bytes as the restored file (an
+// administrator pushing the last applied config again), which is another
+// file or a later write of it (GAP-1411).
 func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
 	env, r := l.env, l.result
 	if current, err := sha256File(env.P(env.Layout.ConfigPath)); err == nil && current != l.rollbackConfigSHA {
 		return
+	}
+	if l.rollbackConfigFile != nil {
+		if current, err := os.Stat(env.P(env.Layout.ConfigPath)); err == nil &&
+			(!os.SameFile(current, l.rollbackConfigFile) || !current.ModTime().Equal(l.rollbackConfigFile.ModTime())) {
+			return
+		}
 	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, owner); err != nil {

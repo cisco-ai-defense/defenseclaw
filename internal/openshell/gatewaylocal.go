@@ -224,7 +224,10 @@ func AnotherAccountsGateway() string {
 }
 
 // portHeldFix is the Gateway service fix while something else holds the
-// gateway's port: nothing to start until it is free.
+// gateway's port: nothing to start until it is free. An account without
+// the gateway service (serviceMissing) installs OpenShell once the port is
+// free: `brew services start` of a formula that is not installed fails
+// (GAP-0390).
 func (r *doctorRun) portHeldFix(other bool) *Fix {
 	start := r.startCommand().String()
 	if other {
@@ -235,9 +238,13 @@ func (r *doctorRun) portHeldFix(other bool) *Fix {
 			// (GAP-0205).
 			handOver += "; a plain stop starts it again at that account's next login"
 		}
+		then, command := "then start this one", start
+		if r.serviceMissing() {
+			then, command = "then install OpenShell in this account", installOpenShellCommand
+		}
 		return &Fix{Summary: "one OpenShell gateway runs on a machine, under the account that started it, and this account's would not get its port: " +
-			"run sandboxes from that account, or have it hand its gateway over (" + handOver + "), then start this one",
-			Command: start}
+			"run sandboxes from that account, or have it hand its gateway over (" + handOver + "), " + then,
+			Command: command}
 	}
 	return &Fix{Summary: "stop what holds the port (another OpenShell gateway, for one), then start the service", Command: start}
 }

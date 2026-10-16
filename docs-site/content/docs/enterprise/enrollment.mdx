@@ -68,13 +68,25 @@ the layouts of the common Node version managers and package managers:
 | OS | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`, whose version is the build Claude Code records in `%USERPROFILE%\.local\share\claude\versions`; a `claude.exe` copied in without that record is enrolled after the user first starts Claude Code, and until then `status` lists the account as unprotected and says what is missing), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. The Codex app from the Microsoft Store (MSIX) is reported, not enrolled; see [Desktop apps and editor extensions](#desktop-apps-and-editor-extensions). |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`, whose version is the build Claude Code records in `%USERPROFILE%\.local\share\claude\versions`; a `claude.exe` copied in without that record is enrolled after the user first starts Claude Code, and until then `status` lists the account as unprotected and says what is missing), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), the official Codex `install.ps1` layout (the release selected by `%USERPROFILE%\.codex\packages\standalone\current`), machine-scope WinGet packages including Copilot CLI and OpenCode, and per-user WinGet packages for signed-in users (Codex, Copilot CLI, OpenCode and Claude Code). The enumerator reads these as static files and registry values; nothing is executed. A signed-out user's per-user WinGet package is read at the next sign-in. The Codex app from the Microsoft Store (MSIX) is reported, not enrolled; see [Desktop apps and editor extensions](#desktop-apps-and-editor-extensions). If a per-user WinGet Packages listing reaches its entry limit or deadline, the account is reported as "not fully scanned" and is scanned again on the next enumeration. |
+
+On managed Windows, an install the enumerator finds but cannot read, or an
+enabled agent running for an account with no enrollment target, appears in
+`status` and `verify` as `agent_unprotected`. The warning names the install
+path or running session and the fix; `security_complete` stays `false`.
+When a running agent has no account name, the enumerator uses its owner SID
+to check enrollment; if neither is available, an enabled agent is reported
+as not protected with its owner unknown.
 
 An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
-or a binary copied into an arbitrary directory) is not found, so it is
-neither enrolled nor reported. On Linux and macOS, install shared agents
-under an `agent_prefixes` path. An agent CLI in an `/opt/<name>/bin`
+or a binary copied into an arbitrary directory) is generally not found, so it
+is neither enrolled nor reported. On managed Windows, a Codex standalone
+install under a relocated `CODEX_HOME` can be found through its visible
+launcher: it is reported but not enrolled.
+
+On Linux and macOS, install shared agents under an `agent_prefixes` path. An
+agent CLI in an `/opt/<name>/bin`
 directory that is not under an `agent_prefixes` path is reported: `status`
 and `verify` warn `agent_unprotected` for each user it is not enrolled for
 and name the prefix to add. Use application control where users must
@@ -559,9 +571,22 @@ the default agent setting), and the user's own hooks and settings stay.
 A home that is not available (not mounted, or not created yet) and a
 removal that fails are recorded in an administrator-owned list and retried.
 `status` and `verify` report each one as the warning
-`guardian_cleanup_pending` and do not fail on it. A record is dropped
-without a cleanup only when the account no longer exists, and a user who is
-enrolled again keeps the record until the guardian protects them again.
+`guardian_cleanup_pending` and do not fail on it. If a live account is
+re-homed to a trusted directory, the guardian cleans the current home as
+that user and, when its recorded home still exists and is trusted, cleans
+that home too. The record ends when the recorded home is definitely gone or
+both cleanups succeed; the guardian logs both homes once. If the recorded
+home may still exist but cannot be trusted, the record stays and the warning
+names it. Uninstall warns and goes on: remove DefenseClaw's entries from
+that agent's config in the recorded home, delete that home if unused, or
+fix its owner or permissions so the guardian can clean it. If the current
+home is missing or untrusted, the record stays: fix the account's directory
+home to an existing directory it owns, without symlinks or group/other
+write, or remove the account, then rerun uninstall. A record is
+dropped without running cleanup when the account no longer exists, its name
+belongs to another uid, or the directory gives it no home and its recorded
+home is definitely gone. A user who is enrolled again keeps the record until
+the guardian protects them again.
 Uninstall removes the registrations of the users still in the manifest; see
 [Remove](/docs/enterprise/linux#remove).
 

@@ -103,7 +103,7 @@ var standalonePayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
-	"policy_compiler.py",
+	policyCompilerPayloadName,
 }
 
 func isStandaloneFlavor(flavor string) bool {
@@ -175,6 +175,9 @@ type enterpriseSetupOptions struct {
 	Standalone         bool
 	StandaloneUnsigned bool
 	ProductVersion     string
+	// OmitPolicyCompiler is set when a signed standalone payload withheld
+	// its Fleet compiler (see enterprisePayload.withoutPolicyCompiler).
+	OmitPolicyCompiler bool
 }
 
 type enterprisePayloadManifest struct {
@@ -203,6 +206,40 @@ type enterprisePayload struct {
 	// carries the FS alongside the validated manifest so the loader
 	// stays the single boundary that decides what's trusted.
 	PayloadFS fs.FS
+}
+
+// policyCompilerPayloadName is the optional Fleet compiler in the standalone
+// payload. Python source cannot carry its own Authenticode signature.
+const policyCompilerPayloadName = "policy_compiler.py"
+
+// CarriesPolicyCompiler reports whether the payload still offers the Fleet
+// compiler to the lifecycle.
+func (payload enterprisePayload) CarriesPolicyCompiler() bool {
+	_, ok := payload.Files[policyCompilerPayloadName]
+	return ok
+}
+
+// withoutPolicyCompiler returns a copy of the payload that stages and offers
+// no Fleet compiler. A signed standalone Setup uses it when WinVerifyTrust
+// cannot verify the outer image offline (DAMAGE-678 A1): every binary and the
+// module keep their own Authenticode checks in the lifecycle, so a Fleet-off
+// install, upgrade or MDM ensure runs as it did before Fleet existed, while a
+// Fleet-enabled config fails closed for want of -PolicyCompiler.
+func (payload enterprisePayload) withoutPolicyCompiler() enterprisePayload {
+	required := make([]string, 0, len(payload.Required))
+	for _, name := range payload.Required {
+		if name != policyCompilerPayloadName {
+			required = append(required, name)
+		}
+	}
+	files := make(map[string]enterprisePayloadManifestFile, len(payload.Files))
+	for name, file := range payload.Files {
+		if name != policyCompilerPayloadName {
+			files[name] = file
+		}
+	}
+	payload.Required, payload.Files = required, files
+	return payload
 }
 
 // Standalone reports whether the payload is the standalone flavor.
@@ -784,6 +821,11 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(opts.Action))
+	if action == "" {
+		// Early argument errors have no action yet; use the schema's
+		// install-like action so the MDM can still parse the failure.
+		action = "ensure"
+	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
 	var invalid enterpriseSetupInvalidArguments

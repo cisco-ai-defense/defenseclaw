@@ -3430,6 +3430,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
 
     if openclaw_active and gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+        from defenseclaw.logger import keep_running_gateway_token
 
         # The OpenClaw gateway token is read from the connector-controlled
         # openclaw.json and is untrusted. Validate at this boundary — before
@@ -3438,6 +3439,9 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         # fails loudly with an operator-facing error instead of being relied
         # on the writer's defense-in-depth sanitization alone. F-0361.
         _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", gw_info["token"])
+        # A re-run with a running gateway: it keeps its token until it
+        # restarts, so this run's audit events use that one (GAP-0490).
+        keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), gw_info["token"])
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"

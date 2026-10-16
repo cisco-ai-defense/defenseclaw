@@ -32,4 +32,7 @@ func (r *Result) AddSandboxPolicyWarnings(cfg *config.Config, goos string) {
 	for _, advisory := range cfg.SandboxAdvisories(goos) {
 		r.AddWarning(CodeSandboxAdvisory, advisory)
 	}
+	if advisory := cfg.OpenShellPackDirAdvisory(); advisory != "" {
+		r.AddWarning(CodeSandboxAdvisory, advisory)
+	}
 }

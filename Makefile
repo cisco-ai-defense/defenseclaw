@@ -14,6 +14,15 @@ BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)
 GO_BUILD_FLAGS := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
+# The golangci-lint that `make go-lint` runs (#1228); scripts/install-dev.sh
+# installs the same version. `go run` builds it with this repo's toolchain, so
+# an older golangci-lint on PATH never decides the result. Set GOLANGCI_LINT
+# to run a local binary instead.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+# golangci-lint reports only issues on lines changed since the merge base with
+# this ref: the tree still carries older findings (#1228). Empty lints all.
+GOLANGCI_LINT_BASE ?= origin/main
 PLUGIN_DIR  := extensions/defenseclaw
 # Packages the OpenClaw plugin loads from its own node_modules: each "dependencies" entry of
 # its package.json plus js-yaml's dependency argparse. OpenClaw refuses to load a plugin whose
@@ -93,7 +102,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog skill-check check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
@@ -891,7 +900,9 @@ BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
 # argument (no shell re-parsing / eval).
-BUNDLE_LDFLAGS := -X main.version=$(VERSION)
+# The commit and build time too: the bundle's gateway --version showed an
+# unknown commit (#1249).
+BUNDLE_LDFLAGS := -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)
 # BUNDLE_TAGS is the comma-separated `go build -tags` value applied to
 # the packaged gateway binary. The macOS bundle ships as the managed
 # distribution and pulls the managed cloud auth provider via
@@ -1308,23 +1319,30 @@ go-lint: sync-openclaw-extension
 		echo "Run 'gofmt -w \$$(git ls-files '*.go')' to fix."; \
 		exit 1; \
 	fi
-	@tmp=$$(mktemp); \
+	go vet ./...
+	@$(MAKE) --no-print-directory go-lint-analyzers
+
+# golangci-lint $(GOLANGCI_LINT_VERSION) on the lines changed since the merge
+# base with $(GOLANGCI_LINT_BASE). A missing linter fails the gate. The one
+# documented skip is a Go toolchain newer than the pinned golangci-lint
+# supports: `go vet ./...` (run by go-lint first) is then the Go lint.
+go-lint-analyzers:
+	@base='$(GOLANGCI_LINT_BASE)'; flags=""; \
+	if [ -n "$$base" ]; then \
+		mb=$$(git merge-base HEAD "$$base" 2>/dev/null) || { \
+			echo "go-lint: no merge base with $$base. Fetch it (git fetch origin main) or run with GOLANGCI_LINT_BASE= to lint the whole tree."; \
+			exit 2; \
+		}; \
+		flags="--new-from-rev=$$mb"; \
+	fi; \
+	tmp=$$(mktemp); \
 	status=0; \
-	if PATH="$(GOBIN):$(PATH)" golangci-lint run >"$$tmp" 2>&1; then \
-		cat "$$tmp"; \
-		rm -f "$$tmp"; \
-		exit 0; \
-	else \
-		status=$$?; \
-	fi; \
-	if [ $$status -eq 127 ] || grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
-		cat "$$tmp"; \
-		echo "golangci-lint is unavailable or does not yet support this repo's Go toolchain; falling back to 'go vet ./...'"; \
-		rm -f "$$tmp"; \
-		go vet ./...; \
-		exit $$?; \
-	fi; \
+	$(GOLANGCI_LINT) run $$flags >"$$tmp" 2>&1 || status=$$?; \
 	cat "$$tmp"; \
+	if [ $$status -ne 0 ] && grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) does not support this Go toolchain yet; 'go vet ./...' above is the Go lint for this run."; \
+		status=0; \
+	fi; \
 	rm -f "$$tmp"; \
 	exit $$status
 

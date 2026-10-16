@@ -103,6 +103,9 @@ type codexHookRequest struct {
 	// nil for host traffic. Path-reading helpers go through it instead of the
 	// host filesystem (see sandbox_hook_scope.go).
 	sandboxView *sandboxauth.FSView
+	// guestCWD is a sandbox request's working directory in the guest's
+	// namespace (sandboxHookGuestCWD); CWD is its host mount.
+	guestCWD string
 
 	// activeHome is the trusted home for "~" resolution, set by the handler
 	// from the request context (never decoded from the body).
@@ -306,6 +309,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
+			SandboxGuestCWD:               req.guestCWD,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {

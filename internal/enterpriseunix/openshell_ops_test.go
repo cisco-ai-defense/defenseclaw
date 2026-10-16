@@ -145,11 +145,7 @@ func TestCommandOpsLinuxStopAndTeardown(t *testing.T) {
 		t.Errorf("daemon-only stop: %v %v", err, runner.calls)
 	}
 	runner.calls = nil
-	if err := ops.Teardown(context.Background(), alice, true); err != nil || !runner.called("/usr/bin/defenseclaw sandbox teardown --yes --keep-images") {
-		t.Errorf("teardown: %v %v", err, runner.calls)
-	}
-	runner.calls = nil
-	if err := ops.Teardown(context.Background(), alice, false); err != nil || runner.called("--keep-images") {
+	if err := ops.Teardown(context.Background(), alice); err != nil || !runner.called("/usr/bin/defenseclaw sandbox teardown --yes") || runner.called("--keep-images") {
 		t.Errorf("purge teardown: %v %v", err, runner.calls)
 	}
 	runner.calls = nil
@@ -363,4 +359,41 @@ func TestSnapshotLinksRestoreSymlinks(t *testing.T) {
 	if _, err := os.Lstat(e.P(absent)); err == nil {
 		t.Error("a link the transaction created stays after the restore")
 	}
+}
+
+// GAP-0598: the non-purge uninstall stops the account's running sandboxes
+// with the daemon unit's ExecStop, run as the account without the
+// lifecycle's own INVOCATION_ID, and reads the names it stopped.
+func TestCommandOpsStopSandboxes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			ops, runner, alice := opsHost(t, goos, func(line string) (CommandResult, error) {
+				if strings.HasSuffix(line, "sandbox-daemon stop-sandboxes") {
+					return CommandResult{Stdout: []byte("stopped sandbox sb-a\nstopped sandbox sb-b\n")}, nil
+				}
+				return CommandResult{}, nil
+			})
+			stopped, err := ops.StopSandboxes(context.Background(), alice)
+			if err != nil || strings.Join(stopped, ",") != "sb-a,sb-b" {
+				t.Fatalf("StopSandboxes = %v, %v", stopped, err)
+			}
+			want := "/usr/bin/env -u INVOCATION_ID " + filepath.Join(ops.env.Layout.BinDir, binGateway) + " sandbox-daemon stop-sandboxes"
+			as := "runuser -u alice -- /usr/bin/env HOME=/home/alice "
+			if goos == "darwin" {
+				as = "sudo -n -u alice -H /usr/bin/env HOME=/Users/alice "
+			}
+			if !runner.called(as) || !runner.called(want) {
+				t.Errorf("calls = %v", runner.calls)
+			}
+		})
+	}
+	t.Run("a failure names its reason and keeps the names it stopped", func(t *testing.T) {
+		ops, _, alice := opsHost(t, "linux", func(line string) (CommandResult, error) {
+			return CommandResult{ExitCode: 1, Stdout: []byte("stopped sandbox sb-a\n"), Stderr: []byte("stop sb-b: the gateway did not answer\n")}, errors.New("exit 1")
+		})
+		stopped, err := ops.StopSandboxes(context.Background(), alice)
+		if err == nil || !strings.Contains(err.Error(), "exited 1: stop sb-b: the gateway did not answer") || strings.Join(stopped, ",") != "sb-a" {
+			t.Fatalf("StopSandboxes = %v, %v", stopped, err)
+		}
+	})
 }

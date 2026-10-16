@@ -10,7 +10,7 @@
 #   1. SSSD: the service runs, this SSSD knows ldap_use_ppolicy, the Okta
 #      domain is Online, and sssd.conf is root-only (run as root for the last
 #      two).
-#   2. Each --user: getent and id show the account and the expected group;
+#   2. Each --user: SSSD getent and id show the account and the expected group;
 #      with --expect-upn, SSSD InfoPipe returns the user principal name.
 #   3. DefenseClaw: the gateway answers which profile the user resolves to
 #      (and, with --expect-profile, that it is the one you expect). On a
@@ -146,9 +146,9 @@ check_sssd() {
 check_user() {
   local user=$1 line groups shell
   echo "User $user"
-  if line=$(getent passwd "$user"); then
+  if line=$(getent -s sss passwd "$user"); then
     IFS=: read -r _ _ uid gid _ home shell <<< "$line"
-    pass "getent passwd: uid $uid, gid $gid, home $home"
+    pass "SSSD passwd: uid $uid, gid $gid, home $home"
     if [[ $shell == */nologin || $shell == */false ]]; then
       fail "DefenseClaw enrollment skips $user: login shell $shell is not interactive"
     fi
@@ -156,7 +156,7 @@ check_user() {
       info "DefenseClaw enrollment needs enterprise.enrollment.home_roots to include $home"
     fi
   else
-    fail "getent passwd $user finds nothing. Check: the domain is Online; the Okta user has uidNumber, gidNumber and unixUsername; the bind user can read users (custom role); the uid is inside min_id..max_id"
+    fail "SSSD passwd $user finds nothing; a local passwd entry is not an Okta user. Check: the domain is Online; the Okta user has uidNumber, gidNumber and unixUsername; the bind user can read users (custom role); the uid is inside min_id..max_id"
     return
   fi
   if groups=$(id -Gn "$user" 2> /dev/null); then

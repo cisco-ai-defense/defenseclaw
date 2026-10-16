@@ -894,9 +894,9 @@
         "uid": "defenseclaw-loki"
       },
       "gridPos": {
-        "x": 12,
-        "y": 55,
-        "w": 12,
+        "x": 0,
+        "y": 60,
+        "w": 24,
         "h": 8
       },
       "targets": [

@@ -56,8 +56,12 @@ Codex's on Windows, which DefenseClaw always sets; see
    user files that lasts until the guardian removes the hook; a hook the
    guardian only reports keeps calls denied until someone removes or approves
    it. Repository files are never changed.
-3. **Checks Claude-format files too.** Cursor, Copilot and Devin also load
-   Claude Code's `settings.json` files, so the guard scans those for them.
+3. **Checks Claude-format files too.** Cursor and Devin also load Claude Code's
+   user and repository `settings.json` files. Copilot loads only repository
+   `.claude/settings.json` and `.claude/settings.local.json`, never
+   `~/.claude/settings.json`. If a session folder is under the home and has no
+   repository, the guard reports the home's `.claude` files as project files
+   (`scope=project`). Run `policy show --project` from the folder the agent runs in.
 4. **Keeps a session blocked until the agent restarts.** Agents read their
    hooks when a session starts and keep running them after the file
    changes; OpenCode and Amp load plugins once per process. So
@@ -87,7 +91,7 @@ Codex's on Windows, which DefenseClaw always sets; see
    directory, `foreign-hook-removals.json` next to its authorization ledger.
    The gateway then denies the calls of that account's agent processes for
    that connector, and for any other connector that loads the same file
-   (Cursor and Devin load `~/.claude/settings.json`), that started before
+   (Cursor and Devin load `~/.claude/settings.json`; Copilot does not), that started before
    the removal, naming the file: they may have loaded the hook, and an agent
    that sends its session-start event only with the first prompt (Hermes)
    takes its snapshot after the file was cleaned. Restart the agent to clear

@@ -197,6 +197,16 @@ installed. Every path keeps your configuration and data.
   `audit.db` (`audit.db.corrupt-<time>`), and `defenseclaw doctor` lists it
   without a warning; block/allow lists live in `config.yaml` and are not
   affected.
+
+  For any `audit.db.corrupt-<time>` archive, whether from a 0.x upgrade or a
+  later gateway start, copy the main file with its `-wal` and `-shm` files and
+  any `-journal` file to a new folder before opening it with SQLite tools;
+  SQLite can change files it opens, so work on the copy. If the first bytes
+  of the main file are zeroed and SQLite says "file is not a database",
+  repair the header on the copy, never on the original archive. A hot
+  rollback journal is rolled back when the gateway starts and is not
+  archived; if the store is still corrupt afterward, the start warning says
+  the pre-existing `-journal` was not preserved.
 - On a host that several accounts share, `defenseclaw-gateway start` and
   `restart` in 0.8.4 and older stop every `defenseclaw-gateway` process the
   account may signal, not only its own (0.8.5 and later stop only the gateway
@@ -229,8 +239,25 @@ For other installs, `defenseclaw rollback` swaps the live install with the
 one the last upgrade replaced: binaries, Python environment, and the
 configuration and data as they
 were at upgrade time. Anything written since then moves into
-`~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
+`~/.defenseclaw/previous` and comes back when you run `defenseclaw rollback`
+again; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
+
+Sandboxes keep running through a rollback. Between releases from 1.0.1 on,
+rollback carries the sandbox setup to the restored install: its `openshell:`
+settings, each sandbox record and hook binding, harness image records, and
+undo point. A running sandbox stays managed, and its hooks work again when
+the gateway returns. The install you left keeps its own copy for a roll
+forward. A release before 1.0.1 cannot take over that setup, so a running
+sandbox's hooks fail closed and its agent's tool calls are refused until you
+return to the newer install. The installer names only sandboxes in the
+`ready` phase, and only while the gateway runs and `sandbox list` answers; a
+sandbox in another phase, or one it cannot list, is not named. After a
+return to 1.0.0, run `defenseclaw rollback` again. After a return to 0.8.x,
+which has no rollback command, run
+`bash ~/.defenseclaw/previous/installer/install.sh --rollback` (the command
+the rollback prints), or run the install command again.
+
 Each install shows only its own audit events, so after a rollback the
 events the other install recorded are not in `defenseclaw-gateway audit export`.
 Read them from the install you left, with the newer build's gateway:
@@ -270,6 +297,10 @@ rewrite fails, the rollback still completes and warns that the uninstall may
 leave those entries; remove them from the agent's settings by hand. Every 1.x
 release keeps to this rule: a hook entry it writes is in a form every earlier
 1.x release removes, or its rollback converts the entry first.
+
+After a rollback to a 1.x release, and on every `defenseclaw upgrade`, DefenseClaw removes only
+its own hook entries for connectors the installed release does not configure.
+It prints the files it changed; other hook entries stay.
 
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
@@ -325,10 +356,10 @@ outside `config.yaml` into it: admission and thresholds from
 switches, and the operator block and allow entries from
 `audit.db`. It keeps `config.yaml.v8.bak`, renames the retired `data.json` to
 `data.json.migrated-v9`, and writes `migration-v9.json` with every value it
-moved and every conflict it settled. `config.yaml.v8.bak` is written once: a
-later migration keeps it and saves its own source as
-`config.yaml.v8.bak.<time>` and the earlier record as
-`migration-v9.<time>.json`. The upgrade summary prints one line, and
+moved and every conflict it settled. On a later migration,
+`config.yaml.v8.bak` is refreshed with that run's latest v8 source; its older
+contents are saved as `config.yaml.v8.bak.<time>`, along with the earlier record
+as `migration-v9.<time>.json`. The upgrade summary prints one line, and
 `defenseclaw doctor` shows a **Config migration** row until you acknowledge the
 record with `defenseclaw config migrate --ack`. You can preview the result
 first with `defenseclaw config migrate --dry-run`. Until the file is migrated,

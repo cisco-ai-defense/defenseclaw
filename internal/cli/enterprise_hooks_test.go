@@ -935,12 +935,12 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	); err != nil {
 		t.Fatalf("write initial state: %v", err)
 	}
-	protected, err := previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	initial, err := previousEnterpriseHookProtection(dir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if !protected {
-		t.Fatal("previousEnterpriseHookSuccess = false after successful state")
+	if !initial.PreviouslyProtected {
+		t.Fatal("previousEnterpriseHookProtection = not protected after successful state")
 	}
 	protection, err := previousEnterpriseHookProtection(
 		dir,
@@ -986,16 +986,16 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	if len(state.ProtectedTargets) != 1 || state.ProtectedTargets[0].Connector != "codex" {
 		t.Fatalf("ProtectedTargets = %+v, want preserved codex target", state.ProtectedTargets)
 	}
-	protected, err = previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	afterFailure, err := previousEnterpriseHookProtection(dir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess after failure: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection after failure: %v", err)
 	}
-	if !protected {
-		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
+	if !afterFailure.PreviouslyProtected {
+		t.Fatal("previousEnterpriseHookProtection = not protected after failed state overwrote results")
 	}
 }
 
-func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T) {
+func TestPreviousEnterpriseHookProtectionIgnoresServiceWritableStatus(t *testing.T) {
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -1009,11 +1009,11 @@ func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T)
 	if err := os.WriteFile(filepath.Join(dataDir, hookGuardianStateFile), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	previous, err := previousEnterpriseHookProtection(dataDir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if protected {
+	if previous.PreviouslyProtected {
 		t.Fatal("service-writable status file granted privileged repair authorization")
 	}
 }
@@ -1179,11 +1179,11 @@ func TestWriteEnterpriseHookGuardianStateRevokesRemovedManifestTarget(t *testing
 	if len(state.ProtectedTargets) != 0 || state.TargetCount != 0 || state.SuccessCount != 0 || !state.OK {
 		t.Fatalf("authorization after removal = %+v, want empty healthy ledger", state)
 	}
-	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	previous, err := previousEnterpriseHookProtection(dataDir, "alice", "/home/alice", "", "codex")
 	if err != nil {
-		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+		t.Fatalf("previousEnterpriseHookProtection: %v", err)
 	}
-	if protected {
+	if previous.PreviouslyProtected {
 		t.Fatal("removed manifest target retained privileged repair authorization")
 	}
 }

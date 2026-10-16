@@ -72,7 +72,7 @@ dependencies = [
     # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
     # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
     # so keep the fixed floor in published-wheel metadata as well as uv.lock.
-    "mcp>=1.28.1,<2",
+    "mcp>=1.30.0,<2",
     # Declare MCP Scanner's YARA engine directly so uv can select the local,
     # Native Setup substitutes the repository-owned, YARA-X-backed compatibility
     # wheel and validates the exact MCP Scanner API; source installs use

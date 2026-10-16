@@ -1,0 +1,436 @@
+{
+  "data_dir": "/home/user/.defenseclaw",
+  "hook_binary_windows": "C:\\Users\\user\\.local\\bin\\defenseclaw-hook.exe",
+  "files": {
+    "antigravity_linux": {
+      "connector": "antigravity",
+      "goos": "linux",
+      "path": ".gemini/config/hooks.json",
+      "healthy": {
+        "defenseclaw-antigravity-postinvocation": {
+          "PostInvocation": [
+            {
+              "command": "/home/user/.defenseclaw/hooks/antigravity-hook.sh PostInvocation",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-posttooluse": {
+          "PostToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/home/user/.defenseclaw/hooks/antigravity-hook.sh PostToolUse",
+                  "timeout": 30,
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-preinvocation": {
+          "PreInvocation": [
+            {
+              "command": "/home/user/.defenseclaw/hooks/antigravity-hook.sh PreInvocation",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-pretooluse": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/home/user/.defenseclaw/hooks/antigravity-hook.sh PreToolUse",
+                  "timeout": 30,
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-stop": {
+          "Stop": [
+            {
+              "command": "/home/user/.defenseclaw/hooks/antigravity-hook.sh Stop",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "team-audit": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/usr/local/bin/team-audit",
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        }
+      },
+      "removed": {
+        "team-audit": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/usr/local/bin/team-audit",
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        }
+      }
+    },
+    "antigravity_windows": {
+      "connector": "antigravity",
+      "goos": "windows",
+      "path": ".gemini/config/hooks.json",
+      "healthy": {
+        "defenseclaw-antigravity-postinvocation": {
+          "PostInvocation": [
+            {
+              "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnADsAIAAkAGUAbgB2ADoATgBvAEQAZQBmAGEAdQBsAHQAQwB1AHIAcgBlAG4AdABEAGkAcgBlAGMAdABvAHIAeQBJAG4ARQB4AGUAUABhAHQAaAA9ACcAMQAnADsAIABpAGYAIAAoACQARQB4AGUAYwB1AHQAaQBvAG4AQwBvAG4AdABlAHgAdAAuAFMAZQBzAHMAaQBvAG4AUwB0AGEAdABlAC4ATABhAG4AZwB1AGEAZwBlAE0AbwBkAGUAIAAtAG4AZQAgACcARgB1AGwAbABMAGEAbgBnAHUAYQBnAGUAJwApACAAewAgACQARQByAHIAbwByAEEAYwB0AGkAbwBuAFAAcgBlAGYAZQByAGUAbgBjAGUAPQAnAEMAbwBuAHQAaQBuAHUAZQAnADsAIAAmACAAJwBDADoAXABVAHMAZQByAHMAXAB1AHMAZQByAFwALgBsAG8AYwBhAGwAXABiAGkAbgBcAGQAZQBmAGUAbgBzAGUAYwBsAGEAdwAtAGgAbwBvAGsALgBlAHgAZQAnACAAJwBoAG8AbwBrACcAIAAnAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAnACAAJwBhAG4AdABpAGcAcgBhAHYAaQB0AHkAJwAgACcALQAtAGUAdgBlAG4AdAAnACAAJwBQAG8AcwB0AEkAbgB2AG8AYwBhAHQAaQBvAG4AJwAgAHwAIABNAGkAYwByAG8AcwBvAGYAdAAuAFAAbwB3AGUAcgBTAGgAZQBsAGwALgBDAG8AcgBlAFwATwB1AHQALQBIAG8AcwB0ADsAIABlAHgAaQB0ACAAJABMAEEAUwBUAEUAWABJAFQAQwBPAEQARQAgAH0AOwAgACQAaABvAG8AawBTAHQAYQByAHQAPQBbAFMAeQBzAHQAZQBtAC4ARABpAGEAZwBuAG8AcwB0AGkAYwBzAC4AUAByAG8AYwBlAHMAcwBTAHQAYQByAHQASQBuAGYAbwBdADoAOgBuAGUAdwAoACcAQwA6AFwAVQBzAGUAcgBzAFwAdQBzAGUAcgBcAC4AbABvAGMAYQBsAFwAYgBpAG4AXABkAGUAZgBlAG4AcwBlAGMAbABhAHcALQBoAG8AbwBrAC4AZQB4AGUAJwAsACcAaABvAG8AawAgAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAgAGEAbgB0AGkAZwByAGEAdgBpAHQAeQAgAC0ALQBlAHYAZQBuAHQAIABQAG8AcwB0AEkAbgB2AG8AYwBhAHQAaQBvAG4AJwApADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AC4AVQBzAGUAUwBoAGUAbABsAEUAeABlAGMAdQB0AGUAPQAkAGYAYQBsAHMAZQA7ACAAJABoAG8AbwBrAFMAdABhAHIAdAAuAFIAZQBkAGkAcgBlAGMAdABTAHQAYQBuAGQAYQByAGQARQByAHIAbwByAD0AJAB0AHIAdQBlADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwA9AFsAUwB5AHMAdABlAG0ALgBEAGkAYQBnAG4AbwBzAHQAaQBjAHMALgBQAHIAbwBjAGUAcwBzAF0AOgA6AFMAdABhAHIAdAAoACQAaABvAG8AawBTAHQAYQByAHQAKQA7ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBTAHQAYQBuAGQAYQByAGQARQByAHIAbwByAC4AQgBhAHMAZQBTAHQAcgBlAGEAbQAuAEMAbwBwAHkAVABvACgAWwBDAG8AbgBzAG8AbABlAF0AOgA6AE8AcABlAG4AUwB0AGEAbgBkAGEAcgBkAEUAcgByAG8AcgAoACkAKQA7ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBXAGEAaQB0AEYAbwByAEUAeABpAHQAKAApADsAIABlAHgAaQB0ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBFAHgAaQB0AEMAbwBkAGUA",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-posttooluse": {
+          "PostToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnADsAIAAkAGUAbgB2ADoATgBvAEQAZQBmAGEAdQBsAHQAQwB1AHIAcgBlAG4AdABEAGkAcgBlAGMAdABvAHIAeQBJAG4ARQB4AGUAUABhAHQAaAA9ACcAMQAnADsAIABpAGYAIAAoACQARQB4AGUAYwB1AHQAaQBvAG4AQwBvAG4AdABlAHgAdAAuAFMAZQBzAHMAaQBvAG4AUwB0AGEAdABlAC4ATABhAG4AZwB1AGEAZwBlAE0AbwBkAGUAIAAtAG4AZQAgACcARgB1AGwAbABMAGEAbgBnAHUAYQBnAGUAJwApACAAewAgACQARQByAHIAbwByAEEAYwB0AGkAbwBuAFAAcgBlAGYAZQByAGUAbgBjAGUAPQAnAEMAbwBuAHQAaQBuAHUAZQAnADsAIAAmACAAJwBDADoAXABVAHMAZQByAHMAXAB1AHMAZQByAFwALgBsAG8AYwBhAGwAXABiAGkAbgBcAGQAZQBmAGUAbgBzAGUAYwBsAGEAdwAtAGgAbwBvAGsALgBlAHgAZQAnACAAJwBoAG8AbwBrACcAIAAnAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAnACAAJwBhAG4AdABpAGcAcgBhAHYAaQB0AHkAJwAgACcALQAtAGUAdgBlAG4AdAAnACAAJwBQAG8AcwB0AFQAbwBvAGwAVQBzAGUAJwAgAHwAIABNAGkAYwByAG8AcwBvAGYAdAAuAFAAbwB3AGUAcgBTAGgAZQBsAGwALgBDAG8AcgBlAFwATwB1AHQALQBIAG8AcwB0ADsAIABlAHgAaQB0ACAAJABMAEEAUwBUAEUAWABJAFQAQwBPAEQARQAgAH0AOwAgACQAaABvAG8AawBTAHQAYQByAHQAPQBbAFMAeQBzAHQAZQBtAC4ARABpAGEAZwBuAG8AcwB0AGkAYwBzAC4AUAByAG8AYwBlAHMAcwBTAHQAYQByAHQASQBuAGYAbwBdADoAOgBuAGUAdwAoACcAQwA6AFwAVQBzAGUAcgBzAFwAdQBzAGUAcgBcAC4AbABvAGMAYQBsAFwAYgBpAG4AXABkAGUAZgBlAG4AcwBlAGMAbABhAHcALQBoAG8AbwBrAC4AZQB4AGUAJwAsACcAaABvAG8AawAgAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAgAGEAbgB0AGkAZwByAGEAdgBpAHQAeQAgAC0ALQBlAHYAZQBuAHQAIABQAG8AcwB0AFQAbwBvAGwAVQBzAGUAJwApADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AC4AVQBzAGUAUwBoAGUAbABsAEUAeABlAGMAdQB0AGUAPQAkAGYAYQBsAHMAZQA7ACAAJABoAG8AbwBrAFMAdABhAHIAdAAuAFIAZQBkAGkAcgBlAGMAdABTAHQAYQBuAGQAYQByAGQARQByAHIAbwByAD0AJAB0AHIAdQBlADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwA9AFsAUwB5AHMAdABlAG0ALgBEAGkAYQBnAG4AbwBzAHQAaQBjAHMALgBQAHIAbwBjAGUAcwBzAF0AOgA6AFMAdABhAHIAdAAoACQAaABvAG8AawBTAHQAYQByAHQAKQA7ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBTAHQAYQBuAGQAYQByAGQARQByAHIAbwByAC4AQgBhAHMAZQBTAHQAcgBlAGEAbQAuAEMAbwBwAHkAVABvACgAWwBDAG8AbgBzAG8AbABlAF0AOgA6AE8AcABlAG4AUwB0AGEAbgBkAGEAcgBkAEUAcgByAG8AcgAoACkAKQA7ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBXAGEAaQB0AEYAbwByAEUAeABpAHQAKAApADsAIABlAHgAaQB0ACAAJABoAG8AbwBrAFAAcgBvAGMAZQBzAHMALgBFAHgAaQB0AEMAbwBkAGUA",
+                  "timeout": 30,
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-preinvocation": {
+          "PreInvocation": [
+            {
+              "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnADsAIAAkAGUAbgB2ADoATgBvAEQAZQBmAGEAdQBsAHQAQwB1AHIAcgBlAG4AdABEAGkAcgBlAGMAdABvAHIAeQBJAG4ARQB4AGUAUABhAHQAaAA9ACcAMQAnADsAIABpAGYAIAAoACQARQB4AGUAYwB1AHQAaQBvAG4AQwBvAG4AdABlAHgAdAAuAFMAZQBzAHMAaQBvAG4AUwB0AGEAdABlAC4ATABhAG4AZwB1AGEAZwBlAE0AbwBkAGUAIAAtAG4AZQAgACcARgB1AGwAbABMAGEAbgBnAHUAYQBnAGUAJwApACAAewAgACQARQByAHIAbwByAEEAYwB0AGkAbwBuAFAAcgBlAGYAZQByAGUAbgBjAGUAPQAnAEMAbwBuAHQAaQBuAHUAZQAnADsAIAAmACAAJwBDADoAXABVAHMAZQByAHMAXAB1AHMAZQByAFwALgBsAG8AYwBhAGwAXABiAGkAbgBcAGQAZQBmAGUAbgBzAGUAYwBsAGEAdwAtAGgAbwBvAGsALgBlAHgAZQAnACAAJwBoAG8AbwBrACcAIAAnAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAnACAAJwBhAG4AdABpAGcAcgBhAHYAaQB0AHkAJwAgACcALQAtAGUAdgBlAG4AdAAnACAAJwBQAHIAZQBJAG4AdgBvAGMAYQB0AGkAbwBuACcAIAB8ACAATQBpAGMAcgBvAHMAbwBmAHQALgBQAG8AdwBlAHIAUwBoAGUAbABsAC4AQwBvAHIAZQBcAE8AdQB0AC0ASABvAHMAdAA7ACAAZQB4AGkAdAAgACQATABBAFMAVABFAFgASQBUAEMATwBEAEUAIAB9ADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAUwB0AGEAcgB0AEkAbgBmAG8AXQA6ADoAbgBlAHcAKAAnAEMAOgBcAFUAcwBlAHIAcwBcAHUAcwBlAHIAXAAuAGwAbwBjAGEAbABcAGIAaQBuAFwAZABlAGYAZQBuAHMAZQBjAGwAYQB3AC0AaABvAG8AawAuAGUAeABlACcALAAnAGgAbwBvAGsAIAAtAC0AYwBvAG4AbgBlAGMAdABvAHIAIABhAG4AdABpAGcAcgBhAHYAaQB0AHkAIAAtAC0AZQB2AGUAbgB0ACAAUAByAGUASQBuAHYAbwBjAGEAdABpAG8AbgAnACkAOwAgACQAaABvAG8AawBTAHQAYQByAHQALgBVAHMAZQBTAGgAZQBsAGwARQB4AGUAYwB1AHQAZQA9ACQAZgBhAGwAcwBlADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AC4AUgBlAGQAaQByAGUAYwB0AFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIAPQAkAHQAcgB1AGUAOwAgACQAaABvAG8AawBQAHIAbwBjAGUAcwBzAD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAXQA6ADoAUwB0AGEAcgB0ACgAJABoAG8AbwBrAFMAdABhAHIAdAApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIALgBCAGEAcwBlAFMAdAByAGUAYQBtAC4AQwBvAHAAeQBUAG8AKABbAEMAbwBuAHMAbwBsAGUAXQA6ADoATwBwAGUAbgBTAHQAYQBuAGQAYQByAGQARQByAHIAbwByACgAKQApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFcAYQBpAHQARgBvAHIARQB4AGkAdAAoACkAOwAgAGUAeABpAHQAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAEUAeABpAHQAQwBvAGQAZQA=",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-pretooluse": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnADsAIAAkAGUAbgB2ADoATgBvAEQAZQBmAGEAdQBsAHQAQwB1AHIAcgBlAG4AdABEAGkAcgBlAGMAdABvAHIAeQBJAG4ARQB4AGUAUABhAHQAaAA9ACcAMQAnADsAIABpAGYAIAAoACQARQB4AGUAYwB1AHQAaQBvAG4AQwBvAG4AdABlAHgAdAAuAFMAZQBzAHMAaQBvAG4AUwB0AGEAdABlAC4ATABhAG4AZwB1AGEAZwBlAE0AbwBkAGUAIAAtAG4AZQAgACcARgB1AGwAbABMAGEAbgBnAHUAYQBnAGUAJwApACAAewAgACQARQByAHIAbwByAEEAYwB0AGkAbwBuAFAAcgBlAGYAZQByAGUAbgBjAGUAPQAnAEMAbwBuAHQAaQBuAHUAZQAnADsAIAAmACAAJwBDADoAXABVAHMAZQByAHMAXAB1AHMAZQByAFwALgBsAG8AYwBhAGwAXABiAGkAbgBcAGQAZQBmAGUAbgBzAGUAYwBsAGEAdwAtAGgAbwBvAGsALgBlAHgAZQAnACAAJwBoAG8AbwBrACcAIAAnAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAnACAAJwBhAG4AdABpAGcAcgBhAHYAaQB0AHkAJwAgACcALQAtAGUAdgBlAG4AdAAnACAAJwBQAHIAZQBUAG8AbwBsAFUAcwBlACcAIAB8ACAATQBpAGMAcgBvAHMAbwBmAHQALgBQAG8AdwBlAHIAUwBoAGUAbABsAC4AQwBvAHIAZQBcAE8AdQB0AC0ASABvAHMAdAA7ACAAZQB4AGkAdAAgACQATABBAFMAVABFAFgASQBUAEMATwBEAEUAIAB9ADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAUwB0AGEAcgB0AEkAbgBmAG8AXQA6ADoAbgBlAHcAKAAnAEMAOgBcAFUAcwBlAHIAcwBcAHUAcwBlAHIAXAAuAGwAbwBjAGEAbABcAGIAaQBuAFwAZABlAGYAZQBuAHMAZQBjAGwAYQB3AC0AaABvAG8AawAuAGUAeABlACcALAAnAGgAbwBvAGsAIAAtAC0AYwBvAG4AbgBlAGMAdABvAHIAIABhAG4AdABpAGcAcgBhAHYAaQB0AHkAIAAtAC0AZQB2AGUAbgB0ACAAUAByAGUAVABvAG8AbABVAHMAZQAnACkAOwAgACQAaABvAG8AawBTAHQAYQByAHQALgBVAHMAZQBTAGgAZQBsAGwARQB4AGUAYwB1AHQAZQA9ACQAZgBhAGwAcwBlADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AC4AUgBlAGQAaQByAGUAYwB0AFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIAPQAkAHQAcgB1AGUAOwAgACQAaABvAG8AawBQAHIAbwBjAGUAcwBzAD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAXQA6ADoAUwB0AGEAcgB0ACgAJABoAG8AbwBrAFMAdABhAHIAdAApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIALgBCAGEAcwBlAFMAdAByAGUAYQBtAC4AQwBvAHAAeQBUAG8AKABbAEMAbwBuAHMAbwBsAGUAXQA6ADoATwBwAGUAbgBTAHQAYQBuAGQAYQByAGQARQByAHIAbwByACgAKQApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFcAYQBpAHQARgBvAHIARQB4AGkAdAAoACkAOwAgAGUAeABpAHQAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAEUAeABpAHQAQwBvAGQAZQA=",
+                  "timeout": 30,
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        },
+        "defenseclaw-antigravity-stop": {
+          "Stop": [
+            {
+              "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnADsAIAAkAGUAbgB2ADoATgBvAEQAZQBmAGEAdQBsAHQAQwB1AHIAcgBlAG4AdABEAGkAcgBlAGMAdABvAHIAeQBJAG4ARQB4AGUAUABhAHQAaAA9ACcAMQAnADsAIABpAGYAIAAoACQARQB4AGUAYwB1AHQAaQBvAG4AQwBvAG4AdABlAHgAdAAuAFMAZQBzAHMAaQBvAG4AUwB0AGEAdABlAC4ATABhAG4AZwB1AGEAZwBlAE0AbwBkAGUAIAAtAG4AZQAgACcARgB1AGwAbABMAGEAbgBnAHUAYQBnAGUAJwApACAAewAgACQARQByAHIAbwByAEEAYwB0AGkAbwBuAFAAcgBlAGYAZQByAGUAbgBjAGUAPQAnAEMAbwBuAHQAaQBuAHUAZQAnADsAIAAmACAAJwBDADoAXABVAHMAZQByAHMAXAB1AHMAZQByAFwALgBsAG8AYwBhAGwAXABiAGkAbgBcAGQAZQBmAGUAbgBzAGUAYwBsAGEAdwAtAGgAbwBvAGsALgBlAHgAZQAnACAAJwBoAG8AbwBrACcAIAAnAC0ALQBjAG8AbgBuAGUAYwB0AG8AcgAnACAAJwBhAG4AdABpAGcAcgBhAHYAaQB0AHkAJwAgACcALQAtAGUAdgBlAG4AdAAnACAAJwBTAHQAbwBwACcAIAB8ACAATQBpAGMAcgBvAHMAbwBmAHQALgBQAG8AdwBlAHIAUwBoAGUAbABsAC4AQwBvAHIAZQBcAE8AdQB0AC0ASABvAHMAdAA7ACAAZQB4AGkAdAAgACQATABBAFMAVABFAFgASQBUAEMATwBEAEUAIAB9ADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAUwB0AGEAcgB0AEkAbgBmAG8AXQA6ADoAbgBlAHcAKAAnAEMAOgBcAFUAcwBlAHIAcwBcAHUAcwBlAHIAXAAuAGwAbwBjAGEAbABcAGIAaQBuAFwAZABlAGYAZQBuAHMAZQBjAGwAYQB3AC0AaABvAG8AawAuAGUAeABlACcALAAnAGgAbwBvAGsAIAAtAC0AYwBvAG4AbgBlAGMAdABvAHIAIABhAG4AdABpAGcAcgBhAHYAaQB0AHkAIAAtAC0AZQB2AGUAbgB0ACAAUwB0AG8AcAAnACkAOwAgACQAaABvAG8AawBTAHQAYQByAHQALgBVAHMAZQBTAGgAZQBsAGwARQB4AGUAYwB1AHQAZQA9ACQAZgBhAGwAcwBlADsAIAAkAGgAbwBvAGsAUwB0AGEAcgB0AC4AUgBlAGQAaQByAGUAYwB0AFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIAPQAkAHQAcgB1AGUAOwAgACQAaABvAG8AawBQAHIAbwBjAGUAcwBzAD0AWwBTAHkAcwB0AGUAbQAuAEQAaQBhAGcAbgBvAHMAdABpAGMAcwAuAFAAcgBvAGMAZQBzAHMAXQA6ADoAUwB0AGEAcgB0ACgAJABoAG8AbwBrAFMAdABhAHIAdAApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIALgBCAGEAcwBlAFMAdAByAGUAYQBtAC4AQwBvAHAAeQBUAG8AKABbAEMAbwBuAHMAbwBsAGUAXQA6ADoATwBwAGUAbgBTAHQAYQBuAGQAYQByAGQARQByAHIAbwByACgAKQApADsAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAFcAYQBpAHQARgBvAHIARQB4AGkAdAAoACkAOwAgAGUAeABpAHQAIAAkAGgAbwBvAGsAUAByAG8AYwBlAHMAcwAuAEUAeABpAHQAQwBvAGQAZQA=",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        },
+        "team-audit": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/usr/local/bin/team-audit",
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        }
+      },
+      "removed": {
+        "team-audit": {
+          "PreToolUse": [
+            {
+              "hooks": [
+                {
+                  "command": "/usr/local/bin/team-audit",
+                  "type": "command"
+                }
+              ],
+              "matcher": "*"
+            }
+          ]
+        }
+      }
+    },
+    "devin_workspace_linux": {
+      "connector": "devin",
+      "goos": "linux",
+      "path": "workspace/.devin/hooks.v1.json",
+      "healthy": {
+        "PermissionRequest": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PostCompaction": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PostToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PreToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "/usr/local/bin/team-audit",
+                "type": "command"
+              }
+            ],
+            "matcher": "*"
+          },
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "SessionEnd": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "SessionStart": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "Stop": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "command": "/home/user/.defenseclaw/hooks/devin-hook.sh",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ]
+      },
+      "removed": {
+        "PreToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "/usr/local/bin/team-audit",
+                "type": "command"
+              }
+            ],
+            "matcher": "*"
+          }
+        ]
+      }
+    },
+    "devin_workspace_windows": {
+      "connector": "devin",
+      "goos": "windows",
+      "path": "workspace/.devin/hooks.v1.json",
+      "healthy": {
+        "PermissionRequest": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PostCompaction": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PostToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "PreToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "/usr/local/bin/team-audit",
+                "type": "command"
+              }
+            ],
+            "matcher": "*"
+          },
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "SessionEnd": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "SessionStart": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "Stop": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ],
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "command": "'C:/Users/user/.local/bin/defenseclaw-hook.exe' hook --connector devin",
+                "timeout": 10,
+                "type": "command"
+              }
+            ],
+            "matcher": ""
+          }
+        ]
+      },
+      "removed": {
+        "PreToolUse": [
+          {
+            "hooks": [
+              {
+                "command": "/usr/local/bin/team-audit",
+                "type": "command"
+              }
+            ],
+            "matcher": "*"
+          }
+        ]
+      }
+    }
+  }
+}

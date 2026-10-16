@@ -41,6 +41,7 @@ version = 2
 [openshell.drivers.docker]
 allow_driver_config = true
 enable_bind_mounts = true
+sandbox_label = "defenseclaw-u1000"
 
 [openshell.drivers.docker.resource_admission]
 enabled = false
@@ -1576,7 +1577,7 @@ func TestDoctorApplyFixesConsent(t *testing.T) {
 		asked = append(asked, c.ID)
 		return c.ID == openshell.CheckIDGatewayService, nil
 	})
-	if err != nil || strings.Join(asked, ",") != "gateway-service,bind-mounts" {
+	if err != nil || strings.Join(asked, ",") != "gateway-service,bind-mounts,docker-namespace" {
 		t.Fatalf("asked about %v, %v", asked, err)
 	}
 	// The outcome carries the title the consent question names the check

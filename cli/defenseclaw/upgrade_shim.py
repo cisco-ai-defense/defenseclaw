@@ -170,14 +170,58 @@ def run(argv: list[str]) -> int:
         return 130
 
 
-def _tolerant_output() -> None:
-    """Never fail on a character the console cannot encode (Windows cp1252)."""
+# The glyphs these status lines start with, and what shows instead where a
+# stream cannot show them.
+_ASCII_GLYPHS = str.maketrans({"✓": "OK", "✗": "x", "→": "->", "—": "-", "…": "..."})
 
-    for stream in (sys.stdout, sys.stderr):
+
+class _AsciiGlyphs:
+    """A text stream that writes the status glyphs in ASCII."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(text.translate(_ASCII_GLYPHS) if isinstance(text, str) else text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _shows_glyphs(stream) -> bool:
+    """Whether *stream* can show the status glyphs.
+
+    PowerShell decodes the piped output of a native command with the console
+    code page, and Python writes a redirected stream in the ANSI code page,
+    so on Windows only a console shows them; elsewhere the stream's encoding
+    must have them.
+    """
+
+    try:
+        if os.name == "nt" and not stream.isatty():
+            return False
+        "✓✗→".encode(stream.encoding or "ascii")
+    except (AttributeError, LookupError, UnicodeEncodeError, ValueError, OSError):
+        return False
+    return True
+
+
+def _tolerant_output() -> None:
+    """Never fail on a character the console cannot encode (Windows cp1252).
+
+    Where a stream cannot show the status glyphs they are written in ASCII:
+    replacing them printed a "?" at the start of the upgrade and rollback
+    lines in PowerShell 7 (GAP-0002).
+    """
+
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError, OSError):
             pass
+        if stream is not None and not isinstance(stream, _AsciiGlyphs) and not _shows_glyphs(stream):
+            setattr(sys, name, _AsciiGlyphs(stream))
 
 
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:

@@ -22,6 +22,8 @@ import (
 // check of those alone reads a path another account can change (or read)
 // as trusted.
 type DarwinACLEntry struct {
+	// Index is the entry's position in the ACL, as `chmod -a#` takes it.
+	Index int
 	// Text is the entry without its index ("group:staff inherited allow
 	// read"), for messages.
 	Text string
@@ -123,7 +125,7 @@ func ParseDarwinACLListing(output string, paths []string) (map[string][]DarwinAC
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if rest, ok := darwinACLLine(line); ok {
+		if index, rest, ok := darwinACLLine(line); ok {
 			if current == "" {
 				continue
 			}
@@ -131,6 +133,7 @@ func ParseDarwinACLListing(output string, paths []string) (map[string][]DarwinAC
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", current, err)
 			}
+			entry.Index = index
 			listed[current] = append(listed[current], entry)
 			continue
 		}
@@ -147,18 +150,19 @@ func ParseDarwinACLListing(output string, paths []string) (map[string][]DarwinAC
 	return listed, nil
 }
 
-// darwinACLLine returns the entry of an ACL line (" 0: user:alice allow
-// write").
-func darwinACLLine(line string) (string, bool) {
+// darwinACLLine returns the index and the entry of an ACL line (" 0:
+// user:alice allow write").
+func darwinACLLine(line string) (int, string, bool) {
 	trimmed := strings.TrimSpace(line)
 	index, rest, found := strings.Cut(trimmed, ":")
 	if !found || index == "" {
-		return "", false
+		return 0, "", false
 	}
-	if _, err := strconv.ParseUint(index, 10, 32); err != nil {
-		return "", false
+	n, err := strconv.ParseUint(index, 10, 31)
+	if err != nil {
+		return 0, "", false
 	}
-	return strings.TrimSpace(rest), true
+	return int(n), strings.TrimSpace(rest), true
 }
 
 func parseDarwinACLEntry(text string) (DarwinACLEntry, error) {

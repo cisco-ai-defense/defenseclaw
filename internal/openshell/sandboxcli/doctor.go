@@ -122,8 +122,16 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	// them from the managed gateway, the facts the administrator's verify
 	// reads (GAP-0173, GAP-0174, GAP-0215, GAP-0367).
 	d.Managed = managed
+	if managed && a.ManagedAccountHome != nil {
+		d.HomeDir = a.ManagedAccountHome
+	}
+	if managed && a.GOOS == "darwin" && a.ManagedE2fsprogsDir != nil {
+		d.AdminE2fsprogsDir, d.AdminE2fsprogsKnown = a.ManagedE2fsprogsDir(ctx)
+	}
 	rep := a.HostDoctor(ctx, d)
 	rep.Managed = rep.Managed || managed
+	// The host checks set it; the Docker access row below asks it again.
+	dockerGroup := d.DockerGroup
 	if managed && st != nil && st.managed != nil {
 		rep.ConfiguredDriver = openshell.ComputeDriver(sandboxapi.DisplayText(st.managed.Driver))
 		rep.Driver = rep.ConfiguredDriver
@@ -146,8 +154,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 		}
-		d, _ := openshell.LookupDriver(string(rep.Driver))
-		images := a.imagesCheck(ctx, image.MicroVMTarget(d))
+		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
+		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
 		if st.managed != nil && st.managed.Unavailable != "" && images.Status == openshell.StatusWarn {
 			// Nothing builds while sandboxes can't run for the account (no
 			// docker or kvm access): the Sandbox runtime row names why and
@@ -161,7 +169,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			// A user on a managed computer reads the organization's policy
 			// from the daemon, never from a configuration they cannot read.
 			rep.Checks = append(rep.Checks, a.managedPolicyCheck(st.managed), managedRuntimeCheck(st.managed))
-			if c := managedDriverCheck(st.managed); c != nil {
+			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
+				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if c := otherGatewaysCheck(st.managed); c != nil {
@@ -169,6 +178,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			}
 			if a.GOOS == "darwin" {
 				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed))
+			}
+			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
+				rep.Checks = append(rep.Checks, *c)
 			}
 		case managed:
 			// Without the daemon's answer the policy and the runtime are not
@@ -180,6 +192,15 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 				openshell.Check{ID: CheckIDManagedRuntime, Title: "Sandbox runtime", Status: openshell.StatusSkip, Detail: unknown})
 		default:
 			rep.Checks = append(rep.Checks, a.adminCheck())
+		}
+	}
+	if managed && a.GOOS == "darwin" {
+		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		// The per-user job is outside the root gateway's readiness report.
+		// Read only this account's gui domain through the host doctor's runner.
+		d.GOOS, d.Geteuid = a.GOOS, a.Geteuid
+		if c := d.ManagedLaunchAgentCheck(ctx); c != nil {
+			rep.Checks = append(rep.Checks, *c)
 		}
 	}
 	return rep
@@ -642,7 +663,7 @@ func (a *App) wrapperBypassHint(ctx context.Context, commands []string, managed 
 	var open []string
 	for _, cmd := range commands {
 		spec, err := ResolveHarness(cmd)
-		if err != nil || slices.ContainsFunc(ex.Managed.RequiredFor, func(c string) bool { return config.NormalizeConnectorName(c) == spec.Name }) {
+		if err != nil || ex.Managed.HostRunRefused(spec.Name) {
 			continue
 		}
 		open = append(open, cmd)

@@ -183,7 +183,8 @@ decides the domain of an SSSD account from its uid, not from its name:
   groups of the host's `/etc/group` and its primary group. A confirmed
   account's groups are listed by its `domain\account` name, plus the
   `/etc/group` groups that list its account name, as the OS gives them at
-  login. Groups of another
+  login, but only when `nsswitch.conf` lists `files` or `compat` on its
+  `initgroups` line, or on `group` when there is no `initgroups` line. Groups of another
   domain of the forest do not count. Two plain LDAP domains that hold the same
   short name are not told apart; give them fully qualified names.
 - **When SSSD does not answer.** Each call gets 2 seconds. When SSSD is stopped
@@ -207,7 +208,10 @@ decides the domain of an SSSD account from its uid, not from its name:
   account the first domain SSSD searches answers with, while standalone
   enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
   `services` in `sssd.conf`) the principal of a confirmed account is
-  `account@realm`. Standalone enterprise keeps the facts of an SSSD account
+  `account@realm`. If InfoPipe stops reporting `userPrincipalName`, a UPN it
+  reported earlier is kept for at most 24 hours (`upn_source: infopipe_kept`);
+  after that, the principal is the derived `account@realm` until InfoPipe
+  reports the UPN again. Standalone enterprise keeps the facts of an SSSD account
   that has no UPN for 2 minutes, then asks again. The gateway trusts a
   guardian record for an hour by the wall clock; the guardian rewrites the
   records every 15 minutes, and within about a minute after the clock is

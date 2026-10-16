@@ -52,6 +52,23 @@ die() {
   exit "${2:-1}"
 }
 
+az_read() {
+  local label=$1 error_file output first class
+  shift
+  error_file=$(mktemp)
+  if output=$("$AZ" "$@" 2>"$error_file"); then
+    rm -f "$error_file"
+    printf '%s\n' "$output"
+    return 0
+  fi
+  first=$(sed -n '1p' "$error_file")
+  rm -f "$error_file"
+  first=${first#ERROR: }
+  class=${first%%:*}
+  case "$class" in '' | *[!A-Za-z0-9_-]*) class='Azure CLI error' ;; esac
+  die "could not read $label ($class); nothing was concluded" 1
+}
+
 rg=""
 vm=""
 apply=0
@@ -130,7 +147,7 @@ case "${vm_identity:-None}" in
 esac
 
 # 2. The AADSSHLoginForLinux extension.
-ext_state=$("$AZ" vm extension list -g "$rg" --vm-name "$vm" --query "[?name=='$EXT_NAME'].provisioningState | [0]" -o tsv 2>/dev/null || true)
+ext_state=$(az_read 'VM extension state' vm extension list -g "$rg" --vm-name "$vm" --query "[?name=='$EXT_NAME'].provisioningState | [0]" -o tsv)
 if [ "$ext_state" = "Succeeded" ]; then
   echo "ok: extension $EXT_NAME is installed"
 else
@@ -147,7 +164,7 @@ grant() {
   else
     principal_type=Group
   fi
-  count=$("$AZ" role assignment list --assignee "$oid" --scope "$vm_id" --role "$role" --query 'length(@)' -o tsv 2>/dev/null || echo 0)
+  count=$(az_read 'VM role assignments' role assignment list --assignee "$oid" --scope "$vm_id" --role "$role" --query 'length(@)' -o tsv)
   if [ "${count:-0}" -gt 0 ]; then
     echo "ok: $kind $principal already has \"$role\" on the VM"
   else

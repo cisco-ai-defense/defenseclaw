@@ -64,6 +64,9 @@ which runs the latest release's installer for you.
 | `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
 | `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
 
+`--local` and `-Local` require a nonempty directory argument. An empty value
+is a usage error (exit `2`).
+
 To install from a mirror instead of GitHub, set `DEFENSECLAW_REPO` to the
 mirror's base URL for that command, for example
 `curl -LsSf <install.sh URL> | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash`.
@@ -375,21 +378,47 @@ shows that installer put them there:
 
 `uninstall --all --binaries` then removes the recorded `uv` and `uvx` while
 they are unchanged, `~/.cache/uv` when nothing in it changed since the
-upgrade, and `~/.config/uv` when it holds only that receipt. uv's Python
+upgrade, `~/.sigstore` only when the 0.8.x installer's cache is still untouched,
+and `~/.config/uv` when it holds only that receipt. uv's Python
 folder (`~/.local/share/uv/python`) always stays, since other tools can use
 it. When the evidence is missing, or you updated or replaced `uv` since, the
 uninstall plan and its result name what stays (`uv`, `uvx`, `~/.cache/uv`,
 `~/.config/uv`) as not recorded as installed by DefenseClaw: remove them
 yourself if DefenseClaw added them.
 
-Uninstall also removes DefenseClaw's OpenShell sandboxes and images (on
-Linux and macOS; there are none on Windows). When Docker or OpenShell is gone
-or broken, add `--skip-sandbox-teardown` to leave them, and remove them later
-with `defenseclaw-gateway sandbox teardown`. A live-mounted sandbox is stopped
-and deleted with its undo point, and what its agent already wrote in your
-folder stays as it is, so review it (`defenseclaw sandbox review NAME`) or
-undo it (`defenseclaw sandbox undo NAME`) first; the plan names those
-sandboxes.
+When sandbox state is present, uninstall also removes DefenseClaw's OpenShell
+sandboxes and images (on Linux and macOS; there are none on Windows). If
+teardown fails with `--all` or `--binaries`, rerun uninstall with
+`--skip-sandbox-teardown` and without `--all` or `--binaries`
+to keep the data needed for later teardown. Once Docker and OpenShell
+work again, run `defenseclaw-gateway sandbox teardown`, then uninstall again.
+Before stopping a live-mounted sandbox, review its
+changes (`defenseclaw sandbox review NAME`) or undo them
+(`defenseclaw sandbox undo NAME`). Work its agent already wrote in your folder
+stays unless you undo it; the plan names those sandboxes.
+
+A per-user uninstall for an account that never set up sandboxes completes
+without a teardown override. Its sandbox directory is absent or holds only
+empty lock files and empty folders, no OpenShell state or user gateway config
+sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
+Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
+Sandbox records, snapshots, non-empty files, links or unreadable entries in
+that directory still trigger teardown, as do enabled OpenShell settings. An
+empty lock file alongside OpenShell state or a user gateway config does too.
+
+A running sandbox stops uninstall before any change. Pull copy-mode work or
+review mount-mode changes, then stop the sandbox and retry. To stop and delete
+running sandboxes with the teardown, pass `--stop-sandboxes`; copy-mode work
+that has not been pulled back is lost.
+
+This list check applies only when sandbox teardown is planned. If the sandbox
+list cannot be read, `uninstall` and `reset` also stop before
+any change because teardown could delete a sandbox that still runs. Check
+with `defenseclaw sandbox list` (start the gateway first if prompted), pull
+back work or stop the sandboxes you want to keep, then retry; or use
+`--stop-sandboxes` to let teardown stop and delete them. The `error`,
+`stopping`, `creating` and `deleting` phases count as running; only
+`stopped`, `completed`, `deleted` and `missing` do not.
 
 Close your agent sessions first. One that stays open goes on without
 DefenseClaw: its hooks fail and nothing checks its tool calls. The plan and

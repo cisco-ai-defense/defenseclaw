@@ -91,6 +91,11 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp defenseclaw-senso
 # The sandbox kernel feed's unit and its root copy of the helper.
 readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
 readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
+# The oldest release that keeps the sandbox setup (the openshell: settings and
+# the sandboxes, snapshots and shadows folders) as this one does. A rollback
+# carries that setup between two releases from here on (GAP-0483); a release
+# that changes how it is kept raises this.
+readonly SANDBOX_STATE_SINCE="1.0.1"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # The first line of the defenseclaw script the swap puts in place of the link.
@@ -237,7 +242,8 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
             TARGET_VERSION="${2#v}"; shift ;;
         --local)
-            [[ $# -ge 2 ]] || usage_error "--local needs a directory"
+            # An empty --local= ran from the current folder (GAP-1336).
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "--local needs a directory"
             LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || usage_error "--local: directory not found: $2"
             shift ;;
         --rollback) ROLLBACK=true ;;
@@ -495,7 +501,19 @@ warn_running_sandboxes() {
     # A running sandbox's hooks fail closed while the gateway restarts, so its
     # agent's tool calls are refused until the gateway is back. Name them
     # before the question, not only in the session's end summary (GAP-0352).
-    local gateway="${BIN_DIR}/defenseclaw-gateway" names
+    # With a version: a rollback to that release, which cannot take over the
+    # sandbox setup, so they stay refused until the user rolls forward.
+    local gateway="${BIN_DIR}/defenseclaw-gateway" names stranded="${1:-}"
+    local one="while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back"
+    local many="while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back"
+    if [[ -n "${stranded}" ]]; then
+        local again="defenseclaw rollback"
+        if is_version "${stranded}" && version_lt "${stranded}" 1.0.0; then
+            again="bash ${PREVIOUS}/installer/install.sh --rollback"
+        fi
+        one="DefenseClaw ${stranded} cannot take over its sandbox setup, so its hooks fail closed and its agent's tool calls are refused until you run '${again}' again"
+        many="DefenseClaw ${stranded} cannot take over their sandbox setup, so their hooks fail closed and their agents' tool calls are refused until you run '${again}' again"
+    fi
     [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
     names="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
 import json, re, subprocess, sys
@@ -511,12 +529,20 @@ print(" ".join(sorted(
 )))
 PY
 )" || return 0
+    # The validated names are space-separated for the count and message.
+    # shellcheck disable=SC2086
     set -- ${names}
     case $# in
         0) ;;
-        1) warn "Sandbox $1 is running: while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back" ;;
-        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back" ;;
+        1) warn "Sandbox $1 is running: ${one}" ;;
+        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): ${many}" ;;
     esac
+}
+
+# sandbox_state_carries V1 V2: both releases keep the sandbox setup as this one does.
+sandbox_state_carries() {
+    is_version "$1" && is_version "$2" \
+        && ! version_lt "$1" "${SANDBOX_STATE_SINCE}" && ! version_lt "$2" "${SANDBOX_STATE_SINCE}"
 }
 
 APP_PATH=""
@@ -556,7 +582,11 @@ if [[ "${ROLLBACK}" == true ]]; then
         step "Rolling back to DefenseClaw ${back_to}"
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
-    warn_running_sandboxes
+    # Sandboxes keep running across the swap, and the data it brings back has
+    # none of the setup made for them since (GAP-0483): it comes along.
+    stranded=""
+    sandbox_state_carries "${current}" "${back_to}" || stranded="${back_to}"
+    warn_running_sandboxes "${stranded}"
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     # GAP-1388: a 0.x release cannot start on a damaged audit store, so check
     # the saved data before anything of this install changes.
@@ -584,6 +614,24 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
+    # GAP-0009: a connector set up after the upgrade is not configured in the
+    # install now back, whose data has no hook script for it: its agent ran a
+    # hook that no longer exists (Claude Code blocked every prompt). The
+    # newer gateway of the two knows the entries; only DefenseClaw's go.
+    if ! version_lt "${back_to}" 1.0.0; then
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+    fi
+    # GAP-0483: the install now back had sandboxes off and none of the
+    # running sandboxes' hook bindings, so their hooks failed closed as
+    # "gateway unreachable" here and after the next upgrade. The newer
+    # gateway of the two copies the setup; previous/ keeps its own.
+    if [[ -z "${stranded}" ]]; then
+        if version_lt "${back_to}" "${current}"; then
+            carry_sandbox_state "${PREVIOUS}" always "${PREVIOUS}/bin/defenseclaw-gateway" "${BIN_DIR}/defenseclaw-gateway"
+        else
+            carry_sandbox_state "${PREVIOUS}" always "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+        fi
+    fi
     rollback_rc=0
     QUARANTINED=""
     if [[ -n "${AUDIT_DAMAGED}" ]] && ! quarantine_rolled_back_audit; then
@@ -610,16 +658,18 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         ok "Now running DefenseClaw ${back_to}."
     fi
+    forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
-        info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        forward="bash ${PREVIOUS}/installer/install.sh --rollback"
+        info "To return to ${current:-1.x}, run: ${forward}"
     else
-        info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+        info "Run '${forward}' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
-        info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        info "Data written since the upgrade is kept in ${PREVIOUS}; '${forward}' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
         [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
             && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
@@ -1050,9 +1100,11 @@ install_uv() {
 # installer and the venv: the Python check, the release policy and Cosign,
 # the connector menu and the gateway download.
 #   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
-#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
-#     cache, and nothing in it is older than that window or newer than the
-#     venv, so no other Cosign has used it.
+#   ~/.sigstore: only with that uv, no cosign on PATH, it holds only the
+#     public Sigstore TUF cache, and everything in it is newer than uv's
+#     receipt and none of it newer than the venv: the 0.8.x installer ran its
+#     temporary Cosign after uv, so no other Cosign has used it. A ten-minute
+#     window alone claimed a cache the user had made just before (GAP-1262).
 readonly LEGACY_WINDOW=600
 LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
@@ -1099,7 +1151,7 @@ legacy_uv_from_0_8() {
     done
 }
 find_legacy_leftovers() {
-    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
+    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore receipt
     [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
     venv_t="$(mtime_of "${cfg}")" || return 0
     if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
@@ -1107,8 +1159,9 @@ find_legacy_leftovers() {
         LEGACY_LEFTOVERS="uv-cache"
     fi
     sigstore="${HOME}/.sigstore"
-    if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
-        && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    if [[ -n "${LEGACY_UV_RECORD}" && -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
+        && [[ -z "$(find "${sigstore}" ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
             ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \
@@ -1490,6 +1543,14 @@ swap_in() {
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        # GAP-0483: a rollback by an earlier release left the sandbox setup
+        # made after its upgrade only in previous/, which this upgrade parks
+        # in backups/; bring it back unless this install has one of its own.
+        local rolled
+        rolled="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || true)"
+        if [[ -f "${PREVIOUS}/ROLLED_BACK" ]] && sandbox_state_carries "${rolled}" "${VERSION}" && ! version_lt "${VERSION}" "${rolled}"; then
+            carry_sandbox_state "${PREVIOUS}" if-unset "${BIN_DIR}/defenseclaw-gateway"
+        fi
         # The previous version's agent discovery is absent or stale. Refresh
         # it (bounded --version probes, no telemetry) before the gateway
         # starts, so the gateway records each agent's version in the hook
@@ -1501,6 +1562,9 @@ swap_in() {
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
             "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
         fi
+        # A rollback by an earlier release left hook entries of a connector
+        # this install does not configure (GAP-0009). Best effort.
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"
     fi
 }
 
@@ -1582,8 +1646,19 @@ restore_snapshot() {
         rm -f "${BIN_DIR:?}/${link}" || restored=false
         if [[ -L "${SNAP}/bin/${link}" ]]; then cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}" || restored=false; fi
     done
-    rm -rf "${INSTALLER_DIR}" || restored=false
-    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
+    # INSTALLER_BACK marks the installer as put back, as VENV_BACK does the
+    # venv: a second run deleted the installer the first had restored (GAP-0922).
+    if [[ ! -f "${SNAP}/INSTALLER_BACK" ]]; then
+        moved=true
+        if [[ -d "${SNAP}/installer" ]]; then
+            : > "${SNAP}/INSTALLER_RESTORING" 2>/dev/null || moved=false
+        fi
+        if [[ "${moved}" == true && ! ( -f "${SNAP}/INSTALLER_RESTORING" && ! -d "${SNAP}/installer" ) ]]; then
+            rm -rf "${INSTALLER_DIR}" || moved=false
+            if [[ "${moved}" == true && -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || moved=false; fi
+        fi
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/INSTALLER_BACK" 2>/dev/null || restored=false; else restored=false; fi
+    fi
     if [[ ! -f "${SNAP}/DATA_ASIDE" ]]; then
         moved=true
         while IFS= read -r name; do
@@ -1963,18 +2038,34 @@ check_rollback_data() {
     done < <("${python}" -I -c "${ROLLBACK_DB_CHECK_PY}" "${PREVIOUS}"/data/*.db 2>>"${LOG}" || true)
 }
 
+# move_audit_store FROM TO: move an SQLite store with its -wal, -shm and
+# -journal as one unit. A move that fails (or would replace a file) puts back
+# what moved and returns 1, so a store is never separated from its WAL (SQLite
+# would drop the WAL's transactions; GAP-1397, rel-1-0-2:GAP-0491).
+move_audit_store() {
+    local from=$1 to=$2 suffix moved_suffixes=()
+    for suffix in "" -wal -shm -journal; do
+        [[ -e "${from}${suffix}" ]] || continue
+        if [[ ! -e "${to}${suffix}" ]] && mv "${from}${suffix}" "${to}${suffix}"; then
+            moved_suffixes=("${suffix}" ${moved_suffixes[@]+"${moved_suffixes[@]}"})
+            continue
+        fi
+        for suffix in ${moved_suffixes[@]+"${moved_suffixes[@]}"}; do
+            mv "${to}${suffix}" "${from}${suffix}" || warn "Could not move ${to}${suffix} back to ${from}${suffix}"
+        done
+        return 1
+    done
+}
+
 # quarantine_rolled_back_audit: after the swap, move the damaged audit store
 # aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
 # time>), so the restored release starts on a new one.
 quarantine_rolled_back_audit() {
-    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix
+    local db="${DEFENSECLAW_HOME}/audit.db" moved
     [[ -f "${db}" ]] || return 0
     moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
     [[ ! -e "${moved}" ]] || moved="${moved}-$$"
-    for suffix in -wal -shm -journal; do
-        [[ ! -e "${db}${suffix}" ]] || mv "${db}${suffix}" "${moved}${suffix}" || return 1
-    done
-    mv "${db}" "${moved}" || return 1
+    move_audit_store "${db}" "${moved}" || return 1
     QUARANTINED="${moved}"
     warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
 }
@@ -1983,7 +2074,7 @@ quarantine_rolled_back_audit() {
 # (GAP-1388). The restored 0.x gateway is not running, and the connector
 # registrations of this install were removed for it: agents would be unguarded.
 undo_rollback() {
-    local left="${current}" undone=0 kept suffix
+    local left="${current}" undone=0 kept fresh audit="${PREVIOUS}/data/audit.db"
     warn "$1, so the rollback is being undone"
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
     # The same swap the other way: previous/ holds the install just left.
@@ -1998,11 +2089,23 @@ undo_rollback() {
     # previous/ is again the install this rollback started from, as it was.
     rm -f "${PREVIOUS}/ROLLED_BACK" "${PREVIOUS}/START_AFTER"
     printf '%s\n' "${saved_was_running:-false}" > "${PREVIOUS}/GATEWAY_WAS_RUNNING"
-    if [[ -n "${QUARANTINED}" && ! -e "${PREVIOUS}/data/audit.db" ]]; then
-        kept="${PREVIOUS}/data/$(basename "${QUARANTINED}")"
-        for suffix in "" -wal -shm -journal; do
-            [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
-        done
+    kept="${PREVIOUS}/data/$(basename "${QUARANTINED:-none}")"
+    if [[ -n "${QUARANTINED}" && -f "${kept}" ]]; then
+        # GAP-1398: the failed start of ${back_to} made a new, empty audit.db
+        # here, which a later rollback then used without a word. It goes
+        # aside, and the saved store goes back with its WAL (each as one unit,
+        # rel-1-0-2:GAP-0492), so that rollback checks it again.
+        if [[ -e "${audit}" ]]; then
+            fresh="${audit}.failed-start-$(date -u +%Y%m%dT%H%M%SZ)"
+            [[ ! -e "${fresh}" ]] || fresh="${fresh}-$$"
+            move_audit_store "${audit}" "${fresh}" || warn "Could not move aside the new audit store the failed start of ${back_to} made"
+        fi
+        if [[ ! -e "${audit}" ]]; then
+            move_audit_store "${kept}" "${audit}" || warn "Could not put back the saved ${back_to} audit store"
+        fi
+        if [[ -e "${kept}" ]]; then
+            warn "The saved ${back_to} audit store is still ${kept}; before 'defenseclaw rollback' again, move it and its -wal and -shm files to ${audit}"
+        fi
     fi
     if start_gateway; then
         ok "DefenseClaw ${current:-1.x} is back, with its gateway and agent hooks"
@@ -2039,6 +2142,57 @@ convert_hooks_for_rollback() {
     [[ -x "${gateway}" ]] || return 0
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
+# prune_orphaned_hooks GATEWAY...: with the first GATEWAY that has the
+# command, remove the DefenseClaw hook entries of every connector the live
+# install does not configure (GAP-0009). Only DefenseClaw-owned entries go;
+# it says which.
+prune_orphaned_hooks() {
+    local gateway
+    for gateway in "$@"; do
+        # An older gateway prints the connector help for an unknown subcommand.
+        [[ -x "${gateway}" ]] && "${gateway}" connector prune-orphans --help 2>/dev/null | grep "connector prune-orphans" >/dev/null || continue
+        "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+            || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
+        return 0
+    done
+    return 0
+}
+
+# carry_sandbox_state SLOT MODE GATEWAY...: copy the sandbox setup (the
+# openshell: settings and the sandboxes, snapshots and shadows folders) of the
+# install in SLOT (previous/) into the live one, with the first GATEWAY that
+# has the command. Sandboxes keep running across a swap; the install a
+# rollback brought back had sandboxes off and none of their hook bindings, so
+# every hook of a running sandbox failed closed until the user set sandboxes
+# up again, also after the next upgrade (GAP-0483). MODE if-unset leaves an
+# install that has a sandbox setup of its own. SLOT keeps its copy, for a roll
+# forward by an installer that carries nothing. Best effort.
+carry_sandbox_state() {
+    local slot="$1" mode="$2" gateway out from_config
+    shift 2
+    case "${DEFENSECLAW_CONFIG:-}" in
+        "") from_config="${slot}/data/config.yaml" ;;
+        "${DEFENSECLAW_HOME}"/*) from_config="${slot}/data/${DEFENSECLAW_CONFIG#"${DEFENSECLAW_HOME}"/}" ;;
+        *) from_config="${slot}/external-config.yaml" ;;
+    esac
+    [[ -d "${slot}/data" && -f "${from_config}" ]] || return 0
+    local args=(sandbox carry-state --from-data "${slot}/data" --from-config "${from_config}"
+        --data-dir "${DEFENSECLAW_HOME}" --config "${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}")
+    [[ "${mode}" != if-unset ]] || args+=(--only-if-unset)
+    for gateway in "$@"; do
+        # An older gateway prints the sandbox help for an unknown subcommand.
+        [[ -x "${gateway}" ]] || continue
+        "${gateway}" sandbox carry-state --help 2>/dev/null | grep "sandbox carry-state" >/dev/null || continue
+        if out="$("${gateway}" "${args[@]}" 2>>"${LOG}")"; then
+            [[ -z "${out}" ]] || info "${out}"
+        else
+            warn "Could not keep the sandbox setup of the install just replaced (see ${LOG}); a sandbox still running from it stays blocked until you return to that install ('defenseclaw rollback') or delete the sandbox and run it again"
+        fi
+        return 0
+    done
+    return 0
 }
 
 remove_connector_registrations_for_legacy() {

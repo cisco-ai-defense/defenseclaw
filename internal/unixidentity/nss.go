@@ -281,11 +281,17 @@ func (r *NSSResolver) LookupGroupID(gid int) (Group, error) {
 	return group, nil
 }
 
-// GroupIDs resolves primary and supplementary groups with getent initgroups.
+// GroupIDs resolves groups for the account identified by its uid.
 func (r *NSSResolver) GroupIDs(account Account) ([]int, error) {
 	if err := validName(account.Name); err != nil {
 		return nil, err
 	}
+	return r.platformGroupIDs(account)
+}
+
+// rawGroupIDs reads the host's name-based initgroups answer. Callers must
+// first establish that the name resolves to the requested account.
+func (r *NSSResolver) rawGroupIDs(account Account) ([]int, error) {
 	result, err := r.query("initgroups", account.Name)
 	if err != nil {
 		return nil, err

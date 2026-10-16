@@ -70,7 +70,7 @@ boot enablement; those changes can still make it exit 4.
    ./okta-ldap-setup.py check --bind-login ldap-bind@example.com --group linux-users
    ```
 
-   Every command can be run again; it changes only what differs. If an existing Okta group shares a `gidNumber` with another group, `assign-posix` stops before writing and `check` reports the collision. Give the groups distinct IDs in Okta before using them for profiles.
+   Every command can be run again; it changes only what differs. If an existing Okta group shares a `gidNumber` with another group, `assign-posix` stops before writing and `check` reports the collision. Give the groups distinct IDs in Okta before using them for profiles. `assign-posix` also checks existing group IDs against the host's SSSD range. If the host uses nondefault `min_id` and `max_id`, pass the same values as `--id-min` and `--id-max` before applying.
 3. On the host, use an SSSD that has `ldap_use_ppolicy` (SSSD 2.10 or later, or the
    backport build), then, as root:
 

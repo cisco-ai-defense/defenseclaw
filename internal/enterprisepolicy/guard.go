@@ -394,8 +394,8 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 	if xdgConfig == "" {
 		xdgConfig = filepath.Join(home, ".config")
 	}
-	// Cursor, Copilot and Devin also load Claude-format hook files by
-	// default (third-party extensibility), so those run inside the agent too.
+	// Cursor and Devin load user and project Claude-format hook files.
+	// Copilot CLI loads only the project files.
 	claudeFormat := func(includeUser bool) {
 		if includeUser {
 			user(formatGrouped, home, ".claude", "settings.json")

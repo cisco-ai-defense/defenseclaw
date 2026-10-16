@@ -59,6 +59,14 @@ $configText = ''
 if ($ConfigPath) {
     $configText = Get-Content -LiteralPath $ConfigPath -Raw
     if ($configText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'config.yaml contains an inline api_key; the standalone profile rejects it and the package must not carry credentials' }
+    $configVersion = [regex]::Match($configText, '(?m)^config_version[ \t]*:[ \t]*([0-9]+)[ \t]*(?:#[^\r\n]*)?\r?$')
+    if (-not $configVersion.Success) {
+        throw 'config.yaml has no top-level config_version; re-author it as config_version 9 (see packaging/identity/entra/admin-config.windows.example.yaml) before packaging'
+    }
+    $versionNumber = [int]::Parse($configVersion.Groups[1].Value)
+    if ($versionNumber -lt 9) {
+        throw "config.yaml is config_version $versionNumber. Setup migrates it on install, so the detection hash would never match. Re-author it as config_version 9 (see packaging/identity/entra/admin-config.windows.example.yaml) before packaging"
+    }
 }
 
 $content = Join-Path $OutputDirectory 'content'

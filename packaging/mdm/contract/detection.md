@@ -98,9 +98,21 @@ option (exit 2).
 
 | Format | Exit | Output |
 | --- | --- | --- |
-| `exit` (default) | 0 detected, 1 not | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR |
-| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`) or a `bundle-*` value (with `--require-bundle`) |
+| `exit` (default) | 0 detected, 1 not, 75 busy | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR; a held lifecycle lock exits 75 for retry |
+| `value` | always 0 | The installed version, or one of the states below |
 | `jamf` | always 0 | The same values inside `<result>...</result>` |
+
+| Value state | Meaning for the MDM |
+| --- | --- |
+| `<version>` | The assigned deployment was detected. |
+| `not-installed` | No trusted installed deployment was found. |
+| `outdated` | The installed version is below `--min-version`. |
+| `unhealthy` | The deployment failed a required health check. |
+| `bundle-missing`, `bundle-mismatch`, `bundle-outdated`, `bundle-not-enforced` | With `--require-bundle`: the requested signed policy bundle is not the confirmed, enforcing bundle (see [Signed policy bundles](#signed-policy-bundles)). |
+| `unknown` | Detection could not assess the host; run the script as root. |
+| `sessions-need-restart` | With `--require-sessions-protected`: running agent sessions predate their managed hook settings and need a restart. Exits 1 in every format, as does an unknown session scan. |
+| `tetragon-not-ready:<check>` | The host is not ready for the requested Tetragon mode. |
+| `busy` | A lifecycle run holds the lock. Retry later; this is neither healthy nor unhealthy. In `exit` format the script exits 75. |
 
 In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.

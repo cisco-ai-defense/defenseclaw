@@ -165,6 +165,12 @@ to use in scripts.
 | **Guardrail proxy port** *(4000)* | `--port`. Used by the proxy connectors; hook connectors bind no proxy. |
 | **Use a custom block message?** *(action mode only)* | `--block-message`. |
 
+For the remote Cisco AI Defense scanner, an unset or empty
+`cisco_ai_defense.enabled_rules` sends no `config.enabled_rules` list; the AI
+Defense connection's own policy applies. A nonempty operator list is sent in
+the order configured. If you relied on the former implicit 12-rule list, name
+those cloud rules explicitly in `cisco_ai_defense.enabled_rules`.
+
 On a multi-connector install, `--connector <name>` scopes this setup run to that
 connector. When `--block-message` is passed without `--connector`, setup treats
 it as broad operator intent: it updates the shared block message and reconciles
@@ -545,6 +551,16 @@ the list as JSON. For a live view, open `defenseclaw tui`.
 
 Which commands prompt and which are flag-only is listed in the
 [interactive vs non-interactive matrix](/docs/reference/setup-commands#interactive-vs-non-interactive).
+
+### Protected-file write proof
+
+The write proof checks command text before a tool runs. It does not see what
+child programs write. A write inside a script, interpreter or shell built-in
+that the command only names cannot be fully checked from the command text.
+A rule that needs the complete action cannot block that inner write; an
+eligible rule about the complete outer argument list can still block the call
+in action mode. For protected files,
+use a sandbox or file permissions as an additional control.
 
 ## Common follow-ups
 

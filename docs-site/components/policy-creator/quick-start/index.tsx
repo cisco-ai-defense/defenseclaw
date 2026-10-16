@@ -121,7 +121,6 @@ export function QuickStart({
       ...answers,
       block: new Set(answers.block),
       allow: new Set(answers.allow),
-      firstPartyExtra: [...answers.firstPartyExtra],
       domainsExtra: [...answers.domainsExtra],
       sinks: { ...answers.sinks },
     };
@@ -388,7 +387,7 @@ function StepAllow({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we allow even when flagged?"
-        subtitle="Let your own plugins skip admission scans. Internal domains are planning notes; the install script does not configure a firewall."
+        subtitle="Set first-party admission in Playground → Admission with a name and source path pin. Internal domains are planning notes; the install script does not configure a firewall."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {ALLOW_CARDS.map((card) => (
@@ -405,14 +404,7 @@ function StepAllow({ answers, update }: StepProps) {
           />
         ))}
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <FreeFormList
-          label="Additional first-party globs"
-          placeholder="my-org/*"
-          items={answers.firstPartyExtra}
-          onChange={(next) => update((d) => void (d.firstPartyExtra = next))}
-          hint="One per line. Matches a target_name on the first-party allow list."
-        />
+      <div className="mt-4">
         <FreeFormList
           label="Additional internal domains"
           placeholder="*.corp.internal"
@@ -729,21 +721,6 @@ function AllowCheckCard({
           </span>
         </span>
       </label>
-      <div className="flex flex-wrap items-center gap-1.5 pl-6 text-[10px] text-fd-muted-foreground">
-        {card.toolPattern && (
-          <code className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">{card.toolPattern}</code>
-        )}
-        {card.cookbookHref && (
-          <a
-            href={docsHref(card.cookbookHref)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto text-[10px] text-emerald-700 hover:underline dark:text-emerald-400"
-          >
-            see cookbook →
-          </a>
-        )}
-      </div>
     </div>
   );
 }

@@ -1119,7 +1119,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         return CatalogPanelAction(False)
 
     def summary_text(self, title: str) -> str:
-        filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
+        filter_text = f" filter={rich_escape(repr(self.filter_text))}" if self.filter_text else ""
         detail = " detail=open" if self.detail_open else ""
         return (
             f"[bold #22D3EE]{title}[/]\n"

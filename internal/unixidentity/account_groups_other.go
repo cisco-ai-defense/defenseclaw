@@ -1,4 +1,4 @@
-//go:build !windows && !darwin
+//go:build !windows && !darwin && !linux
 
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 //
@@ -17,9 +17,7 @@ import (
 	"os/user"
 )
 
-// platformAccountGroupIDs trusts os/user's listing here (ids, listErr).
-// Linux directory accounts resolve through the NSSResolver, not through
-// os/user.
-func platformAccountGroupIDs(_ context.Context, _ commandRunner, _ *user.User, ids []string, listErr error) ([]string, error) {
+// platformAccountGroupIDs uses os/user on other Unix systems.
+func platformAccountGroupIDs(_ context.Context, _ commandRunner, _ *user.User, ids []string, listErr error, _ []string) ([]string, error) {
 	return ids, listErr
 }

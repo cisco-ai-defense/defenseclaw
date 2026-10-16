@@ -130,6 +130,17 @@ type Options struct {
 
 	// UnblockHint overrides DefaultUnblockHint in 403 bodies.
 	UnblockHint func(p Principal, d Decision) string
+	// Refresh, when set, brings an authenticated principal's policy up to
+	// date before a new tunnel or forwarded request of it is decided: a
+	// managed computer's sandbox daemon confirms the sandbox's policy with
+	// the managed gateway and re-registers its credential when it changed.
+	// The proxy then authenticates the request again, so the decider the
+	// credential maps to once Refresh returned decides it, whichever
+	// request's refresh registered it; off refuses the request as a
+	// suspended credential's (Decision.Category CategoryEgressOff). ctx is
+	// the request's. It runs on the request's goroutine and must return
+	// within a bounded time.
+	Refresh func(ctx context.Context, p Principal) (off *Decision)
 	// ErrorLog receives the HTTP server's internal errors; nil discards.
 	ErrorLog *log.Logger
 }
@@ -144,6 +155,7 @@ type Proxy struct {
 	counter *Counter
 	dialer  *guardDialer
 	hint    func(Principal, Decision) string
+	refresh func(context.Context, Principal) *Decision
 	idle    time.Duration
 	// headerTimeout bounds reading a tunnel's first flight and the head of
 	// each HTTP request inside it; maxHeaderBytes bounds those heads.
@@ -228,6 +240,7 @@ func New(opts Options) (*Proxy, error) {
 		counter:        opts.Counter,
 		dialer:         &guardDialer{resolver: opts.Resolver, dialer: opts.Dialer, timeout: opts.DialTimeout, local: hostAddrs},
 		hint:           opts.UnblockHint,
+		refresh:        opts.Refresh,
 		idle:           opts.TunnelIdleTimeout,
 		headerTimeout:  opts.HeaderTimeout,
 		maxHeaderBytes: opts.MaxHeaderBytes,
@@ -723,6 +736,26 @@ func (p *Proxy) authenticate(r *http.Request) (pr Principal, cred Credential, pr
 	return pr, Credential{Username: user, Password: pass}, true, true, nil
 }
 
+// authenticateCurrent is authenticate after the principal's policy was
+// brought up to date (Options.Refresh): the credential is read again after
+// every refresh that did not refuse the request, so the decider in force
+// once the refresh returned decides it. Read again only when this request's
+// own refresh changed the policy, a request that waited for another one's
+// confirmation, or found the lease that confirmation renewed, kept the
+// decider it had read before the change was registered (GAP-0172). One that
+// could not be confirmed refuses the request (off). A request without a
+// known principal is not refreshed.
+func (p *Proxy) authenticateCurrent(r *http.Request) (pr Principal, cred Credential, presented, ok bool, off *Decision) {
+	pr, cred, presented, ok, off = p.authenticate(r)
+	if p.refresh == nil || (!ok && off == nil) {
+		return pr, cred, presented, ok, off
+	}
+	if refused := p.refresh(r.Context(), pr); refused != nil {
+		return pr, Credential{}, true, false, refused
+	}
+	return p.authenticate(r)
+}
+
 // suspended looks up a suspended credential (SuspendingAuthenticator).
 func (p *Proxy) suspended(user, pass string) (Principal, Decision, bool) {
 	sa, ok := p.auth.(SuspendingAuthenticator)
@@ -882,7 +915,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		writeRaw(conn, http.StatusServiceUnavailable, "Service Unavailable", nil, shuttingDownResponse())
 		return
 	}
-	pr, cred, presented, ok, off := p.authenticate(r)
+	pr, cred, presented, ok, off := p.authenticateCurrent(r)
 	if off != nil {
 		p.refuseRaw(conn, pr, http.MethodConnect, suspendedRefusal(*off, target), start)
 		return

@@ -362,6 +362,85 @@ func TestTetragonSourceWithoutAHomeTakesTheFileHalfFromTheObservePolicy(t *testi
 	}
 }
 
+// #1240: the reconciler records its observe policy as its own after Tetragon
+// lists it, so the observe policy can become the file half (and stop being
+// it) while the listing stays the same. The coverage changed, but only a
+// handoff or a policy-list change announced it, so the gateway kept the
+// partial coverage of its first frame for good. The source now signals every
+// such change, both ways.
+func TestTetragonSourceSignalsWhenTheObservePolicyBecomesTheFileHalf(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	recorded := false
+	observe := func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return recorded && name == "defenseclaw-observe-89abcdef"
+	}
+	setRecorded := func(v bool) { mu.Lock(); recorded = v; mu.Unlock() }
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"}}})
+	h.feeds <- feed
+	source := startSource(t, h, nil, observe)
+	waitFor(t, "the Tetragon stream", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	time.Sleep(3 * handoffInterval) // let a hand-off evaluation see the unrecorded policy
+	drain := func() {
+		for {
+			select {
+			case <-source.CoverageChanges():
+			default:
+				return
+			}
+		}
+	}
+	drain()
+	if source.Coverage().Complete() {
+		t.Fatalf("a policy the reconciler has not recorded is the file half: %+v", source.Coverage())
+	}
+	changed := func(what string, complete bool) {
+		t.Helper()
+		select {
+		case <-source.CoverageChanges():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no coverage change when %s (coverage now %+v)", what, source.Coverage())
+		}
+		if got := source.Coverage().Complete(); got != complete {
+			t.Fatalf("after %s: complete %v, want %v: %+v", what, got, complete, source.Coverage())
+		}
+	}
+	setRecorded(true)
+	changed("the observe policy became the file half", true)
+	if mechanism := source.Coverage().Mechanism; !strings.HasSuffix(mechanism, " + file opens from the DefenseClaw observe policy") {
+		t.Fatalf("mechanism %q", mechanism)
+	}
+	drain()
+	setRecorded(false)
+	changed("the observe policy stopped being the file half", false)
+}
+
+// #1240: an observe policy already loaded when the session dials (every
+// gateway subscription after the first) is the file half from the first
+// coverage, not from the first hand-off evaluation.
+func TestTetragonSourceTakesALoadedObservePolicyAtTheDial(t *testing.T) {
+	observe := func(name string) bool { return name == "defenseclaw-observe-89abcdef" }
+	for _, tc := range []struct {
+		state    string
+		complete bool
+	}{{"enabled", true}, {"disabled", false}} {
+		t.Run(tc.state, func(t *testing.T) {
+			h := newHarness(t)
+			handoffInterval = time.Hour // no hand-off evaluation in this test
+			h.feeds <- newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+				Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: tc.state}}})
+			coverage := startSource(t, h, nil, observe).Coverage()
+			if coverage.Complete() != tc.complete ||
+				(tc.complete && !strings.HasSuffix(coverage.Mechanism, " + file opens from the DefenseClaw observe policy")) {
+				t.Fatalf("first coverage with the observe policy %s: %+v", tc.state, coverage)
+			}
+		})
+	}
+}
+
 func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 	h := newHarness(t)
 	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
@@ -390,6 +469,60 @@ func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 	}
 	if len(got[SourceTetragon]) != 1 || got[SourceTetragon][0] != 7 || len(got[SourceFanotify]) != 1 || got[SourceFanotify][0] != 8 {
 		t.Fatalf("delivered %v: want Tetragon's pid 7 and fanotify's pid 8 only", got)
+	}
+}
+
+// #1156: while the reconciler keeps a replaced controls policy for the
+// sessions only it marked, a session started from a binary in both anchors
+// is marked by both policies, and Tetragon reports each denied open twice.
+// The stream delivers, and taps, one event per open; two real opens stay two,
+// and other processes, files and policies are untouched.
+func TestTetragonSourceDeliversOneEventPerDeniedOpen(t *testing.T) {
+	h := newHarness(t)
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- feed
+	var mu sync.Mutex
+	tapped := 0
+	source := NewTetragonSource(nil, TetragonOptions{Mode: "enforce", Dial: h.dial,
+		Tap: func(batch KernelBatch) { mu.Lock(); tapped += len(batch.Events); mu.Unlock() }})
+	if err := source.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	at := time.Unix(1791336304, 0)
+	deny := func(policy, exec, path string, offset time.Duration) Event {
+		return Event{Kind: KindFileRead, PID: 7, ExecID: exec, Path: path, Policy: policy, PolicyOwner: PolicyOwnerDefenseClaw,
+			Outcome: OutcomeBlocked, Control: "kernel.ssh_private_key_read", Source: SourceTetragon, At: at.Add(offset)}
+	}
+	const kept, replacement, key = "defenseclaw-controls-0a1b2c3d", "defenseclaw-controls-4e5f6a7b", "/home/dcr-std1/.ssh/id_ed25519"
+	feed.batches <- KernelBatch{Events: []Event{
+		deny(kept, "e1", key, 0), deny(replacement, "e1", key, time.Microsecond), // one open, two reports
+		deny(kept, "e1", key, 10*time.Millisecond), // the same process opens it again
+	}}
+	feed.batches <- KernelBatch{Events: []Event{
+		deny(replacement, "e1", key, 10*time.Millisecond+time.Microsecond),  // the second open's twin, in the next batch
+		deny(replacement, "e2", key, 20*time.Millisecond),                   // another process
+		deny(kept, "e1", "/home/dcr-std1/.ssh/id_rsa", 30*time.Millisecond), // another file
+		{Kind: KindFileRead, PID: 7, ExecID: "e1", Path: key, Policy: "customer-ssh", PolicyOwner: PolicyOwnerCustomer,
+			Outcome: OutcomeBlocked, Source: SourceTetragon, At: at.Add(time.Microsecond)}, // the host's own policy
+	}}
+	var got []Event
+	for i := 0; i < 5; i++ {
+		got = append(got, next(t, source))
+	}
+	select {
+	case extra := <-source.Events():
+		t.Fatalf("a twin was delivered: %+v (after %+v)", extra, got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got[0].Policy != kept || got[1].Policy != kept || got[2].ExecID != "e2" || got[3].Path != "/home/dcr-std1/.ssh/id_rsa" ||
+		got[4].PolicyOwner != PolicyOwnerCustomer {
+		t.Fatalf("delivered %+v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if tapped != 5 {
+		t.Fatalf("tapped %d events, want 5", tapped)
 	}
 }
 

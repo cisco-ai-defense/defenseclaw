@@ -912,7 +912,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 		if recovered := recover(); recovered != nil {
 			// The chain lane is additive. A local bug or sink panic must never
 			// replace an already-computed standalone block with the handler's
-			// generic fail-open panic response.
+			// recovered-error response.
 			a.handleHookPanic(
 				ctx,
 				req.ConnectorName,

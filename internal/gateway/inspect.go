@@ -523,6 +523,16 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	return a.inspectToolPolicyCtx(context.Background(), req)
 }
 
+// inspectToolTrustedShellCWD is the working directory a shell tool call on
+// /inspect/tool names for its command, when it is absolute; the session's is
+// not known there.
+func inspectToolTrustedShellCWD(dir string) string {
+	if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
+		return dir
+	}
+	return ""
+}
+
 // inspectToolPolicyCtx is inspectToolPolicy with an explicit context for
 // the judge lane's deadline guard. The generic /inspect/tool endpoint
 // (handleInspectTool) passes its 200ms-capped ctx so the judge
@@ -545,8 +555,20 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		// (GAP-1450). The directory is the command's working directory when
 		// it is absolute; the session's is not known here.
 		action.Input.Args = args
-		if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
-			action.Input.CWD = dir
+		action.Input.CWD = inspectToolTrustedShellCWD(dir)
+		// The conflicting-keys check reads the arguments as the call carried
+		// them and projects each candidate the same way (GAP-0678).
+		base := action.Input
+		action.conflictSource = &conflictingToolArgumentSource{
+			raw: req.Args,
+			project: func(raw json.RawMessage) actionfacts.Input {
+				candidate := base
+				candidate.Args, candidate.CWD = raw, ""
+				if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, raw); ok {
+					candidate.Args, candidate.CWD = args, inspectToolTrustedShellCWD(dir)
+				}
+				return candidate
+			},
 		}
 	}
 	if trustedShimArgvTool(req.Tool) {

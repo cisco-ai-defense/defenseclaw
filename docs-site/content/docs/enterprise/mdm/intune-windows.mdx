@@ -316,7 +316,11 @@ script or Remediation for each upgraded build.
 **Change the config.** Setup applies a new config when it runs `/ensure` with a
 config that differs from the installed one. The registry rule detects by
 version only, so Intune does not re-run an app for a config-only change. To
-roll out a new config:
+roll out a new config, re-author `config.yaml` as `config_version: 9` (see
+`packaging/identity/entra/admin-config.windows.example.yaml`). The packager
+refuses a missing or older version. Setup migrates an older file during install,
+so its installed hash would differ from the hash pinned in the package and the
+custom detection rule would never match.
 
 1. Build a package from the same Setup and the new `config.yaml`.
 2. Create it as a new Win32 app that supersedes the previous one with
@@ -353,7 +357,10 @@ changes made outside Setup are not validated.
 
 **Roll back.** `/ensure` refuses a Setup older than the installed version
 (`downgrade_refused`, `1603`), so superseding with an older app does nothing.
-Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
+First remove the newer **Required** Intune assignment from the target group
+(`intune_tenant.py remove-assignment --app NAME --group GROUP [--apply]`, or
+remove it in Intune admin center). Then follow
+[Roll back](/docs/enterprise/lifecycle#roll-back).
 
 ## 7. Remove DefenseClaw
 

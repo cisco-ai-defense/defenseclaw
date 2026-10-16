@@ -31,6 +31,21 @@ type IdentitySpoolAccount struct {
 	User string
 }
 
+// checkMacOSRecordUID refuses the Open Directory record dscl returned for an
+// account unless its UniqueID is the account's uid. dscl /Search reads by
+// short name, so the record can be another account's: its verified identity
+// (UPN, domain) was then spooled under this uid (GAP-1075).
+func checkMacOSRecordUID(dscl string, uid int) error {
+	got, ok := useridentity.MacOSDSCLRecordUID(dscl)
+	if !ok {
+		return fmt.Errorf("the directory record has no single UniqueID; refusing it for uid %d", uid)
+	}
+	if got != uid {
+		return fmt.Errorf("record belongs to another account (UniqueID %d, not uid %d)", got, uid)
+	}
+	return nil
+}
+
 // identitySpoolLookupTimeout bounds the privileged lookups for one account,
 // so one unreachable directory cannot stall the guardian's pass.
 const identitySpoolLookupTimeout = 10 * time.Second
@@ -102,9 +117,16 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			resolved++
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
 				var kept bool
-				if record, kept = KeepVerifiedInfoPipeUPN(record, previous); kept && previous.UPNSource != UPNSourceInfoPipeKept && logf != nil {
+				record, kept = KeepVerifiedInfoPipeUPN(record, previous)
+				switch {
+				case logf == nil:
+				case kept && previous.UPNSource != UPNSourceInfoPipeKept:
 					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName; keeping the UPN "+
-						"it reported before. Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName", account.UID)
+						"it reported before for at most %s. Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName",
+						account.UID, IdentitySpoolKeptUPNMaxAge)
+				case !kept && previous.UPNSource == UPNSourceInfoPipeKept && record.Facts.UPN == "":
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe has answered without userPrincipalName for %s; "+
+						"no longer keeping the UPN it reported before", account.UID, IdentitySpoolKeptUPNMaxAge)
 				}
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)

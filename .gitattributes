@@ -75,3 +75,7 @@ internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
 # and prevent lifecycle snapshot capture during an upgrade.
 internal/gateway/connector/hooks/** text eol=lf
 internal/gateway/connector/shims/*.sh text eol=lf
+
+# Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
+# as published upstream; do not flag their whitespace in git diff --check.
+edge-connector/third_party/** -whitespace

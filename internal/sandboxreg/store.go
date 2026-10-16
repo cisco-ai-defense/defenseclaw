@@ -182,6 +182,17 @@ func PolicyUpdatedAt(r Registration) time.Time {
 	return r.CreatedAt
 }
 
+// SessionStart is when the session r's sandbox runs now began: the running
+// report that followed its last stop (SessionAt), else its bind. A
+// session-scope decision made before it was an earlier session's, which
+// ended when the sandbox stopped (GAP-0009).
+func SessionStart(r Registration) time.Time {
+	if r.SessionAt.After(r.BoundAt) {
+		return r.SessionAt
+	}
+	return r.BoundAt
+}
+
 // ValidBind checks the sandbox a bind names: the binding id the daemon
 // minted (sb_ and 32 hex), the OpenShell sandbox name and its id. A bind
 // without the id names no sandbox OpenShell made, so neither a foreign
@@ -435,7 +446,8 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 	}
 	r.V, r.UID, r.State = RecordVersion, uid, StatePending
 	r.SandboxID, r.SandboxName, r.BindingID = "", "", ""
-	r.RevokedReason, r.BoundAt, r.RevokedAt = "", time.Time{}, time.Time{}
+	r.RevokedReason, r.BoundAt, r.RevokedAt, r.SessionAt = "", time.Time{}, time.Time{}, time.Time{}
+	r.GuestWatch, r.GuestSeenAt = false, time.Time{}
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = s.now()
 	}
@@ -641,6 +653,7 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 		return Registration{}, ErrDriverMismatch
 	}
 	r.State, r.BoundAt, r.SeenAt = StateLive, now, now
+	r.GuestWatch, r.GuestSeenAt = true, time.Time{}
 	r.SandboxID, r.SandboxName, r.BindingID = b.SandboxID, b.SandboxName, b.BindingID
 	next := u.clone()
 	next.regs[at] = r
@@ -648,6 +661,40 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 		return Registration{}, err
 	}
 	return r, nil
+}
+
+// MarkGuestSeen stores the first accepted record for a bound sandbox. A
+// duplicate leaves the original sighting and store file unchanged.
+func (s *FileStore) MarkGuestSeen(uid int, id string, at time.Time) error {
+	if !ValidID(id) {
+		return ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return err
+	}
+	for i, r := range u.regs {
+		if r.ID != id {
+			continue
+		}
+		switch {
+		case r.State == StateRevoked:
+			return ErrRevoked
+		case !r.GuestWatch || r.BoundAt.IsZero() || r.SandboxName == "":
+			return ErrNotPending
+		case at.IsZero() || at.Before(r.BoundAt):
+			return ErrInvalid
+		case !r.GuestSeenAt.IsZero():
+			return nil
+		}
+		r.GuestSeenAt = at.UTC()
+		next := u.clone()
+		next.regs[i] = r
+		return s.saveLocked(uid, next)
+	}
+	return ErrNotFound
 }
 
 // Revoke keeps uid's registration id as a tombstone with reason and drops
@@ -736,7 +783,11 @@ const seenWriteEvery = 2 * time.Minute
 // Report records what uid's daemon sees of registration id's sandbox now
 // (GAP-0505):
 //
-//   - running: the registration is live again and its LiveLease renewed;
+//   - running: the registration is live again and its LiveLease renewed.
+//     After a stop (a not-running report, or none for LiveLease) the
+//     sandbox runs a new session from now on (SessionAt): the daemon ends
+//     its session decisions when it starts the sandbox again, and the
+//     gateway no longer applies its own record of them (GAP-0009);
 //   - not running: it is stopped, so it authorizes no relayed call until a
 //     running report.
 //
@@ -768,6 +819,9 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 		case running:
 			if r.State == StateLive && now.Sub(leaseStart(r)) < seenWriteEvery {
 				return r, nil
+			}
+			if EffectiveState(r, now) == StateStopped {
+				next.SessionAt = now
 			}
 			next.State, next.SeenAt = StateLive, now
 		case r.State == StateStopped:

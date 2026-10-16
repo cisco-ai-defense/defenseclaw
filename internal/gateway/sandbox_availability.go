@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // Whether a sandbox can run for one account on this host, as the managed
@@ -82,7 +83,11 @@ const (
 	// no_kvm, no_kvm_access) under driver_fallback: none; otherwise the
 	// docker fallback runs.
 	// The OpenShell prerequisites the lifecycle records (prerequisites.json).
-	sandboxUnavailableNotSetUp          = "OpenShell is not set up on this computer"
+	sandboxUnavailableNotSetUp = "OpenShell is not set up on this computer"
+	// sandboxUnavailableSetupChanging: the record is of another driver or
+	// install mode than the configured one, which the lifecycle has not
+	// prepared yet (an administrator's switch, #1203).
+	sandboxUnavailableSetupChanging     = sandboxrelay.UnavailableSetupChanging
 	sandboxUnavailableNoOpenShell       = "OpenShell is not installed"
 	sandboxUnavailableDockerMissing     = "Docker is not installed"
 	sandboxUnavailablePrerequisiteOther = "a sandbox prerequisite is missing on this computer"
@@ -332,7 +337,10 @@ func sandboxPrerequisiteWhy(cfg *config.Config, goos, driver string, record sand
 	want := cfg.Enterprise.OpenShell.SandboxDriver(goos)
 	if !strings.EqualFold(strings.TrimSpace(record.Install), install) ||
 		!strings.EqualFold(strings.TrimSpace(record.Driver), want) {
-		return sandboxUnavailableNotSetUp
+		// The lifecycle prepared another setup than the one configured now:
+		// the organization switched it, and the switch is under way. Not a
+		// missing setup to ask IT about (#1203).
+		return sandboxUnavailableSetupChanging
 	}
 	items := record.sandboxPrerequisiteItems
 	if driver == config.EnterpriseOpenShellDriverDocker && want != config.EnterpriseOpenShellDriverDocker {

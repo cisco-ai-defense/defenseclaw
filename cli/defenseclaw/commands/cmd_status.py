@@ -486,7 +486,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
         _print_hook_guardian(cfg)
-        _print_fleet_health(client)
+        _print_fleet_health(cfg, client)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -528,7 +528,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        _print_fleet_health(client)
+        _print_fleet_health(cfg, client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -710,6 +710,7 @@ def _print_agents(
         return
 
     gc = getattr(cfg, "guardrail", None)
+    agent_missing = {c for c in actives if _agent_missing(cfg, c)}
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -737,6 +738,7 @@ def _print_agents(
     not_running_count = sum(
         1 for c in actives if _is_enabled(c) and (
             c == "claudecode" and not shutil.which("claude")
+            or c in agent_missing
             or c not in health_map and c in not_started
         )
     )
@@ -794,7 +796,11 @@ def _print_agents(
         if hc:
             runtime_detail = ""
             runtime_state = str(hc.get("state") or "")
-            if conn == "opencode":
+            if conn in agent_missing:
+                # The gateway registers a staged connector, but no agent
+                # runs its hooks (GAP-0513).
+                runtime_state, runtime_detail = "off", _agent_missing_detail(conn)
+            elif conn == "opencode":
                 runtime_state, runtime_detail = _opencode_runtime_truth(
                     hc,
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -822,7 +828,10 @@ def _print_agents(
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn == "opencode" and not sidecar_down:
+            if conn in agent_missing:
+                suffix = _connector_state_verb("off") + ux.dim(f" ({_agent_missing_detail(conn)})")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "opencode" and not sidecar_down:
                 # With the sidecar stopped the header already says no
                 # connector is enforced; tag none of them (GAP-1871).
                 runtime_state, runtime_detail = _opencode_runtime_truth(
@@ -1034,6 +1043,32 @@ def _connectors_not_started(health: dict | None) -> set[str]:
     if not isinstance(names, list):
         return set()
     return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
+
+
+def _agent_missing(cfg, connector: str) -> bool:
+    """Whether the connector's agent is not installed (GAP-0513).
+
+    The rule of doctor's Connector compatibility row
+    (``doctor_health.connector_agent_missing``), so a connector setup staged
+    for an agent that is not installed is not shown RUNNING or counted
+    active while doctor fails it. Claude Code and OpenClaw keep their own
+    checks (the ``claude`` executable on PATH, the OpenClaw install).
+    """
+    if connector in ("claudecode", "openclaw"):
+        return False
+    try:
+        from defenseclaw.doctor_health import connector_agent_missing
+
+        return connector_agent_missing(str(getattr(cfg, "data_dir", "") or ""), connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
+        return False
+
+
+def _agent_missing_detail(connector: str) -> str:
+    return (
+        f"{_friendly_connector_name(connector)} is not installed, so nothing runs the hooks setup staged; "
+        "install it, then run: defenseclaw agent discover --refresh"
+    )
 
 
 def _connector_state_verb(state: str) -> str:
@@ -1669,7 +1704,12 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             },
         )
     health_map = _fetch_health_connectors(health=health)
-    if "opencode" in rows:
+    for name, row in rows.items():
+        if row.get("enabled") and _agent_missing(cfg, name):
+            # As the text output: not running while doctor fails it (GAP-0513).
+            row["state"] = "off"
+            row["runtime_detail"] = _agent_missing_detail(name)
+    if "opencode" in rows and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
             gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -1774,29 +1814,33 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
-    payload["fleet"] = _fleet_health_payload(client)
+    payload["fleet"] = _fleet_health_payload(cfg, client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
 
 
-def _fetch_fleet_health(client) -> dict | None:
-    """GET /api/v1/fleet/health from the gateway; None when unavailable."""
-    if client is None:
+def _fleet_enabled(cfg) -> bool:
+    # Identity check, as _sandboxes_enabled: a stand-in config is not "on".
+    return getattr(getattr(cfg, "fleet", None), "enabled", False) is True
+
+
+def _fetch_fleet_health(cfg, client) -> dict | None:
+    """GET /api/v1/fleet/health from the gateway; None when unavailable.
+
+    Only a Fleet-enabled config asks: with Fleet off the route does not
+    exist, and a Fleet token sent in place of the gateway token made every
+    status call log an api-auth-failure row (DAMAGE-678 A7).
+    """
+    if client is None or not _fleet_enabled(cfg):
         return None
     import os
 
     try:
-        # Use the fleet bearer token (DCLAW_FLEET_API_TOKEN), not the gateway token.
-        # Fall back to reading from ~/.defenseclaw/.env if the env var is not set.
-        fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
-        if not fleet_token:
-            env_file = Path.home() / ".defenseclaw" / ".env"
-            if env_file.exists():
-                for line in env_file.read_text().splitlines():
-                    if line.startswith("DCLAW_FLEET_API_TOKEN="):
-                        fleet_token = line.split("=", 1)[1].strip()
-                        break
+        # The Fleet bearer token, not the gateway token. Loading the config
+        # already merged the data dir's .env into the environment.
+        token_env = getattr(cfg.fleet, "api_token_env", "") or "DCLAW_FLEET_API_TOKEN"
+        fleet_token = os.environ.get(token_env, "").strip()
         headers = {}
         if fleet_token:
             headers["Authorization"] = f"Bearer {fleet_token}"
@@ -1828,9 +1872,11 @@ def _safe_int(val, default=0):
         return default
 
 
-def _print_fleet_health(client) -> None:
-    """Render a Fleet row when the fleet API is reachable."""
-    data = _fetch_fleet_health(client)
+def _print_fleet_health(cfg, client) -> None:
+    """Render a Fleet row when Fleet is enabled; nothing otherwise."""
+    if not _fleet_enabled(cfg):
+        return
+    data = _fetch_fleet_health(cfg, client)
     if data is None:
         _status_row("Fleet", ux.dim("not configured"))
         return
@@ -1845,9 +1891,9 @@ def _print_fleet_health(client) -> None:
     _status_row("Fleet", f"{online_text}, {offline_text}")
 
 
-def _fleet_health_payload(client) -> dict:
+def _fleet_health_payload(cfg, client) -> dict:
     """Fleet health as a JSON-friendly dict for ``status --json``."""
-    data = _fetch_fleet_health(client)
+    data = _fetch_fleet_health(cfg, client)
     if data is None:
         return {"available": False}
     return {
@@ -1856,7 +1902,7 @@ def _fleet_health_payload(client) -> dict:
         "online": _safe_int(data.get("online", 0)),
         "offline": _safe_int(data.get("offline", 0)),
         "degraded": _safe_int(data.get("degraded", 0)),
-        "lockdown": int(data.get("lockdown", 0)),
+        "lockdown": _safe_int(data.get("lockdown", 0)),
     }
 
 

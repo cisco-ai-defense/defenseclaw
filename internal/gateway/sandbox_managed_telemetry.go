@@ -68,6 +68,44 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 	return r.(*audit.SandboxRecorder)
 }
 
+// refreshManagedSandboxActive exports the managed recorder's active-sandbox
+// gauge again when its last export is SandboxActiveExportInterval old
+// (audit.SandboxRecorder.RecordActiveSandboxesIfDue); nothing before the
+// recorder tracked anything.
+func (a *APIServer) refreshManagedSandboxActive(ctx context.Context) {
+	r, ok := managedSandboxRecorders.Load(a)
+	if !ok {
+		return
+	}
+	if err := r.(*audit.SandboxRecorder).RecordActiveSandboxesIfDue(context.WithoutCancel(ctx), audit.SandboxActiveExportInterval); err != nil {
+		sandboxRecordFailed("sandbox active", err)
+	}
+}
+
+// trackManagedSandboxActive has the managed recorder count reg's sandbox
+// from the registration, running while its daemon reports it running,
+// unless a lifecycle record tracks it (audit.SandboxRecorder.
+// TrackManagedSandbox). After the gateway starts again its recorder tracks
+// nothing, and a sandbox that runs on quietly sends no lifecycle record to
+// count it by: its daemon's polls, once a minute, count it again (#1241).
+func (a *APIServer) trackManagedSandboxActive(ctx context.Context, auth *sandboxAuthority, uid int, reg sandboxreg.Registration) {
+	if reg.State != sandboxreg.StateLive && reg.State != sandboxreg.StateStopped || reg.SandboxName == "" {
+		return
+	}
+	phase := audit.SandboxPhaseStopped
+	if sandboxreg.EffectiveState(reg, auth.clock()) == sandboxreg.StateLive {
+		phase = audit.SandboxPhaseReady
+	}
+	changed, err := a.managedSandboxRecorder().TrackManagedSandbox(context.WithoutCancel(ctx), reg.ID, reg.Connector,
+		sandboxRecordSubject(reg).UserID, phase)
+	sandboxRecordFailed("sandbox active", err)
+	if changed {
+		// Revoked or removed meanwhile: the store's OnGone may have run
+		// before it was tracked.
+		a.sandboxForgetIfGone(auth, uid, reg)
+	}
+}
+
 // sandboxRegistrationGone stops tracking the phase of reg's sandbox. The
 // registration store calls it (sandboxreg.FileStore.OnGone) whenever a
 // registration is revoked, removed or evicted, by any path, so a sandbox
@@ -75,6 +113,7 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 // recorder's phase map nor counts in sandbox.active; the daemon's deleted
 // record is not relied on.
 func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
+	a.sandboxGuestSignalForget(reg)
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
 	}
@@ -442,8 +481,8 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 // network profile or policy revision, which no registration vouches for. A
 // registration not bound to a sandbox yet takes no record (the daemon posts
 // only after the bind), and a record naming another sandbox than reg's is
-// dropped, so a caller can't make up sandboxes: each one would be a phase the
-// managed recorder tracks for every account (sandboxPhaseKey).
+// dropped, so a telemetry record cannot name a sandbox other than the one
+// held by the registration (sandboxPhaseKey).
 func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
 	var c sandboxTelemetryClaim
 	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &c) != nil {
@@ -499,7 +538,17 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 		// the registration and the subject key alone.
 		sandboxRecordFailed(ev.Kind+" (stamped)", err)
 		identity.Managed = audit.SandboxManaged{RegistrationID: reg.ID, SubjectKey: reg.SubjectKey}
-		sandboxRecordFailed(ev.Kind, record(identity))
+		if err := record(identity); err != nil {
+			sandboxRecordFailed(ev.Kind, err)
+			return
+		}
+	}
+	// Only a record accepted for this bound sandbox after bind is a sighting.
+	// The gateway stamps receipt time: queued creation records predate the bind.
+	// Tombstone telemetry still records the sandbox's last phases, but cannot
+	// establish a new sighting for a revoked registration.
+	if reg.State != sandboxreg.StateRevoked {
+		a.sandboxMarkGuestSeen(reg)
 	}
 }
 

@@ -81,6 +81,7 @@ func setupApp(t *testing.T, input, extra string, settled bool) *testApp {
 	if settled {
 		ta.gateway.state.BindMounts = mountsOn
 		ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
+		ta.gateway.state.DockerNamespace = openshell.AccountDockerNamespace(1000)
 	}
 	return ta
 }
@@ -1050,6 +1051,7 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
+	ta.gateway.state.DockerNamespace = openshell.AccountDockerNamespace(1000)
 	wantExit(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}), 1)
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
@@ -1575,6 +1577,7 @@ func TestSetupTelemetryQuestionSaysItRestartsTheGateway(t *testing.T) {
 	ta := setupApp(t, "", "  upstream_telemetry: true\n", false)
 	ta.Cfg.OpenShell.UpstreamTelemetry = true
 	ta.gateway.state.BindMounts = mountsOn
+	ta.gateway.state.DockerNamespace = openshell.AccountDockerNamespace(1000)
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 	has(t, ta.output(), "OpenShell's anonymous usage telemetry stays on (openshell.upstream_telemetry is true in")
 	lacks(t, ta.output(), "Disable OpenShell's anonymous usage telemetry?")

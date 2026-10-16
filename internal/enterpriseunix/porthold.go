@@ -150,29 +150,60 @@ func (e *Env) linuxPortHolders(port int) []portHolder {
 	return holders
 }
 
+// darwinListenHosts are the lsof local addresses whose listener keeps the
+// gateway from binding 127.0.0.1 (as linuxListenAddrs): the address itself
+// and the wildcards.
+var darwinListenHosts = map[string]bool{"127.0.0.1": true, "*": true, "[::]": true, "[::ffff:127.0.0.1]": true}
+
 // darwinPortHolders asks lsof (as root it sees every process) for the
 // listeners on port.
 func (e *Env) darwinPortHolders(ctx context.Context, port int) []portHolder {
-	result, err := e.Runner.Run(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-Fpu")
+	result, err := e.Runner.Run(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-Fpun")
 	if err != nil && len(result.Stdout) == 0 {
 		return nil
 	}
-	var holders []portHolder
-	for _, line := range strings.Split(string(result.Stdout), "\n") {
+	return parseDarwinPortHolders(string(result.Stdout))
+}
+
+// parseDarwinPortHolders reads `lsof -Fpun`: a p (pid) line per process, its
+// u (uid), and an n (local address:port) line per listening socket. A
+// process listening only on other local addresses (a LAN address) does not
+// keep the gateway from binding 127.0.0.1, and the preflight refused it
+// (GAP-1491); a process lsof names no address for stays a holder.
+func parseDarwinPortHolders(output string) []portHolder {
+	type process struct {
+		holder             portHolder
+		names, conflicting int
+	}
+	var processes []*process
+	for _, line := range strings.Split(output, "\n") {
 		if len(line) < 2 {
-			continue
-		}
-		value, err := strconv.Atoi(line[1:])
-		if err != nil {
 			continue
 		}
 		switch line[0] {
 		case 'p':
-			holders = append(holders, portHolder{PID: value, UID: -1})
-		case 'u':
-			if len(holders) > 0 {
-				holders[len(holders)-1].UID = value
+			if pid, err := strconv.Atoi(line[1:]); err == nil {
+				processes = append(processes, &process{holder: portHolder{PID: pid, UID: -1}})
 			}
+		case 'u':
+			if uid, err := strconv.Atoi(line[1:]); err == nil && len(processes) > 0 {
+				processes[len(processes)-1].holder.UID = uid
+			}
+		case 'n':
+			if len(processes) == 0 {
+				continue
+			}
+			current := processes[len(processes)-1]
+			current.names++
+			if i := strings.LastIndexByte(line, ':'); i > 1 && darwinListenHosts[line[1:i]] {
+				current.conflicting++
+			}
+		}
+	}
+	var holders []portHolder
+	for _, p := range processes {
+		if p.names == 0 || p.conflicting > 0 {
+			holders = append(holders, p.holder)
 		}
 	}
 	return holders

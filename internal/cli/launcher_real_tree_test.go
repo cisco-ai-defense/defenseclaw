@@ -137,6 +137,25 @@ func TestLauncherOnTheRealCommandTree(t *testing.T) {
 			}
 		}
 	})
+	// The root help lists `help`, so `help --help` answers with its usage
+	// and exit 0, as every other listed command does (GAP-0471, GAP-0479,
+	// GAP-0480).
+	t.Run("the listed help command answers --help", func(t *testing.T) {
+		for _, args := range [][]string{{"help", "--help"}, {"help", "-h"}} {
+			stdout, stderr, code := runLauncherRealTree(t, args...)
+			if code != 0 || strings.Contains(stderr, launcherRefusal) {
+				t.Fatalf("%v: exit %d, stderr %q", args, code, stderr)
+			}
+			if !strings.Contains(stdout, "Usage:") || !strings.Contains(stdout, "defenseclaw help") {
+				t.Errorf("%v: no usage of the help command:\n%s", args, stdout)
+			}
+			for _, hidden := range []string{"--host", "--port", "--version-json"} {
+				if strings.Contains(stdout, hidden) {
+					t.Errorf("%v: help mentions %q:\n%s", args, hidden, stdout)
+				}
+			}
+		}
+	})
 	t.Run("the sandbox tree answers help", func(t *testing.T) {
 		stdout, stderr, code := runLauncherRealTree(t, "sandbox", "--help")
 		if code != 0 || !strings.Contains(stdout, "run") {
@@ -155,6 +174,9 @@ func TestLauncherOffersHelpOnlyForTheSandboxTree(t *testing.T) {
 		{[]string{"help", "sandbox"}, true},
 		{[]string{"help", "sandbox", "run"}, true},
 		{[]string{"help", "status"}, false},
+		{[]string{"help", "--help"}, true},
+		{[]string{"help", "-h"}, true},
+		{[]string{"help", "--host"}, false},
 		{[]string{"sandbox", "list"}, true},
 		{[]string{"--version-json"}, false},
 		{[]string{"--host", "x"}, false},

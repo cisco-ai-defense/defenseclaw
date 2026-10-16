@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // The managed gateway's one recorder tracks the phase of every account's
@@ -70,16 +69,69 @@ func (recorder *SandboxRecorder) managedPhaseRoomLocked(key string, input Sandbo
 	if _, known := recorder.phases[key]; known {
 		return nil
 	}
-	held := 0
-	for other, tracked := range recorder.phases {
-		if tracked.owner == input.UserID && strings.HasPrefix(other, sandboxManagedPhasePrefix) {
-			held++
-		}
-	}
-	if held >= recorder.managedLimit {
+	if held := recorder.managedHeldLocked(input.UserID); held >= recorder.managedLimit {
 		return fmt.Errorf("%w (account %q, %d tracked)", ErrSandboxPhaseLimit, input.UserID, held)
 	}
 	return nil
+}
+
+// managedHeldLocked counts the managed sandboxes the recorder tracks for
+// owner. The caller holds recorder.lifecycle.
+func (recorder *SandboxRecorder) managedHeldLocked(owner string) int {
+	held := 0
+	for key, tracked := range recorder.phases {
+		if tracked.owner == owner && strings.HasPrefix(key, sandboxManagedPhasePrefix) {
+			held++
+		}
+	}
+	return held
+}
+
+// TrackManagedSandbox sets the phase of the managed sandbox of registration
+// registrationID from the managed gateway's registration (its daemon's
+// last state report: ready while it runs, stopped otherwise) unless a
+// lifecycle record tracks it. After the gateway starts again its recorder
+// tracks nothing, and a sandbox that runs on quietly sends no lifecycle
+// record to count it by: it was in no metric.defenseclaw.sandbox.active
+// point until its next phase change (#1241). A phase a lifecycle record
+// set is left as it is, a phase set here is never a lifecycle record's
+// previous phase, and owner's LimitManagedPhases bound holds. When the
+// phase changed, connector's gauge is exported at once; it reports whether
+// it changed.
+func (recorder *SandboxRecorder) TrackManagedSandbox(ctx context.Context, registrationID, connector, owner string, phase SandboxPhase) (bool, error) {
+	if recorder == nil || registrationID == "" || connector == "" || !phase.Valid() || phase == SandboxPhaseDeleted {
+		return false, nil
+	}
+	recorder.lifecycle.Lock()
+	defer recorder.lifecycle.Unlock()
+	key := sandboxManagedPhaseKey(registrationID)
+	tracked, known := recorder.phases[key]
+	switch {
+	case known && (!tracked.fromRegistration || tracked.phase == phase && tracked.connector == connector):
+		return false, nil
+	case !known && recorder.managedLimit > 0 && recorder.managedHeldLocked(owner) >= recorder.managedLimit:
+		return false, fmt.Errorf("%w (account %q)", ErrSandboxPhaseLimit, owner)
+	}
+	recorder.phases[key] = sandboxTrackedPhase{connector: connector, phase: phase, owner: owner, fromRegistration: true}
+	affected := []string{connector}
+	if known && tracked.connector != connector {
+		affected = append(affected, tracked.connector)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return true, recorder.exportActiveLocked(ctx, affected)
+}
+
+// ActiveSandboxes is the metric.defenseclaw.sandbox.active count of
+// connector the recorder tracks now.
+func (recorder *SandboxRecorder) ActiveSandboxes(connector string) int64 {
+	if recorder == nil {
+		return 0
+	}
+	recorder.lifecycle.Lock()
+	defer recorder.lifecycle.Unlock()
+	return recorder.activeLocked(connector)
 }
 
 // ForgetManagedSandbox stops tracking the phase of the managed sandbox of
@@ -98,19 +150,13 @@ func (recorder *SandboxRecorder) ForgetManagedSandbox(ctx context.Context, regis
 		return false
 	}
 	delete(recorder.phases, key)
-	if !tracked.phase.Active() || recorder.logger == nil {
-		return true
-	}
-	binding := recorder.logger.runtimeV8BindingSnapshot()
-	if binding.metricBatch == nil {
+	if !tracked.phase.Active() {
 		return true
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	event := recorder.newEvent(ctx, ActionSandboxLifecycle, SandboxIdentity{Connector: tracked.connector}, "", "", time.Now())
-	_ = recorder.logger.recordRuntimeV8GeneratedMetricBatch(ctx, binding,
-		[]RuntimeV8GeneratedMetric{newSandboxActiveMetric(event, tracked.connector, recorder.activeLocked(tracked.connector))})
+	_ = recorder.exportActiveLocked(ctx, []string{tracked.connector})
 	return true
 }
 

@@ -166,17 +166,17 @@ func TestVerifyAndRestorePublishedDirWithMacOSDenyACL(t *testing.T) {
 	}
 	dir := filepath.Join(opts.Root, "Library/Application Support/ClaudeCode/managed-settings.d")
 	denied := true
-	previousRead, previousClear := publishedDirACLEntries, clearPublishedDirACL
-	t.Cleanup(func() { publishedDirACLEntries, clearPublishedDirACL = previousRead, previousClear })
+	previousRead, previousRemove := publishedDirACLEntries, removeDarwinACLEntry
+	t.Cleanup(func() { publishedDirACLEntries, removeDarwinACLEntry = previousRead, previousRemove })
 	publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error) {
 		if path != dir || !denied {
 			return nil, nil
 		}
 		return []managed.DarwinACLEntry{{Text: "group:everyone deny list,search", Rights: []string{"list", "search"}}}, nil
 	}
-	clearPublishedDirACL = func(path string) error {
-		if path != dir {
-			t.Fatalf("cleared unexpected ACL on %s", path)
+	removeDarwinACLEntry = func(path string, index int) error {
+		if path != dir || index != 0 {
+			t.Fatalf("removed unexpected ACL entry %d on %s", index, path)
 		}
 		denied = false
 		return nil
@@ -232,7 +232,7 @@ func TestVerifyAndRestorePublishedDirWithoutGroupAccess(t *testing.T) {
 // GAP-1350: a Linux named-user ACL entry without search on the 0755
 // managed-settings directory keeps that user's Claude Code from loading the
 // policy while the mode bits look right. Verify reports it and the restore
-// removes the ACL.
+// gives that entry search and list (GAP-1323: it no longer removes the ACL).
 func TestVerifyAndRestorePublishedDirWithLinuxDenyACL(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("POSIX ACL xattrs are Linux-only")

@@ -92,7 +92,7 @@ token that carries the Intune permissions.
   what it can and says so for the rest.
 - Uploading a Win32 app is an admin center step (see `../windows`); `assign-app` assigns it afterwards.
 - A Linux platform script is created in the admin center; there is no Linux command here.
-- The tenant helper does not assign licences or create users; `../../identity/entra/entra_setup.py`
+- The tenant helper does not assign licences or create users; `../../../identity/entra/entra_setup.py`
   creates groups and users in Entra ID.
 
 Microsoft Graph can take up to about 45 seconds to list a newly created group.

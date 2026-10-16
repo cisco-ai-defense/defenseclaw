@@ -1,0 +1,36 @@
+config_version: 9
+data_dir: '@HOME@'
+# A 0.8.10 home after its own config v8 upgrade, with an operator rule pack,
+# a skill-scanner policy file named custom (0.8.x read it relative to the
+# working directory) and a hand-written provider overlay that names one
+# provider twice.
+guardrail:
+  mode: action
+  custom_packs:
+    team:
+      path: @HOME@/policies/guardrail/team
+      digest: sha256:723919560cad01dd787dcf3c97e83755fea957570c62d9970da65f944b3c5d28
+  rule_pack: team
+scanners:
+  skill_scanner:
+    policy: custom
+    policy_file:
+      path: @HOME@/custom
+      digest: sha256:5c96c04167f2684aae76877470b96254b0636a029dd291f9a4d4d5194d0f6b18
+observability: {}
+update:
+  check: false
+llm_providers:
+  custom:
+    - name: acme
+      domains:
+        - llm.acme.internal
+        - eu.llm.acme.internal
+      env_keys:
+        - ACME_KEY
+        - ACME_EU_KEY
+      base_url: https://eu.llm.acme.internal/v1
+      available_models:
+        - acme-small
+      allowed_requests:
+        - chat

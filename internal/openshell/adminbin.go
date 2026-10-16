@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -70,4 +71,117 @@ func AdminBinary(goos, name string, trusted func(path string) error) (string, er
 		return "", fmt.Errorf("%w: %s", ErrNoAdminBinary, strings.Join(refused, "; "))
 	}
 	return "", fmt.Errorf("%w: %s is in none of %s", ErrNoAdminBinary, name, strings.Join(AdminBinaryDirs(goos), ", "))
+}
+
+// AdminVMDriverDirs are the folders the administrator's openshell-driver-vm
+// (the MicroVM driver) is looked up in, in order: the lifecycle renders the
+// first that holds a trusted driver as the account gateways' driver_dir.
+func AdminVMDriverDirs(goos string) []string {
+	if goos == "darwin" {
+		return []string{"/usr/local/libexec/openshell", "/opt/homebrew/libexec/openshell"}
+	}
+	return []string{"/usr/libexec/openshell", "/usr/lib/openshell", "/usr/local/libexec/openshell"}
+}
+
+// AdminVMDriver is the administrator's openshell-driver-vm on goos: the
+// first of AdminVMDriverDirs whose driver exists and passes trusted (the
+// managed trust check); refused names, as "path (why)", every candidate
+// before it that exists but fails the check. exists and trusted get the
+// canonical path (a caller on a rooted test filesystem maps it). exists
+// must require a regular executable file. It is the
+// one check of the driver: the enterprise verify (as root) and a managed
+// user's `sandbox doctor` both run it, so the doctor cannot say ready where
+// verify says the driver is missing (GAP-0481).
+func AdminVMDriver(goos string, exists func(path string) bool, trusted func(path string) error) (found string, refused []string) {
+	for _, dir := range AdminVMDriverDirs(goos) {
+		// goos is linux or darwin, so the canonical path is a slash path
+		// whatever OS runs this (filepath.Join gave backslashes on Windows).
+		driver := path.Join(dir, vmDriverBinary)
+		if !exists(driver) {
+			continue
+		}
+		if err := trusted(driver); err != nil {
+			refused = append(refused, fmt.Sprintf("%s (%v)", driver, err))
+			continue
+		}
+		return driver, refused
+	}
+	return "", refused
+}
+
+// ExecutableVMDriver reports whether the gateway can execute a regular
+// openshell-driver-vm file. Callers use it as AdminVMDriver's exists check.
+func ExecutableVMDriver(path string) bool { return executable(path) }
+
+// RenderedAdminVMDriver checks the exact driver_dir passed to the managed
+// gateway. The lifecycle chooses that directory from AdminVMDriverDirs, but
+// an older render can outlive a moved driver. An alternate trusted driver
+// elsewhere does not help: OpenShell searches only an explicit driver_dir
+// and the gateway binary's sibling when driver_dir is set.
+func RenderedAdminVMDriver(goos, driverDir string, executable func(path string) bool, trusted func(path string) error) (string, string) {
+	allowed := false
+	for _, dir := range AdminVMDriverDirs(goos) {
+		if dir == driverDir {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Sprintf("the rendered MicroVM driver_dir %q is not one of the administrator's driver directories (%s)", driverDir, strings.Join(AdminVMDriverDirs(goos), ", "))
+	}
+	driver := path.Join(driverDir, vmDriverBinary)
+	if !executable(driver) {
+		return "", fmt.Sprintf("the rendered MicroVM driver_dir %q has no executable %s", driverDir, vmDriverBinary)
+	}
+	if err := trusted(driver); err != nil {
+		return "", fmt.Sprintf("the rendered MicroVM driver %s is not trusted: %v", driver, err)
+	}
+	return driver, ""
+}
+
+// adminVMDriverArchive is OpenShell's release archive of the MicroVM driver
+// for a managed host ("" when it publishes none).
+func adminVMDriverArchive(goos, goarch string) string {
+	switch goos + "/" + goarch {
+	case "linux/amd64", "linux/arm64":
+		return vmDriverArchive(goarch)
+	case "darwin/arm64":
+		return vmDriverBinary + "-aarch64-apple-darwin.tar.gz"
+	}
+	return ""
+}
+
+// AdminVMDriverFix is the administrator's step (worded for the
+// administrator: the managed doctor says to ask for it) on a managed host
+// without a
+// trusted openshell-driver-vm: install the driver of OpenShell InstallerTag
+// root-owned into the first of AdminVMDriverDirs, after checking its release
+// archive against the SHA-256 this build pins for it (TarballPins), never
+// against a checksum file fetched from the same release (#1224). The
+// openshell package ships no MicroVM driver.
+func AdminVMDriverFix(goos, goarch string) *Fix {
+	dir := AdminVMDriverDirs(goos)[0]
+	archive := adminVMDriverArchive(goos, goarch)
+	if archive == "" {
+		return &Fix{Summary: "OpenShell publishes its MicroVM driver for Linux on amd64 and arm64 and for Apple-silicon Macs only"}
+	}
+	digest := TarballPins[InstallerVersion][archive]
+	if digest == "" {
+		return &Fix{Summary: "install " + vmDriverBinary + " of OpenShell " + InstallerTag + " root-owned into " + dir +
+			" (this DefenseClaw build pins no digest for " + archive + ")", Sudo: true}
+	}
+	check, group := "sha256sum -c -", "root"
+	if goos == "darwin" {
+		check, group = "shasum -a 256 -c -", "wheel"
+	}
+	return &Fix{
+		Summary: "install " + vmDriverBinary + " of OpenShell " + InstallerTag + " root-owned into " + dir +
+			", after checking the archive against the SHA-256 this DefenseClaw build pins for it (the openshell package ships no MicroVM driver)",
+		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + TarballBaseURL + InstallerTag + "/" + archive +
+			" && echo '" + digest + "  " + archive + "' | " + check + " && tar -xzf " + archive + " " + vmDriverBinary +
+			" && sudo install -d -m 0755 -o root -g " + group + " " + dir +
+			" && sudo install -m 0755 -o root -g " + group + " " + vmDriverBinary + " " + dir + "/" + vmDriverBinary +
+			"; cd - >/dev/null; rm -rf \"$d\"",
+		Sudo: true,
+	}
 }

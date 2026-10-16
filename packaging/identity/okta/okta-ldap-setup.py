@@ -535,7 +535,8 @@ def cmd_posix_schema(client: Okta, args: argparse.Namespace) -> int:
 
 
 def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, used: set[int],
-                 gid_base: int) -> tuple[dict[str, Any] | None, int | None]:
+                 gid_base: int, id_min: int = 1710000, id_max: int = 1729999
+                 ) -> tuple[dict[str, Any] | None, int | None]:
     """Make sure the Okta group exists and has a gidNumber.
 
     Returns the group and its gidNumber. The group is None when a dry run would create it (then
@@ -557,6 +558,10 @@ def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, 
     profile = dict(group.get("profile", {}))
     have = profile.get("gidNumber")
     if have is not None:
+        if not id_min <= int(have) <= id_max:
+            report.problem(f"group {name} has gidNumber {have} outside SSSD range {id_min}..{id_max}; "
+                           "choose a gidNumber inside the host's configured range")
+            return group, None
         if want_gid is not None and int(have) != want_gid:
             report.problem(f"group {name} has gidNumber {have}, not {want_gid}; change it in Okta if that is wrong")
         else:
@@ -590,6 +595,11 @@ def unix_name(login: str) -> str:
 
 def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
     report = Report(dry_run=not args.apply)
+    id_min = getattr(args, "id_min", 1710000)
+    id_max = getattr(args, "id_max", 1729999)
+    if id_min >= id_max:
+        report.problem("--id-min must be below --id-max")
+        return report.finish()
     if not args.user and not args.users_from:
         raise OktaError("name the users: --user LOGIN (repeatable) or --users-from OKTA_GROUP")
 
@@ -627,11 +637,12 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
     used_gids = check_duplicate_group_gids(client, report)
     if report.problems:
         return report.finish()
-    primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids, args.gid_base)
+    primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids,
+                                        args.gid_base, id_min, id_max)
     if report.problems:
         return report.finish()
     for name, gid in args.group or []:
-        ensure_group(client, report, name, gid, used_gids, args.gid_base)
+        ensure_group(client, report, name, gid, used_gids, args.gid_base, id_min, id_max)
     if report.problems:
         return report.finish()
 
@@ -965,6 +976,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="first uidNumber to hand out (default 1710000)")
     assign.add_argument("--gid-base", type=int, default=1720000, metavar="N",
                         help="first gidNumber to hand out (default 1720000)")
+    assign.add_argument("--id-min", type=int, default=1710000, metavar="N",
+                        help="host SSSD min_id (default 1710000)")
+    assign.add_argument("--id-max", type=int, default=1729999, metavar="N",
+                        help="host SSSD max_id (default 1729999)")
     assign.add_argument("--shell", default="/bin/bash", help="loginShell for users without one (default /bin/bash)")
     assign.add_argument("--home-template", default="/home/{name}", help="homeDirectory; {name} is the account name")
     assign.set_defaults(func=cmd_assign_posix)

@@ -379,6 +379,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		changes.EnableBindMounts = yes
 		copyOnly = !yes
 	}
+	if !microVM && a.GOOS == "linux" {
+		// The account's docker gateway gets a sandbox namespace of its own
+		// in the same plan, unless it keeps sandboxes in the shared one
+		// (GAP-0579).
+		changes.DockerNamespace = a.accountDockerNamespace(ctx, state)
+	}
 	// A saved openshell.upstream_telemetry: true is an earlier answer to
 	// keep it, which setup does not ask again.
 	keepTelemetry := o.UpstreamTelemetry || a.Cfg.OpenShell.UpstreamTelemetry
@@ -443,7 +449,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// leaves it on docker.
 	switching := microVM && rep.Driver != openshell.DriverVM
 	switched := false
-	if changes.EnableBindMounts || changes.ComputeDriver != "" || changes.ServiceUMask != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
+	if changes.EnableBindMounts || changes.ComputeDriver != "" || changes.ServiceUMask != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 ||
+		changes.DockerNamespace != "" {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
 			return fmt.Errorf("plan the gateway change: %w", err)

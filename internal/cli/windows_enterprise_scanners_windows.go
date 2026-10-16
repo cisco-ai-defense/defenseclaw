@@ -204,9 +204,15 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				}
 			}
 			if result.Scanners.State != "missing" && result.Scanners.JudgeModel == "" {
-				result.AddWarning("scanner_judge_missing",
-					"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
-						"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
+				if windowsStandaloneSkillJudgeDisabled() {
+					result.AddWarning("scanner_judge_missing",
+						"the skill scanner runs without its LLM judge because scanners.skill_scanner.use_llm is false in the admin config "+
+							"(recommended: the quiet policy with the LLM judge); set it to true, with llm.model and its key stored by `enterprise secret set`")
+				} else {
+					result.AddWarning("scanner_judge_missing",
+						"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
+							"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
+				}
 			}
 		}
 	}
@@ -391,6 +397,11 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 	if state == "not_prepared" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime is prepared but damaged (" + scanners.Problem + "), " + blocked +
 			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to unpack it again"
+	}
+	if state == "untrusted" && scanners.Problem != "" {
+		return "the skill, MCP and plugin scanner runtime can be changed by an account other than SYSTEM and Administrators (" +
+			scanners.Problem + "), so DefenseClaw does not run it, " + blocked +
+			"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, which puts back the folder's protected permissions and the payload copy"
 	}
 	if state == "untrusted" {
 		return "the skill, MCP and plugin scanner runtime executable is not the one the payload trust policy admitted " +
@@ -680,13 +691,18 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 	if info, err := os.Lstat(target); err != nil || !info.Mode().IsRegular() {
 		return state
 	}
+	state.Policy, state.JudgeModel = readWindowsStandaloneScannerSettings()
 	// Status and verify run this executable with elevated caller privileges.
 	// Check the runtime root as a protected directory, then the executable
 	// and its ancestors, before invoking even the read-only versions command.
-	if windowsScannerRuntimeACLCheck(root, target) != nil {
+	// A runtime an unprivileged account can change is not run, and it is not
+	// missing either: it was reported as missing, and the advice left out the
+	// access that keeps it from running (GAP-0827).
+	if err := windowsScannerRuntimeACLCheck(root, target); err != nil {
+		state.State = "untrusted"
+		state.Problem = err.Error()
 		return state
 	}
-	state.Policy, state.JudgeModel = readWindowsStandaloneScannerSettings()
 	// Then that it is the executable the payload trust policy admitted: an
 	// administrator-only folder does not stop an administrator, or a process
 	// running as one, from replacing it in place (GAP-0311).
@@ -715,41 +731,75 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 }
 
 // readWindowsStandaloneScannerSettings reads the skill scanner policy and
-// its judge model from the installed admin config.
+// its judge model from the installed admin config. The model is "" when
+// scanners.skill_scanner.use_llm is false: no scan runs the judge then, and
+// status named the configured model as the judge (GAP-1016).
 func readWindowsStandaloneScannerSettings() (string, string) {
-	layout, err := managed.StandaloneWindowsLayout()
-	if err != nil {
-		return "", ""
-	}
-	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 4<<20)
-	if err != nil {
-		return "", ""
-	}
-	var document struct {
-		LLM struct {
-			Model string `yaml:"model"`
-		} `yaml:"llm"`
-		Scanners struct {
-			SkillScanner struct {
-				Policy string `yaml:"policy"`
-				LLM    struct {
-					Model string `yaml:"model"`
-				} `yaml:"llm"`
-			} `yaml:"skill_scanner"`
-		} `yaml:"scanners"`
-	}
-	if yaml.Unmarshal(trimWindowsJSONBOM(body), &document) != nil {
+	document, ok := readWindowsStandaloneScannerDocument()
+	if !ok {
 		return "", ""
 	}
 	model := strings.TrimSpace(document.Scanners.SkillScanner.LLM.Model)
 	if model == "" {
 		model = strings.TrimSpace(document.LLM.Model)
 	}
+	if document.skillJudgeDisabled() {
+		model = ""
+	}
 	policy := strings.TrimSpace(document.Scanners.SkillScanner.Policy)
 	if policy == "" {
 		policy = config.DefaultSkillScannerPolicy
 	}
 	return policy, model
+}
+
+// windowsStandaloneScannerDocument is the part of the installed admin
+// config that names the skill scanner's policy and judge.
+type windowsStandaloneScannerDocument struct {
+	LLM struct {
+		Model string `yaml:"model"`
+	} `yaml:"llm"`
+	Scanners struct {
+		SkillScanner struct {
+			Policy string `yaml:"policy"`
+			// UseLLM is nil when the key is absent: the standalone default
+			// runs the judge.
+			UseLLM *bool `yaml:"use_llm"`
+			LLM    struct {
+				Model string `yaml:"model"`
+			} `yaml:"llm"`
+		} `yaml:"skill_scanner"`
+	} `yaml:"scanners"`
+}
+
+func (d windowsStandaloneScannerDocument) skillJudgeDisabled() bool {
+	return d.Scanners.SkillScanner.UseLLM != nil && !*d.Scanners.SkillScanner.UseLLM
+}
+
+// readWindowsStandaloneScannerConfig reads the installed admin config; a
+// seam for tests.
+var readWindowsStandaloneScannerConfig = func() ([]byte, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	return readWindowsEnterpriseBoundedFile(layout.ConfigPath, 4<<20)
+}
+
+func readWindowsStandaloneScannerDocument() (windowsStandaloneScannerDocument, bool) {
+	var document windowsStandaloneScannerDocument
+	body, err := readWindowsStandaloneScannerConfig()
+	if err != nil || yaml.Unmarshal(trimWindowsJSONBOM(body), &document) != nil {
+		return windowsStandaloneScannerDocument{}, false
+	}
+	return document, true
+}
+
+// windowsStandaloneSkillJudgeDisabled reports an admin config that turns
+// the skill scanner's judge off.
+func windowsStandaloneSkillJudgeDisabled() bool {
+	document, ok := readWindowsStandaloneScannerDocument()
+	return ok && document.skillJudgeDisabled()
 }
 
 // writeWindowsEnterpriseScanners prints the scanners line of a status

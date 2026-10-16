@@ -13,7 +13,6 @@
 import type {
   Policy,
   RuleDef,
-  ToolSuppressionDef,
   WebhookEntry,
 } from '../types';
 import { policyFromPreset } from '../lib/presets';
@@ -84,47 +83,16 @@ export function applyAnswers(answers: Answers): Policy {
 
   // --- Q3: ALLOW ----------------------------------------------------------
 
-  const newToolSupps: ToolSuppressionDef[] = [];
   const newDomains = new Set<string>(answers.domainsExtra.map((d) => d.trim()).filter(Boolean));
-  const newFirstParty = new Set<string>(
-    answers.firstPartyExtra.map((d) => d.trim()).filter(Boolean),
-  );
 
   for (const cardId of answers.allow) {
     const card = ALLOW_CARDS.find((c) => c.id === cardId);
     if (!card) continue;
-    if (card.toolPattern && card.suppressFindings && card.suppressFindings.length > 0) {
-      newToolSupps.push({
-        tool_pattern: card.toolPattern,
-        suppress_findings: [...card.suppressFindings],
-        reason: card.title,
-      });
-    }
     for (const d of card.domains ?? []) newDomains.add(d);
-    for (const fp of card.firstParty ?? []) newFirstParty.add(fp);
   }
-  // Dedupe by tool_pattern so re-running with the same answers doesn't
-  // add duplicates (the operator might toggle, untoggle, retoggle).
-  policy.suppressions.tool_suppressions = dedupBy(
-    [...policy.suppressions.tool_suppressions, ...newToolSupps],
-    (s) => s.tool_pattern,
-  );
   policy.firewall.allowed_domains = Array.from(
     new Set([...policy.firewall.allowed_domains, ...newDomains]),
   );
-  // First-party allow list expects {target_type, target_name, reason}
-  // entries; the Quick Start only collects target_name globs so we
-  // default target_type to 'plugin' (the broadest), matching how the
-  // bundled allow list ships.
-  for (const glob of newFirstParty) {
-    if (policy.first_party_allow_list.some((e) => e.target_name === glob)) continue;
-    policy.first_party_allow_list.push({
-      target_type: 'plugin',
-      target_name: glob,
-      reason: 'Added via Quick Start',
-      source_path_contains: [],
-    });
-  }
 
   // --- Q4: response posture ----------------------------------------------
 

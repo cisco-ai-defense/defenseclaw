@@ -69,7 +69,7 @@ import (
 //  2. driver: vm only. Extract NVIDIA's openshell-driver-vm tarball into
 //     /usr/local/libexec/openshell and chown -R root:root it (tar keeps the
 //     builder's owner). The lifecycle renders driver_dir from the first
-//     folder in systemDriverDirs that holds openshell-driver-vm.
+//     folder in openshell.AdminVMDriverDirs that holds openshell-driver-vm.
 //  3. Run the lifecycle (`enterprise <os> ensure`). It needs the policies
 //     folder to be root:defenseclaw 0750 and the rule pack folders to be
 //     root-owned.
@@ -213,6 +213,9 @@ func (e *Env) renderedTOMLPath() string {
 func (e *Env) renderedFallbackTOMLPath() string {
 	return filepath.Join(e.openshellDir(), openshell.GatewayFallbackTOMLFile)
 }
+func (e *Env) renderedBridgeTOMLPath() string {
+	return filepath.Join(e.openshellDir(), openshell.GatewayDefaultNamespaceTOMLFile)
+}
 func (e *Env) renderedEnvPath() string {
 	return filepath.Join(e.openshellDir(), openshell.GatewayEnvFile)
 }
@@ -333,6 +336,10 @@ type openshellPlan struct {
 	// daemonInputs identifies what a running daemon was started on: the unit
 	// definitions, the gateway binary and the rendered configuration.
 	daemonInputs string
+	// defaultNamespaceBridge renders the 1.0.1 upgrade bridge
+	// (openshell.GatewayDefaultNamespaceTOMLFile, dockerBridgeHolds). 1.0.1
+	// upgrade bridge, remove when 1.0.1 is out of support.
+	defaultNamespaceBridge bool
 }
 
 // planOpenShell adds the sandbox subsystem to the plan: its files, folders
@@ -343,6 +350,7 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
 	p.openshell = op
 	l.osPlan = op
 
@@ -550,16 +558,6 @@ func (e *Env) ensureSymlink(path, target string) (changed bool, err error) {
 	return true, nil
 }
 
-// systemDriverDirs are where an administrator's OpenShell keeps its MicroVM
-// driver, the root-owned places first (on a Mac a Homebrew prefix belongs to
-// the account that ran brew).
-func (e *Env) systemDriverDirs() []string {
-	if e.GOOS == "darwin" {
-		return []string{"/usr/local/libexec/openshell", "/opt/homebrew/libexec/openshell"}
-	}
-	return []string{"/usr/libexec/openshell", "/usr/lib/openshell", "/usr/local/libexec/openshell"}
-}
-
 // systemDriverDir is the directory holding a trusted openshell-driver-vm, or
 // "": the rendered gateway configuration never points at a driver another
 // account can change.
@@ -569,13 +567,11 @@ func (e *Env) systemDriverDir() string {
 }
 
 // systemDriver is systemDriverDir with the candidates that exist but fail
-// the managed trust check.
+// the managed trust check. It is openshell.AdminVMDriver, the check a
+// managed user's `sandbox doctor` runs too (GAP-0481), on this filesystem.
 func (e *Env) systemDriver() (dir string, refused []string) {
-	var paths []string
-	for _, d := range e.systemDriverDirs() {
-		paths = append(paths, filepath.Join(d, "openshell-driver-vm"))
-	}
-	found, refused := e.trustedAdminFile(paths)
+	found, refused := openshell.AdminVMDriver(e.GOOS, func(p string) bool { return openshell.ExecutableVMDriver(e.P(p)) },
+		func(p string) error { return e.Trust(e.P(p), TrustAdminFile) })
 	if found == "" {
 		return "", refused
 	}
@@ -586,9 +582,10 @@ func (e *Env) systemDriver() (dir string, refused []string) {
 // to the sandbox subsystem and of the per-user changes waiting for sandboxes
 // to stop.
 type openshellState struct {
-	Version int                `json:"version"`
-	Applied *openshellApplied  `json:"applied,omitempty"`
-	Pending map[string]pending `json:"pending,omitempty"`
+	Version         int                `json:"version"`
+	Applied         *openshellApplied  `json:"applied,omitempty"`
+	Pending         map[string]pending `json:"pending,omitempty"`
+	GatewayIdentity string             `json:"gateway_identity,omitempty"`
 }
 
 // openshellApplied is the sandbox configuration the last committed
@@ -604,6 +601,19 @@ type openshellApplied struct {
 	DaemonInputs string `json:"daemon_inputs,omitempty"`
 	// E2fsprogsDir is enterprise.openshell.e2fsprogs_dir.
 	E2fsprogsDir string `json:"e2fsprogs_dir,omitempty"`
+	// DockerNamespace is the OpenShell sandbox namespace (sandbox_label) of
+	// the docker gateways the render starts: the docker driver and the
+	// docker fallback of the MicroVM driver; "" when the render has none. A
+	// record written before the render named one (1.0.1, the 1.0.2 release
+	// candidates) has none either: its docker gateways ran in OpenShell's
+	// default namespace, so the upgrade from it keeps the 1.0.1 upgrade
+	// bridge (dockerBridgeHolds).
+	DockerNamespace string `json:"docker_namespace,omitempty"`
+	// DefaultNamespaceBridge records that the render carries the 1.0.1
+	// upgrade bridge (openshell.GatewayDefaultNamespaceTOMLFile), so it
+	// stays on the next runs. 1.0.1 upgrade bridge, remove when 1.0.1 is out
+	// of support.
+	DefaultNamespaceBridge bool `json:"default_namespace_bridge,omitempty"`
 }
 
 func appliedOf(op *openshellPlan) *openshellApplied {
@@ -611,8 +621,44 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 		return nil
 	}
 	s := op.settings
-	return &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
-		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir}
+	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
+		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
+		DefaultNamespaceBridge: op.defaultNamespaceBridge}
+	if a.usesDocker() {
+		a.DockerNamespace = openshell.ManagedDockerNamespace
+	}
+	return a
+}
+
+// usesDocker reports whether the applied setup starts docker gateways: the
+// docker driver, or the MicroVM driver with the docker fallback.
+func (a *openshellApplied) usesDocker() bool {
+	return a.Driver == config.EnterpriseOpenShellDriverDocker || a.Fallback == config.EnterpriseOpenShellFallbackDocker
+}
+
+// dockerBridgeHolds reports whether a render on settings s, after the
+// applied record prev, carries the 1.0.1 upgrade bridge (GAP-0587): prev is
+// a docker record of 1.0.1 (or of the 1.0.2 release candidates 1 to 3),
+// which names no docker namespace, or already carries the bridge, and s
+// still starts docker gateways on Linux. 1.0.1's managed docker gateways had
+// no sandbox_label, so the sandboxes their accounts kept are in OpenShell's
+// default namespace, which the managed namespace's gateway does not list.
+// Moving such an account was a switch that stranded them (their unpulled
+// work was lost); with the bridge its gateway stays in the default namespace
+// until it keeps no sandbox there (the exec shim decides per account, at
+// each gateway start), so nothing is switched and the namespace is no part
+// of switchKey. Sandboxes turned off keep the bridge for when they are
+// turned on again; a setup without docker gateways ends it (a driver switch
+// says what it does to the sandboxes made before). 1.0.1 upgrade bridge,
+// remove when 1.0.1 is out of support.
+func dockerBridgeHolds(goos string, s openshellSettings, prev *openshellApplied) bool {
+	if goos != "linux" || prev == nil {
+		return false
+	}
+	if bridged := prev.DefaultNamespaceBridge || (prev.usesDocker() && prev.DockerNamespace == ""); !bridged {
+		return false
+	}
+	return !s.Enabled || s.Driver == config.EnterpriseOpenShellDriverDocker || s.dockerFallback()
 }
 
 // switchKey changes when the account's OpenShell has to be replaced rather

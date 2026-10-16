@@ -1540,6 +1540,9 @@ def _mcp_policy_fanout_connectors(
             for entry in entries:
                 if entry.target_name == target and entry.connector:
                     add(entry.connector)
+    # A scoped rule written to config.yaml alone has no journal row (GAP-1307).
+    for connector in asset_lists.scoped_rule_connectors(app.cfg, "mcp", target):
+        add(connector)
 
     return sorted(connectors, key=lambda c: order.get(c, len(order)))
 

@@ -62,6 +62,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# -Local "" (an empty value) binds like no -Local at all (GAP-1336).
+$LocalGiven = [bool](Get-Variable -Name PSBoundParameters -Scope 1 -ValueOnly -ErrorAction SilentlyContinue |
+    Where-Object { $_.ContainsKey("Local") })
 try {
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -303,6 +306,29 @@ function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {
     }
 }
 
+function Move-AuditStore([string]$From, [string]$To) {
+    # An SQLite store moves with its -wal, -shm and -journal as one unit: when
+    # a move fails, what moved goes back and the error is thrown, so a store is
+    # never separated from its WAL (SQLite would drop the WAL's transactions;
+    # rel-1-0-2:GAP-0491, as move_audit_store in install.sh).
+    $moved = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
+            if (-not (Test-Path -LiteralPath "$From$suffix")) { continue }
+            Move-Path "$From$suffix" "$To$suffix"
+            $moved.Add($suffix)
+        }
+    } catch {
+        $failure = $_
+        $stuck = @()
+        for ($i = $moved.Count - 1; $i -ge 0; $i--) {
+            try { Move-Path "$To$($moved[$i])" "$From$($moved[$i])" } catch { $stuck += "$To$($moved[$i])" }
+        }
+        if ($stuck.Count) { throw "$($failure.Exception.Message); $($stuck -join ', ') could not be moved back to $From" }
+        throw $failure
+    }
+}
+
 function Copy-Kept([string]$Source, [string]$DestinationDir) {
     # Copy into DestinationDir with robocopy, which keeps each file's
     # permissions: DefenseClaw refuses keys and tokens that come back from a
@@ -370,7 +396,13 @@ function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {
 }
 
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    # A file this account cannot read printed PowerShell's raw ReadError and
+    # "The property 'Hash' cannot be found" before the sentence that said what
+    # happened (GAP-0007): say once which file could not be read.
+    try { $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Path -ErrorAction Stop } catch {
+        throw "Could not read $Path; restore read access to it, then try again"
+    }
+    return $hash.Hash.ToLowerInvariant()
 }
 
 function Get-ListedSha256([string]$Checksums, [string]$Name) {
@@ -799,10 +831,7 @@ function Move-DamagedAuditStore([string]$BackTo) {
     if (-not (Test-Path -LiteralPath $db -PathType Leaf)) { return "" }
     $moved = "$db.corrupt-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
     if (Test-Path -LiteralPath $moved) { $moved += "-$PID" }
-    foreach ($suffix in @("-wal", "-shm", "-journal")) {
-        if (Test-Path -LiteralPath "$db$suffix") { Move-Path "$db$suffix" "$moved$suffix" }
-    }
-    Move-Path $db $moved
+    Move-AuditStore $db $moved
     Write-Warn ("The saved $BackTo audit store failed SQLite's integrity check; it was kept as $moved and $BackTo starts on a new " +
         "audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)")
     return $moved
@@ -1364,6 +1393,9 @@ function Install-New {
         if (Test-Path -LiteralPath $oldGuard) {
             Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("acp", "refresh", "--from-sha256", (Get-Sha256 $oldGuard)) | Out-Null
         }
+        # A rollback by an earlier release left hook entries of a connector
+        # this install does not configure (GAP-0009). Best effort.
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"))
     }
     return $true
 }
@@ -1797,6 +1829,23 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     }
 }
 
+function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
+    # GAP-0009: remove the DefenseClaw hook entries of every connector the
+    # live install does not configure, with the first gateway that has the
+    # command: a connector set up after an upgrade kept its entries after the
+    # rollback, and its agent ran a hook the restored install cannot serve.
+    # Only DefenseClaw-owned entries go. An older gateway prints its
+    # connector help for the unknown command, so the help is checked first.
+    foreach ($gateway in $Gateways) {
+        if (-not (Test-Path -LiteralPath $gateway)) { continue }
+        if ((Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")) -notmatch "connector prune-orphans") { continue }
+        if ((Invoke-Native $gateway @("connector", "prune-orphans", "--data-dir", $DataDir)) -ne 0) {
+            Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+        }
+        return
+    }
+}
+
 function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
     # Put back the install the rollback replaced, and return 1 (GAP-1388): a
     # restored 0.x release whose gateway is not running leaves agents
@@ -1818,10 +1867,26 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
     Set-Content -LiteralPath (Join-Path $Previous "GATEWAY_WAS_RUNNING") -Value $state -Encoding Ascii
     $audit = Join-Path $Previous "data\audit.db"
-    if ($Quarantined -and -not (Test-Path -LiteralPath $audit)) {
-        $kept = Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)"
-        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
-            if (Test-Path -LiteralPath "$kept$suffix") { Invoke-Quietly { Move-Path "$kept$suffix" "$audit$suffix" } }
+    $kept = if ($Quarantined) { Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)" } else { "" }
+    if ($kept -and (Test-Path -LiteralPath $kept -PathType Leaf)) {
+        # rel-1-0-2:GAP-0492: the failed start of $BackTo made a new, empty
+        # audit.db here, which a later rollback then used without a word. It
+        # goes aside, and the saved store goes back with its WAL, so that
+        # rollback checks it again (as undo_rollback in install.sh).
+        if (Test-Path -LiteralPath $audit) {
+            $fresh = "$audit.failed-start-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
+            if (Test-Path -LiteralPath $fresh) { $fresh += "-$PID" }
+            try { Move-AuditStore $audit $fresh } catch {
+                Write-Warn "Could not move aside the new audit store the failed start of $BackTo made ($($_.Exception.Message))"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $audit)) {
+            try { Move-AuditStore $kept $audit } catch {
+                Write-Warn "Could not put back the saved $BackTo audit store ($($_.Exception.Message))"
+            }
+        }
+        if (Test-Path -LiteralPath $kept) {
+            Write-Warn "The saved $BackTo audit store is still $kept; before 'defenseclaw rollback' again, move it and its -wal and -shm files to $audit"
         }
     }
     if ((Start-Gateway) -in @(0, 3)) {
@@ -1874,6 +1939,9 @@ function Invoke-Rollback {
     }
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
+    if (-not $toLegacy) {
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe"))
+    }
     $quarantined = ""
     if ($auditDamaged) {
         try { $quarantined = Move-DamagedAuditStore $backTo } catch {
@@ -1943,11 +2011,14 @@ function Wait-UninstallCleanup([int]$Seconds = 300) {
 }
 
 function Invoke-Install {
-    if ($Help) { Show-Usage; return 0 }
+    # -h binds to -Help; the --help of install.sh lands in UnknownArguments
+    # and shows the same help, before anything else runs (GAP-0466).
+    if ($Help -or $UnknownArguments -contains "--help") { Show-Usage; return 0 }
     foreach ($argument in $UnknownArguments) {
         if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
             # -Name=value is the same option as -Name value (GAP-0361).
             Set-Variable -Name $Matches[1] -Value $Matches[2]
+            if ($Matches[1] -eq "Local") { $LocalGiven = $true }
         } elseif ($RunByUpgrade) {
             Write-Warn "Ignoring unknown option: $argument"
         } else {
@@ -1964,6 +2035,7 @@ function Invoke-Install {
     $TargetVersion = $Version -replace '^v', ''
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
+    if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {
         if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Stop-Usage "-Local: directory not found: $Local" }
         $LocalDir = (Resolve-Path -LiteralPath $Local).ProviderPath

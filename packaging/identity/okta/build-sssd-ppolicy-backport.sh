@@ -78,7 +78,7 @@ done
 ((EUID != 0)) || fail 3 "run as a normal user with sudo: rpmbuild must not run as root"
 command -v sudo > /dev/null || fail 3 "sudo is required for dnf"
 
-T="$WORK/rpmbuild"
+T="$WORK/rpmbuild.<unique>"
 SPEC="$T/SPECS/sssd.spec"
 
 if ((DRY_RUN)); then
@@ -96,6 +96,8 @@ PLAN
 fi
 
 mkdir -p "$WORK"
+T=$(mktemp -d "$WORK/rpmbuild.XXXXXX")
+SPEC="$T/SPECS/sssd.spec"
 log "tools"
 sudo dnf -y -q install rpm-build gcc dnf-plugins-core
 
@@ -108,7 +110,6 @@ fi
   fail 1 "the downloaded source package is not $NVR"
 
 log "unpack and build dependencies"
-rm -rf "$T"
 rpm -i --define "_topdir $T" "$WORK/$NVR.src.rpm" 2>&1 | grep -v -E 'warning: (user|group) ' || true
 [[ -f $SPEC ]] || fail 1 "the source package has no sssd.spec"
 sudo dnf -y -q builddep --disableexcludes=all --enablerepo='codeready-builder-*' "$SPEC"

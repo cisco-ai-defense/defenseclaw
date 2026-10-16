@@ -97,15 +97,20 @@ rules:
 			wantRuleID: "CG-EXEC-001",
 		},
 		{
+			// Two target keys cannot be verified: the conflicting-arguments
+			// finding blocks the call (GAP-0678); CodeGuard stays visible and
+			// detection only.
 			name:       "ambiguous write envelope remains visible detection only",
 			args:       json.RawMessage(`{"path":"/tmp/app.py","file_path":"/tmp/other.py","content":"os.system(cmd)"}`),
-			wantAction: guardrailActionAllow,
+			wantAction: guardrailActionBlock,
 			wantRuleID: "CG-EXEC-001",
 		},
 		{
+			// A target key repeated with another value cannot be verified
+			// either (GAP-0678); CodeGuard stays visible and detection only.
 			name:       "duplicate write field remains visible detection only",
 			args:       json.RawMessage(`{"path":"/tmp/app.py","path":"/tmp/other.py","content":"os.system(cmd)"}`),
-			wantAction: guardrailActionAllow,
+			wantAction: guardrailActionBlock,
 			wantRuleID: "CG-EXEC-001",
 		},
 	}

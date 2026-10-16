@@ -10,6 +10,7 @@ import (
 	"errors"
 	osuser "os/user"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -105,5 +106,15 @@ func matchedGroupSource(set *guardrailProfileSet, _ *profileSubject, group strin
 	return "directory"
 }
 
-// accountGroupIDs lists an OS account's group SIDs.
-var accountGroupIDs = func(account *osuser.User) ([]string, error) { return account.GroupIds() }
+// accountGroupIDs uses the signed-in token record of the requested SID. The
+// current process can use its own token when no guardian record is available.
+var accountGroupIDs = func(account *osuser.User) ([]string, error) {
+	sid := strings.ToUpper(strings.TrimSpace(account.Uid))
+	if record, ok := readIdentitySpoolFacts(sid, time.Now()); ok {
+		return profileGroupSIDsForAccount(sid, record)
+	}
+	if current, err := osuser.Current(); err == nil && strings.EqualFold(current.Uid, sid) {
+		return account.GroupIds()
+	}
+	return nil, errors.New("profile groups: current token groups are unavailable for account SID")
+}

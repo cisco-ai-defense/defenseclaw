@@ -566,11 +566,22 @@ def group_mail_nickname(name: str) -> str:
 def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     if not args.name and not args.add_device:
         raise SystemExit("error: name at least one --name GROUP or --add-device DEVICE:GROUP")
+    requested_devices: list[tuple[str, str]] = []
+    for pair in args.add_device:
+        device_name, sep, group_name = pair.partition(":")
+        if not sep or not device_name or not group_name:
+            raise SystemExit(f"error: --add-device wants DEVICE:GROUP, got {pair!r}")
+        requested_devices.append((device_name, group_name))
     # Resolve and validate every requested group before changing the tenant.
     planned_groups: list[tuple[str, dict | None, str | None]] = []
+    seen_group_names: set[str] = set()
     for name in args.name:
         if len(name) > GROUP_NAME_MAX_CHARS:
             raise SystemExit(f"error: group name is {len(name)} characters; the limit is {GROUP_NAME_MAX_CHARS}")
+        key = name.casefold()
+        if key in seen_group_names:
+            continue
+        seen_group_names.add(key)
         path = f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
         found = graph.get_all(path)
         if not found and args.apply:
@@ -587,7 +598,7 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     known_groups: dict[str, dict] = {}
     for name, found, nickname in planned_groups:
         if found:
-            known_groups[name] = found
+            known_groups[name.casefold()] = found
             print(f"{tag}group {name}: exists")
         elif not args.apply:
             print(f"{tag}group {name}: would create a static security group")
@@ -600,18 +611,15 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
                 "securityEnabled": True,
             }
             made = graph.request("POST", f"{V1}/groups", body)
-            known_groups[name] = graph.get_after_create(f"{V1}/groups/{made['id']}?$select=id")
+            known_groups[name.casefold()] = graph.get_after_create(f"{V1}/groups/{made['id']}?$select=id")
             print(f"group {name}: created")
-    for pair in args.add_device:
-        device_name, sep, group_name = pair.partition(":")
-        if not sep or not device_name or not group_name:
-            raise SystemExit(f"error: --add-device wants DEVICE:GROUP, got {pair!r}")
+    for device_name, group_name in requested_devices:
         devices = graph.get_all(f"{V1}/devices?$filter={odata_eq('displayName', device_name)}&$select=id,displayName")
         if len(devices) != 1:
             raise SystemExit(f"error: {len(devices)} Entra devices are named {device_name!r}; need exactly one")
         # A group named with --name was checked above, or created as a static security group.
-        checked = group_name in known_groups
-        found = [known_groups[group_name]] if checked else graph.get_all(
+        checked = group_name.casefold() in known_groups
+        found = [known_groups[group_name.casefold()]] if checked else graph.get_all(
             f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id,securityEnabled,groupTypes"
         )
         if len(found) > 1:

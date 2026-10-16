@@ -20,6 +20,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -686,15 +687,17 @@ var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCle
 		backups:    []string{"hooks.json.json"},
 		generation: true,
 	},
+	// Devin and Hermes also keep the last known good copy of the agent
+	// config and its restore notice beside its backup record (GAP-0588).
 	"devin": {
 		hooks:      windowsManagedRuntimeRuntimeLeaves("devin", append([]string{"devin-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
-		backups:    []string{"config.json"},
+		backups:    append([]string{"config.json"}, connector.AgentConfigBackupLeaves("devin")...),
 		generation: true,
 	},
 	"hermes": {
 		root:       []string{".hermes-lifecycle.lock", "agent_selection.json", "agent_selection.json.lock"},
 		hooks:      windowsManagedRuntimeRuntimeLeaves("hermes", append([]string{"hermes-hook.sh", "hermes-direct-native-state.json"}, windowsManagedRuntimeSharedHookScripts...)...),
-		backups:    []string{"config.yaml.json", "shell-hooks-allowlist.json.json"},
+		backups:    append([]string{"config.yaml.json", "shell-hooks-allowlist.json.json"}, connector.AgentConfigBackupLeaves("hermes")...),
 		generation: true,
 	},
 	"kiro": {

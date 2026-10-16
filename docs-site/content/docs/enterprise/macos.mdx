@@ -361,6 +361,16 @@ enumerator enrolls accounts with a uid of 501 or higher by default. See
 waiting for the next minute, run
 `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
 
+`status` and `verify` warn with `agent_settings_not_restored` if the guardian
+puts back a missing Hermes `config.yaml` or Devin `config.json` from the last
+known good copy or the pristine backup, or recreates it with DefenseClaw's
+hooks only when no copy is available. The hooks are in place, but settings
+changed after the copy may be missing; with no copy, the user may need to
+re-enter their settings. This warning alone does not make
+`security_complete` false or `verify` fail, change the exit code, or fail MDM
+detection. Ask the user to review their settings and restore missing values
+from a backup; see [Warnings](/docs/enterprise/troubleshooting#warnings).
+
 A `guardrail.profile_assignments` group this Mac does not know (renamed or
 deleted in the directory) selects nobody, so its members get the default
 profile. `status` and `verify` warn `profile_assignment_unmatched` for it,
@@ -402,6 +412,11 @@ per-user product refuses to run:
 | `defenseclaw upgrade` | Refuses |
 | Per-user gateway | Refuses to start |
 
+This table describes the current per-user installer. The 0.8.10 `install.sh`
+predates the managed-host check and can install a per-user copy after that
+user's old `~/.defenseclaw` folder has been removed. Do not use that older
+installer on a managed Mac.
+
 Nothing migrates a per-user install automatically. Before you deploy, have
 each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
 Add `--all` to also delete `~/.defenseclaw`. See
@@ -427,7 +442,7 @@ install, `status` and `verify` name each such account with the
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its binaries, config, secrets, data, logs, lifecycle state and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
 | Keep only the `_defenseclaw` account | Add `--keep-service-account` |
@@ -435,6 +450,9 @@ install, `status` and `verify` name each such account with the
 Run these as root from `/opt/cisco/defenseclaw/bin`. Uninstall removes each
 user's DefenseClaw hook registrations and DefenseClaw's own machine-policy
 entries first. Administrator entries in those files stay as they were.
+The kept `sandbox` registration store and `redaction-correlation.key` are
+root-owned while the service account is gone; the next `ensure` adopts them.
+Use `--purge` for a clean image or to remove them.
 Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
 names the accounts that still have `~/.defenseclaw` or per-user binaries in
 `~/.local/bin`. With `--purge` it also
@@ -496,10 +514,11 @@ The per-user AI Discovery scan also walks the home for package manifests and
 model files. Without Full Disk Access it never opens the folders that make
 macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
 Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
-`~/Library/Group Containers`, and Contacts. It skips them without an error,
-so an employee never sees a prompt attributed to `defenseclaw-gateway` and
-the scan stays complete. The other TCC-protected folders answer "operation not
-permitted" and are skipped the same way.
+`~/Library/Group Containers`, and Contacts. No employee sees a prompt
+attributed to `defenseclaw-gateway`; the scan summary is partial, with
+`detector_errors.macos_privacy` reporting "protected folders were not scanned". The
+other TCC-protected folders answer "operation not permitted" and are skipped
+the same way.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants
@@ -526,6 +545,10 @@ the helper is the binary that needs Full Disk Access. Without it, Endpoint
 Security refuses the client (`ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED`), Plane C
 reports `running: false` with that reason, and the runtime snapshot stays
 degraded. Planes A and B keep working.
+
+**Known limit:** Plane C can leave a detached child of a terminal-launched
+agent unattributed after the child is reparented to PID 1. Its process lineage
+no longer identifies the agent from the parent PID alone.
 
 Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-policy`)
 under `SystemPolicyAllFiles`:

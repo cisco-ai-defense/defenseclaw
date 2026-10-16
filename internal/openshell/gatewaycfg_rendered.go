@@ -70,10 +70,57 @@ type RenderedGateway struct {
 	// TelemetryEnabled lets OpenShell send its own anonymous usage
 	// telemetry; off unless the organization's sandbox floor allows it.
 	TelemetryEnabled bool
+	// DefaultDockerNamespaceBridge renders a docker driver without a
+	// sandbox_label, the 1.0.1 render: its sandboxes live in OpenShell's
+	// default namespace (GatewayDefaultNamespaceTOMLFile). 1.0.1 upgrade
+	// bridge, remove when 1.0.1 is out of support.
+	DefaultDockerNamespaceBridge bool
 }
 
 // renderedHeader marks the files the lifecycle owns.
 const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from enterprise.openshell. Do not edit.\n"
+
+// Docker sandbox namespaces. OpenShell's docker driver labels every
+// container and volume it makes with its sandbox namespace
+// (openshell.ai/sandbox-namespace, [openshell.drivers.docker] sandbox_label)
+// and, each time its gateway starts, force-removes every supervisor, staging
+// and identity container of that namespace and every channel volume of it
+// whose sandbox has no container (reconcile_runtime_resources_at_startup,
+// OpenShell 0.1.1 to 0.1.3), whichever account's gateway made them. Every
+// account's gateway on a host shares one Docker engine. With the default
+// namespace a managed account's gateway start removed the supervisors of
+// another account's running sandboxes (a per-user gateway the account
+// started before the host was managed) and their workloads ended
+// (GAP-0566). The managed gateways get a namespace of their own, and a
+// per-user gateway `defenseclaw sandbox setup` configures gets the
+// account's (AccountDockerNamespace, GAP-0579): DefaultDockerNamespace stays
+// with the gateways DefenseClaw does not configure and those that keep
+// sandboxes in it. Managed gateways share theirs because one runs at a
+// time: a second account's daemon is refused while another account's
+// managed gateway runs, on the managed port or, while that account's
+// gateway_port switch waits, on the old one (accountBusyError), and a
+// gateway's ExecStop stops its sandboxes before it exits.
+const (
+	// DefaultDockerNamespace is OpenShell's own default sandbox_label.
+	DefaultDockerNamespace = "default"
+	// ManagedDockerNamespace is the sandbox_label of the gateways the
+	// lifecycle renders.
+	ManagedDockerNamespace = "defenseclaw-managed"
+)
+
+// GatewayDefaultNamespaceTOMLFile is the rendered docker configuration of
+// the 1.0.1 upgrade bridge (GAP-0587): the docker driver as 1.0.1 rendered
+// it, with no sandbox_label, so in OpenShell's default namespace. 1.0.1's
+// managed gateways kept their sandboxes there, and a gateway lists only its
+// own namespace's: on the managed one they could not start, OpenShell
+// dropped them and their unpulled work was lost. The lifecycle renders the
+// file on a host upgraded from a 1.0.1 docker record, and the exec shim
+// starts an account's docker gateway on it while that account still keeps a
+// sandbox in the default namespace (DockerNamespaceInUse) and none in the
+// managed one; an account without one, or once its last one is deleted,
+// moves to ManagedDockerNamespace at its next gateway start. 1.0.1 upgrade
+// bridge, remove when 1.0.1 is out of support.
+const GatewayDefaultNamespaceTOMLFile = "gateway-docker-default-namespace.toml"
 
 // Validate refuses a configuration the lifecycle must not render.
 func (r RenderedGateway) Validate() error {
@@ -124,10 +171,12 @@ type renderedVMDriver struct {
 // renderedDockerDriver are bindMountSettings: the docker driver honors the
 // read-only mounts DefenseClaw asks for in a sandbox's driver config (the
 // harness settings it keeps out of the agent's reach), which a managed run
-// needs as much as any other (GAP-0449).
+// needs as much as any other (GAP-0449). SandboxLabel is the sandbox
+// namespace of every Docker object the driver makes (ManagedDockerNamespace).
 type renderedDockerDriver struct {
-	AllowDriverConfig bool `toml:"allow_driver_config"`
-	EnableBindMounts  bool `toml:"enable_bind_mounts"`
+	AllowDriverConfig bool   `toml:"allow_driver_config"`
+	EnableBindMounts  bool   `toml:"enable_bind_mounts"`
+	SandboxLabel      string `toml:"sandbox_label,omitempty"`
 	ResourceAdmission struct {
 		Enabled bool `toml:"enabled"`
 	} `toml:"resource_admission"`
@@ -146,7 +195,11 @@ func (r RenderedGateway) TOML() ([]byte, error) {
 	case DriverVM:
 		doc.OpenShell.Drivers = &renderedDrivers{VM: &renderedVMDriver{DriverDir: r.DriverDir, SandboxUID: r.VMSandboxUID, SandboxGID: r.VMSandboxGID}}
 	case DriverDocker:
-		doc.OpenShell.Drivers = &renderedDrivers{Docker: &renderedDockerDriver{AllowDriverConfig: true, EnableBindMounts: true}}
+		label := ManagedDockerNamespace
+		if r.DefaultDockerNamespaceBridge {
+			label = "" // OpenShell's default namespace, as 1.0.1 rendered it
+		}
+		doc.OpenShell.Drivers = &renderedDrivers{Docker: &renderedDockerDriver{AllowDriverConfig: true, EnableBindMounts: true, SandboxLabel: label}}
 	}
 	body, err := toml.Marshal(doc)
 	if err != nil {

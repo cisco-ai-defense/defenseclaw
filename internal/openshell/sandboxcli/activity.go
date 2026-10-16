@@ -92,7 +92,29 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		a.println(a.activityLine(ev, o.Sandbox == ""))
 		return nil
 	}
-	err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox, Since: o.Since, Follow: o.Follow}, show)
+	if o.Output != OutputJSON && !o.Follow && o.Sandbox == "" && o.Since == 0 {
+		// The feed keeps the sandboxes deleted since the daemon started, for
+		// the audit trail; the plain listing shows only the ones that are
+		// still there, so a second take does not start below the first
+		// take's lines (es-demo:GAP-0017). --sandbox, --since and -o json
+		// still give the whole feed.
+		var events []sandboxapi.ActivityEvent
+		err = api.Activity(ctx, sandboxapi.ActivityQuery{}, func(ev sandboxapi.ActivityEvent) error {
+			events = append(events, ev)
+			return nil
+		})
+		if err == nil {
+			kept, gone := withoutDeletedSandboxes(events)
+			for _, ev := range kept {
+				_ = show(ev)
+			}
+			if len(gone) > 0 {
+				a.note(deletedSandboxesNote(gone))
+			}
+		}
+	} else {
+		err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox, Since: o.Since, Follow: o.Follow}, show)
+	}
 	// A followed stream ends when the daemon restarts or lets go of its
 	// sandboxes: follow the feed it serves next (from its start; what this
 	// one showed is skipped), or say why the feed stopped.
@@ -128,6 +150,44 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		}
 	}
 	return nil
+}
+
+// withoutDeletedSandboxes leaves out of events (one feed, oldest first)
+// every event of a sandbox up to its last deletion the feed recorded: what
+// is left are the events of the sandboxes there now, a name reused after a
+// deletion included. gone names the deleted sandboxes, sorted.
+func withoutDeletedSandboxes(events []sandboxapi.ActivityEvent) (kept []sandboxapi.ActivityEvent, gone []string) {
+	deleted := map[string]int{}
+	for i, ev := range events {
+		if ev.Kind == sandboxapi.ActivityLifecycle && ev.Phase == "deleted" && ev.Sandbox != "" {
+			deleted[ev.Sandbox] = i
+		}
+	}
+	for i, ev := range events {
+		if last, ok := deleted[ev.Sandbox]; ok && ev.Sandbox != "" && i <= last {
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	for name := range deleted {
+		gone = append(gone, name)
+	}
+	slices.Sort(gone)
+	return kept, gone
+}
+
+// deletedSandboxesNote says whose events the plain listing left out, and
+// how to see them.
+func deletedSandboxesNote(gone []string) string {
+	names := strings.Join(gone[:min(len(gone), 3)], ", ")
+	if more := len(gone) - 3; more > 0 {
+		names += fmt.Sprintf(" and %d more", more)
+	}
+	what := "the events of a deleted sandbox (" + names + ") are"
+	if len(gone) > 1 {
+		what = "the events of deleted sandboxes (" + names + ") are"
+	}
+	return what + " left out; " + CommandName + " activity --sandbox NAME or -o json shows them"
 }
 
 // stoppedNoticeWindow is how long after a foreign sandbox was stopped the
@@ -595,14 +655,9 @@ func (a *App) Unblock(ctx context.Context, o UnblockOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	// One line: the daemon's message repeats where the unblock applies.
-	msg := "unblocked " + res.Host + " in " + res.Sandbox
-	if res.Scope == "always" {
-		msg = "unblocked " + res.Host + " for every sandbox"
-		if res.Persisted {
-			msg += " (saved to openshell.egress.unblocked)"
-		}
-	}
-	a.ok(msg)
+	// One line, the daemon's own: it says where the unblock applies and
+	// where it is kept, which only it knows (a managed computer keeps it in
+	// the organization's gateway, not in openshell.egress.unblocked; #1205).
+	a.ok(firstNonEmpty(res.Message, "unblocked "+res.Host))
 	return nil
 }

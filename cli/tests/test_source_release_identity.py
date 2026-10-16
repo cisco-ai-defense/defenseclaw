@@ -246,7 +246,7 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     extension_build = workflow.index("make extensions", stamp)
     restore = workflow.index("git restore --worktree -- .", extension_build)
     clean = workflow.index('test -z "$(git status --porcelain)"', restore)
-    gateway_build = workflow.index("goreleaser/goreleaser-action@", clean)
+    gateway_build = workflow.index("- name: Build gateway archives and SBOMs", clean)
     package_stamp = workflow.index('scripts/stamp-version.sh "$VERSION"', gateway_build)
     wheel_build = workflow.index("make dist-cli dist-installers dist-requirements", package_stamp)
     publish = workflow.index('gh release create "$VERSION"')

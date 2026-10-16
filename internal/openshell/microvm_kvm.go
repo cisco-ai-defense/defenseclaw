@@ -214,25 +214,28 @@ func InstallE2fsprogsFix() *Fix {
 
 // InstallVMDriverFix is what to do on a Linux host without the
 // openshell-driver-vm binary, which NVIDIA's package does not install: its
-// release publishes it as an archive of its own.
+// release publishes it as an archive of its own. The archive is checked
+// against the digest compiled in for InstallerVersion (TarballPins), not
+// against a checksum file fetched from the same release as the archive,
+// which proved only that the two downloads agreed (#1224).
 func InstallVMDriverFix(goarch string) *Fix {
 	archive := vmDriverArchive(goarch)
 	if archive == "" {
 		return &Fix{Summary: "OpenShell publishes its MicroVM driver for amd64 and arm64 Linux only"}
 	}
-	base := "https://github.com/NVIDIA/OpenShell/releases/download/" + InstallerTag + "/"
+	digest := TarballPins[InstallerVersion][archive]
+	if digest == "" {
+		return &Fix{Summary: "this DefenseClaw build pins no digest for OpenShell " + InstallerTag + "'s " + archive + "; install " + vmDriverBinary + " from that release by hand"}
+	}
+	base := TarballBaseURL + InstallerTag + "/"
 	return &Fix{
-		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into ~/.local/libexec/openshell, after checking its digest against the release's " +
-			vmDriverChecksums + " (the openshell package ships no MicroVM driver)",
-		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + base + archive + " -O " + base + vmDriverChecksums +
-			" && grep \" " + archive + "$\" " + vmDriverChecksums + " | sha256sum -c - && mkdir -p ~/.local/libexec/openshell && tar -xzf " + archive +
+		Summary: "install " + vmDriverBinary + " from OpenShell " + InstallerTag + " into ~/.local/libexec/openshell, after checking the archive against the SHA-256 " +
+			"this DefenseClaw build pins for it (the openshell package ships no MicroVM driver)",
+		Command: "d=$(mktemp -d) && cd \"$d\" && curl -fsSLO " + base + archive +
+			" && echo '" + digest + "  " + archive + "' | sha256sum -c - && mkdir -p ~/.local/libexec/openshell && tar -xzf " + archive +
 			" -C ~/.local/libexec/openshell " + vmDriverBinary + " && chmod 0755 ~/.local/libexec/openshell/" + vmDriverBinary + "; cd - >/dev/null; rm -rf \"$d\"",
 	}
 }
-
-// vmDriverChecksums is the release file that lists the SHA-256 of each
-// archive of OpenShell's release.
-const vmDriverChecksums = "openshell-checksums-sha256.txt"
 
 // linuxMicroVMHost finds what the MicroVM driver needs on this Linux
 // host.

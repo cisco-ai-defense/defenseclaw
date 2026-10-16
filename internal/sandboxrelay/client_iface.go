@@ -51,6 +51,10 @@ type RelayCall struct {
 	Registration string
 	Header       http.Header
 	Body         []byte
+	// EgressRefusals are the sandbox's refusals its agent has not been
+	// told of, sent in EgressRefusalsHeader (FitEgressRefusals) on a hook
+	// call; nil sends none.
+	EgressRefusals []EgressRefusal
 }
 
 // RelayResponse is the gateway's answer to a RelayCall: the handler's

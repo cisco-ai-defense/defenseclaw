@@ -138,7 +138,7 @@ func enterpriseHookPerUserEnrolled(manifest enterprisehooks.Manifest, machinePol
 // the eligible accounts or policies changed. Cleanup is best effort: the
 // hook-side guard still denies tool calls while an unapproved hook remains.
 // perUser is enterpriseHookPerUserEnrolled for this pass.
-func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time, manifest enterprisehooks.Manifest, perUser map[string]map[string]bool) int {
+func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time, manifest enterprisehooks.Manifest, perUser map[string]map[string]bool, hookSocket string) int {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
@@ -225,6 +225,18 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
 	}
 	drifted := hookFileDrift()
+	recordedByUID := map[int]enterprisehooks.UnixEligibleAccount{}
+	for _, account := range recorded {
+		recordedByUID[account.UID] = account
+	}
+	recordedFiles := map[int]bool{}
+	for _, account := range accounts {
+		previous, ok := recordedByUID[account.UID]
+		if ok && previous.User == account.User && filepath.Clean(previous.Home) == filepath.Clean(account.Home) &&
+			(previous.HomeInode == 0 || account.HomeInode == 0 || previous.HomeInode == account.HomeInode) {
+			recordedFiles[account.UID] = true
+		}
+	}
 	enterpriseHookForeignCleanupState.Lock()
 	newDrift := false
 	stillUnrepaired := map[string]bool{}
@@ -341,6 +353,8 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	removed := 0
 	createdDirs := map[int][]string{}
+	var auditRepairs []enterpriseHookGuardianAuditReport
+	reportedUIDs := map[int]bool{}
 	for _, outcome := range runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals) {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
@@ -377,6 +391,24 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
 		if report := outcome.Response.CopilotVSCode; report != nil {
+			// A changed file is a repair only if this account already had a
+			// guardian-written file, it drifted before the pass, and the
+			// worker restored that exact hook file without an error.
+			if report.Error == "" && outcome.Job.Request.CopilotVSCode != nil &&
+				outcome.Job.Request.CopilotVSCode.HookFile && recordedFiles[outcome.Job.Account.UID] && drifted[user] {
+				hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(outcome.Job.Account.Home)
+				for _, path := range report.Changed {
+					if filepath.Clean(path) == filepath.Clean(hookFile) {
+						if !reportedUIDs[outcome.Job.Account.UID] {
+							auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{
+								User: user, UID: outcome.Job.Account.UID, Connector: "copilot",
+							})
+							reportedUIDs[outcome.Job.Account.UID] = true
+						}
+						break
+					}
+				}
+			}
 			if dirs := enterprisehooks.UnixCreatedDirsBelow(filepath.Clean(outcome.Job.Account.Home), report.Created); len(dirs) > 0 {
 				createdDirs[outcome.Job.Account.UID] = dirs
 			}
@@ -411,6 +443,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 	}
+	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	if recordErr == nil {
 		next := nextCopilotVSCodeAccounts(recorded, accounts, governed, dropped, createdDirs)
 		if !sameCopilotVSCodeAccounts(recorded, next) {

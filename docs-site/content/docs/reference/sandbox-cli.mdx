@@ -58,6 +58,8 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `hermes`,
   `openhands`, `omnigent`, `agy`, `amp`, `cursor-agent`, `devin`), by its
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
+  OpenHands and OmniGent are deprecated: their names still resolve, but do not
+  choose them for new sandboxes.
   Help and hints name Kiro and Antigravity by their connector names, as
   `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
   Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
@@ -81,7 +83,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `0` but not one of the session's hooks reached DefenseClaw, so that every
   tool call was blocked, `run` and `connect` exit `69`. A harness that sends
   its first hook only with your first prompt (Kiro CLI, Hermes Agent,
-  Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
+  Antigravity, GitHub Copilot CLI) and was never
   prompted is not counted, unless the daemon saw it work without hooks.
   Neither is an interactive session given harness arguments after `--`
   that may start no session (`connect NAME -- --version`), unless the
@@ -240,7 +242,7 @@ asking. Doctor exits `1` when a check fails, with `--output json` too, after it
 prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
-supported OpenShell older than 0.1.2 in place) and `openshell_install_version`
+supported OpenShell older than 0.1.3 in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
 detail and fix, the OpenShell and Docker versions found, and the compute driver;
 the TUI's Setup wizard reads these fields. When sandboxes are on
@@ -295,6 +297,10 @@ docker without BuildKit. Such a refusal says only why. It starts no build and
 keeps the previous build's log. On a MicroVM gateway
 it warns after a build when the volume of the driver's image cache lacks the
 room the first start of the new image needs (see `sandbox run`).
+On macOS the MicroVM name-resolution check binds two files from
+`~/Library/Caches/defenseclaw/hookfire`; when the container engine cannot
+see that home directory, it reports the sharing prerequisite and the
+`sandbox image build <harness> --force` recheck command.
 
 ```bash
 defenseclaw sandbox image build
@@ -553,6 +559,9 @@ check and remove it:
 
 ![sudo defenseclaw-gateway sandbox kernel-feed install: the sandbox kernel feed is installed at the gateway's version with protocol 1 and Tetragon connected, Tetragon v1.7.1 on its socket and Docker Engine answering, sandboxes started with the process tree now record every exec and exit, and the check and remove commands](/images/segmentation/terminal-sandbox-kernel-feed-install.png)
 
+Current install output also says that a sandbox already running when the feed
+restarts shows DefenseClaw's own hook calls in full until you stop and start it.
+
 {/* AUTOGEN-BEGIN: sandbox-flags kernel-feed install */}
 This command has no flags.
 {/* AUTOGEN-END: sandbox-flags */}
@@ -706,12 +715,13 @@ A kept sandbox's resume line is followed, last, by the command that
 continues the same conversation inside the sandbox, for every harness that
 can continue one:
 
+OpenHands and OmniGent are deprecated and are omitted from the resume examples.
+
 | Harness | Continue with |
 | --- | --- |
-| Claude Code, OpenCode, GitHub Copilot CLI, Hermes Agent, OmniGent | `defenseclaw sandbox connect myapp-7f3a -- --continue` |
+| Claude Code, OpenCode, GitHub Copilot CLI, Hermes Agent | `defenseclaw sandbox connect myapp-7f3a -- --continue` |
 | Codex | `defenseclaw sandbox connect myapp-7f3a -- resume --last` |
 | Kiro CLI | `defenseclaw sandbox connect myapp-7f3a -- --resume` |
-| OpenHands | `defenseclaw sandbox connect myapp-7f3a -- --resume --last` |
 | Antigravity | `defenseclaw sandbox connect myapp-7f3a -- -c` |
 
 A plain `connect` starts a new conversation. To resume a particular
@@ -720,8 +730,8 @@ conversation, pass the harness's own flag and ID after `--`:
 
 The resume line the harness itself prints as it exits (`claude --resume
 <id>`, `codex resume <id>`, `opencode -s <id>`, `copilot --resume=<id>`,
-`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
-<id>`, `omnigent run … --resume <id>`, `agy --conversation=<id>`) works only
+`kiro-cli --resume-id <id>`, `hermes --resume <id>`,
+`agy --conversation=<id>`) works only
 inside the sandbox, where the conversation is. Typed on this machine it does
 not reach it, unless the shell wrapper is on (`sandbox enable`) for that
 command, which sends it into the folder's sandbox. DefenseClaw cannot keep
@@ -764,8 +774,7 @@ one, prints its line only after a prompt.
 - the banner's model line.
 
 Secret values are never kept. The options stop at the first word that is
-not one, except for OmniGent, whose every argument is kept in order (the
-agent path included), an OpenCode project path, and Hermes's `chat`.
+not one, except for an OpenCode project path and Hermes's `chat`.
 `connect`, and a shell wrapper's resume, pass those options again before
 any new ones, and show the same Model and Secret lines as the run.
 
@@ -849,9 +858,7 @@ A few rules the flags follow:
   required pack that works on copies), `run` says so before it copies.
 - In a safe run (`--safe`, or a policy that keeps the prompts), harness
   arguments that would turn the prompts off are dropped with a warning that
-  names the organization when the policy is its. OmniGent has no
-  skip-permissions switch: its banner shows that its approvals come from its
-  own policies, DefenseClaw's included.
+  names the organization when the policy is its.
 - A folder that can't be mounted live (a linked git worktree, a git
   directory outside it) runs on a copy, with one line saying why.
 - A copy larger than `openshell.workdir.max_upload_mb` (500 MB by default)
@@ -1084,6 +1091,12 @@ warn about unpulled work, as after a session that brought everything back.
 When the copy is as its last pull took it, the next `pull` uses that pull
 instead of starting the sandbox.
 
+A copy-mode MicroVM with a full disk keeps running if its copy holds work not
+yet pulled (exit `5`), even with `--yes`: check it with
+`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name>`, then
+stop. `sandbox delete <name>` gives up that work. If its disk does not answer
+within 15 seconds, stop asks first; `--yes` skips that question.
+
 ```bash
 defenseclaw sandbox stop myapp-7f3a
 ```
@@ -1164,7 +1177,9 @@ feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
 happened before is in defenseclaw-gateway audit export …`). An empty feed
 says since when too (`no activity since the DefenseClaw daemon last started
 (HH:MM:SS) …`), also for a sandbox deleted before the restart. The audit
-store keeps every event. A destination
+store keeps every event. A plain `sandbox activity` listing leaves out events
+of sandboxes deleted since the daemon started; `--sandbox NAME` or `-o json`
+shows the whole feed. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:
@@ -1295,7 +1310,13 @@ Approves an ask. The approval opens a direct OpenShell rule for the
 destination. It is applied at the sandbox's next quiet moment, because every
 OpenShell policy change closes the sandbox's open connections. `--always`
 also saves the hosts to `openshell.egress.unblocked` for future sandboxes.
-It is refused, and nothing is approved, for the typical asks: a port on your
+
+On a managed computer with `allow_unblock: false`, an approval lasts for the
+session only and `approve --always` is refused, even when `user_approvals` is
+unset.
+
+The `--always` option is also refused, and nothing is approved, for the
+typical asks: a port on your
 machine, a destination on your private network (a private address, an
 intranet name such as `*.corp`, or a name that resolves to a private
 address), or an ask with allowed IP addresses (`allowed_ips`). Those open for
@@ -1346,6 +1367,11 @@ this machine, and your organization's lists can't be unblocked, and neither can 
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
 [decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
 has the details.
+
+A managed `sandbox unblock HOST --sandbox NAME` without `--always` lasts only
+for that sandbox's current session. After `sandbox stop` and a start (or a
+connect of a stopped sandbox), DefenseClaw's destination rule applies again
+at the hook and egress proxy. An allowed `--always` unblock outlives the stop.
 
 An unblock also stops DefenseClaw's destination rules (such as
 `C2-WEBHOOK-SITE` for `webhook.site`, or `C2-NGROK`) from flagging or
@@ -1674,6 +1700,10 @@ On a managed computer it starts with your own policy in plain words, and
 `--sources` labels each value as coming from your organization, your profile,
 the pack, the repository or a flag (see
 [On a managed computer](#on-a-managed-computer)).
+
+Without `--sandbox` or `--harness`, a managed `policy explain` describes a
+new run of the default agent and names running sandboxes. Use `--sandbox NAME`
+to explain the policy of a running sandbox.
 
 ![defenseclaw sandbox policy explain on a managed computer: Your sandbox policy in plain words with the organization profile and matched group, then the pack and its digest and a table of settings with their value, source and origin](/images/sandboxes/managed/policy-explain.png)
 

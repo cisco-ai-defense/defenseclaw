@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -114,7 +115,19 @@ type InstallResult struct {
 	AgentVersionStatus         string `json:"agent_version_status,omitempty"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string `json:"hook_contract_entry_updated_at,omitempty"`
+	// AgentConfig is what the account should know about its agent config
+	// that is no protection failure (connector.AgentConfigStatus: a Hermes
+	// or Devin config put back from a copy, or recreated with DefenseClaw's
+	// hooks only, GAP-0564). It is not serialized: the guardian state keeps
+	// the schema a prior binary reads strictly. The worker's answer carries
+	// it next to the result, and the guardian records it in its own file.
+	AgentConfig string `json:"-"`
 }
+
+// agentConfigReadOnVerify reports a guardian that verifies the accounts'
+// agent configs without writing in their data folders: the Windows
+// standalone one (agent_config_verify_windows.go).
+var agentConfigReadOnVerify = func() bool { return false }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
 // policy registration. Per-user runtime files are intentionally retained as
@@ -337,6 +350,19 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), lock.RawAgentVersion),
 			}
+			switch {
+			case standalonePerUserRepair(uid):
+				// The agent config that verified (Hermes, Devin) is the
+				// last known good copy; one recreated without the
+				// account's settings stays reported until they are back
+				// (GAP-0564).
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, true)
+			case agentConfigReadOnVerify():
+				// The Windows standalone guardian verifies for the account:
+				// it reads what to report and writes nothing (the copy is
+				// kept by its setup, GAP-0588).
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, false)
+			}
 			return nil
 		})
 	})
@@ -539,6 +565,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
+			var beforeSetup dataDirSnapshot
+			var beforeHookConfigs hookConfigSnapshot
 			rollback := func(cause error) error {
 				failures := []error{cause}
 				if lockWriteAttempted {
@@ -552,8 +580,20 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
 					}
 				}
-				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
+				teardownErr := conn.Teardown(ctx, setupOpts)
+				if teardownErr != nil {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+				}
+				// Only once no registration names them: an agent still
+				// pointed at a removed script would fail its hook. Either
+				// the teardown took the registration back, or the agent's
+				// hook config files hold what they held before Setup (a
+				// Setup that failed on an unparseable config, whose
+				// teardown fails the same way).
+				if teardownErr == nil || beforeHookConfigs.unchanged() {
+					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
+					}
 				}
 				return errors.Join(failures...)
 			}
@@ -562,11 +602,35 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
 				return err
 			}
+			// A rollback removes what Setup adds below the data directory
+			// (GAP-0509).
+			beforeSetup = snapshotDataDir(dataDir)
+			beforeHookConfigs = snapshotHookConfigs(append(append([]string{}, paths...), pluginArtifacts...))
+			setupStarted := time.Now()
 			// The folders Setup creates below the home (~/.codex in an
 			// account that never ran Codex, say) are recorded, so the purge
 			// and a per-user uninstall --all remove them once empty.
 			if err := connector.SetupRecordingCreatedDirs(ctx, conn, setupOpts); err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
+				cause := fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
+				// A Setup that fails part way (on an unparseable agent
+				// config, say) has written its hook scripts, token and
+				// config files and backups already (GAP-0509).
+				switch {
+				case beforeHookConfigs.unchanged():
+					// It registered nothing, so no teardown: one would take
+					// back a previous install's registration and the shims
+					// every connector shares. The files it added go.
+					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
+						return errors.Join(cause, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
+					}
+					return cause
+				case beforeHookConfigs.ok:
+					return rollback(cause)
+				default:
+					// A hook config that could not be read before Setup (a
+					// named pipe, say) is left as it is.
+					return cause
+				}
 			}
 			// Setup found the folders made above already there, so it did
 			// not record them for its teardown.
@@ -630,6 +694,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), setupOpts.AgentVersion),
 			}
+			// An agent config this setup put back or recreated (GAP-0564).
+			result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, setupStarted, false)
 			return nil
 		})
 	})

@@ -104,10 +104,6 @@ func bundleDirs(b *Bundle) map[string]bool {
 	return dirs
 }
 
-func renderValue(value, root string, b *Bundle, dirs map[string]bool) (string, error) {
-	return renderValueForPlatform(value, root, "", b, dirs)
-}
-
 func renderValueForPlatform(value, root, platform string, b *Bundle, dirs map[string]bool) (string, error) {
 	top, _, nested := strings.Cut(value, "/")
 	if !nested || !bundleTopDirs[top] {

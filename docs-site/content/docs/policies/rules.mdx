@@ -71,6 +71,12 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
         tags: [acme, database]
     ```
 
+    With the default posture, this `HIGH` rule alerts; `CRITICAL` is the
+    blocking level. See [Thresholds](/docs/policies/thresholds#rule-pack-default-posture)
+    to choose the block and alert levels. The expression checks
+    `c.argv_complete` because enforcement needs the complete argument list;
+    incomplete argv can be recorded but cannot prove this tool-call block.
+
     A pattern-only rule can block matching prompts and content, but a tool-call
     pattern match is detection-only: it alerts and never blocks, regardless of
     `block_at`. For a tool-call block, use an `expression` over complete action

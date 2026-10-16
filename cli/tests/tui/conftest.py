@@ -127,6 +127,18 @@ def _no_agent_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_update_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read the host's release-update cache or look up the latest release.
+
+    The app shows "DefenseClaw X is available" as its first toast when a newer
+    release is cached, which shifted the toast assertions on any machine that
+    had one (GAP-0375).
+    """
+
+    monkeypatch.setenv("DEFENSECLAW_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture(autouse=True)
 def _no_captured_cli_refresh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never spawn the real CLI for the app's quiet ``--json`` loads in Pilot tests.
 

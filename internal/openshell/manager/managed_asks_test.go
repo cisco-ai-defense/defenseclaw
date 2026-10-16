@@ -21,6 +21,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -570,6 +571,109 @@ func TestManagedSessionUnblockEndsAtStop(t *testing.T) {
 	}
 	if !e.decideEgress("sessbox", "example.org").Allowed {
 		t.Fatal("an always unblock did not outlive the stop")
+	}
+}
+
+// GAP-0676: the answer to a proxy ask for the session ends when the sandbox
+// stops, like a session unblock: after the start the host is refused again
+// and asks again. An answer for always is what outlives the stop.
+func TestManagedSessionApprovalEndsAtStop(t *testing.T) {
+	e, _ := managedEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	_, advance := e.fakeClock(time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC))
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "pabox"})
+	e.register("pabox")
+	answer := func(host string, always bool) {
+		t.Helper()
+		if status, _ := proxy.connect(t, "pabox", host+":443"); status != http.StatusForbidden {
+			t.Fatalf("CONNECT %s = %d, want the proxy's refusal", host, status)
+		}
+		asks := e.waitAsks("pabox", 1)
+		must(t, e.decide(asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: always}))
+		e.waitAsks("pabox", 0)
+		if !e.decideEgress("pabox", host).Allowed {
+			t.Fatalf("the proxy still refuses %s after the approval", host)
+		}
+	}
+	answer("example.org", false)
+	answer("kept.example.net", true)
+	e.stopBox("pabox")
+	e.startBox("pabox", sandboxapi.StartRequest{})
+	if e.decideEgress("pabox", "example.org").Allowed {
+		t.Fatal("a session approval outlived the stop")
+	}
+	if rec := e.boxOf("pabox").rec; len(rec.Approved) != 0 {
+		t.Fatalf("the record keeps the last session's approvals: %q", rec.Approved)
+	}
+	if !e.decideEgress("pabox", "kept.example.net").Allowed {
+		t.Fatal("an always approval did not outlive the stop")
+	}
+	// The new session asks again, within the minutes an answer given moments
+	// ago holds off a repeat ask (collapseWindow): the last session's answer
+	// is not one. (Past the refusal log's own folding window.)
+	advance(time.Minute)
+	if status, _ := proxy.connect(t, "pabox", "example.org:443"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT example.org after the start = %d, want the proxy's refusal", status)
+	}
+	if asks := e.waitAsks("pabox", 1); asks[0].Host != "example.org" {
+		t.Fatalf("ask after the start = %+v", asks[0])
+	}
+}
+
+// GAP-0676 (decision 6b): a rule the person approved for the session (an
+// OpenShell draft proposal) ends when the sandbox stops too; one approved
+// for always, which the managed gateway keeps, stays, and so does one
+// DefenseClaw approved on its own.
+func TestManagedSessionRuleEndsAtStop(t *testing.T) {
+	e, _ := managedEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.live(sandboxapi.CreateRequest{Name: "srbox"})
+	e.register("srbox")
+	approveRule := func(host string, always bool) string {
+		t.Helper()
+		e.propose("srbox", host)
+		e.draft("srbox")
+		asks := e.waitAsks("srbox", 1)
+		must(t, e.decide(asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: always}))
+		rule := ruleFor(host)
+		eventually(t, "the approved rule "+rule, func() bool {
+			return e.approvedRules("srbox")[rule] == actorOperator && e.hasRule("srbox", rule)
+		})
+		e.waitAsks("srbox", 0)
+		return rule
+	}
+	session := approveRule("session.example.org", false)
+	always := approveRule("always.example.org", true)
+	e.stopBox("srbox")
+	e.startBox("srbox", sandboxapi.StartRequest{})
+	if e.hasRule("srbox", session) {
+		t.Fatal("a rule approved for the session outlived the stop")
+	}
+	if _, kept := e.approvedRules("srbox")[session]; kept {
+		t.Fatal("the record keeps the approver of the removed rule")
+	}
+	if !e.tel.removed(session, policyReasonApprovalRequired) {
+		t.Fatal("the removed rule has no policy record")
+	}
+	if !e.hasRule("srbox", always) || e.approvedRules("srbox")[always] != actorOperator {
+		t.Fatal("a rule approved for always did not outlive the stop")
+	}
+}
+
+// Outside managed mode an approval for the session lasts as long as the
+// sandbox: nothing ends at a stop.
+func TestUnmanagedSessionApprovalsOutliveAStop(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.live(sandboxapi.CreateRequest{Name: "ombox"})
+	e.propose("ombox", "session.example.org")
+	e.draft("ombox")
+	asks := e.waitAsks("ombox", 1)
+	must(t, e.decide(asks[0].ID, approve))
+	rule := ruleFor("session.example.org")
+	eventually(t, "the approved rule", func() bool { return e.hasRule("ombox", rule) })
+	e.stopBox("ombox")
+	e.startBox("ombox", sandboxapi.StartRequest{})
+	if !e.hasRule("ombox", rule) || e.approvedRules("ombox")[rule] != actorOperator {
+		t.Fatal("outside managed mode a session rule ended at the stop")
 	}
 }
 

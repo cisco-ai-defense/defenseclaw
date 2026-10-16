@@ -260,6 +260,28 @@ try {
                 $failures.Add("the running program's copy was not left for deletion at restart: $($copies.Count) copies, $($restartDeletes -join ', ')")
             }
             Test-Refused 'tree with an earlier upgrade copy (walk)' { Assert-DefenseClawManagedInstallTree -Layout $busy } 'unexpected file'
+
+            # GAP-0852: a handle that shares only read access (as an antivirus
+            # scan holds a file) failed the replacement with a raw sharing
+            # violation. The refusal names the held file and the retry step,
+            # and the file keeps its bytes.
+            $held = New-TestLayout 'held'
+            $heldTarget = [IO.Path]::Combine($held.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::WriteAllText($heldTarget, 'old hook')
+            $heldSource = [IO.Path]::Combine($Root, 'newer-hook.exe')
+            [IO.File]::WriteAllText($heldSource, 'newer hook')
+            $handle = [IO.File]::Open($heldTarget, 'Open', 'Read', 'Read')
+            try {
+                Test-Refused 'replacement of a file another program holds open' {
+                    Install-DefenseClawFileAtomic -Source $heldSource -Destination $heldTarget
+                } ([regex]::Escape("another program holds $heldTarget open") + '.*run Setup again')
+            }
+            finally {
+                $handle.Dispose()
+            }
+            if ([IO.File]::ReadAllText($heldTarget) -cne 'old hook') {
+                $failures.Add('a refused replacement changed the held file')
+            }
             Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $busy
             if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $busy.BinDirectory -Force -Filter 'defenseclaw-acp.exe.backup.*').Count -ne 0) {
                 $failures.Add('the uninstall sweep left the earlier upgrade copy')

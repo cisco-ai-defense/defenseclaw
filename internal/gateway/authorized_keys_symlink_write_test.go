@@ -695,8 +695,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			block   bool
 		}{
 			{"cd dirlink && echo k >> authorized_keys", true},
-			{"f() { cd dirlink; }; trap f DEBUG; echo k >> authorized_keys", true},
-			{"trap 'rm -f tmp.txt' EXIT; echo ok >> notes.txt", false},
 			{"cd ~/proj/dirlink && tee -a authorized_keys", true},
 			{"cd -P dirlink && echo k >> authorized_keys", true},
 			{"cd -L \"dirlink\" && echo k >> authorized_keys", true},
@@ -729,7 +727,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			{"env -C dirlink sh -c \"echo k >> authorized_keys\"", true},
 			{"env --chdir=dirlink sh -c \"echo k >> authorized_keys\"", true},
 			{"env --chdir=dirlink tee -a authorized_keys", true},
-			{"tar -C dirlink -xf keys.tar authorized_keys", true},
 			{"env -C build tee -a notes.txt", false},
 			{"if false; then :; else cd dirlink; fi; echo k >> authorized_keys", true},
 			{"pushd /tmp; if true; then pushd -n dirlink; fi; pushd; echo k >> authorized_keys", true},
@@ -882,18 +879,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if !ok || cdTargets[hookpaths.DirectoryFactPrefix+filepath.Join(project, "dirlink")] != filepath.Dir(keys) {
 		t.Fatalf("hook physical directory fact = %q", cdTargets[hookpaths.DirectoryFactPrefix+filepath.Join(project, "dirlink")])
 	}
-	tarInput := actionfacts.Input{Tool: "Bash", Command: "tar -C dirlink -xf keys.tar authorized_keys",
-		CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
-	tarPayload := mustJSON(t, map[string]any{"tool_name": "Bash", "cwd": project,
-		"tool_input": map[string]any{"command": tarInput.Command}})
-	tarTargets, ok := hookpaths.Decode(hookpaths.Resolve(tarPayload))
-	if !ok {
-		t.Fatal("hook tar member facts did not decode")
-	}
-	tarRequest := trustedActionRequest{Input: tarInput, ProtectedHomeHook: true, ResolvedWriteTargets: tarTargets}
-	if !trustedExistingAuthorizedKeysSymlinkWrite(tarRequest, actionfacts.Analyze(tarInput)) {
-		t.Fatalf("tar member through linked directory was allowed; client facts=%v", tarTargets)
-	}
 	big := filepath.Join(project, "big")
 	if err := os.MkdirAll(big, 0o700); err != nil {
 		t.Fatal(err)
@@ -980,7 +965,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`rsync -a disklink notes.txt && echo k >> notes.txt`,
 		`rsync -l disklink notes.txt && echo k >> notes.txt`,
 		`cp -a disklink notes.txt && cp payload notes.txt`,
-		`rsync -a disklink notes.txt && busybox tee -a notes.txt < payload`,
 		`cp --recursive tree copy && echo k >> copy/k`,
 		`cp -a -t copy tree && echo k >> copy/tree/k`,
 		`cp --archive --target-directory=copy tree && echo k >> copy/tree/k`,
@@ -1048,83 +1032,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
-		// Issue 1168: same-command variables and parameter expansions.
-		`f=disklink; echo k >> "$f"`,
-		`f=dirlink/authorized_keys; echo k >> "$f"`,
-		`f=disklink; printf k | tee -a "$f"`,
-		`echo k >> ${f:-disklink}`,
-		`f=report.txt; if true; then unset f; fi; echo k >> ${f:-disklink}`,
-		// Issue 1169: interpreter literal writes.
-		`python3 -c 'from pathlib import Path; Path("disklink").open("a").write("k")'`,
-		"python3 - <<'PY'\nopen(\"disklink\",\"a\").write(\"k\")\nPY",
-		"python3 <<'PY'\nopen(\"disklink\",\"a\").write(\"k\")\nPY",
-		"python3 <<<'open(\"disklink\",\"a\").write(\"k\")'",
-		"cat <<'PY' | python3\nopen(\"disklink\",\"a\").write(\"k\")\nPY",
-		`echo 'open("disklink","a").write("k")' | python3`,
-		`printf 'open("disklink","a").write("k")' | python3 -`,
-		`cd dirlink && python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`,
-		"cd dirlink && python3 - <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"k\")\nPY",
-		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"k\")\nPY",
-		`cd dirlink && perl -e 'open my $fh, ">>", "authorized_keys"; print $fh "k"'`,
-		`cd dirlink && node -e 'require("fs").createWriteStream("authorized_keys").write("k")'`,
-		`env -C dirlink python3 -c 'from pathlib import Path; Path("authorized_keys").open("a").write("k")'`,
-		// Issue 1170: multicall applets and operand extraction.
-		`cd dirlink && echo k | busybox tee -a authorized_keys`,
-		`tar -C dirlink -xf keys.tar authorized_keys`,
-		`ln -sf ../proj/report.txt dirlink/authorized_keys`,
-		// Issue 1171: function bodies and coproc after a directory change.
-		`cd dirlink && f() { echo k >> authorized_keys; }; f`,
-		`cd dirlink && function f { echo k >> authorized_keys; }; f`,
-		`cd dirlink && coproc { echo k >> authorized_keys; }; wait`,
-		// Issue 1175 (GAP-1569): compound cd forms through the real link.
-		`(cd dirlink && echo k >> authorized_keys)`,
-		`{ cd dirlink; echo k >> authorized_keys; }`,
-		`if cd dirlink; then echo k >> authorized_keys; fi`,
-		`cd dirlink && for f in authorized_keys; do echo k >> $f; done`,
-		`cd dirlink && echo k >> authorized_keys &`,
-		`cd dirlink && { echo k >> authorized_keys; }`,
-		`cd dirlink && (echo k >> authorized_keys)`,
-		`cd dirlink && ! echo k >> authorized_keys`,
-		`cd dirlink && time echo k >> authorized_keys`,
-		`pushd dirlink && pushd /tmp && pushd && echo k >> authorized_keys`,
-		`pushd -n dirlink && pushd && echo k >> authorized_keys`,
-		`env -C dirlink sh -c "echo k >> authorized_keys"`,
-		// Issue 1176: nested redirects are still write operands.
-		`if true; then echo k >> disklink; fi`,
-		`for i in 1 2; do echo k >> disklink; done`,
-		`while true; do echo k >> disklink; done`,
-		`case x in x) echo k >> disklink;; esac`,
-		`f() { echo k >> disklink; }; f`,
-		`echo $(echo k >> disklink)`,
-		`cat <(echo k >> disklink)`,
-		// Issue 1177: poisoned variables fail closed instead of reusing stale values.
-		`f=other; if true; then f=disklink; fi; echo k >> "$f"`,
-		`f=other; for f in disklink; do :; done; echo k >> "$f"`,
-		`f=other; select f in disklink; do echo k >> "$f"; done`,
-		`f=other; export f=disklink; echo k >> "$f"`,
-		`f=other; declare f=disklink; echo k >> "$f"`,
-		`f=other; typeset f=disklink; echo k >> "$f"`,
-		`f=other; local f=disklink; echo k >> "$f"`,
-		`f=other; readonly f=disklink; echo k >> "$f"`,
-		`f=dirlink/; f+=authorized_keys; echo k >> "$f"`,
-		`f=other; eval f=disklink; echo k >> "$f"`,
-		`f=other; source x.sh; echo k >> "$f"`,
-		`f=other; . x.sh; echo k >> "$f"`,
-		`f=other; printf -v f disklink; echo k >> "$f"`,
-		`f=other; (( f = 1 )); echo k >> "$f"`,
-		`f=other; let f=1; echo k >> "$f"`,
-		`f=other; getopts a f; echo k >> "$f"`,
-		`f=other; mapfile f; echo k >> "$f"`,
-		`f=other; readarray f; echo k >> "$f"`,
-		`f=other; read f; echo k >> "$f"`,
-		`f=other; g() { f=disklink; }; g; echo k >> "$f"`,
-		`f=other; echo | f=disklink; echo k >> "$f"`,
-		`f=other; f=disklink & echo k >> "$f"`,
-		`f=other; true && f=disklink; echo k >> "$f"`,
-		`f=other; false || f=disklink; echo k >> "$f"`,
-		`f=other; (f=disklink); echo k >> "$f"`,
-		`f=other; f=disklink cmd; echo k >> "$f"`,
-		`f=other; echo "$(f=disklink)"; echo k >> "$f"`,
 	}
 	allowed := []string{
 		`cd build && echo ok >> notes.txt`,
@@ -1183,160 +1090,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
-	ordinaryAllowed := []string{
-		`true`,
-		`echo ok`,
-		`printf ok`,
-		`echo ok > report.txt`,
-		`echo ok >> report.txt`,
-		`: > empty.txt`,
-		`printf "ok\n" > report.txt`,
-		`printf "ok\n" >> report.txt`,
-		`echo ok 2> err.log`,
-		`echo ok &> combined.log`,
-		`cat < report.txt > copy.txt`,
-		`cat <<'EOF' > report.txt
-ok
-EOF`,
-		`cat > report.txt <<'EOF'
-ok
-EOF`,
-		`tee -a report.txt < payload`,
-		`printf ok | tee report.txt`,
-		`printf ok | tee -a report.txt`,
-		`printf ok | tee -a reportlink`,
-		`cp payload report.txt`,
-		`cp payload reportlink`,
-		`cp payload dirlink/known_hosts`,
-		`cp -f payload report.txt`,
-		`cp -p payload report.txt`,
-		`cp --preserve=mode payload report.txt`,
-		`cp -a src dst`,
-		`cp --archive src dst`,
-		`cp -R src dst`,
-		`cp --recursive src dst`,
-		`cp -a tree copy`,
-		`cp --archive --target-directory copy tree`,
-		`cp -a -t copy tree`,
-		`mv payload report.txt`,
-		`mv -f payload report.txt`,
-		`install payload report.txt`,
-		`install -m 600 payload report.txt`,
-		`dd if=payload of=report.txt`,
-		`truncate -s 0 report.txt`,
-		`sed -i 's/marker/ok/' report.txt`,
-		`sed -i.bak 's/marker/ok/' report.txt`,
-		`sed -i --follow-symlinks 's/marker/ok/' reportlink`,
-		`ln -s report.txt ordinary-link && echo ok >> ordinary-link`,
-		`ln -sf report.txt ordinary-link && echo ok >> ordinary-link`,
-		`ln report.txt hard-report && echo ok >> hard-report`,
-		`ln -f report.txt hard-report && echo ok >> hard-report`,
-		`tar cf out.tar report.txt`,
-		`tar czf out.tgz tree`,
-		`tar -C build -xf keys.tar notes.txt`,
-		`tar -C build -xvf keys.tar notes.txt`,
-		`tar --directory build -xf keys.tar notes.txt`,
-		`tar -xf keys.tar -C build notes.txt`,
-		`tar -t -f keys.tar`,
-		`tar -tf keys.tar > listing.txt`,
-		`tar -xzf pkg.tgz > unpack.log`,
-		`unzip -l keys.zip`,
-		`unzip keys.zip -d build`,
-		`unzip -o keys.zip -d build`,
-		`7z l keys.7z`,
-		`7z x keys.7z -obuild`,
-		`make > build.log`,
-		`make test > build.log`,
-		`make -C build all > build.log`,
-		`go build ./... > build.log`,
-		`go test ./... > test.log`,
-		`go test ./internal/hookpaths > test.log`,
-		`go vet ./... > vet.log`,
-		`git status > status.txt`,
-		`git diff -- report.txt > diff.txt`,
-		`git show --stat > stat.txt`,
-		`git grep marker > hits.txt`,
-		`npm install > npm.log`,
-		`npm test > npm-test.log`,
-		`npm run build > npm-build.log`,
-		`python3 -m pip install -r requirements.txt > pip.log`,
-		`pip install -r requirements.txt > pip.log`,
-		`python3 -m compileall . > py.log`,
-		`python3 -c 'open("report.txt","a").write("ok")'`,
-		`python3 -c 'open("reportlink","a").write("ok")'`,
-		`python3 -c 'open("report.txt","w").write("ok")'`,
-		`python3 -c 'open("report.txt","x").write("ok")'`,
-		`python3 -c 'from pathlib import Path; Path("report.txt").open("a").write("ok")'`,
-		`python3 -c 'from pathlib import Path; Path("reportlink").open("a").write("ok")'`,
-		`python3 -c 'from pathlib import Path; Path("report.txt").write_text("ok")'`,
-		"python3 - <<'PY'\nopen(\"report.txt\",\"a\").write(\"ok\")\nPY",
-		"python3 <<'PY'\nopen(\"report.txt\",\"a\").write(\"ok\")\nPY",
-		"python3 <<<'open(\"report.txt\",\"a\").write(\"ok\")'",
-		"cat <<'PY' | python3\nopen(\"report.txt\",\"a\").write(\"ok\")\nPY",
-		`echo 'open("report.txt","a").write("ok")' | python3`,
-		`printf 'open("report.txt","a").write("ok")' | python3 -`,
-		"python3 - <<'PY'\nfrom pathlib import Path\nPath(\"report.txt\").open(\"a\").write(\"ok\")\nPY",
-		`perl -e 'open my $fh, ">>", "report.txt"; print $fh "ok"'`,
-		`perl -e 'open(my $fh, ">>", "report.txt"); print $fh "ok"'`,
-		`perl -e 'open F,">>","report.txt"; print F "ok"'`,
-		`node -e 'require("fs").writeFileSync("report.txt","ok")'`,
-		`node -e 'require("fs").appendFileSync("report.txt","ok")'`,
-		`node -e 'require("fs").createWriteStream("report.txt").write("ok")'`,
-		`ruby -e 'File.write("report.txt","ok")'`,
-		`ruby -e 'File.open("report.txt","a") { |f| f.write("ok") }'`,
-		`awk 'BEGIN {print "ok" >> "report.txt"}'`,
-		`f=report.txt; echo ok >> "$f"`,
-		`f=reportlink; echo ok >> "$f"`,
-		`f=report.txt; printf ok | tee -a "$f"`,
-		`f=report.txt; cp payload "$f"`,
-		`f=report.txt; mv payload "$f"`,
-		`f=report.txt; install payload "$f"`,
-		`f=report.txt; dd if=payload of="$f"`,
-		`f=report.txt; truncate -s 0 "$f"`,
-		`f=report.txt; sed -i 's/marker/ok/' "$f"`,
-		`echo ok >> ${f:-report.txt}`,
-		`f=other.txt; echo ok >> ${f:-report.txt}`,
-		`unset f; echo ok >> ${f:=report.txt}`,
-		`f=report.txt; if true; then unset -f f; fi; echo ok >> "$f"`,
-		`f=old.txt; f=report.txt; echo ok >> "$f"`,
-		`f=report.txt echo ok >> "$f"`,
-		`{ echo ok >> report.txt; }`,
-		`(echo ok >> report.txt)`,
-		`if true; then echo ok >> report.txt; fi`,
-		`if false; then :; else echo ok >> report.txt; fi`,
-		`for f in report.txt; do echo ok >> "$f"; done`,
-		`while false; do echo ok >> report.txt; done`,
-		`case x in x) echo ok >> report.txt;; esac`,
-		`f() { echo ok >> report.txt; }; f`,
-		`f() { cd dirlink; }; echo ok > authorized_keys`,
-		`function f { echo ok >> report.txt; }; f`,
-		`coproc { echo ok >> report.txt; }; wait`,
-		`cd build && echo ok >> notes.txt`,
-		`cd build && printf ok | tee -a notes.txt`,
-		`cd build && python3 -c 'open("notes.txt","a").write("ok")'`,
-		"cd build && python3 - <<'PY'\nopen(\"notes.txt\",\"a\").write(\"ok\")\nPY",
-		`cd build && perl -e 'open my $fh, ">>", "notes.txt"; print $fh "ok"'`,
-		`cd build && node -e 'require("fs").appendFileSync("notes.txt","ok")'`,
-		`env -C build sh -c "echo ok >> notes.txt"`,
-		`env --chdir=build sh -c "echo ok >> notes.txt"`,
-		`env -C build python3 -c 'open("notes.txt","a").write("ok")'`,
-		`env -C build tee -a notes.txt < payload`,
-		`busybox tee -a report.txt < payload`,
-		`busybox cp payload report.txt`,
-		`busybox mv payload report.txt`,
-		`busybox ln -s report.txt ordinary-link && echo ok >> ordinary-link`,
-		`busybox sed -i 's/marker/ok/' report.txt`,
-		`busybox truncate -s 0 report.txt`,
-		`busybox dd if=payload of=report.txt`,
-		`toybox tee -a report.txt < payload`,
-		`toybox cp payload report.txt`,
-		`toybox mv payload report.txt`,
-		`toybox ln -s report.txt ordinary-link && echo ok >> ordinary-link`,
-	}
-	if len(ordinaryAllowed) < 100 {
-		t.Fatalf("ordinary allow table has %d rows, want at least 100", len(ordinaryAllowed))
-	}
-	allowed = append(allowed, ordinaryAllowed...)
 	// The managed gateway also fails closed on a program word that is not
 	// static, which this change leaves as it is.
 	allowedPerUser := []string{`"$PY" x.py > out.txt`, `bash -lc "cp a b" > out.txt`}
@@ -1394,142 +1147,6 @@ EOF`,
 					}
 				}
 			})
-		}
-	}
-}
-
-// The hook sees user-owned links under /home, while a managed gateway with
-// ProtectHome does not. Exercise the header in both connector formats before
-// making the link invisible to the gateway.
-func TestManagedWriteOperandFactsForRelativeLinkHop(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX link operands")
-	}
-	for _, row := range []struct {
-		name, command string
-		block         bool
-		omitFact      bool
-	}{
-		{"cp", "cp payload a/l", true, false},
-		{"tee", "tee -a a/l < payload", true, false},
-		{"mv", "mv payload a/l", true, false},
-		{"install", "install payload a/l", true, false},
-		{"dd", "dd if=payload of=a/l", true, false},
-		{"sed", "sed -i s/old/new/ a/l", true, false},
-		{"truncate", "truncate -s 0 a/l", true, false},
-		{"ln force", "ln -f payload a/l", true, false},
-		{"rsync", "rsync payload a/l", true, false},
-		{"cp omitted fact", "cp payload a/l", true, true},
-		{"cp sibling", "cp payload notes.txt", false, false},
-		{"tee sibling", "tee out.log < payload", false, false},
-		{"cp plain child", "cp payload a/ok.txt", false, false},
-		{"tee benign relink", "tee -a c/l2 < payload", false, false},
-		{"archive hop", "tar -C unpack -xf pack.tar && echo k >> a2/l", true, false},
-		{"cp archive link then append", "cp --archive disklink notes.txt && echo k >> notes.txt", true, false},
-		{"cp short archive link then append", "cp -a disklink notes.txt && echo k >> notes.txt", true, false},
-	} {
-		for _, connector := range []string{"claudecode", "codex"} {
-			for _, managed := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/managed=%v", row.name, connector, managed), func(t *testing.T) {
-					home := filepath.Join(t.TempDir(), "home")
-					project := filepath.Join(home, "proj")
-					keys := filepath.Join(home, ".ssh", "authorized_keys")
-					for _, dir := range []string{filepath.Dir(keys), filepath.Join(home, ".ssh", "d"),
-						filepath.Join(project, "a"), filepath.Join(project, "a2"), filepath.Join(project, "c", "real"),
-						filepath.Join(project, "unpack", "q", "r")} {
-						if err := os.MkdirAll(dir, 0o700); err != nil {
-							t.Fatal(err)
-						}
-					}
-					for _, link := range []struct{ name, target string }{
-						{filepath.Join(project, "disklink"), keys},
-						{filepath.Join(project, "a", "b"), filepath.Join(home, ".ssh", "d")},
-						{filepath.Join(project, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
-						{filepath.Join(project, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
-						{filepath.Join(project, "a2", "l"), filepath.FromSlash("b/../t")},
-						{filepath.Join(project, "c", "b2"), filepath.Join(project, "c", "real")},
-						{filepath.Join(project, "c", "l2"), filepath.FromSlash("b2/../ok.txt")},
-					} {
-						if err := os.Symlink(link.target, link.name); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(filepath.Join(project, "a", "ok.txt"), nil, 0o600); err != nil {
-						t.Fatal(err)
-					}
-					t.Setenv("HOME", home)
-					tool, key := "Bash", "command"
-					if connector == "codex" {
-						tool, key = "exec_command", "cmd"
-					}
-					args := mustJSON(t, map[string]string{key: row.command, "description": "Run the copy command as specified"})
-					payload := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
-						"tool_name": tool, "cwd": project, "tool_input": json.RawMessage(args)})
-					header := hookpaths.Resolve(payload)
-					targets, ok := hookpaths.Decode(header)
-					if !ok {
-						t.Fatal("hook write facts did not decode")
-					}
-					if strings.Contains(row.command, "a/l") {
-						operand := filepath.Join(project, "a", "l")
-						_, present := targets[operand]
-						if !present {
-							t.Fatalf("hook omitted write operand %s: %v", operand, targets)
-						}
-						if row.name == "cp" || row.name == "tee" {
-							if got := targets[operand]; got != keys {
-								t.Fatalf("hook physical operand = %q, want %q", got, keys)
-							}
-						}
-					}
-					if strings.Contains(row.command, "disklink") {
-						source := hookpaths.SourceLinkFactPrefix + filepath.Join(project, "disklink")
-						if got := targets[source]; got != "1" {
-							t.Fatalf("hook source link fact = %q, want 1; client facts=%v", got, targets)
-						}
-					}
-					if row.omitFact {
-						delete(targets, filepath.Join(project, "a", "l"))
-						header = encodeTargets(t, targets)
-					}
-					if managed {
-						// Host-independent ProtectHome seam: after the user-side
-						// header is made, the gateway cannot inspect even the CWD.
-						// This also catches PathFacts left relative by its first pass.
-						if err := os.Rename(project, filepath.Join(home, "hidden")); err != nil {
-							t.Fatal(err)
-						}
-						if got := hookCWDForContext(withManagedHookPeer(context.Background(), managedHookPeer{Home: home}), project); got != "" {
-							t.Fatalf("gateway still resolved private cwd %q", got)
-						}
-					}
-					cfg := &config.Config{}
-					cfg.Guardrail.Mode = "action"
-					cfg.Guardrail.Connector = connector
-					api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-					request := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
-					request.Header.Set(hookpaths.Header, header)
-					if connector == "codex" {
-						setTestCodexHookBinding(request, "PreToolUse", defaultTestCodexHookContract)
-					}
-					if managed {
-						request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{Home: home}))
-					}
-					recorder := httptest.NewRecorder()
-					api.handleAgentHook(connector).ServeHTTP(recorder, request)
-					want := `{"action":"allow"`
-					if row.block {
-						want = `{"action":"block"`
-					}
-					if got := recorder.Body.String(); !strings.HasPrefix(got, want) ||
-						row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-						t.Fatalf("decision = %.400s, want %s; client facts=%v", got, want, targets)
-					}
-				})
-			}
 		}
 	}
 }

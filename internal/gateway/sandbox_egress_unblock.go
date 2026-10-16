@@ -22,7 +22,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // A sandbox's egress proxy and DefenseClaw's destination rules are two
@@ -70,7 +73,7 @@ const sandboxEgressUnblockExtra = "sandbox_egress_unblocked"
 // liftUnblockedDestinations returns resp as an allow when every rule that
 // decided it is a destination rule (sandboxDestinationRules) and every
 // destination those rules name in the hook request is unblocked for the
-// request's sandbox (SandboxIngressConfig.EgressUnblock). ok is false, and
+// request's sandbox (sandboxEgressUnblockSource). ok is false, and
 // resp unchanged, otherwise. A destination the request names in a form the
 // scan cannot read as one host (a shell expansion next to it, a longer name
 // that only contains the domain) keeps the verdict, and so does a verdict a
@@ -94,12 +97,12 @@ func (a *APIServer) liftUnblockedDestinations(ctx context.Context, req agentHook
 	if !ok {
 		return resp, false
 	}
-	st := a.sandboxIngressState()
-	if st == nil || st.egressUnblock == nil {
-		return resp, false
-	}
 	rules, ok := sandboxDestinationRuleIDs(resp.RuleIDs, resp.Findings)
 	if !ok {
+		return resp, false
+	}
+	unblocked := a.sandboxEgressUnblockSource(ctx)
+	if unblocked == nil {
 		return resp, false
 	}
 	var domains []string
@@ -112,7 +115,7 @@ func (a *APIServer) liftUnblockedDestinations(ctx context.Context, req agentHook
 	}
 	lifted := make([]string, 0, len(hosts))
 	for _, host := range hosts {
-		scope, ok := st.egressUnblock(binding, host)
+		scope, ok := unblocked(binding, host)
 		if !ok {
 			return resp, false
 		}
@@ -125,6 +128,86 @@ func (a *APIServer) liftUnblockedDestinations(ctx context.Context, req agentHook
 	resp.Severity, resp.WouldBlock = "NONE", false
 	resp.Findings, resp.Reason, resp.AdditionalContext = nil, "", ""
 	return resp, true
+}
+
+// sandboxEgressUnblockSource is the unblock lookup of a sandbox request:
+// for a relayed call (a managed host) the managed gateway's own record of
+// the caller's unblocks (sandboxRelayUnblock), else the local sandbox
+// manager's (SandboxIngressConfig.EgressUnblock). Nil lifts nothing.
+func (a *APIServer) sandboxEgressUnblockSource(ctx context.Context) func(sandboxauth.Binding, string) (string, bool) {
+	if state := sandboxRelayStateFrom(ctx); state != nil {
+		return a.sandboxRelayUnblock(ctx, state.reg)
+	}
+	st := a.sandboxIngressState()
+	if st == nil || st.egressUnblock == nil {
+		return nil
+	}
+	return st.egressUnblock
+}
+
+// sandboxRelayUnblock is the unblock lookup of a call relayed for reg. The
+// managed gateway keeps every unblock a managed user makes, for one
+// sandbox or for every sandbox (handleSandboxDecide stores each one after
+// checking it against the floor), so the lift is decided here, from that
+// record alone: an unblock of the host for reg's own registration in the
+// session its sandbox runs now (sandboxreg.SessionStart), or for every
+// sandbox of the caller, that reg's floor still allows now (allow_unblock,
+// the organization's block and allowed lists). The registration outlives
+// a stop and start, and its daemon then ends its own session unblocks
+// (es:GAP-0676), so a session unblock made before that start lifts
+// nothing (GAP-0009). A user block of the host wins. Nothing the daemon
+// or the sandbox sends decides it, so no process of the user can make the
+// gateway lift a destination rule the user could not lift with
+// `defenseclaw sandbox unblock` (#1192).
+// Nil when the record or the floor can't be read: nothing is lifted.
+func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Registration) func(sandboxauth.Binding, string) (string, bool) {
+	auth, err := a.sandboxAuth()
+	if err != nil || auth.decisions == nil {
+		return nil
+	}
+	floor, _, err := sandboxFloorFor(a.liveBaseConfig(ctx), reg.Profile)
+	if err != nil {
+		return nil
+	}
+	saved, err := auth.decisions.List(reg.UID, "")
+	if err != nil || len(saved) == 0 {
+		return nil
+	}
+	sessionStart := sandboxreg.SessionStart(reg)
+	return func(b sandboxauth.Binding, host string) (string, bool) {
+		if b.RegistrationID != reg.ID {
+			return "", false
+		}
+		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		scope := ""
+		for _, d := range saved {
+			if d.Registration != reg.ID && d.Scope != sandboxrelay.DecisionScopeAlways {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSuffix(strings.TrimSpace(d.Host), "."), host) {
+				continue
+			}
+			switch d.Kind {
+			case sandboxrelay.DecisionEgressBlock:
+				return "", false
+			case sandboxrelay.DecisionUnblock:
+				if d.Scope == sandboxrelay.DecisionScopeSession && d.CreatedAt.Before(sessionStart) {
+					// An earlier session's: it ended when the sandbox stopped.
+					continue
+				}
+				check := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: reg.ID, Kind: d.Kind, Host: d.Host, Scope: d.Scope}
+				if sandboxCheckDecision(floor, check) != nil {
+					continue
+				}
+				if d.Scope == sandboxrelay.DecisionScopeSession {
+					scope = string(audit.SandboxApprovalScopeSandbox)
+				} else if scope == "" {
+					scope = string(audit.SandboxApprovalScopeAlways)
+				}
+			}
+		}
+		return scope, scope != ""
+	}
 }
 
 // sandboxDestinationRuleIDs returns the canonical IDs of a verdict's

@@ -70,6 +70,7 @@ func TestManagedExplainMatchesGoldenSchema(t *testing.T) {
 	full := ManagedExplain{
 		Profile: "contractors", Description: "Contractors", Match: "group", MatchedGroup: "CORP\\Contractors", Provisional: true,
 		Allowed: true, RequiredFor: []string{"claudecode"}, WhenUnavailable: "refuse",
+		HostRunGate: "exempt", EnrollmentExempt: true,
 		AllowedHarnesses: []string{"claudecode"}, AllowedCredentials: []string{"none"},
 		EgressAllowOnly: []string{"api.example.net"}, EgressBlock: []string{"bad.example"},
 		UserApprovals: "session", AllowUnblock: true,

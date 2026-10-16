@@ -235,6 +235,23 @@ gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
 state=/opt/cisco/defenseclaw/lifecycle
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
+# Installer may replace a signed payload file while an account's LaunchAgent
+# remains loaded. Give both DefenseClaw LaunchAgents a new program inode before
+# ensure reloads their loaded jobs. They both execute this gateway binary.
+refresh_signed_launchagent_binary() {
+    binary=$1
+    [ -f "$binary" ] && [ ! -L "$binary" ] || return 1
+    dir=${binary%/*}
+    tmp=$(mktemp "$dir/.${binary##*/}.pkg.XXXXXXXX") || return 1
+    if ! cp -p "$binary" "$tmp" || ! mv -f "$tmp" "$binary"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+if ! refresh_signed_launchagent_binary "$gateway"; then
+    echo "DefenseClaw: could not replace the signed LaunchAgent gateway with a new file; reinstall the package." >&2
+    exit 1
+fi
 downgrade=""
 if [ -f "$state/allow-downgrade" ] && [ ! -L "$state/allow-downgrade" ] && [ "$(stat -f %u "$state/allow-downgrade")" = 0 ]; then
     downgrade=--allow-downgrade

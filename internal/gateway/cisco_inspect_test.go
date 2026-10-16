@@ -47,7 +47,7 @@ func ciscoMetricMap(metrics []telemetry.V8ProjectedMetric) map[string][]telemetr
 	return result
 }
 
-func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
+func TestCiscoFindingCatalogCoversKnownRules(t *testing.T) {
 	wantIDs := map[string]string{
 		"Prompt Injection":                 "CISCO-PROMPT-INJECTION",
 		"Jailbreak":                        "CISCO-JAILBREAK",
@@ -63,23 +63,15 @@ func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
 		"Code Detection":                   "CISCO-CODE",
 	}
 
-	seen := make(map[string]struct{}, len(defaultEnabledRules))
-	for _, rule := range defaultEnabledRules {
-		label := rule["rule_name"]
-		wantID, ok := wantIDs[label]
-		if !ok {
-			t.Errorf("default Cisco rule %q has no canonical identity fixture", label)
-			continue
-		}
-		seen[label] = struct{}{}
+	if len(wantIDs) != 12 {
+		t.Fatalf("covered %d canonical Cisco rules, want 12", len(wantIDs))
+	}
+	for label, wantID := range wantIDs {
 		if gotID := canonicalCiscoFindingID(label); gotID != wantID {
 			t.Errorf("canonicalCiscoFindingID(%q) = %q, want %q", label, gotID, wantID)
 		} else if gotLabel := ciscoFindingDisplayLabel(gotID); gotLabel != label {
 			t.Errorf("ciscoFindingDisplayLabel(%q) = %q, want %q", gotID, gotLabel, label)
 		}
-	}
-	if len(seen) != len(wantIDs) {
-		t.Fatalf("covered %d canonical Cisco rules, want %d", len(seen), len(wantIDs))
 	}
 
 	for _, tc := range []struct {
@@ -361,10 +353,10 @@ func TestCiscoInspectClient_WireParity(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
-		Endpoint:  srv.URL,
-		APIKey:    "test-golden-key",
-		TimeoutMs: 3000,
-		// Rely on the default enabledRules to lock the payload shape.
+		Endpoint:     srv.URL,
+		APIKey:       "test-golden-key",
+		TimeoutMs:    3000,
+		EnabledRules: []string{"Prompt Injection"},
 	}, "")
 	if c == nil {
 		t.Fatal("expected non-nil client with APIKey set")
@@ -429,11 +421,36 @@ func TestCiscoInspectClient_WireParity(t *testing.T) {
 	if !strings.Contains(bodyStr, `"enabled_rules":`) {
 		t.Errorf("body missing config.enabled_rules; body = %s", bodyStr)
 	}
-	// The default enabledRules list is 12 entries; the exact set is
-	// deliberately not asserted here so operators can add rules without
-	// breaking this test, but the format-invariant is that each entry
-	// is a {"rule_name": "..."} object.
+	// The format-invariant is that each entry is a {"rule_name": "..."} object.
 	if !strings.Contains(bodyStr, `{"rule_name":"Prompt Injection"}`) {
-		t.Errorf("first default rule not present in enabled_rules; body = %s", bodyStr)
+		t.Errorf("configured rule not present in enabled_rules; body = %s", bodyStr)
+	}
+}
+
+// An unconfigured client sends no config block, so a connection that already
+// carries a policy is not asked to merge one.
+func TestCiscoInspectClient_NoEnabledRulesWhenUnconfigured(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint: srv.URL, APIKey: "test-key", TimeoutMs: 3000,
+	}, "")
+	if c == nil {
+		t.Fatal("expected non-nil client with APIKey set")
+	}
+	if v := c.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hello"}}); v == nil {
+		t.Fatal("expected non-nil verdict on 200 response")
+	}
+	if strings.Contains(string(gotBody), `"config"`) {
+		t.Errorf("config must be absent when no rules are configured; body = %s", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"messages"`) {
+		t.Errorf("messages missing; body = %s", gotBody)
 	}
 }

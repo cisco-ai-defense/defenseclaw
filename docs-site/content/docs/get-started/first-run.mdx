@@ -235,14 +235,6 @@ To also write events to a JSONL file as they happen, add a JSONL destination
       type: "high|medium|low|critical",
       description: "Lowest finding severity that triggers a HITL approval prompt. Only applies with --human-approval; CRITICAL findings always block.",
     },
-    "--non-interactive": {
-      type: "flag",
-      description: "Never prompt. The same as --yes; kept so older install scripts keep working.",
-    },
-    "--yes": {
-      type: "flag",
-      description: "Assume yes for confirmations.",
-    },
     "--force": {
       type: "flag",
       description: "Rerun every step even if the environment is already initialized.",

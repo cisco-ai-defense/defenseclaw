@@ -1235,6 +1235,31 @@ def devin_hook_config_path(workspace_dir: str | None = None) -> str:
     return _workspace_path(workspace_dir, ".devin", "hooks.v1.json")
 
 
+def connector_hook_config_paths(connector: str, workspace_dir: str | None = None) -> list[str]:
+    """Return the hook files Setup writes at the configured connector scope."""
+
+    name = normalize(connector)
+    workspace = _workspace_dir(workspace_dir)
+    if name == "devin":
+        return [devin_hook_config_path(workspace) if workspace else devin_user_config_path()]
+    if name == "copilot":
+        root = _workspace_path(workspace, ".github") if workspace else copilot_home()
+        return [os.path.join(root, "hooks", "defenseclaw.json")]
+    if name == "openhands":
+        paths = [os.path.join(connector_home("openhands"), "hooks.json")]
+        if workspace:
+            paths.insert(0, _workspace_path(workspace, ".openhands", "hooks.json"))
+        return paths
+    if name == "kiro":
+        paths = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
+        if workspace:
+            paths.append(_workspace_path(workspace, ".kiro", "hooks", "defenseclaw.json"))
+        return paths
+    if name in {"cursor", "antigravity"}:
+        return [os.path.join(connector_home(name), "hooks.json")]
+    return []
+
+
 def amp_config_home() -> str:
     """Return Amp's documented system configuration directory."""
 

@@ -3994,6 +3994,9 @@ def _skill_policy_fanout_connectors(
         for entry in pe.list_by_type("skill"):
             if entry.target_name == skill_name and entry.connector:
                 add(entry.connector)
+    # A scoped rule written to config.yaml alone has no journal row (GAP-1307).
+    for connector in asset_lists.scoped_rule_connectors(app.cfg, "skill", skill_name):
+        add(connector)
 
     return sorted(connectors, key=lambda c: active_order.get(c, len(active_order)))
 

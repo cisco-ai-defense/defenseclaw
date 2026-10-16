@@ -180,6 +180,12 @@ type App struct {
 	// installed for the account in setup mode ("" for none), read again
 	// after the daemon readied OpenShell for a first run.
 	OpenShellCLI func() string
+	// ManagedE2fsprogsDir reads the administrator's e2fsprogs_dir through
+	// the managed gateway settings call. ok is false if it did not answer.
+	ManagedE2fsprogsDir func(context.Context) (dir string, ok bool)
+	// ManagedAccountHome is the home path the managed gateway exec shim
+	// resolves for this account, including directory accounts.
+	ManagedAccountHome func() (string, error)
 	// GitConfig is the value of a git configuration key as the host's git
 	// reads it in dir (the repository's, the user's and the system's), ""
 	// when unset.

@@ -54,6 +54,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// conflictSource is the tool call's argument object before a connector
+	// projection took arguments out of Input.Args, for the conflicting-keys
+	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
+	// the call carried.
+	conflictSource *conflictingToolArgumentSource
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -69,6 +74,15 @@ type trustedActionRequest struct {
 	ResolvedWriteTargets map[string]string
 	record               func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry      func(trustedActionTelemetry)
+	// SandboxGuestCWD is a sandbox call's working directory in the guest's
+	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
+	// the authorized-keys proofs read it, and only to add a match.
+	SandboxGuestCWD string
+	// windowsShellDialect is set when Input.DialectHint is inferred from
+	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
+	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
+	// has its hint inferred again from that command (GAP-0686).
+	windowsShellDialect bool
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -129,6 +143,10 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
+		// Two argument keys name one field: judge each candidate (GAP-0678).
+		return dispatchConflictingToolArguments(parent, request, conflict)
+	}
 	ctx := parent
 
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
@@ -183,6 +201,9 @@ func dispatchTrustedAction(
 	// subsetView is set when semanticFacts keeps only the action's static,
 	// certain commands; as on a redirect-target view, only a match counts.
 	subsetView := false
+	// overLimitView is set when semanticFacts is the over-limit view of a
+	// write tool call, the only facts that name the targets of that call.
+	overLimitView := false
 	// powerShellView keeps the independently parsed commands of exact
 	// pwsh -Command / -EncodedCommand bodies next to the action's static
 	// top-level commands. The original action remains partial. The view
@@ -194,7 +215,12 @@ func dispatchTrustedAction(
 		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
 			powerShellView = &view
 		}
-		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+		if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+			// A write tool call whose arguments are limit-exceeded, judged on
+			// the same call with its large text left out: it names the same
+			// targets, so a match counts (GAP-0674).
+			semanticFacts, subsetView, overLimitView = view, true, true
+		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
@@ -203,6 +229,10 @@ func dispatchTrustedAction(
 			// list: a profile only runs more commands before the body, so a
 			// match on the body counts.
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+		} else if view, ok := actionfacts.OpaqueCMDWrapperArgvReduction(request.Input, facts); ok {
+			// cmd.exe /c has a complete outer argv even when AutoRun leaves
+			// its child opaque. Only a positive match on that argv counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 			if partialArgv {
@@ -425,56 +455,7 @@ func dispatchTrustedAction(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
 	) ([]RuleFinding, trustedActionTelemetry) {
-		legacyFindings = appendTrustedFIFOListenerBindShellFinding(
-			legacyFindings,
-			generation,
-			request.Input,
-			facts,
-		)
-		legacyFindings = appendTrustedBoundedExactFallbackFindings(
-			legacyFindings,
-			generation,
-			request.Input,
-			facts,
-		)
-		legacyFindings = appendTrustedWindowsPathFactFindings(
-			legacyFindings,
-			facts,
-			request.Input.Tool,
-			options,
-		)
-		legacyFindings = appendTrustedEmbeddedCommandFindings(
-			legacyFindings,
-			generation,
-			request.Input.Tool,
-			facts,
-			options,
-		)
-		legacyFindings, laneTelemetry := appendTrustedBashFallbackFindings(
-			legacyFindings,
-			generation,
-			request.Input,
-			request.Input.Tool,
-			facts,
-			options,
-			request.EnforcementCapable,
-			request.DowngradeReadOnlyDataArgs,
-		)
-		legacyFindings = filterTrustedLegacyActionContext(
-			generation,
-			legacyFindings,
-			request.Input,
-			request.Input.Tool,
-			facts,
-			request.DowngradeReadOnlyDataArgs,
-		)
-		legacyFindings = filterExactFallbackFindings(
-			legacyFindings,
-			request.Input,
-			facts,
-			request.EnforcementCapable,
-		)
-		return legacyFindings, laneTelemetry
+		return trustedFallbackLanes(generation, request, options, legacyFindings, facts)
 	}
 	legacyFindings, fallbackTelemetry := fallbackLanes(
 		append([]RuleFinding(nil), scanned...),
@@ -490,9 +471,17 @@ func dispatchTrustedAction(
 		sequenceFindings, _ := fallbackLanes(scanned, semanticFacts)
 		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
 	}
+	// A write tool call over the argument limit names its targets only on
+	// its over-limit view, so a path finding of the recovery lanes is proven
+	// and judged there; only a finding proven on the view is added (GAP-0674).
+	if overLimitView {
+		contextFacts = semanticFacts
+		viewFindings, _ := fallbackLanes(scanned, semanticFacts)
+		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
+	}
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
+	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -2124,6 +2113,11 @@ func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	return true
 }
 
+// dispatchTrustedFallback judges a call with the legacy scan and the
+// recovery lanes only. A write tool call over the argument limit whose
+// over-limit view cannot be projected, or one judged by a generation with no
+// semantic rules, gets here with that view: as in dispatchTrustedAction, the
+// lanes and the context checks also judge it on the view.
 func dispatchTrustedFallback(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
@@ -2135,12 +2129,39 @@ func dispatchTrustedFallback(
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
 	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
-	findings := scanRuleGeneration(
+	scanned := scanRuleGeneration(
 		generation,
 		legacyText,
 		request.Input.Tool,
 		options,
 	)
+	findings, fallbackTelemetry := trustedFallbackLanes(
+		generation,
+		request,
+		options,
+		append([]RuleFinding(nil), scanned...),
+		facts,
+	)
+	contextFacts := facts
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		contextFacts = view
+		viewFindings, _ := trustedFallbackLanes(generation, request, options, scanned, view)
+		findings = withSequenceProvenFindings(findings, viewFindings)
+	}
+	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+}
+
+// trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
+// of the call, on facts, then the checks that decide on those facts whether a
+// fallback, content or path finding may block.
+func trustedFallbackLanes(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	options ruleScanOptions,
+	findings []RuleFinding,
+	facts actionfacts.Facts,
+) ([]RuleFinding, trustedActionTelemetry) {
 	findings = appendTrustedFIFOListenerBindShellFinding(
 		findings,
 		generation,
@@ -2166,8 +2187,7 @@ func dispatchTrustedFallback(
 		facts,
 		options,
 	)
-	var fallbackTelemetry trustedActionTelemetry
-	findings, fallbackTelemetry = appendTrustedBashFallbackFindings(
+	findings, laneTelemetry := appendTrustedBashFallbackFindings(
 		findings,
 		generation,
 		request.Input,
@@ -2191,8 +2211,7 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
-	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
+	return findings, laneTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on

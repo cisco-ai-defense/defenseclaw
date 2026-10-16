@@ -139,6 +139,13 @@ type EnumerateOptions struct {
 	// the cycle can take the gateway's inventory read access off it
 	// (GAP-1024).
 	ReportExcluded func(ManifestTarget)
+	// RunningAgents names, by account SID and connector, an agent session
+	// the cycle saw running (a label such as "codex (pid 4242)"). The
+	// standalone enumerator reports, through ReportUnprotected, a running
+	// agent of an enabled connector that no row enrolls and no other report
+	// names: an install discovery cannot read is then never a silent gap
+	// while status and verify say security_complete (GAP-0226).
+	RunningAgents map[string]map[string]string
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -159,8 +166,8 @@ type EnumerateOptions struct {
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
 //     point, junction, or symlink; `winpath.RejectReparseChain`
-//     walks the ancestor chain up to the volume root — a junction
-//     anywhere in the path is refused).
+//     checks from the volume root down and refuses an ancestor before
+//     reading anything below it).
 //  5. `opts.ExcludeSIDs`: any SID listed here is dropped. Used by
 //     spec 005 F1's targeted uninstall.
 //
@@ -256,6 +263,21 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		groups.pruneCache(listed)
 	}
+	running := map[string]map[string]string{}
+	for sid, agents := range opts.RunningAgents {
+		if canon := canonicalManifestTargetSID(sid); canon != "" {
+			for conn, label := range agents {
+				if running[canon] == nil {
+					running[canon] = map[string]string{}
+				}
+				running[canon][strings.ToLower(strings.TrimSpace(conn))] = label
+			}
+		}
+	}
+	// The accounts whose running agents a profile pass below judged (or left
+	// alone by the admin's choice). A running agent of any other account is
+	// reported after the loop, so it never drops out of the record.
+	judged := map[string]bool{}
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -268,6 +290,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if _, skip := exclude[canonicalManifestTargetSID(profile.SID)]; skip {
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
+			judged[canonicalManifestTargetSID(profile.SID)] = true
 			continue
 		}
 		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
@@ -275,7 +298,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// removed (a hive another process still holds) kept its rows: the
 			// guardian could never repair them, status failed and every
 			// later Setup /ensure stopped at the activation evidence. No one
-			// can sign in as it, so its rows are revoked now (GAP-0430).
+			// can sign in as it, so its rows are revoked now (GAP-0430). An
+			// agent process that outlives the account is not judged here: it
+			// is reported with its owner unknown after the loop (GAP-0556).
 			logfSafely(opts.Logger, profile.SID,
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
 			continue
@@ -288,6 +313,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
+			judged[canonicalManifestTargetSID(profile.SID)] = true
 			if opts.ReportExcluded != nil {
 				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
 			}
@@ -302,13 +328,25 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
 		}
-		if standalone && !sessionActive && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+		if standalone && !sessionActive && len(running[canonicalManifestTargetSID(profile.SID)]) == 0 &&
+			windowsDisabledLocalAccount(profile.SID, lookupAccount) {
 			// A disabled account cannot start a new session, but an existing
 			// session can still run its agents. Suppress the stale warning
-			// only after the account has signed out (GAP-1034).
+			// only after the account has signed out (GAP-1034) and no agent
+			// process of it is left running (a scheduled task outlives the
+			// sign-out, GAP-0556).
 			logfSafely(opts.Logger, profile.SID,
 				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
 			rowContext.report = nil
+		}
+		// The connectors this profile got a row or a report for, so a
+		// running agent of any other enabled connector is reported below.
+		covered := map[string]bool{}
+		if report := rowContext.report; report != nil {
+			rowContext.report = func(agent UnprotectedAgent) {
+				covered[strings.ToLower(strings.TrimSpace(agent.Connector))] = true
+				report(agent)
+			}
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -317,6 +355,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// its hook registration stays in the user's own agent config and
 			// fails closed as unregistered.
 			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
+				covered[conn] = true
 				continue
 			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
@@ -347,8 +386,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				// skip.
 				continue
 			}
+			covered[conn] = true
 			targets = append(targets, row)
 		}
+		judged[canonicalManifestTargetSID(profile.SID)] = true
+		if standalone {
+			reportUnenrolledRunningAgents(profile, connectors, running[canonicalManifestTargetSID(profile.SID)], covered, decision, reason, rowContext)
+		}
+	}
+	if standalone {
+		reportRunningAgentsOfUnknownOwners(running, judged, connectors, opts.ReportUnprotected)
 	}
 
 	sort.Slice(targets, func(i, j int) bool {
@@ -359,6 +406,83 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	})
 
 	return Manifest{Version: 1, Targets: targets}, nil
+}
+
+// reportUnenrolledRunningAgents reports each agent session running for the
+// profile whose connector is enabled but got no row and no other report this
+// cycle: DefenseClaw found no install of it under the profile that it can
+// read, so nothing enrolls the account and its tool calls are not decided by
+// DefenseClaw.
+func reportUnenrolledRunningAgents(
+	profile windowsUserProfile,
+	connectors []string,
+	running map[string]string,
+	covered map[string]bool,
+	decision windowsEnrollmentDecision,
+	decisionReason string,
+	rowContext windowsStandaloneRowContext,
+) {
+	if len(running) == 0 || rowContext.report == nil {
+		return
+	}
+	for _, conn := range connectors {
+		label := strings.TrimSpace(running[conn])
+		if label == "" || covered[conn] {
+			continue
+		}
+		row := ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home), Connector: conn}
+		reason := fmt.Sprintf("%s runs for this account, but no %s install DefenseClaw can read was found in this profile; %s",
+			label, conn, windowsStandaloneInstallFix(conn))
+		if decision == windowsEnrollmentUndecided {
+			reason = fmt.Sprintf("%s runs for this account and its enrollment is pending: %s", label, decisionReason)
+		}
+		rowContext.unprotected(&row, "", reason)
+	}
+}
+
+// windowsUnknownOwnerUser names the owner of a running agent whose account
+// SID names no account a profile pass judged.
+const windowsUnknownOwnerUser = "unknown"
+
+// reportRunningAgentsOfUnknownOwners reports each running agent of an enabled
+// connector whose interactive-user SID no profile pass judged: the account was
+// deleted while the process kept running (its rows are revoked, GAP-0430), or
+// no listed profile belongs to it. No row enrolls such an account, so the
+// agent is recorded as unprotected with the owner unknown on every cycle the
+// process is seen, and it drops out only when the process exits (GAP-0556).
+// Service and other well-known SIDs are not user agent sessions.
+func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, judged map[string]bool, connectors []string, report func(UnprotectedAgent)) {
+	if report == nil || len(running) == 0 {
+		return
+	}
+	sids := make([]string, 0, len(running))
+	for sid := range running {
+		if judged[sid] {
+			continue
+		}
+		parsed, err := windows.StringToSid(sid)
+		if err != nil || !sidIsInteractiveUser(parsed) {
+			continue
+		}
+		sids = append(sids, sid)
+	}
+	sort.Strings(sids)
+	for _, sid := range sids {
+		for _, conn := range connectors {
+			label := strings.TrimSpace(running[sid][conn])
+			if label == "" {
+				continue
+			}
+			report(UnprotectedAgent{
+				User:      windowsUnknownOwnerUser,
+				SID:       sid,
+				Connector: conn,
+				Code:      UnprotectedCodeAgentUnprotected,
+				Reason: fmt.Sprintf("%s runs as this SID, but it names no account DefenseClaw enrolls (the account was deleted while the process kept running, or no user profile is listed for it), so no row enrolls it and DefenseClaw does not decide its tool calls; it counts as unprotected until the process exits",
+					label),
+			})
+		}
+	}
 }
 
 // WriteTargetsManifestAtomic serialises `m` to YAML, compares it

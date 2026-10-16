@@ -44,6 +44,11 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 	return &sandboxcli.App{
 		Cfg:          cfg,
 		OpenShellCLI: setupModeOpenShellCLI,
+		ManagedE2fsprogsDir: func(ctx context.Context) (string, bool) {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return settings.Enterprise.E2fsprogsDir, ok
+		},
+		ManagedAccountHome: sandboxAccountHome,
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
