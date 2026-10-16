@@ -18,14 +18,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-// bundleNotAppliedCode is the lifecycle error of a bundle-mode device whose
-// confirmed signed policy bundle does not enforce: config.yaml is not the
-// bundle's config, or the running gateway reports another policy. status,
-// verify and every changing action report it, so an MDM health check never
-// reads compliant while the gateway enforces a policy nobody signed
-// (GAP-0114). ensure and repair re-apply the bundle first.
-const bundleNotAppliedCode = "bundle_not_applied"
-
 // bundleEnforcement is what decides whether the confirmed bundle of a
 // bundle-mode device enforces. It is filled by the platform lifecycle and
 // kept free of I/O so the decision is tested on every platform.

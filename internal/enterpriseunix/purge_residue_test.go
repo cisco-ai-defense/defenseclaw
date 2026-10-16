@@ -42,11 +42,11 @@ func (s hookTrafficServices) Stop(ctx context.Context, u Unit) error {
 		_ = s.fakeServices.Stop(ctx, Unit{Name: unitGateway}) // Requires= propagates the stop
 	}
 	if s.isActive(unitHookSocket) && !s.isActive(unitGateway) {
-		s.fakeServices.mu.Lock()
+		s.mu.Lock()
 		for _, name := range []string{unitGateway, unitAPISocket, unitHookSocket} {
-			s.fakeServices.active[name] = true
+			s.active[name] = true
 		}
-		s.fakeServices.mu.Unlock()
+		s.mu.Unlock()
 	}
 	return err
 }
@@ -75,22 +75,22 @@ type stuckServices struct {
 func (s stuckServices) Stop(ctx context.Context, unit Unit) error {
 	err := s.fakeServices.Stop(ctx, unit)
 	if unit.Name == s.stuck {
-		s.fakeServices.mu.Lock()
-		s.fakeServices.active[unit.Name] = true
-		s.fakeServices.mu.Unlock()
+		s.mu.Lock()
+		s.active[unit.Name] = true
+		s.mu.Unlock()
 	}
 	return err
 }
 
 func (s stuckServices) StopTogether(ctx context.Context, units []Unit) error {
 	err := s.fakeServices.StopTogether(ctx, units)
-	s.fakeServices.mu.Lock()
+	s.mu.Lock()
 	for _, unit := range units {
 		if unit.Name == s.stuck {
-			s.fakeServices.active[unit.Name] = true
+			s.active[unit.Name] = true
 		}
 	}
-	s.fakeServices.mu.Unlock()
+	s.mu.Unlock()
 	return err
 }
 

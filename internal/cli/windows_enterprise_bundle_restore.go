@@ -25,6 +25,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
+// bundleNotAppliedCode is the lifecycle error of a bundle-mode device whose
+// confirmed signed policy bundle does not enforce: config.yaml is not the
+// bundle's config, or the running gateway reports another policy. status,
+// verify and every changing action report it, so an MDM health check never
+// reads compliant while the gateway enforces a policy nobody signed
+// (GAP-0114). ensure and repair re-apply the bundle first.
+const bundleNotAppliedCode = "bundle_not_applied"
+
 // In bundle mode the confirmed signed bundle is the policy (management plane
 // spec P1 section 7: repair and verify re-apply the current bundle, so
 // in-place edits of config.yaml revert). A config.yaml changed outside the
