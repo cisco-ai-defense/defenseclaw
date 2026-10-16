@@ -1102,6 +1102,9 @@ class InventoryPanelModel:
         agents = (*self.inventory.agents, *self.agent_identities)
         return tuple(agent for agent in agents if self._connector_keep(agent))
 
+    def _agent_count(self) -> int:
+        return len(self.filtered_agents())
+
     def filtered_ide_plugins(self) -> tuple[InventoryIDEPlugin, ...]:
         # IDE plugins belong to a user, not a connector: the connector
         # filter does not narrow them.
@@ -1184,7 +1187,7 @@ class InventoryPanelModel:
             "skills": _map_val(inv.summary.skills, "count"),
             "plugins": _map_val(inv.summary.plugins, "count"),
             "mcp": _map_val(inv.summary.mcp, "count"),
-            "agents": _map_val(inv.summary.agents, "count"),
+            "agents": str(self._agent_count()),
             "rules": str(_int_count(inv.summary.rules)),
             "tools": _map_val(inv.summary.tools, "count"),
             "models": _map_val(inv.summary.models, "count"),
@@ -1718,7 +1721,7 @@ class InventoryPanelModel:
             "skills": _kept(self.inventory.skills),
             "plugins": _kept(self.inventory.plugins),
             "mcp": _kept(self.inventory.mcps),
-            "agents": _kept((*self.inventory.agents, *self.agent_identities)),
+            "agents": self._agent_count(),
             "tools": _kept(self.inventory.tools),
             "models": _kept(self.inventory.models),
             "memory": _kept(self.inventory.memory),

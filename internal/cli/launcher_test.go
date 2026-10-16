@@ -362,6 +362,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 				"/bin/launchctl print gui/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl bootstrap gui/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
+				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart gui/501/com.cisco.defenseclaw.sandbox",
 			},
 		},
@@ -376,6 +377,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 				"/bin/launchctl print gui/501",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl bootstrap user/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
+				"/bin/launchctl print user/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart user/501/com.cisco.defenseclaw.sandbox",
 			},
 		},
@@ -385,6 +387,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			calls: []string{
 				"/bin/launchctl print gui/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
+				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart gui/501/com.cisco.defenseclaw.sandbox",
 			},
 		},
@@ -393,6 +396,8 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{pending(0), up},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
+				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart -k gui/501/com.cisco.defenseclaw.sandbox",
 			},
 			stderr: "restarting your sandbox service",

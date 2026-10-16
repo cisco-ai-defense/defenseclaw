@@ -7,6 +7,7 @@ package cli
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +15,38 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+// GAP-1461: status and verify fail on a missing hook runtime folder when the
+// deployment enrolls an account, and say nothing when it enrolls nobody.
+func TestWindowsEnterpriseHookRuntimeMissingFailsStatus(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "DefenseClaw-HookRuntime")
+	originalDir, originalTargets := windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir, windowsEnterpriseEnrolledTargets = originalDir, originalTargets
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return dir, nil }
+	for _, enrolled := range []bool{true, false} {
+		windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+			if !enrolled {
+				return map[string]bool{}, nil
+			}
+			return map[string]bool{"S-1-5-21-1-2-3-1001\x00claudecode": true}, nil
+		}
+		result := enterprisestatus.New("verify", "standalone", "windows", "test")
+		applyWindowsEnterpriseHookRuntimeAccess(result)
+		if !enrolled {
+			if len(result.Errors) != 0 {
+				t.Fatalf("no enrolled account: errors = %+v", result.Errors)
+			}
+			continue
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "machine_policy_summary_missing" ||
+			!strings.Contains(result.Errors[0].Message, dir+" is missing") ||
+			!strings.Contains(result.Errors[0].Message, "repair") {
+			t.Fatalf("missing hook runtime folder: errors = %+v", result.Errors)
+		}
+	}
+}
 
 // GAP-0927, GAP-0929: status and verify fail on a hook runtime folder that
 // standard users can write and on one they cannot read, and name the

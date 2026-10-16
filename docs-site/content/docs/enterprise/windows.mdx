@@ -71,19 +71,32 @@ The four services:
 | --- | --- | --- |
 | `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Runs the policy engine and the hook API on `127.0.0.1:18970` |
 | `DefenseClawSensorHelper` | LocalSystem, with `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
-| `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations, and removes a quarantined skill or plugin from a user's folder, using that user's token |
+| `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations |
 | `DefenseClawHookEnumerator` | LocalSystem, with the same privilege list | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) and writes the target manifest |
 
 The gateway needs no "Log on as a service" grant. Existing virtual-account
 installs move to LocalSystem on upgrade or repair; the service SID remains
 the gateway's write boundary. The gateway refuses reads and scans inside
-user profiles; scan a profile project from the signed-in user's session or
-move it outside the profile. This keeps the former virtual-account boundary
-around other users' profiles. Readable paths outside profiles still scan.
+user profiles. Its install watcher skips profile roots for skills, plugins
+and MCP servers. `defenseclaw-gateway status --json` reports a degraded
+watcher with `health.watcher.details.profile_roots_skipped: true` when it skips
+them. The enterprise `status` and `verify` results do not report that field
+separately. For an administrator scan, copy the asset to a readable folder
+outside profiles and use the [scan commands](#scan-skills-mcp-servers-and-plugins).
+Keep shared skills outside profiles. A brokered scan as the enrolled user
+is planned for a later release.
+For skills and plugins in profiles, set
+`asset_policy.skill.runtime_detection.enabled: true` and
+`asset_policy.plugin.runtime_detection.enabled: true` so hooks apply default,
+registry and approval rules; set `asset_policy.mode: action` to block on those
+rules. Set `asset_policy.enabled: true` as well. MCP runtime detection already
+defaults to true. Hooks refuse denied names regardless of runtime detection.
+Windows `status` and `verify` do not warn when a default or registry rule
+goes unenforced; the gateway log is the only signal.
+
 Scanner children inherit the write-restricted LocalSystem token and its
 single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
-to start a child as another user. The watcher skips profile roots and reports
-degraded health only when it skips one. Outside profiles, caller-supplied
+to start a child as another user. Outside profiles, caller-supplied
 paths that only administrators could read are now readable as LocalSystem;
 this extends the W-05 early-phase limitation.
 
@@ -370,6 +383,26 @@ agents. The same warning names a session that started before a later config
 change enabled its connector, or enrolled its account (for example one taken
 out of `exclude_users`), in that `ensure` result and every `status` after it.
 
+On Windows, the warning also names a Hermes or other per-user agent session
+started before the hook guardian restored hooks that the user changed or
+removed. `security_complete` stays `false` until that session restarts.
+Claude Code, Codex and Cursor use machine policy hooks, so this restore case
+does not apply to them.
+
+If the hook guardian's restore record cannot be read, Windows `status` and
+`verify` report `agent_sessions_restart_required` with "restart status unknown"
+and set `security_complete` to `false`, even when no session was listed. A
+running agent with no account name is checked by its owner SID when available;
+with neither an account name nor a SID, its restart status is unknown.
+
+Windows `status`, `verify`, `ensure` and `repair` also report
+`agent_settings_not_restored` when the hook guardian puts back a missing
+Hermes `config.yaml` or Devin `config.json` from its last known good copy or
+the pristine backup, or recreates the file with hooks only when no copy is
+available. The warning tells the account to review settings that may not
+have been restored; it does not by itself change `security_complete`, the
+exit code or MDM detection.
+
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
 
@@ -495,9 +528,9 @@ an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
 static analyzers only. When every recent judge call fails (a rejected key,
 for example) `status` and `verify` warn `judge_failing` with the last error;
 the rule packs keep deciding. While the scanner runtime is missing or not prepared,
-every skill, MCP server and plugin install is blocked: `status` warns and
-`verify` fails with `scanner_runtime_unavailable`, and Setup `/repair`
-installs it again.
+watched assets that require a scan fail closed: `status` warns and `verify`
+fails with `scanner_runtime_unavailable`, and Setup `/repair` installs it
+again.
 
 The lifecycle records the SHA-256 of the `defenseclaw-scanners.exe` it
 admitted (a valid Authenticode signature, or the digest the payload manifest
@@ -507,8 +540,8 @@ against that record. A copy changed or replaced in place, even by an
 administrator, is not run: the `Scanners:` state is `untrusted`, `verify`
 fails and `status`, `repair` and `ensure` from the installed CLI warn with
 `scanner_runtime_unavailable` (the Intune remediation script reports
-"not repaired"), and every skill, MCP server and plugin install is blocked
-until Setup `/repair` or `/ensure` installs the admitted copy again.
+"not repaired"). Watched assets that require a scan fail closed until Setup
+`/repair` or `/ensure` installs the admitted copy again.
 
 ## Verify the install
 
@@ -704,13 +737,20 @@ copy a genuine entry.
 </Accordion>
 </Accordions>
 
-`status` and `verify` also name every agent the enumerator found installed
-but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
+`status` and `verify` also report agents the enumerator found installed but
+could not enroll, or accounts it could not finish scanning
+(`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
-Each is one account's agent, so both print it as a `warning <code>: <message>`
+Each warning applies to one account, so both print it as a
+`warning <code>: <message>`
 line and `--json` lists it under `warnings`: `security_complete` is `false`,
 but `verify`, and so MDM detection, still passes. `enterprise policy show`
 lists them as well.
+On Windows, `agent_unprotected` also covers a running enabled agent whose
+account SID cannot be resolved; the warning names the account when known and
+otherwise says the owner is unknown. A per-user WinGet package listing that
+reaches its entry limit or deadline is reported as "not fully scanned" for
+that account, instead of as no install found.
 Cursor's machine hooks file is published only while a user is enrolled for
 Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
@@ -804,42 +844,26 @@ for the folders the service may read in each profile.
 
 ## Scan skills, MCP servers and plugins
 
-The gateway service watches the skill and plugin folders of every user the
-hook guardian protects, for each connector, and the Codex, Claude Code and
-Devin MCP server lists in those users' profiles. A skill, plugin or MCP server that
-appears there goes through install admission with the scanners in the scanner
-runtime and the `admission` and `scanners` keys of the admin config, as on a
-per-user install:
+The LocalSystem gateway skips enrolled users' profile roots. The following
+install-admission behavior applies to skill, plugin and MCP server roots
+outside profiles that the gateway can watch. An asset there goes through
+the scanners in the scanner runtime and the `admission` and `scanners` keys
+of the admin config:
 
 - A verdict at a level whose `admission.<type>.actions` value is `block`
   blocks the asset. Its folder stays where the user put it
   (`file_action=none` in the audit row).
-- A verdict whose action is `quarantine` moves the skill or plugin out of the
-  user's folder, as on a per-user install. The gateway service may only read
-  user folders, so it copies the folder to
-  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine` and the hook
-  guardian removes the original as that user, after checking that it is in a
-  watched folder and matches the copy. A folder that an administrator or a
-  SYSTEM job copied into the profile, and so owns, is removed the same way,
-  as long as the user may delete it. A user with a disconnected session
-  counts as signed in. For a signed-out user it uses an S4U logon: MSV1_0 for
-  a local account, Kerberos for an Active Directory account (by its user
-  principal name, through a domain controller). A Microsoft Entra ID account
-  has no S4U logon, and Windows can refuse one, for example when no domain
-  controller answers; the guardian then removes the folder when that user
-  next signs in. `hook-guardian.log` says why (`deferred: ... the owner of
-  <user> is signed out, and ...`, then `removed now that the user is signed
-  in`), and until then `enterprise windows status` and `verify` warn with
-  `asset_removal_deferred`. Two users with a skill or plugin of the same name
-  each get their own quarantine copy.
+- A `quarantine` action copies a skill or plugin from a watched root into
+  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine`, verifies the copy,
+  then removes the source. The usual slot is
+  `quarantine\<type-dir>\<connector>\<name>`; if it already holds a different
+  asset, a `quarantine\per-source\<type-dir>\<connector>\<id>\<name>` slot
+  keeps the copies separate. `<type-dir>` is `skills` or `plugins`, and the
+  connector segment is omitted when none is known.
 - A scan that fails (the scanner exits, or the gateway service cannot read
   the folder) blocks the asset and disables it at runtime, as a rejected
   verdict does: a blocked MCP server's tool calls are refused and a blocked
-  skill does not load. A folder moved into a watched folder (`Move-Item` from
-  elsewhere in the profile) keeps the access list of where it came from,
-  which has no entry for the gateway service. The gateway asks the hook
-  guardian for read access, which adds, as the user, the entry the agent
-  folders carry, and scans the folder again.
+  skill does not load.
 - A quarantine that cannot finish, for example because the disk is full,
   leaves the asset blocked and disabled in place. The copy is staged as
   `<name>.pending-<id>` beside its quarantine slot, and the stage is removed
@@ -847,7 +871,7 @@ per-user install:
   scan, again after 2 minutes, then 4, and so on up to every 30 minutes, until
   admission finishes. While the folder is still there, `enterprise windows
   status` and `verify` warn with `asset_not_scanned` or
-  `asset_not_quarantined`, naming the account and the path.
+  `asset_not_quarantined`, naming the asset and path.
 - With `gateway.watcher.<type>.take_action: false` a rejected asset is only
   recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
   stays usable. When an `ensure` turns `take_action` back on, the first rescan
@@ -857,9 +881,10 @@ per-user install:
   and `verify` warn with `asset_rejected_not_enforced` for a skill or plugin
   still in its folder.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
-  without a scan, and the audit row says `reason=scan-disabled`. A server a
-  user adds goes through admission, usually within two minutes, also while a
-  periodic rescan is running, such as the first one after an upgrade.
+  without a scan, and the audit row says `reason=scan-disabled`. An MCP server
+  that the watcher admits goes through admission, usually within two minutes,
+  also while a periodic rescan is running, such as the first one after an
+  upgrade.
 - The MCP scanner does not connect to loopback, private, link-local or
   multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
   internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
@@ -899,8 +924,17 @@ per-user install:
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
-  profile, every 30 seconds and publishes the servers to the gateway, so
-  `claude mcp add` (any scope) reaches admission within about a minute.
+  profile, every 30 seconds and publishes their inventory to the gateway.
+  The LocalSystem watcher still skips their profile paths, so publication
+  does not start an install scan.
+  The enumerator opens each project folder and its `.mcp.json` under the
+  enrolled user's own token, so it reads only what that user can read, and it
+  never follows a project key that points to a network, mapped or substituted
+  drive or through a link. A project the user cannot access contributes
+  neither its local-scope servers nor its `.mcp.json` servers; the user's other
+  projects and user-scope servers stay published. Any other read or parse
+  failure of a project file is treated like an unreadable `.claude.json`, as
+  described next.
   When the enumerator cannot read or parse a user's `.claude.json` (an
   access list that leaves SYSTEM out, or broken JSON), DefenseClaw cannot
   see that user's servers, so it fails closed: it refuses every Claude Code
@@ -910,52 +944,52 @@ per-user install:
 - Kiro keeps user MCP servers in `.kiro\settings\mcp.json`. For a user
   enrolled for Kiro, the hook guardian protects the `.kiro` folder, so the
   gateway service cannot read that file either. The hook enumerator reads and
-  publishes it the same way, so a server added with Kiro reaches admission
-  within about a minute. When the enumerator cannot read or parse the file,
-  DefenseClaw refuses that user's Kiro MCP tool calls, and status and
-  `verify` warn with `kiro_mcp_unreadable`.
-- A folder created after the gateway starts is picked up within about 30
-  seconds. The gateway never creates a folder in a user profile.
-- The skill and plugin folders of the agents in each profile are watched,
-  and the skill folders of a project inside the profile
-  (`<project>\.claude\skills`, `<project>\.agents\skills`) from the first
-  hook an agent sends from it: the hook guardian checks that no link leads to
-  the folder and lets the gateway read it, and the hooks refuse a skill there
-  until install admission has scanned it (or, for a folder that could not be
-  verified, always: `enterprise windows status` and `verify` warn with
-  `project_skill_root_unverified`, and the gateway log names the folder).
-  A project outside the profile gets no install
-  admission; the agent hooks still refuse a denied skill name there (see
+  publishes it the same way, but the LocalSystem watcher skips its profile
+  path instead of scanning the server. When the enumerator cannot read or
+  parse the file, DefenseClaw refuses that user's Kiro MCP tool calls, and
+  status and `verify` warn with `kiro_mcp_unreadable`.
+- A watched folder outside profiles created after the gateway starts is
+  picked up within about 30 seconds. The gateway never creates a folder in
+  a user profile.
+- On the LocalSystem gateway, project skill folders inside profiles are
+  skipped before verification or registration, even after an agent's first
+  hook. They receive no install scan, no "is not scanned yet" refusal and no
+  `project_skill_root_unverified` warning. A project outside the profile is
+  not registered from an enrolled user's hook either. The hooks still refuse
+  denied skill names and folder reads there; default, registry and approval
+  rules apply only with `runtime_detection.enabled: true`, and block with
+  `asset_policy.mode: action` (see
   [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - Claude Code runs a plugin installed from a local marketplace folder from
-  that folder, which DefenseClaw does not watch and never changes. When
-  admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
-  under `.claude\plugins\cache` is quarantined and the Claude Code hook
-  refuses the plugin's skills, commands, agents and MCP tools: the refusal
-  says `plugin "<plugin>@<marketplace>" is blocked by install admission` or
-  that the plugin is denied by asset policy.
+  that folder, which DefenseClaw does not automatically watch or change. When
+  its cache is inside a profile, the LocalSystem watcher skips it: there is
+  no install admission or cache quarantine for that plugin in 1.0.2. A
+  matching `asset_policy.plugin.denied` rule still makes the Claude Code hook
+  refuse the plugin's skills, commands, agents and MCP tools. A hook refusal
+  gives a structured reason such as
+  `ASSET-POLICY reason_code=admin-deny source=admin-deny asset_type=plugin asset_name=<plugin>`.
+  Displayed values may instead be redacted as `<redacted len=N sha=...>`.
 - MCP servers a Claude Code plugin bundles (its `.mcp.json`, or `mcpServers`
-  in `.claude-plugin/plugin.json`) are admitted with the plugin, not on their
-  own: the plugin scan reads their definitions, and the plugin's verdict and
-  `asset_policy.plugin` rules decide for their tool calls. They get no
-  `install-*` row and no entry in the MCP inventory. `asset_policy.mcp` rules
-  still apply to their tool calls at the hook: a rule names such a server
-  `plugin:<plugin>:<server>` (Claude Code's tool names spell it
+  in `.claude-plugin/plugin.json`) are admitted with the plugin when it is
+  in a watched root; they get no separate `install-*` row or MCP inventory
+  entry. A profile plugin receives no install scan. `asset_policy.mcp` rules
+  still apply to its bundled servers' tool calls at the hook: a rule names
+  such a server `plugin:<plugin>:<server>` (Claude Code's tool names spell it
   `plugin_<plugin>_<server>`), and a `command`, `args_prefix` or `url` rule
   matches its definition, so a denied server cannot be brought back inside a
   plugin.
-- The audit rows of these scans name the user whose profile holds the asset:
-  the `scan` and `scan-finding` rows carry `user.id` (the SID) and
-  `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the
-  LLM judge ran, and the `quarantine` row ends with `user=<account>`.
+- On the LocalSystem gateway, watcher `scan` and `scan-finding` rows for
+  watched roots outside profiles carry no per-user attribution. The `scan`
+  row includes `judge=<model>` when the LLM judge ran. A `quarantine` row
+  has no `user=<account>` field from a watcher owner there.
 
 ### Release a blocked or quarantined skill
 
 Standard users cannot release an asset on a managed computer, and `skill
 enable` and `skill restore` are not available there. After you review a skill
 or plugin, add an allow rule for it to `asset_policy` in the admin config,
-pinned to the folder of one user or, without `source_path_contains`, for
-every user:
+pinned to its watched folder outside profiles or, without
+`source_path_contains`, for every matching copy:
 
 ```yaml title="Admin config"
 asset_policy:
@@ -963,32 +997,37 @@ asset_policy:
     allowed:
       - name: reviewed-skill
         reason: reviewed by security
-        source_path_contains: ["C:\\Users\\<account>\\.claude\\skills\\reviewed-skill"]
+        source_path_contains: ["C:\\ApprovedSkills\\<account>\\reviewed-skill"]
 ```
 
-Replace `<account>` with the actual Windows profile directory name, and
-`reviewed-skill` with the installed skill folder name in both fields.
+Replace `<account>` with the name of the folder that holds that account's
+reviewed skills, and `reviewed-skill` with the installed skill folder name in
+both fields. This example assumes the folder `C:\ApprovedSkills\<account>`
+is listed in `gateway.watcher.skill.dirs`.
 `source_path_contains` must match the reviewed copy's actual path; omit it
-only when the allow rule should cover every user's copy.
+only when the allow rule should cover every matching copy. A profile asset is
+never admission-blocked in 1.0.2, so there is no watcher block to release for
+it. To lift a hook refusal of a profile skill denied by name, change the
+`asset_policy.skill.denied` rule in the admin config.
 
 For a Claude Code plugin from a marketplace, use `asset_policy.plugin` with
 the name `claude plugin list` shows, `plugin@marketplace`. A denied rule also
 matches the plugin name alone and the name in its
-`.claude-plugin/plugin.json`, and refuses the plugin at its version folder
-with `install-rejected ... source=admin-deny`; an allowed rule needs
-`plugin@marketplace`.
+`.claude-plugin/plugin.json` at the hook; an allowed rule needs
+`plugin@marketplace`. A profile plugin has no watcher `install-rejected` row.
 
 - A blocked skill whose folder is still in place is released at the next
   periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at
-  once when the user copies it in again: admission allows it
+  once when it is copied into the watched folder again: admission allows it
   (`install-allowed reason=allow-listed`) and clears the install block and
   runtime disable that the earlier verdict recorded, with an `enable` audit
   row that says `released by an allow rule`. The agent can then use it.
 - A quarantined skill keeps its copy in
   `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine\skills\<connector>\<name>`
-  (or `...\quarantine\per-source\skills\<connector>\<id>\<name>` when two
-  users had a skill of that name). To give it back, add the allow rule, then
-  copy the folder from there into the skills folder of the user from an
+  (or `...\quarantine\per-source\skills\<connector>\<id>\<name>` if the
+  usual slot holds a different asset of the same name). The connector
+  segment is omitted when none is known. To give it back, add the allow rule,
+  then copy the folder from there back into the watched folder from an
   elevated prompt; it is admitted as allow-listed. To purge copies you no
   longer need, delete their folders under `runtime\quarantine` from an
   elevated prompt.
@@ -999,15 +1038,18 @@ same scanners, policy and judge from an elevated prompt:
 
 ```powershell title="Elevated Administrator prompt"
 $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
-& $Cli scan skill 'C:\Users\Public\review\my-skill'
+& $Cli scan skill 'C:\DefenseClawReview\my-skill'
 & $Cli scan mcp https://mcp.example.com/mcp
-& $Cli scan plugin 'C:\Users\Public\review\my-plugin'
+& $Cli scan plugin 'C:\DefenseClawReview\my-plugin'
 ```
 
 Each command prints the verdict, the findings, the skill scanner policy (or
 the MCP analyzers) and the judge model; add `--json` for the full response.
-The gateway service reads the folder, so scan a copy in a folder it can
-read, such as one under `C:\Users\Public`. Variables such as
+The gateway service reads the folder as LocalSystem and refuses any folder
+inside a user profile, including paths under `C:\Users` or another registered
+profile root. Copy what you want to scan to an administrator-created folder
+outside the profiles, such as `C:\DefenseClawReview`, that LocalSystem can read.
+Variables such as
 `SKILL_SCANNER_LLM_MODEL` in the administrator's shell are ignored: the scan
 runs in the gateway service with the admin config.
 
@@ -1277,9 +1319,9 @@ entry (`diagnostics`) with `JSON=1`. A successful run writes nothing to
 standard error, which an MDM such as Intune reads as a failed script.
 At the bound it stops the prepare and Setup fails (`1603`) with a
 `scanner_runtime_unavailable` error that says `timed out after 15m0s` and
-names `/repair`: DefenseClaw is installed and its services run, but every
-skill, MCP server and plugin install stays blocked and `verify` fails until a
-`/repair` prepares the runtime. That run continues the unpack where the stopped
+names `/repair`: DefenseClaw is installed and its services run, but watched
+assets that require a scan stay blocked and `verify` fails until a `/repair`
+prepares the runtime. That run continues the unpack where the stopped
 one ended instead of starting over.
 
 The prepare is CPU work: it writes and hashes about 13,600 files (360 MB),
@@ -1346,29 +1388,29 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. So does the empty,
-administrator-only lock file
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, and with it
-`C:\ProgramData\Cisco`: the lock serializes every lifecycle run, including
-the next install's, so the uninstall keeps it in place. To leave nothing,
-delete `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`, and
-`C:\ProgramData\Cisco` if it is then empty, after the uninstall. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
+also keeps the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
+lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
+cleanup; do not delete a lock while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
 such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
 anything, because a running binary keeps its own folder in use. If an
-uninstall reports that it committed but could not finish, run the same
-`defenseclaw.exe` uninstall (or the MDM `uninstall.ps1`) again: it finishes
-the cleanup.
+uninstall reports that it committed but could not finish, run Setup again as
+LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original run was a
+purge). Setup carries its own verified gateway and can finish cleanup after
+the installed CLI has been removed.
 
 ### Per-user registrations at uninstall
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
 Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
-hook file and plugin folder) from the agent configuration of every signed-in user, running as that
-user. Only DefenseClaw's entries are removed; the user's own hooks and
+hook file and plugin folder) from the agent configuration of users with an
+active, connected session, running as each user. Disconnected or signed-out
+sessions remain pending. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
 

@@ -27,11 +27,29 @@ esac
 # config used to replace every file and then fail its ensure on the config,
 # which left the new binaries next to the old deployment and services, with
 # verify reporting them modified until a manual downgrade (GAP-0392). Refuse
-# before any file is replaced instead.
+# before any file is replaced instead. The version is read as YAML reads the
+# top-level key: at the indentation of the document's first key (a document
+# may be indented as a whole), with the key or value quoted or not; an
+# indented config_version slipped past a match anchored at column 0
+# (GAP-1065). A key nested under another one is not the config's version.
 max_config_version=9
 config=/etc/defenseclaw/config.yaml
 if [ -f "$config" ]; then
-    found=$(sed -n "s/^config_version:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$config" 2>/dev/null | head -n 1)
+    found=$(awk -v q="'" '
+        /^[ \t]*(#|$)/ || /^(---|\.\.\.)[ \t]*$/ || /^%/ { next }
+        {
+            match($0, /^ */)
+            if (top == "") top = RLENGTH
+            if (RLENGTH != top) next
+            line = substr($0, RLENGTH + 1)
+            re = "^[\"" q "]?config_version[\"" q "]?[ \t]*:[ \t]*[\"" q "]?[0-9]+"
+            if (match(line, re)) {
+                v = substr(line, 1, RLENGTH)
+                sub(/^.*[^0-9]/, "", v)
+                print v
+                exit
+            }
+        }' "$config" 2>/dev/null)
     if [ -n "$found" ] && [ "$found" -gt "$max_config_version" ] 2>/dev/null; then
         echo "defenseclaw-enterprise: $config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first." >&2
         exit 1

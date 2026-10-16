@@ -200,7 +200,20 @@ function Resolve-LocalGroup {
     catch {
         Exit-WithError "The local group '$Value' was not found on this computer."
     }
-    [pscustomobject]@{ Sid = $sid.Value; Name = ($account -split '\\')[-1] }
+    $shortName = ($account -split '\\')[-1]
+    if ($sid.Value -notmatch '^S-1-5-32-\d+$') {
+        try {
+            $localSid = [System.Security.Principal.NTAccount]::new([Environment]::MachineName, $shortName).Translate(
+                [System.Security.Principal.SecurityIdentifier])
+        }
+        catch {
+            Exit-WithError "The group '$Value' resolves to SID $($sid.Value), but '$shortName' is not a local group on this computer. No membership was changed."
+        }
+        if ($localSid.Value -ne $sid.Value) {
+            Exit-WithError "The group '$Value' resolves to SID $($sid.Value), but the local group '$shortName' has SID $($localSid.Value). No membership was changed."
+        }
+    }
+    [pscustomobject]@{ Sid = $sid.Value; Name = $shortName; DisplayName = $Value }
 }
 
 $group = Resolve-LocalGroup -Value $LocalGroup
@@ -234,7 +247,7 @@ foreach ($sid in $GroupSid) {
     $isListed = $listed -contains $sid
     if ($Remove -and -not $isListed -and $WhatIfPreference) { $action = 'WhatIf' }
     elseif (-not $Remove -and $isListed) { $action = 'AlreadyMember' }
-    elseif ($PSCmdlet.ShouldProcess($group.Name, "$verb Entra group $sid")) {
+    elseif ($PSCmdlet.ShouldProcess($group.DisplayName, "$verb Entra group $sid")) {
         $status = [DcIdentityKit.LocalGroupApi]::Change($group.Name, $sid, (-not $Remove))
         switch ($status) {
             0 { $action = if ($Remove) { 'Removed' } else { 'Added' } }
@@ -244,7 +257,7 @@ foreach ($sid in $GroupSid) {
         }
     }
     else { $action = 'WhatIf' }
-    [pscustomobject]@{ GroupSid = $sid; LocalGroup = $group.Name; Action = $action }
+    [pscustomobject]@{ GroupSid = $sid; LocalGroup = $group.DisplayName; Action = $action }
 }
 
 if (-not $WhatIfPreference) {

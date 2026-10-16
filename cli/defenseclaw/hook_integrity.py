@@ -26,12 +26,15 @@ Unix checks are skipped there.
 
 from __future__ import annotations
 
+import base64
 import json
+import ntpath
 import os
 import posixpath
 import re
 import shlex
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -318,25 +321,198 @@ def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
 _CONFIG_LIMIT = 2 * 1024 * 1024
 
 
-def _registration_text(text: str) -> str:
-    """The part of an agent config file that can register DefenseClaw hooks.
+# Agent config formats whose hook registrations are read from the decoded
+# document (:func:`_hook_section`).
+_STRUCTURED_SUFFIXES = (".json", ".toml", ".yaml", ".yml")
 
-    Setup also writes ``env`` entries that name DefenseClaw (the OTLP headers
-    and resource attributes in ``~/.claude/settings.json``), so a whole-file
-    match kept a settings file with no hooks looking registered (GAP-1230).
-    For a JSON object only its ``hooks`` section counts; other formats are
-    matched as a whole.
+# Antigravity keeps each hook set under its own top-level name; Setup writes
+# DefenseClaw's as defenseclaw-antigravity-<event> (antigravityOwnedHookKeys in
+# internal/gateway/connector/hook_only.go). Devin's project hooks.v1.json holds
+# the event map at its root (devinHooksObject in internal/gateway/connector/devin.go).
+_ANTIGRAVITY_HOOK_KEY_PREFIX = "defenseclaw-antigravity-"
+_DEVIN_PROJECT_HOOKS_FILE = "hooks.v1.json"
+
+# A PowerShell -EncodedCommand (or an abbreviation of it) and its base64
+# script: the per-user Windows hook command names the launcher only inside it.
+_ENCODED_SCRIPT = re.compile(r"(?i)(?:^|\s)[-/]e[a-z]*\s+([A-Za-z0-9+/]{64,}={0,2})(?=\s|$)")
+
+
+def _hook_section(document: Any, path: Path) -> list[Any] | None:
+    """The hook registrations of the decoded agent config *path*, or None.
+
+    Most agents keep them in a ``hooks`` section; Codex keeps its hook trust
+    state beside the events (``[hooks.state]``), which registers nothing.
+    Antigravity's hooks.json has a top-level key per hook set and Devin's
+    project hooks.v1.json is the event map itself, so reading only a
+    ``hooks`` key called a clean Setup of either unregistered (GAP-0489).
     """
 
+    if not isinstance(document, dict):
+        return None
+    if path.name.lower() == _DEVIN_PROJECT_HOOKS_FILE:
+        return [document]
+    sections: list[Any] = []
+    hooks = document.get("hooks")
+    if isinstance(hooks, dict):
+        sections.append({key: value for key, value in hooks.items() if key != "state"})
+    elif isinstance(hooks, list):
+        sections.append(hooks)
+    sections.extend(
+        value
+        for key, value in document.items()
+        if isinstance(key, str) and key.startswith(_ANTIGRAVITY_HOOK_KEY_PREFIX)
+    )
+    return sections or None
+
+
+# Per-user Windows Claude Code registers its launcher through cmd.exe so a
+# missing launcher blocks instead of failing open (GAP-1091). Keep this
+# sentence and argv identical to internal/gateway/connector/claudecode_launcher_guard.go.
+CLAUDE_LAUNCHER_GUARD_WORDS = (
+    "DefenseClaw blocked this: its Claude Code hook launcher is missing. "
+    "Run the DefenseClaw installer again to repair it."
+).split()
+
+
+def claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged.
+
+    Doctor's hook matrix and the status registration check both read a
+    Claude Code handler through this view (GAP-0463).
+    """
+    if not isinstance(handler, dict):
+        return handler
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return handler
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return handler
+    if len(args) < 8 or args[:4] != ["/d", "/c", "if", "exist"] or args[5] != "(" or args[6] != args[4]:
+        return handler
+    end = next((i for i in range(7, len(args) - 1) if args[i] == ")" and args[i + 1] == "else"), -1)
+    if end < 0:
+        return handler
+    launcher, inner = args[4], args[7:end]
+    expected = [
+        "/d", "/c", "if", "exist", launcher, "(", launcher, *inner, ")", "else", "(", "echo",
+        *CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+    ]
+    if args != expected:
+        return handler
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(inner)
+    return view
+
+
+def hook_handler_command_lines(handler: Any, connector: str) -> list[str]:
+    """The command lines one decoded hook handler runs.
+
+    Claude Code's exec form keeps the argv in ``args``, and per-user Windows
+    runs the launcher through the cmd.exe guard, so ``command`` is cmd.exe and
+    the launcher is named only in ``args``. Reading ``command`` alone made
+    status call every hook of a 1.0.1 or later Windows install unregistered
+    while doctor, which reads the same view, passed them (GAP-0463).
+    """
+
+    if connector == "claudecode":
+        handler = claude_launcher_guard_view(handler)
+    if not isinstance(handler, dict):
+        return []
+    args = handler.get("args")
+    argv = list(args) if isinstance(args, list) and all(isinstance(arg, str) for arg in args) else None
+    lines: list[str] = []
+    for key in _HOOK_COMMAND_KEYS:
+        value = handler.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        lines.append(subprocess.list2cmdline([value, *argv]) if key == "command" and argv is not None else value)
+    return lines
+
+
+def _hook_command_lines(value: Any, connector: str) -> list[str]:
+    """Every command line in a decoded ``hooks`` section, read one handler at a time."""
+
+    if isinstance(value, list):
+        return [line for item in value for line in _hook_command_lines(item, connector)]
+    if not isinstance(value, dict):
+        return []
+    found = hook_handler_command_lines(value, connector)
+    for key, item in value.items():
+        if not (key in _HOOK_COMMAND_KEYS and isinstance(item, str)):
+            found.extend(_hook_command_lines(item, connector))
+    return found
+
+
+def _decoded_command(command: str) -> str:
+    """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
+
+    match = _ENCODED_SCRIPT.search(command)
+    if not match:
+        return command
     try:
-        data = json.loads(text)
+        script = base64.b64decode(match.group(1), validate=True).decode("utf-16-le")
+    except (ValueError, UnicodeDecodeError):
+        return command
+    return command + "\n" + script
+
+
+def _defenseclaw_hook_command(cfg: Any, connector: str, command: str, *, strict: bool) -> bool:
+    """Whether *command* runs a DefenseClaw hook.
+
+    Per-user Unix hooks run a script under this data directory's ``hooks``
+    folder (or an edited DefenseClaw entry, which the edited-hook check
+    reports). Windows registers the native launcher, and managed installs
+    their own runtime: there the command must name DefenseClaw or run a
+    script in this data directory's hooks folder (the Windows Copilot
+    PowerShell adapter, which names DefenseClaw only when the data directory
+    does).
+    """
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    roots = dict.fromkeys((data_dir, os.path.realpath(data_dir)))
+    hooks_dirs = [os.path.join(root, "hooks") + os.sep for root in roots]
+    if strict:
+        if any(hooks in command for hooks in hooks_dirs):
+            return True
+        script_name = HOOK_SCRIPT_NAMES.get(connector, "")
+        return bool(script_name and edited_hook_script(command, script_name))
+    if "defenseclaw" in _decoded_command(command).lower():
+        return True
+    lowered = command.casefold()
+    return bool(data_dir) and any(hooks.casefold() in lowered for hooks in hooks_dirs)
+
+
+def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict: bool) -> bool:
+    """Whether the agent config file *path* registers a DefenseClaw hook.
+
+    Setup also writes DefenseClaw text outside the hooks: the OTLP headers and
+    resource attributes (``x-defenseclaw-source`` in Claude Code ``env`` and
+    the Codex ``[otel]`` exporters), the Codex ``notify`` bridge, an MCP
+    server entry. A whole-file match kept a file with no hooks looking
+    registered (GAP-1230, GAP-1311), so for JSON, TOML and YAML only a hook
+    command in the file's hook registrations (:func:`_hook_section`) counts.
+    Other formats (the OpenCode plugin file) are matched as a whole.
+    """
+
+    raw = path.read_bytes()
+    if path.suffix.lower() not in _STRUCTURED_SUFFIXES:
+        return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    try:
+        document = _load_agent_document(path, raw)
     except ValueError:
-        return text.lower()
-    if not isinstance(data, dict):
-        return text.lower()
-    if "hooks" in data:
-        return json.dumps(data["hooks"]).lower()
-    return json.dumps({key: value for key, value in data.items() if key != "env"}).lower()
+        # A file the parser cannot read is reported by the agent itself;
+        # never call it unregistered on that ground alone.
+        return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    section = _hook_section(document, path)
+    if section is None:
+        return False
+    return any(
+        _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+        for command in _hook_command_lines(section, connector)
+    )
 
 
 def _hook_config_paths(cfg: Any, connector: str) -> list[Path]:
@@ -360,38 +536,47 @@ def _hook_config_paths(cfg: Any, connector: str) -> list[Path]:
 
 
 def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
-    """Report hook config files that no longer mention DefenseClaw at all.
+    """Report hook config files that no longer register DefenseClaw hooks.
 
     Setup records the agent config files it registered hooks in
-    (``locations.hook_config_paths``). When every one of them that exists has
-    lost its DefenseClaw entries (for example the ``hooks`` key was deleted
-    from ``~/.claude/settings.json``), the agent runs unguarded; status says
-    so instead of showing the connector as normal (GAP-1230). When the
-    entries are there, their commands must also be ones the shell can run
-    (:func:`hook_command_problems`). Per-user Windows gets the same check: a
-    Codex self-update left config.toml without hooks while ``guardrail mode
-    action`` reported success (GAP-1035).
+    (``locations.hook_config_paths``). When one of them that exists has lost
+    its DefenseClaw hook entries (for example the ``hooks`` key was deleted
+    from ``~/.claude/settings.json``, or the Codex hook tables were removed and
+    only its ``[otel]`` headers still name DefenseClaw), the agent runs
+    unguarded; status says so instead of showing the connector as normal
+    (GAP-1230, GAP-1311). Every recorded file is checked; on a managed
+    install, whose hooks may sit in one machine layer, one is enough. When
+    the entries are there, their commands must also be ones the shell can
+    run (:func:`hook_command_problems`). Per-user Windows gets the same
+    check: a Codex self-update left config.toml without hooks while
+    ``guardrail mode action`` reported success (GAP-1035).
     """
 
     windows = _is_windows()
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
     if windows:
         launcher = hook_launcher_problems(cfg, connector)
-        if launcher or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        if launcher or managed:
             return launcher
-    existing: list[Path] = []
+    strict = not windows and not managed and bool(str(getattr(cfg, "data_dir", "") or ""))
+    unregistered: list[Path] = []
+    registered = False
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
-            if "defenseclaw" in _registration_text(path.read_text(encoding="utf-8", errors="replace")):
-                commands = [] if windows else hook_command_problems(cfg, connector)
-                return commands or agent_hook_switch_problems(cfg, connector)
+            if _registers_defenseclaw_hooks(cfg, connector, path, strict=strict):
+                registered = True
+                continue
         except OSError:
             continue
-        existing.append(path)
-    if not existing:
-        return agent_hook_switch_problems(cfg, connector)
-    return [f"no DefenseClaw hooks are registered in {existing[0]}"]
+        unregistered.append(path)
+    if unregistered and (not registered or not managed):
+        return [f"no DefenseClaw hooks are registered in {unregistered[0]}"]
+    if registered:
+        commands = [] if windows else hook_command_problems(cfg, connector)
+        return commands or agent_hook_switch_problems(cfg, connector)
+    return agent_hook_switch_problems(cfg, connector)
 
 
 def _read_agent_config(path: Path) -> Any:
@@ -403,9 +588,25 @@ def _read_agent_config(path: Path) -> Any:
         return None
 
 
-def _load_agent_document(path: Path) -> Any:
-    raw = path.read_bytes()
-    return codex_toml.loads(raw) if path.suffix == ".toml" else json.loads(raw.decode("utf-8", errors="replace"))
+def _load_agent_document(path: Path, raw: bytes | None = None) -> Any:
+    """Decode an agent config file: TOML (Codex), YAML (Hermes) or JSON.
+
+    Raises ValueError for a file that does not parse.
+    """
+
+    if raw is None:
+        raw = path.read_bytes()
+    suffix = path.suffix.lower()
+    if suffix == ".toml":
+        return codex_toml.loads(raw)
+    if suffix in (".yaml", ".yml"):
+        import yaml
+
+        try:
+            return yaml.safe_load(raw.decode("utf-8", errors="replace"))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"{path}: {exc}") from exc
+    return json.loads(raw.decode("utf-8", errors="replace"))
 
 
 def _commandless_codex_handlers(document: Any) -> int:
@@ -508,7 +709,10 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
     Agents run a Unix hook command through a shell. A registration whose
     script path contains a space and no quotes makes the shell run the first
     half of the path (``/home/dc``), so no hook call reaches the gateway while
-    the other rows stay green (GAP-0382). Setup writes the path quoted.
+    the other rows stay green (GAP-0382). Setup writes the path quoted. The
+    Copilot ``bash`` entries and the Hermes ``config.yaml`` commands are
+    checked like the ``command`` entries of the other agents (GAP-1385,
+    GAP-1467).
     """
 
     if os.name == "nt":
@@ -524,7 +728,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError):
             continue
-        for command in _registered_commands(document):
+        for command in _hook_command_strings(document):
             if hooks_dir + os.sep not in command:
                 continue
             try:
@@ -627,13 +831,18 @@ def edited_hook_script(command: str, script_name: str) -> str:
     return ""
 
 
+# The keys agents read a hook command from: ``command`` (Claude Code, Codex,
+# Hermes), ``bash``/``powershell`` (Copilot) and Codex's Windows override.
+_HOOK_COMMAND_KEYS = ("command", "bash", "powershell", "command_windows", "commandWindows")
+
+
 def _hook_command_strings(value: Any) -> list[str]:
-    """Every string under a ``command`` or ``bash`` key of a decoded hook config."""
+    """Every string under a hook command key of a decoded hook config."""
 
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in ("command", "bash") and isinstance(item, str):
+            if key in _HOOK_COMMAND_KEYS and isinstance(item, str):
                 found.append(item)
             else:
                 found.extend(_hook_command_strings(item))
@@ -664,15 +873,8 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
-            if path.suffix in (".yaml", ".yml"):
-                import yaml
-
-                document = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
-            else:
-                document = _load_agent_document(path)
+            document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
-            continue
-        except Exception:  # yaml.YAMLError: the registration rows report an unreadable file
             continue
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)

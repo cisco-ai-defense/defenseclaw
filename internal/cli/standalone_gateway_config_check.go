@@ -119,7 +119,7 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		// first: a pack with an explicit Deny for it loaded here, and the
 		// install then failed with only "Failed to start service" (GAP-0095).
 		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
-			return fmt.Errorf("the gateway service cannot read the guardrail rule pack that %s names: %v", configPath, err)
+			return fmt.Errorf("%s that %s names: %v", standaloneRulePackUnreadableText, configPath, err)
 		}
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v%s",
@@ -140,6 +140,12 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	}
 	return nil
 }
+
+// standaloneRulePackUnreadableText starts the refusal of a rule pack the
+// gateway service account cannot read. The Windows Setup preflight reports
+// it as rule_pack_unreadable, the code the enumerator's report gets and the
+// troubleshooting page documents (GAP-0314).
+const standaloneRulePackUnreadableText = "the gateway service cannot read the guardrail rule pack"
 
 // standalonePathPreflightSecrets lets compilation reach path checks when the
 // service, rather than Setup, provides an environment token. Protected

@@ -568,6 +568,39 @@ def test_edited_pack_error_names_narrow_repin():
     )
 
 
+def _go_restart_keys() -> list[str]:
+    """restartKeys of internal/config/configwrite, read as text."""
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(root, "internal", "config", "configwrite", "configwrite.go"), encoding="utf-8") as stream:
+        source = stream.read()
+    block = re.search(r"\nvar restartKeys = \[\]string\{(.*?)\n\}", source, re.S)
+    assert block, "configwrite.go no longer declares restartKeys"
+    return re.findall(r'"([^"]+)"', block.group(1))
+
+
+def test_restart_keys_match_the_go_writer():
+    """es:GAP-0734: the Python writer reports the same restart-required keys as
+    configwrite.restartKeys; it left out enterprise.openshell, so a lifecycle
+    write of the sandbox runtime said nothing about the restart it needs."""
+    assert list(config_writer.RESTART_KEYS) == _go_restart_keys()
+
+
+def test_an_enterprise_openshell_change_needs_a_restart_and_the_sandbox_floor_stays_hot():
+    """Mirrors configwrite TestEnterpriseOpenShellRestartsAndSandboxFloorStaysHot."""
+    changed = [
+        "enterprise.openshell.install",
+        "enterprise.openshell.gateway_port",
+        "openshell.admin.required_for",
+        "guardrail.profiles.contractors.sandbox.allowed",
+    ]
+    assert config_writer.restart_required(changed) == [
+        "enterprise.openshell.install",
+        "enterprise.openshell.gateway_port",
+    ]
+
+
 def test_source_of_truth_page_lists_every_restart_required_key():
     """The page names each key config set reports as restart-required, not a shorter list."""
     page = _reference_page("source-of-truth.mdx")

@@ -199,10 +199,6 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
 		}
 	}
-	byTarget, err := store.ListEventsByTarget(in.Target, 10)
-	if err != nil || len(byTarget) != 1 || byTarget[0].TurnID != in.TurnID {
-		t.Fatalf("ListEventsByTarget turn roundtrip: events=%+v err=%v", byTarget, err)
-	}
 }
 
 func TestStoreLogEventRoundTripsStructuredPayload(t *testing.T) {

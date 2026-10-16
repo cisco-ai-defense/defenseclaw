@@ -5278,7 +5278,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._table_rows = model.data_table_rows()
             detail = catalog_detail_text(model.selected()) if model.detail_open else ""
             message = model.message or model.empty_state()
-            suffix = f"\n\n{message}" if message and not detail and not model.filtered else ""
+            suffix = f"\n\n{rich_escape(message)}" if message and not detail and not model.filtered else ""
             # 8.13: a multi-connector install shows the shared connector
             # filter chip so the operator knows the catalog's current scope
             # and how to change it. Empty for single-connector installs.
@@ -7970,16 +7970,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 col += 2  # the "  " join between rendered segments
             disabled = cfg is not None and cfg.connector_is_disabled(label)
             text = f"{label} (off)" if disabled else label
+            escaped_text = rich_escape(text)
             if is_active:
                 rendered.append(
-                    f"[{TOKENS.surface_base} on {TOKENS.accent_cyan}] {text} [/]"
+                    f"[{TOKENS.surface_base} on {TOKENS.accent_cyan}] {escaped_text} [/]"
                 )
                 visible = f" {text} "
             elif disabled:
-                rendered.append(f"[{TOKENS.text_muted}]{text}[/]")
+                rendered.append(f"[{TOKENS.text_muted}]{escaped_text}[/]")
                 visible = text
             else:
-                rendered.append(f"[{TOKENS.text_secondary}]{text}[/]")
+                rendered.append(f"[{TOKENS.text_secondary}]{escaped_text}[/]")
                 visible = text
             value = "" if label == connector_filter_svc.ALL_LABEL else label
             click_segments.append((col, col + len(visible), value))

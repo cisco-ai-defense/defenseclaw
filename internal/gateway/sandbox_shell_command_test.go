@@ -281,16 +281,26 @@ func TestSandboxShellCommandOnlyAddsVerdicts(t *testing.T) {
 
 func TestSandboxShellCommandScope(t *testing.T) {
 	args := json.RawMessage(`{"command":"ls","dc_unlisted_arg":1}`)
-	if command, tool := sandboxShellCommand(context.Background(), "opencode", "tool.execute.before", "bash", "bash", args); command != nil || tool != "" {
-		t.Fatalf("host request = %s, %q; want none", command, tool)
+	// Host requests are judged on the command too (GAP-0686), except a Codex
+	// shell call where Codex runs it in PowerShell (codexPowerShellCommand).
+	if command, tool := sandboxShellCommand(context.Background(), "opencode", "tool.execute.before", "bash", "bash", args); string(command) != `{"command":"ls"}` || tool != "bash" {
+		t.Fatalf("host request = %s, %q", command, tool)
 	}
+	previous := codexShellRunsPowerShell
+	codexShellRunsPowerShell = true
+	t.Cleanup(func() { codexShellRunsPowerShell = previous })
+	if command, tool := sandboxShellCommand(context.Background(), "codex", "PreToolUse", "Bash", "Bash", args); command != nil || tool != "" {
+		t.Fatalf("codex PowerShell host request = %s, %q; want none", command, tool)
+	}
+	codexShellRunsPowerShell = previous
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxTestBinding("opencode"), nil)
 	if command, tool := sandboxShellCommand(ctx, "opencode", "tool.execute.before", "bash", "bash", args); string(command) != `{"command":"ls"}` || tool != "bash" {
 		t.Fatalf("sandbox request = %s, %q", command, tool)
 	}
-	// Another connector's binding, and a tool that is not a shell.
-	if command, _ := sandboxShellCommand(ctx, "hermes", "pre_tool_call", "terminal", "terminal", args); command != nil {
-		t.Fatalf("other connector's binding = %s", command)
+	// Another connector's binding is judged as host traffic; a tool that is
+	// not a shell has no command.
+	if command, tool := sandboxShellCommand(ctx, "hermes", "pre_tool_call", "terminal", "terminal", args); string(command) != `{"command":"ls"}` || tool != "terminal" {
+		t.Fatalf("other connector's binding = %s, %q", command, tool)
 	}
 	if command, _ := sandboxShellCommand(ctx, "opencode", "tool.execute.before", "read", "read", args); command != nil {
 		t.Fatalf("read tool = %s", command)

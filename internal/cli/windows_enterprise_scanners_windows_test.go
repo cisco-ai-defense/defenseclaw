@@ -140,8 +140,57 @@ func TestWindowsScannerRuntimeRejectsWritableRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
-	if got := readWindowsScannerRuntime(); got.State != "missing" {
-		t.Fatalf("writable scanner runtime state = %q, want missing", got.State)
+	// GAP-0827: not run, and not reported as missing either: the state and
+	// the advice name the access that keeps it from running.
+	got := readWindowsScannerRuntime()
+	if got.State != "untrusted" || got.Problem == "" {
+		t.Fatalf("writable scanner runtime = %+v, want untrusted with the access problem", got)
+	}
+	if message := windowsScannerRuntimeUnavailable(got); !strings.Contains(message, got.Problem) ||
+		!strings.Contains(message, "other than SYSTEM and Administrators") || !strings.Contains(message, "/repair") {
+		t.Fatalf("writable scanner runtime advice = %q", message)
+	}
+}
+
+// GAP-1016: an admin config with scanners.skill_scanner.use_llm: false runs
+// no judge, so status names none and warns, even with llm.model set; an
+// absent key keeps the judge.
+func TestWindowsStandaloneScannerJudgeFollowsUseLLM(t *testing.T) {
+	seam := readWindowsStandaloneScannerConfig
+	t.Cleanup(func() { readWindowsStandaloneScannerConfig = seam })
+	for _, tc := range []struct {
+		name, config, judge string
+	}{
+		{"judge off", "llm:\n  model: bedrock/claude\nscanners:\n  skill_scanner:\n    use_llm: false\n", ""},
+		{"default", "llm:\n  model: bedrock/claude\nscanners:\n  skill_scanner:\n    policy: quiet\n", "bedrock/claude"},
+	} {
+		config := tc.config
+		readWindowsStandaloneScannerConfig = func() ([]byte, error) { return []byte(config), nil }
+		if _, judge := readWindowsStandaloneScannerSettings(); judge != tc.judge {
+			t.Fatalf("%s: judge = %q, want %q", tc.name, judge, tc.judge)
+		}
+		readerSeam, checkSeam := windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck
+		windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+			_, judge := readWindowsStandaloneScannerSettings()
+			return &enterprisestatus.ScannerRuntime{State: "ready", JudgeModel: judge}
+		}
+		windowsScannerRuntimeServiceCheck = func() error { return nil }
+		result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+		result.Installed = true
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
+		windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck = readerSeam, checkSeam
+		warned := ""
+		for _, warning := range result.Warnings {
+			if warning.Code == "scanner_judge_missing" {
+				warned = warning.Message
+			}
+		}
+		if tc.judge == "" && !strings.Contains(warned, "use_llm is false") {
+			t.Fatalf("%s: warnings = %+v, want scanner_judge_missing naming use_llm", tc.name, result.Warnings)
+		}
+		if tc.judge != "" && warned != "" {
+			t.Fatalf("%s: warnings = %+v, want no scanner_judge_missing", tc.name, result.Warnings)
+		}
 	}
 }
 

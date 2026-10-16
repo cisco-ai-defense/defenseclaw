@@ -266,6 +266,12 @@ It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exac
 MCP servers are admitted through the CLI, admitted when the agent's own
 commands add them, and rescanned on a schedule:
 
+On managed Windows, the LocalSystem gateway skips MCP server roots inside
+enrolled users' profiles, so those servers receive no install-watcher scan.
+Use the [administrator scan procedure](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
+for a one-shot review outside profiles; gateway health reports
+`watcher.details.profile_roots_skipped: true` when profile roots are skipped.
+
 <Steps>
   <Step>
     **Scan on add.** `defenseclaw mcp set <name> ...` scans the server before

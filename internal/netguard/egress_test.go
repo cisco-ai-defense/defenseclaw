@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"golang.org/x/net/http/httpproxy"
@@ -28,6 +29,34 @@ func TestParseEgressProxyURL(t *testing.T) {
 	for _, bad := range []string{"", "proxy.corp:3128", "socks5://proxy.corp:1080", "http://user:pass@proxy.corp:3128", "http://proxy.corp/path", "http://proxy.corp?x=1", "http://:3128"} {
 		if _, err := ParseEgressProxyURL(bad); err == nil {
 			t.Errorf("ParseEgressProxyURL(%q) accepted", bad)
+		}
+	}
+}
+
+func TestParseEgressProxyURLUsesPlainSchemeHint(t *testing.T) {
+	for _, input := range []string{
+		"proxy.example.com:3128",
+		"proxy.example.com",
+		"//proxy.example.com:3128",
+		"user:pw@proxy.example.com:3128",
+		"http://[::1",
+		"http://exa mple.com",
+	} {
+		_, err := ParseEgressProxyURL(input)
+		if err == nil {
+			t.Errorf("ParseEgressProxyURL(%q) accepted", input)
+			continue
+		}
+		message := err.Error()
+		if !strings.Contains(message, "http://host:port") || !strings.Contains(message, "https://host:port") ||
+			strings.Contains(message, "first path segment") || strings.Contains(message, "parse ") ||
+			strings.Contains(message, "pw") || strings.Contains(message, input) {
+			t.Errorf("ParseEgressProxyURL(%q) error = %q, want a plain scheme hint without the input", input, message)
+		}
+	}
+	for _, input := range []string{"http://proxy.example.com:3128", "https://proxy.example.com:3128"} {
+		if _, err := ParseEgressProxyURL(input); err != nil {
+			t.Errorf("ParseEgressProxyURL(%q): %v", input, err)
 		}
 	}
 }

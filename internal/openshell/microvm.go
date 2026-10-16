@@ -28,6 +28,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Free space the MicroVM driver's state directory needs: the first start
@@ -36,6 +38,14 @@ const (
 	VMDiskFailBytes = 6 << 30
 	VMDiskWarnBytes = 12 << 30
 )
+
+// EnterprisePlatformName is the enterprise subcommand for a Go OS name.
+func EnterprisePlatformName(goos string) string {
+	if goos == "darwin" {
+		return "macos"
+	}
+	return goos
+}
 
 // Homebrew commands that prepare a Mac for the MicroVM driver.
 const (
@@ -66,6 +76,7 @@ const hypervisorEntitlement = "com.apple.security.hypervisor"
 // MicroVMHost is what OpenShell's MicroVM (vm) driver needs on a Mac, as
 // doctor found it.
 type MicroVMHost struct {
+	managed bool
 	// E2fsprogs is the directory the driver finds mke2fs and debugfs in;
 	// empty when it finds none. OnPath names a copy only the shell's PATH
 	// has, which the driver under launchd may not see.
@@ -75,10 +86,6 @@ type MicroVMHost struct {
 	// which the driver does not search for e2fsprogs (empty for
 	// /opt/homebrew and /usr/local).
 	OwnBrewPrefix string `json:"homebrew_prefix,omitempty"`
-	// RefusedE2fsprogs names, on a managed host, an e2fsprogs the driver
-	// would find that another account can change, which a managed sandbox
-	// does not use.
-	RefusedE2fsprogs string `json:"e2fsprogs_refused,omitempty"`
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
@@ -136,13 +143,15 @@ func (m *MicroVMHost) Problems() []string {
 	}
 	var out []string
 	if m.E2fsprogs == "" {
-		problem := "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
-			"the driver formats every MicroVM's disks with its mke2fs and debugfs"
-		if m.OwnBrewPrefix != "" {
-			problem += "; it does not look in your Homebrew at " + m.OwnBrewPrefix
-		}
-		if m.RefusedE2fsprogs != "" {
-			problem += "; a managed sandbox does not use the one in " + m.RefusedE2fsprogs + ", which another account can change"
+		problem := "e2fsprogs is not installed where the MicroVM driver looks for it"
+		if m.managed {
+			problem += ": a managed computer uses the administrator's enterprise.openshell.e2fsprogs_dir or your own ~/.local/opt/e2fsprogs/sbin build"
+		} else {
+			problem += ", Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
+				"the driver formats every MicroVM's disks with its mke2fs and debugfs"
+			if m.OwnBrewPrefix != "" {
+				problem += "; it does not look in your Homebrew at " + m.OwnBrewPrefix
+			}
 		}
 		out = append(out, problem)
 	}
@@ -233,24 +242,59 @@ func mootWithoutLandlock(c Check, microVMs string) Check {
 // changed.
 var dockerDesktopSharing = []string{"/Users", "/Volumes", "/private", "/tmp", "/var/folders"}
 
+// HookFireProbeDir is the private directory under the user cache
+// directory (~/Library/Caches/defenseclaw/hookfire on a Mac) that the
+// hook-fire probe of an image build mounts a MicroVM /etc/hosts and
+// /etc/resolv.conf from (image.Builder, GAP-0037): a container engine that
+// shares the home directory sees it. "" without a cache directory.
+func HookFireProbeDir() string {
+	cache, err := os.UserCacheDir()
+	if err != nil || !filepath.IsAbs(cache) {
+		return ""
+	}
+	return filepath.Join(cache, "defenseclaw", "hookfire")
+}
+
 // vmFileSharingCheck is the Docker file sharing check of a gateway on the
 // MicroVM driver. Its sandboxes mount no host folders, but the hook-fire
 // probe that checks every image built for them runs the harness in a
-// Docker container with a MicroVM's /etc/hosts and /etc/resolv.conf,
-// which it mounts from the system temp directory (image.Builder.TempDir):
-// Docker Desktop shares it by default (/var/folders, the user's $TMPDIR,
-// and /tmp). Unshared, every image stays unchecked for a MicroVM, which
-// the gateway then refuses to boot.
+// Docker container with a MicroVM /etc/hosts and /etc/resolv.conf, which
+// it mounts from HookFireProbeDir (Doctor.TempDir), under the home
+// directory. Unshared, every image stays unchecked for a MicroVM, which the
+// gateway then refuses to boot. On a Mac every engine runs containers in a
+// Linux VM: Docker Desktop shares what its settings name (/Users among its
+// defaults), Colima and OrbStack the home directory by default (GAP-0402).
 func (r *doctorRun) vmFileSharingCheck() Check {
 	c := Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
-	tmp := filepath.Clean(r.TempDir())
 	what := " (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)"
+	dir := r.TempDir()
 	switch {
 	case !r.docker:
 		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
 		return c
-	case !r.desktop:
+	case !r.desktop && r.GOOS != "darwin":
 		c.Status, c.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
+		return c
+	case dir == "":
+		c.Status, c.Detail = StatusWarn, "no cache directory for the hook-fire probe of an image build (HOME is not set)"
+		c.Fix = &Fix{Summary: "run DefenseClaw with HOME set to your home directory"}
+		return c
+	}
+	dir = filepath.Clean(dir)
+	resolved, _ := filepath.EvalSymlinks(dir)
+	under := func(shared []string) bool {
+		return sharedDir(shared, dir) || (resolved != "" && sharedDir(shared, resolved))
+	}
+	if !r.desktop {
+		// Colima, OrbStack and other engines on a Mac: their VM sees the
+		// home directory by default; what else it sees is their own
+		// configuration, which DefenseClaw does not read.
+		if home, _ := r.HomeDir(); filepath.IsAbs(home) && under([]string{home}) {
+			c.Status, c.Detail = StatusPass, dir+" is under your home directory, which Colima and OrbStack share with the VM they run containers in by default"+what
+			return c
+		}
+		c.Status, c.Detail = StatusWarn, dir+" is outside your home directory, and the VM this Docker engine runs containers in may not see it"+what
+		c.Fix = &Fix{Summary: "share " + dir + " with the VM of your Docker engine (Colima: add it under mounts in ~/.colima/default/colima.yaml, then `colima restart`)"}
 		return c
 	}
 	dd, err := r.DockerDesktop()
@@ -261,28 +305,27 @@ func (r *doctorRun) vmFileSharingCheck() Check {
 		if err != nil {
 			c.Detail += ": " + err.Error()
 		}
-		c.Fix = &Fix{Summary: "make sure " + tmp + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
+		c.Fix = &Fix{Summary: "make sure " + dir + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
 		return c
 	case dd.FileSharing != nil:
 		shared = dd.FileSharing
 	}
-	resolved, _ := filepath.EvalSymlinks(tmp)
-	if sharedDir(shared, tmp) || (resolved != "" && sharedDir(shared, resolved)) {
-		c.Status, c.Detail = StatusPass, tmp+" is shared with Docker Desktop"+what
+	if under(shared) {
+		c.Status, c.Detail = StatusPass, dir+" is shared with Docker Desktop"+what
 		return c
 	}
 	c.Status = StatusFail
-	c.Detail = tmp + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
-	c.Fix = &Fix{Summary: "add " + tmp + " in Docker Desktop → Settings → Resources → File sharing (it is shared by default: /var/folders and /tmp)"}
+	c.Detail = dir + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
+	c.Fix = &Fix{Summary: "add " + dir + " (or your home directory) in Docker Desktop → Settings → Resources → File sharing (/Users is shared by default)"}
 	return c
 }
 
 // microVMHost finds what the MicroVM driver needs on this Mac.
 func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
-	m := &MicroVMHost{Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
+	m := &MicroVMHost{managed: r.Gateway.managedHost(), Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
 		Recommended: RecommendedVMResources(r.HostMemory()).Within(r.MaxCPUMillis, r.MaxMemoryBytes)}
-	if r.Gateway.managedHost() {
-		m.E2fsprogs, m.RefusedE2fsprogs = r.managedE2fsprogs()
+	if m.managed {
+		m.E2fsprogs = r.managedE2fsprogs()
 	} else {
 		m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	}
@@ -328,60 +371,61 @@ func hasE2fsprogs(dir string) bool {
 	return (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs"))
 }
 
-// managedE2fsprogs is the e2fsprogs a managed sandbox uses (spec D5): the
-// user's own build in ~/.local/opt/e2fsprogs, else the first of
-// E2fsprogsDirs whose tools only root or this user can change. A keg in
-// another account's Homebrew (the Cellar is that account's, and writable by
-// the admin group) is refused, never used silently (GAP-0004); refused
-// names it.
-func (r *doctorRun) managedE2fsprogs() (dir, refused string) {
-	var dirs []string
-	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin"))
+// managedE2fsprogs uses the exact folder decision of the managed gateway
+// exec shim, including the administrator's authoritative setting and never
+// a Homebrew keg (GAP-0004).
+func (r *doctorRun) managedE2fsprogs() string {
+	home, _ := r.HomeDir()
+	adminDir := ""
+	if r.AdminE2fsprogsKnown {
+		adminDir = r.AdminE2fsprogsDir
 	}
-	for _, d := range append(dirs, r.E2fsprogsDirs...) {
-		if !hasE2fsprogs(d) {
-			continue
-		}
-		if err := ownedByRootOrUser(filepath.Join(d, "debugfs"), os.Geteuid()); err != nil {
-			if refused == "" {
-				refused = fmt.Sprintf("%s (%v)", d, err)
-			}
-			continue
-		}
-		return d, refused
-	}
-	return "", refused
+	dir, _ := ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(), r.trustManagedE2fsprogs)
+	return dir
 }
 
-// ownedByRootOrUser checks that path, after its links, and every folder
-// above it belong to root or uid and that no other account can write them
-// (a root-owned sticky folder such as /tmp aside).
-func ownedByRootOrUser(path string, uid int) error {
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
+func (d *Doctor) trustManagedE2fsprogs(path string, file bool) error {
+	if file {
+		trust := d.TrustedE2fsprogsFile
+		if trust == nil {
+			trust = managed.ValidateTrustedFilePath
+		}
+		return trust(path, "e2fsprogs tool")
 	}
-	for p := real; ; p = filepath.Dir(p) {
-		info, err := os.Stat(p)
-		if err != nil {
-			return err
-		}
-		owner, ok := fileUID(info)
-		if !ok {
-			return fmt.Errorf("%s: owner unknown", p)
-		}
-		rootSticky := info.IsDir() && owner == 0 && info.Mode()&os.ModeSticky != 0
-		switch {
-		case owner != 0 && owner != uid:
-			return fmt.Errorf("%s belongs to uid %d", p, owner)
-		case info.Mode().Perm()&0o022 != 0 && !rootSticky:
-			return fmt.Errorf("%s can be changed by other accounts (mode %04o)", p, info.Mode().Perm())
-		}
-		if parent := filepath.Dir(p); parent == p {
-			return nil
-		}
+	trust := d.TrustedE2fsprogsDir
+	if trust == nil {
+		trust = managed.ValidateTrustedRuntimeDir
 	}
+	return trust(path, "e2fsprogs")
+}
+
+// ManagedE2fsprogsCheck reports the managed Mac gateway's actual e2fsprogs
+// folder. It is called after the daemon identifies the managed VM driver;
+// Doctor.Run omits host checks on managed computers.
+func (d *Doctor) ManagedE2fsprogsCheck() Check {
+	d.defaults()
+	c := Check{ID: CheckIDManagedE2fsprogs, Title: "e2fsprogs", Status: StatusFail}
+	if !d.AdminE2fsprogsKnown {
+		c.Detail = "the managed gateway did not answer its e2fsprogs_dir settings; cannot verify which folder its exec shim uses"
+		c.Fix = &Fix{Summary: "ask your administrator to restore the managed gateway settings service, then run sandbox doctor again"}
+		return c
+	}
+	home, _ := d.HomeDir()
+	dir, problem := ManagedE2fsprogsToolDir(d.AdminE2fsprogsDir, home, os.Getuid(),
+		d.trustManagedE2fsprogs)
+	if dir != "" {
+		c.Status, c.Detail = StatusPass, "the managed gateway uses e2fsprogs in "+dir
+		return c
+	}
+	c.Detail = problem
+	fix := "ask your administrator to install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools; or use an account build in ~/.local/opt/e2fsprogs/sbin when e2fsprogs_dir is unset"
+	if strings.Contains(problem, "not trusted") {
+		fix = "ask your administrator to make the e2fsprogs directory and both tools root-owned, without symlinks or group/other write access; enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	} else if strings.Contains(problem, "cannot be traversed") || strings.Contains(problem, "cannot be executed") {
+		fix = "ask your administrator to make the e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x); enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	}
+	c.Fix = &Fix{Summary: fix}
+	return c
 }
 
 func executable(p string) bool {

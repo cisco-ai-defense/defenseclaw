@@ -46,9 +46,14 @@ type fakeSandboxOps struct {
 	teardowns []string
 	reloads   []string
 	stopErr   error
-	// events is every Stop and Teardown in the order they ran.
+	// events is every Stop, StopSandboxes and Teardown in the order they ran.
 	events      []string
 	teardownErr error
+	// running names, per uid, the sandboxes StopSandboxes stops.
+	running          map[int][]string
+	stopSandboxesErr error
+	// onTeardown does to the account's home what the real teardown does.
+	onTeardown func(SandboxAccount)
 }
 
 func (f *fakeSandboxOps) Accounts(context.Context) []SandboxAccount { return f.accounts }
@@ -81,9 +86,19 @@ func (f *fakeSandboxOps) Reload(_ context.Context, a SandboxAccount) error {
 	return nil
 }
 
-func (f *fakeSandboxOps) Teardown(_ context.Context, a SandboxAccount, keepImages bool) error {
-	f.teardowns = append(f.teardowns, fmt.Sprintf("%s:keepImages=%v", a.Name, keepImages))
+func (f *fakeSandboxOps) StopSandboxes(_ context.Context, a SandboxAccount) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "stop-sandboxes "+a.Name)
+	return f.running[a.UID], f.stopSandboxesErr
+}
+
+func (f *fakeSandboxOps) Teardown(_ context.Context, a SandboxAccount) error {
+	f.teardowns = append(f.teardowns, a.Name)
 	f.events = append(f.events, "teardown "+a.Name)
+	if f.onTeardown != nil {
+		f.onTeardown(a)
+	}
 	return f.teardownErr
 }
 
@@ -174,6 +189,7 @@ func (h *osHost) payloadOnce() string {
 	}
 	dir := h.payload("1.0.0")
 	payloadDirs.Store(h.t.Name(), dir)
+	h.t.Cleanup(func() { payloadDirs.Delete(h.t.Name()) })
 	return dir
 }
 
@@ -786,8 +802,8 @@ func (h *osHost) installTarballFiles(t *testing.T, a SandboxAccount, version str
 	return unrelated
 }
 
-// Uninstall tears down every account; purge leaves nothing the subsystem
-// created.
+// Uninstall stops every account's sandboxes and keeps them; purge tears them
+// down and leaves nothing the subsystem created.
 func TestSandboxUninstallAndPurge(t *testing.T) {
 	populate := func(t *testing.T, h *osHost) {
 		t.Helper()
@@ -831,7 +847,7 @@ func TestSandboxUninstallAndPurge(t *testing.T) {
 			populate(t, h)
 			r := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireOK(t, r)
-			if got := h.ops.teardowns; len(got) != 1 || got[0] != "alice:keepImages=false" {
+			if got := h.ops.teardowns; len(got) != 1 || got[0] != "alice" {
 				t.Errorf("teardowns = %v", got)
 			}
 			if !strings.Contains(strings.Join(h.ops.stopped(), ","), "alice:daemon+gateway+socket") {
@@ -888,8 +904,8 @@ func TestSandboxUninstallAndPurge(t *testing.T) {
 		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"})))
 		populate(t, h)
 		requireOK(t, h.run(Options{Action: ActionUninstall}))
-		if got := h.ops.teardowns; len(got) != 1 || got[0] != "alice:keepImages=true" {
-			t.Errorf("teardowns = %v", got)
+		if got := h.ops.teardowns; len(got) != 0 {
+			t.Errorf("teardowns = %v: a non-purge uninstall deletes the sandboxes (GAP-0598)", got)
 		}
 		if !h.exists(filepath.Join(h.alice.Home, h.env.daemonStateRel())) || !h.exists(filepath.Join(h.alice.Home, ".local/bin/openshell")) {
 			t.Error("the account's sandbox state was removed without --purge")
@@ -1041,7 +1057,8 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		}
 		r = h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "e2fsprogs_dir": dir}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox e2fsprogs"); state != "ok: "+dir {
+		// The row names the folder the gateway runs the driver with (GAP-0506).
+		if state, _ := rowState(r, "sandbox e2fsprogs"); state != "ok: "+dir+"/sbin" {
 			t.Errorf("e2fsprogs row = %q", state)
 		}
 		h.env.Trust = func(path string, kind TrustKind) error {

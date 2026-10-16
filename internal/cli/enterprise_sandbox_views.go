@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -483,6 +484,19 @@ func explainRegistration(c *config.Config, reg sandboxreg.Registration) registra
 	out := registrationExplain{Registration: reg, Policy: sandboxPolicyOf(c, reg.Profile)}
 	if out.Policy.hasFloor {
 		out.Managed = managedExplainOfFloor(reg, out.Policy.floor, out.Policy.Sources)
+		if len(out.Managed.RequiredFor) > 0 {
+			exempt := gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, reg.UID, reg.UserName)
+			// Preview the same gate as the user's explain. The gateway's
+			// profile answer includes verified directory name matches.
+			if !exempt && reg.UID != 0 && len(c.Enterprise.Enrollment.ExemptUsers) > 0 {
+				_, _, _, resolved, err := enterprisePolicySandboxProfile(reg.UserName)
+				if err == nil {
+					exempt = resolved
+				}
+			}
+			out.Managed.HostRunGate = gateway.RequireSandboxHostGate(out.Managed.RequiredFor, out.Managed.RequiredFor[0], exempt)
+			out.Managed.EnrollmentExempt = out.Managed.HostRunGate == gateway.RequireSandboxHostRunExempt
+		}
 	}
 	return out
 }

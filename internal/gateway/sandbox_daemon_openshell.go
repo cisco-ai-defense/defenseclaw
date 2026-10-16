@@ -73,11 +73,12 @@ import (
 // settings_drift).
 
 const (
-	openShellGatewayUnit  = "defenseclaw-openshell-gateway.service"
-	openShellGatewayLabel = "com.cisco.defenseclaw.openshell-gateway"
-	openShellGatewayPlist = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
-	daemonSystemctl       = "/usr/bin/systemctl"
-	daemonLaunchctl       = "/bin/launchctl"
+	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
+	openShellGatewayLabel         = "com.cisco.defenseclaw.openshell-gateway"
+	openShellGatewayPlist         = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
+	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
+	daemonSystemctl               = "/usr/bin/systemctl"
+	daemonLaunchctl               = "/bin/launchctl"
 
 	// openShellPrerequisiteReason is the refusal detail of a missing
 	// OpenShell prerequisite.
@@ -92,6 +93,7 @@ const (
 var (
 	openShellGatewayStartWait = 90 * time.Second
 	openShellGatewayPollEvery = 500 * time.Millisecond
+	openShellGatewayHealAfter = 3 * time.Second
 )
 
 // daemonOpenShell is what the daemon does with the account's OpenShell;
@@ -144,6 +146,9 @@ type accountOpenShell struct {
 	// accountProcs lists the account's processes, a line each: the pid and
 	// the command line.
 	accountProcs func(ctx context.Context) (string, error)
+	// hostProcs lists every account's processes, a line each: the uid, the
+	// pid and the command line.
+	hostProcs func(ctx context.Context) (string, error)
 
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
@@ -176,6 +181,9 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		procArgs:     processArgs,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
+		},
+		hostProcs: func(ctx context.Context) (string, error) {
+			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-A", "-o", "uid=,pid=,args="}, nil)
 		},
 	}
 }
@@ -292,8 +300,8 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 
 // commandDrift compares the command line of the gateway on the account's
 // gateway port with the one the managed unit's exec shim execs: the install
-// mode's openshell-gateway, --config and the rendered file (on Linux also
-// the rendered docker fallback). A listener that is not openshell-gateway
+// mode's openshell-gateway, --config and one of the rendered files
+// (managedConfigs). A listener that is not openshell-gateway
 // itself, or one whose command cannot be read, is not judged.
 func (o *accountOpenShell) commandDrift(ctx context.Context, s sandboxrelay.DaemonSettings) []openshell.SettingDrift {
 	if o.portPID == nil || o.procArgs == nil {
@@ -316,16 +324,25 @@ func (o *accountOpenShell) commandDrift(ctx context.Context, s sandboxrelay.Daem
 	if binary == "" || cfg == "" {
 		return nil
 	}
-	allowed := []string{cfg}
-	if o.goos == "linux" {
-		allowed = append(allowed, filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile))
-	}
-	for _, path := range allowed {
+	for _, path := range o.managedConfigs(cfg) {
 		if strings.Join(words, " ") == binary+" --config "+path {
 			return nil
 		}
 	}
 	return []openshell.SettingDrift{{Field: "gateway command", Want: binary + " --config " + cfg, Have: strings.Join(words, " ")}}
+}
+
+// managedConfigs are the rendered files the managed unit's exec shim starts
+// the account's gateway on: the rendered gateway.toml cfg and, on Linux, the
+// docker fallback's and the 1.0.1 upgrade bridge's docker configuration
+// (openshell.GatewayDefaultNamespaceTOMLFile, GAP-0587; remove that one
+// with the bridge when 1.0.1 is out of support).
+func (o *accountOpenShell) managedConfigs(cfg string) []string {
+	if o.goos != "linux" {
+		return []string{cfg}
+	}
+	dir := filepath.Dir(cfg)
+	return []string{cfg, filepath.Join(dir, openshell.GatewayFallbackTOMLFile), filepath.Join(dir, openshell.GatewayDefaultNamespaceTOMLFile)}
 }
 
 // gatewayBinary is the openshell-gateway the managed unit's exec shim runs
@@ -367,9 +384,9 @@ func (o *accountOpenShell) OtherGateways(ctx context.Context, s sandboxrelay.Dae
 	if binary == "" || cfg == "" {
 		return nil
 	}
-	managedCommand := map[string]bool{binary + " --config " + cfg: true}
-	if o.goos == "linux" {
-		managedCommand[binary+" --config "+filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile)] = true
+	managedCommand := map[string]bool{}
+	for _, path := range o.managedConfigs(cfg) {
+		managedCommand[binary+" --config "+path] = true
 	}
 	out, err := o.accountProcs(ctx)
 	if err != nil {
@@ -437,11 +454,50 @@ func (o *accountOpenShell) Prepare(ctx context.Context, s sandboxrelay.DaemonSet
 			return false, openShellPrerequisiteError("the administrator's OpenShell is not usable: %v", err)
 		}
 	}
-	started, err := o.ensureRunning(ctx, port)
+	started, err := o.ensureRunning(ctx, port, s.Enterprise.GatewayConfigPath)
 	if err != nil {
 		return started, err
 	}
 	return started, o.ensureRegistered(ctx, cli, gatewayRegistrationName(s), port)
+}
+
+// otherAccountManagedGateway reports a managed gateway, the managed unit's
+// command line on the rendered configuration cfg on any port, that another
+// account runs (false when the processes cannot be listed). Every managed
+// docker gateway keeps its sandboxes in one namespace
+// (openshell.ManagedDockerNamespace), and a docker gateway's start
+// force-removes that namespace's supervisors, so one started while another
+// account's runs ends that account's sandboxes. The one managed port keeps
+// them apart while both use it, but an account whose gateway_port switch
+// waits for its sandboxes to stop still runs its gateway on the old port
+// while the new one is free (GAP-0566). The gateways of the 1.0.1 upgrade
+// bridge share OpenShell's default namespace the same way, so they count
+// too (managedConfigs).
+func (o *accountOpenShell) otherAccountManagedGateway(ctx context.Context, cfg string) bool {
+	if o.hostProcs == nil || cfg == "" {
+		return false
+	}
+	configs := map[string]bool{}
+	for _, path := range o.managedConfigs(cfg) {
+		configs[path] = true
+	}
+	out, err := o.hostProcs(ctx)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		words := strings.Fields(line)
+		// uid pid <openshell-gateway> --config <rendered file>: the binary
+		// is the install mode's (the account's own in setup mode), the
+		// configuration the administrator's.
+		if len(words) != 5 || filepath.Base(words[2]) != openshell.GatewayBinary || words[3] != "--config" || !configs[words[4]] {
+			continue
+		}
+		if uid, err := strconv.Atoi(words[0]); err == nil && uid != o.uid {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureInstalled installs the pinned release: once per process unless
@@ -469,18 +525,42 @@ func (o *accountOpenShell) ensureInstalled(ctx context.Context, version string, 
 
 // ensureRunning starts the account's gateway unit unless the gateway port
 // is already this account's, and waits until it is. Another account's
-// listener on the port refuses with the neutral account-busy text.
-func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, error) {
+// listener on the port, or another account's managed gateway on the
+// rendered configuration cfg on any port, refuses with the neutral
+// account-busy text.
+func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg string) (bool, error) {
 	if holder, held := o.portHolder(port); held {
 		if holder == o.uid {
 			return false, nil
 		}
 		return false, accountBusyError()
 	}
-	if err := o.startUnit(ctx); err != nil {
-		return true, openShellPrerequisiteError("your OpenShell gateway could not be started: %v", err)
+	if o.otherAccountManagedGateway(ctx, cfg) {
+		// Neutral, like the refusal: whose gateway it is stays out of this
+		// account's log.
+		o.logf("another account's managed OpenShell gateway runs: yours starts once it has stopped")
+		return false, accountBusyError()
+	}
+	reloaded, err := o.startUnit(ctx)
+	if err != nil {
+		// The service manager's command line and job text stay in the log:
+		// they name nothing the person can act on (#1202).
+		o.logf("start your OpenShell gateway: %v", err)
+		if holder, held := o.portHolder(port); held && holder != o.uid {
+			// Another account's gateway holds the port (its idle gateway
+			// had not stopped yet), so this account's could not bind it.
+			return true, accountBusyError()
+		}
+		var reloadErr *openShellLaunchAgentReloadError
+		if errors.As(err, &reloadErr) {
+			return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
+		}
+		return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); "+
+			"`defenseclaw sandbox doctor` shows why", o.unitState(ctx))
 	}
 	deadline := time.Now().Add(openShellGatewayStartWait)
+	healAt := time.Now().Add(openShellGatewayHealAfter)
+	healChecked := reloaded
 	for {
 		if holder, held := o.portHolder(port); held {
 			if holder == o.uid {
@@ -492,6 +572,22 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, e
 		if time.Now().After(deadline) {
 			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s); "+
 				"`defenseclaw sandbox doctor` shows why", port, openShellGatewayStartWait, o.unitState(ctx))
+		}
+		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
+			healChecked = true
+			domain := o.launchDomain(ctx)
+			target := domain + "/" + openShellGatewayLabel
+			out, printErr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
+			if printErr == nil && openshell.ParseLaunchAgentState([]byte(out)).Failure(false) != "" {
+				if err := o.reloadLaunchAgent(ctx, domain); err != nil {
+					o.logf("reload your OpenShell gateway LaunchAgent: %v", err)
+					return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
+				}
+				if err := o.kickstartLaunchAgent(ctx, target); err != nil {
+					o.logf("start your reloaded OpenShell gateway LaunchAgent: %v", err)
+					return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); `defenseclaw sandbox doctor` shows why", o.unitState(ctx))
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -652,24 +748,53 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 }
 
 // startUnit starts the account's OpenShell gateway unit.
-func (o *accountOpenShell) startUnit(ctx context.Context) error {
+func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 	switch o.goos {
 	case "linux":
 		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "start", openShellGatewayUnit}, userManagerEnv(o.uid))
-		return commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
+		return false, commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
 	case "darwin":
 		domain := o.launchDomain(ctx)
 		target := domain + "/" + openShellGatewayLabel
-		if _, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); err != nil {
+		printed, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
+		if err != nil {
 			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
 			if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
-				return err
+				return false, err
 			}
+		} else if openshell.ParseLaunchAgentState([]byte(printed)).Failure(false) != "" {
+			if err := o.reloadLaunchAgent(ctx, domain); err != nil {
+				return false, err
+			}
+			return true, o.kickstartLaunchAgent(ctx, target)
 		}
-		out, err := o.run(ctx, daemonLaunchctl, []string{"kickstart", target}, nil)
-		return commandError(daemonLaunchctl+" kickstart "+target, out, err)
+		return false, o.kickstartLaunchAgent(ctx, target)
 	}
-	return fmt.Errorf("sandboxes run on Linux and macOS only")
+	return false, fmt.Errorf("sandboxes run on Linux and macOS only")
+}
+
+type openShellLaunchAgentReloadError struct{ err error }
+
+func (e *openShellLaunchAgentReloadError) Error() string {
+	return "your OpenShell gateway's LaunchAgent could not be reloaded; run `" + openShellGatewayRepairCommand + "`: " + e.err.Error()
+}
+func (e *openShellLaunchAgentReloadError) Unwrap() error { return e.err }
+
+func (o *accountOpenShell) reloadLaunchAgent(ctx context.Context, domain string) error {
+	target := domain + "/" + openShellGatewayLabel
+	if out, err := o.run(ctx, daemonLaunchctl, []string{"bootout", target}, nil); err != nil {
+		o.logf("boot out your OpenShell gateway LaunchAgent: %v: %s", err, firstOutputLine(out))
+	}
+	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+	if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
+		return &openShellLaunchAgentReloadError{err: err}
+	}
+	return nil
+}
+
+func (o *accountOpenShell) kickstartLaunchAgent(ctx context.Context, target string) error {
+	out, err := o.run(ctx, daemonLaunchctl, []string{"kickstart", target}, nil)
+	return commandError(daemonLaunchctl+" kickstart "+target, out, err)
 }
 
 // launchDomain is the launchd domain of the account's agents: the graphical
@@ -690,7 +815,7 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 	status := ""
 	switch o.goos {
 	case "linux":
-		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
+		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
 		if err != nil {
 			return "its state is unknown"
 		}
@@ -699,6 +824,12 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
 				fields[k] = v
 			}
+		}
+		switch {
+		case fields["LoadState"] == "not-found":
+			return "its service unit was not found on this computer"
+		case fields["ActiveState"] == "":
+			return "its state is unknown"
 		}
 		status = fields["ExecMainStatus"]
 		if status != strconv.Itoa(78) {

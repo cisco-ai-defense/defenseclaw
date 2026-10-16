@@ -183,7 +183,7 @@ def test_empty_token_is_a_problem_like_a_missing_one(tmp_path, monkeypatch):
 def test_removed_hook_registration_is_reported(tmp_path):
     # GAP-1230: the hooks key deleted from the agent's settings file.
     settings = tmp_path / "settings.json"
-    hook = {"command": "/x/defenseclaw/claude-code-hook.sh"}
+    hook = {"command": str(tmp_path / "hooks" / "claude-code-hook.sh")}
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
     lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
     (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))

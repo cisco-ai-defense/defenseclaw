@@ -157,8 +157,11 @@ enforced.
    `coverage_complete` and `security_complete`
    ([Status and verify](/docs/enterprise/operations#status-and-verify)).
 3. **Check enrollment.** Confirm that the users you expect appear for each
-   agent. The enumerator runs every five minutes, so allow a few minutes after
-   a user first installs an agent.
+   per-user agent. The enumerator runs every five minutes, so allow a few
+   minutes after a user first installs an agent. On Linux and macOS, a
+   machine-policy-only deployment can have an empty `enterprise hooks status`
+   Enrollment section while its eligible users are protected; check `status`
+   and `verify` for machine-policy coverage.
 4. **Read the decisions.** Let people work for a week or two. Review what
    DefenseClaw would have blocked
    ([Logs and events](/docs/enterprise/operations#logs-and-events)), and tune
@@ -235,7 +238,9 @@ Watch these on every ring:
   optionally, health ([Detection](/docs/enterprise/mdm#detection)).
 - **Health fields.** `coverage_complete` and `security_complete` in the
   lifecycle result ([Health fields](/docs/enterprise/operations#health-fields)).
-- **Enrollment counts** in `status`, against the users you expect.
+- **Enrollment counts** for per-user agents, against the users you expect.
+  Machine-policy-only Linux and macOS deployments can have no Enrollment rows
+  even while eligible users are protected.
 - **The effective policy digest.** `policy.effective_digest` should be the
   same on every host of one OS in the ring that received the same config, and
   `policy.applied` should be `true` (Linux and macOS; see

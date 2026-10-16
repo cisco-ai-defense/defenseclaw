@@ -72,6 +72,11 @@ type HookDecision struct {
 	// the tool input stays on the managed gateway, so ToolInput is empty
 	// and content-keyed connectors pair calls by CallRef.
 	CallRef string
+	// AlertsLow reports that the guardrail profile which decided the call
+	// alerts at LOW itself (alert_at: low): a LOW alert is then a finding
+	// of the session. Under the rule pack's own levels a LOW alert stays in
+	// the audit log only (GAP-0091, #1207).
+	AlertsLow bool
 }
 
 // ObserveIngress records an authenticated ingress request, the hook-coverage
@@ -212,7 +217,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
-	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !asked && flaggedVerdict(d.Action, reason) {
+	if severity := flaggedSeverity(d.Severity, d.AlertsLow); severity != "" && !blocked && !asked && flaggedVerdict(d.Action, reason) {
 		// A verdict that let the tool call run but flagged it (an alert,
 		// or a block the event could not enforce) is a finding of the
 		// session: the feed shows every one.
@@ -385,14 +390,22 @@ func flaggedVerdict(action, reason string) bool {
 }
 
 // flaggedSeverity is a verdict's severity when it carries a finding of the
-// session (MEDIUM or worse), upper-cased, else "".
-func flaggedSeverity(severity string) string {
+// session (MEDIUM or worse, or LOW under a profile that alerts at LOW),
+// upper-cased, else "".
+func flaggedSeverity(severity string, alertsLow bool) string {
 	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
 	case "MEDIUM", "HIGH", "CRITICAL":
 		return s
+	case "LOW":
+		if alertsLow {
+			// The profile asks for LOW alerts (an offline floor's alert_at:
+			// low): the user reviews them like any other (#1207).
+			return s
+		}
 	}
-	// A LOW alert (one email address in a tool's output) stays in the
-	// audit log; it is nothing to review in a session.
+	// A LOW alert of the rule pack's own levels (one email address in a
+	// tool's output) stays in the audit log; it is nothing to review in a
+	// session.
 	return ""
 }
 

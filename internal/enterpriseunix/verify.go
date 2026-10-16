@@ -594,9 +594,44 @@ func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment)
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		cause = " (" + failure + ")"
 	}
+	if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+		// A power loss in the middle of an rpm upgrade leaves both versions
+		// in the package database; ensure --from-package cannot repair that,
+		// and the next dnf transaction trips over it (GAP-0782).
+		return fmt.Sprintf("the installed package is version %s but the deployment applied %s, and the rpm database records %d versions of %s (%s): "+
+			"a package upgrade was interrupted. Remove the older record with `sudo dnf remove --duplicates %s`, then reinstall the package with "+
+			"`sudo dnf reinstall %s`, which applies it",
+			version, record.ProductVersion, len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName)
+	}
 	return fmt.Sprintf("the installed package is version %s but the deployment applied %s: the package's install run did not finish%s; "+
 		"fix that and run `%s --from-package` to apply it (add --allow-downgrade when %s is the older package you meant to go back to)",
 		version, record.ProductVersion, cause, env.lifecycleCommand(ActionEnsure), version)
+}
+
+// linuxPackageName is the deb and rpm package of the managed deployment.
+const linuxPackageName = "defenseclaw-enterprise"
+
+// rpmDuplicateRecords lists the versions of the package the rpm database
+// records, when it records more than one; nil otherwise (and on a host
+// without rpm).
+func (e *Env) rpmDuplicateRecords(ctx context.Context) []string {
+	if e.GOOS != "linux" {
+		return nil
+	}
+	result, err := e.Runner.Run(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", linuxPackageName)
+	if err != nil {
+		return nil
+	}
+	var versions []string
+	for _, line := range strings.Split(string(result.Stdout), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			versions = append(versions, line)
+		}
+	}
+	if len(versions) < 2 {
+		return nil
+	}
+	return versions
 }
 
 // restartSettle bounds the wait for a unit its service manager is about to
@@ -664,6 +699,12 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 				problems = append(problems, fmt.Sprintf("%s is writable by group or other (%04o), so another account could replace it; restore it with `chmod 0755 %s` or reinstall the package", path, perm, path))
 			} else if uid != 0 {
 				problems = append(problems, fmt.Sprintf("%s is owned by uid %d, not root, so that account could replace it; restore it with `chown 0 %s` or reinstall the package", path, uid, path))
+			} else if managedExecutable(filepath.Base(path)) && perm&0o111 != 0o111 {
+				// Only the hook binary's execute bits were checked, so a sensor
+				// helper (or gateway) that lost them stayed healthy in verify and
+				// detect.sh --require-healthy until its service restarted and
+				// could not start it (GAP-1235, GAP-1285).
+				problems = append(problems, fmt.Sprintf("%s is not executable (%04o), so its service cannot start it again; restore it with `chmod 0755 %s` or reinstall the package", path, perm, path))
 			}
 		case path == e.Layout.ConfigPath:
 			if perm != 0o640 || uid != 0 || gid != record.ServiceGID {
@@ -684,6 +725,16 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 			strings.Join(loosenedUnits, ", "), e.lifecycleCommand(ActionEnsure)))
 	}
 	return problems
+}
+
+// managedExecutable reports the programs the deployment installs in BinDir,
+// which every account (the services, the agents running the hook) executes.
+func managedExecutable(name string) bool {
+	switch name {
+	case binGateway, binHook, binSensorHelper, binACP:
+		return true
+	}
+	return false
 }
 
 // lifecycleCommand is the administrator command line for a lifecycle

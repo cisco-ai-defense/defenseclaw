@@ -19,11 +19,13 @@ package watcher
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -195,9 +197,18 @@ func (s *admissionState) dueIssues(now time.Time, kinds ...string) []AdmissionIs
 			continue
 		}
 		if _, err := os.Lstat(s.addressable(path)); err != nil {
-			delete(s.issues, path)
-			delete(s.retry, path)
-			changed = true
+			if assetGone(err) {
+				delete(s.issues, path)
+				delete(s.retry, path)
+				changed = true
+				continue
+			}
+			// The folder may still be there: a permission refused for now
+			// (an access list being repaired, a profile not loaded) is not
+			// a removal. The issue stays recorded and is tried again later,
+			// backing off as a failed admission does (GAP-1192).
+			delay := min(max(retry.delay*2, admissionRetryFirst), admissionRetryLast)
+			s.retry[path] = admissionRetry{due: now.Add(delay), delay: delay}
 			continue
 		}
 		retry.due = now.Add(max(retry.delay, admissionRetryFirst))
@@ -208,6 +219,12 @@ func (s *admissionState) dueIssues(now time.Time, kinds ...string) []AdmissionIs
 		s.writeLocked()
 	}
 	return due
+}
+
+// assetGone reports whether a Lstat error says the asset is no longer in
+// its folder (it, or a folder above it, was removed or replaced by a file).
+func assetGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 func (s *admissionState) set(evt InstallEvent, state string) {

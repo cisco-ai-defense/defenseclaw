@@ -6,9 +6,12 @@
 package winpath
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -116,6 +119,70 @@ func TestRejectReparseChainAllowsOrdinaryAndMissingLeafPaths(t *testing.T) {
 	}
 }
 
+func TestRejectReparseChainChecksRootDownAndStopsAtFirstBarrier(t *testing.T) {
+	leaf := filepath.Join(t.TempDir(), "parent", "child", "leaf.txt")
+	var reverse []string
+	for current := leaf; ; current = filepath.Dir(current) {
+		reverse = append(reverse, current)
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	chain := make([]string, len(reverse))
+	for i := range reverse {
+		chain[i] = reverse[len(reverse)-1-i]
+	}
+	barrier := filepath.Dir(filepath.Dir(leaf))
+	var beforeBarrier []string
+	for _, element := range chain {
+		beforeBarrier = append(beforeBarrier, element)
+		if element == barrier {
+			break
+		}
+	}
+
+	for _, tc := range []struct {
+		name        string
+		attributes  uint32
+		readErr     error
+		wantTouched []string
+		wantErr     error
+		wantText    string
+	}{
+		{name: "ordinary", wantTouched: chain},
+		{name: "reparse", attributes: windows.FILE_ATTRIBUTE_REPARSE_POINT, wantTouched: beforeBarrier,
+			wantText: "reparse point in path: " + barrier},
+		{name: "missing file", readErr: fmt.Errorf("missing: %w", windows.ERROR_FILE_NOT_FOUND), wantTouched: beforeBarrier},
+		{name: "missing path", readErr: fmt.Errorf("missing: %w", windows.ERROR_PATH_NOT_FOUND), wantTouched: beforeBarrier},
+		{name: "access denied", readErr: fmt.Errorf("denied: %w", windows.ERROR_ACCESS_DENIED),
+			wantTouched: beforeBarrier, wantErr: windows.ERROR_ACCESS_DENIED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := windowsPathAttributes
+			t.Cleanup(func() { windowsPathAttributes = previous })
+			var touched []string
+			windowsPathAttributes = func(path string) (uint32, error) {
+				touched = append(touched, path)
+				if path == barrier && tc.name != "ordinary" {
+					return tc.attributes, tc.readErr
+				}
+				return 0, nil
+			}
+			err := RejectReparseChain(leaf)
+			if !reflect.DeepEqual(touched, tc.wantTouched) {
+				t.Fatalf("attribute read order = %q, want %q", touched, tc.wantTouched)
+			}
+			if tc.wantText != "" {
+				if err == nil || err.Error() != tc.wantText {
+					t.Fatalf("refusal = %v, want %q", err, tc.wantText)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRejectReparseChainRejectsSymlinkPaths(t *testing.T) {
 	t.Run("leaf file", func(t *testing.T) {
 		root := t.TempDir()
@@ -167,6 +234,35 @@ func TestRejectReparseChainRejectsJunction(t *testing.T) {
 	})
 	if err := RejectReparseChain(filepath.Join(junction, "missing", "leaf.txt")); err == nil {
 		t.Fatal("junction was accepted")
+	}
+}
+
+func TestRejectReparseChainRefusesJunctionBeforeExistingDescendant(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Mkdir(filepath.Join(target, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "child", "leaf.txt"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	junction := filepath.Join(real, "mid")
+	output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", junction, target).CombinedOutput()
+	if err != nil {
+		t.Skipf("junction creation unavailable: %v: %s", err, output)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(junction); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove junction: %v", err)
+		}
+	})
+	leaf := filepath.Join(junction, "child", "leaf.txt")
+	if err := RejectReparseChain(leaf); err == nil || err.Error() != "reparse point in path: "+junction {
+		t.Fatalf("existing descendant through junction = %v, want junction refusal", err)
 	}
 }
 

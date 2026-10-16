@@ -731,8 +731,11 @@ and [Status and verify](/docs/enterprise/operations#status-and-verify).
 Remove DefenseClaw from the tool's run list first, so the next run does not
 reinstall it. Then remove the package: its pre-remove step runs
 `enterprise linux uninstall`, which stops the services, removes DefenseClaw's
-hooks and machine-policy entries, and removes the machine state (config,
-credentials, state and logs) and the `defenseclaw` service account. Each user
+hooks and machine-policy entries, and removes most of the machine state (config, credentials, state and logs) and
+the `defenseclaw` service account. If an account keeps sandboxes, the
+gateway's sandbox registration store (`/var/lib/defenseclaw/sandbox`) and its
+key (`/var/lib/defenseclaw/redaction-correlation.key`) stay, root-owned, until
+the next `ensure` adopts them; use `--purge` for a clean image. Each user
 keeps `~/.defenseclaw` and the per-user binaries. To remove those too, run the
 kit's `packaging/mdm/linux/uninstall.sh --purge` instead, which runs the
 lifecycle's uninstall with `--purge` and then removes the package. On Debian

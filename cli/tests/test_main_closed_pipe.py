@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import errno
+import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -60,6 +62,38 @@ def test_the_cli_never_creates_an_audit_db_in_the_managed_config_folder(monkeypa
     assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(tmp_path / "root" / "audit.db"))) == ":memory:"
     monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
     assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(managed / "audit.db"))) == str(managed / "audit.db")
+
+
+def test_cli_audit_db_refuses_equivalent_managed_folders(monkeypatch, tmp_path):
+    from defenseclaw import upgrade_shim
+
+    managed = tmp_path / "etc" / "defenseclaw"
+    managed.mkdir(parents=True)
+    descriptor = managed / "managed-runtime.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: str(descriptor))
+
+    alias = tmp_path / "managed-link"
+    alias.symlink_to(managed, target_is_directory=True)
+    equivalent = [
+        alias / "audit.db",
+        alias / ".." / "defenseclaw" / "audit.db",
+        managed / ".." / "defenseclaw" / "audit.db",
+    ]
+    if os.path.abspath("//" + str(managed).lstrip("/")).startswith("//"):
+        equivalent.append("//" + str(managed / "audit.db").lstrip("/"))
+    case_variant = managed.with_name(managed.name.swapcase())
+    if str(case_variant) != str(managed) and os.path.exists(case_variant):
+        equivalent.append(case_variant / "audit.db")
+    for path in equivalent:
+        assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(path))) == ":memory:"
+
+    other = tmp_path / "other"
+    other.mkdir()
+    other_alias = tmp_path / "other-link"
+    other_alias.symlink_to(other, target_is_directory=True)
+    for path in (other / "audit.db", other_alias / "audit.db"):
+        assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(path))) == str(path)
 
 
 def test_other_einval_errors_are_not_hidden(monkeypatch):

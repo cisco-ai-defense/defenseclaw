@@ -69,3 +69,7 @@ internal/openshell/sandboxapi/testdata/*.golden text eol=lf
 # enterprise bundle CLI goldens are compared byte-for-byte with the command
 # output (LF); keep them LF on Windows checkouts too.
 internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
+
+# Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
+# as published upstream; do not flag their whitespace in git diff --check.
+edge-connector/third_party/** -whitespace

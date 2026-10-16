@@ -16,6 +16,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,48 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
 	}
 }
 
+// GAP-1235: a UPN InfoPipe stopped reporting was carried into every later
+// record, so a UPN removed in the directory kept selecting the account's
+// UPN profile for as long as the guardian ran. It is kept for
+// IdentitySpoolKeptUPNMaxAge from the first pass that kept it, and the
+// GAP-1114 carry-forward still holds inside that bound.
+func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
+	start := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC)
+	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
+		UpdatedAt: start.Add(-time.Minute),
+		Facts:     useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
+	pass := func(at time.Time) IdentitySpoolRecord {
+		return IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
+			UpdatedAt: at, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+	}
+	first, kept := KeepVerifiedInfoPipeUPN(pass(start), previous)
+	if !kept || first.Facts.UPN != "w4a2.alt@alt.dclab.test" || !first.UPNKeptSince.Equal(start) {
+		t.Fatalf("first pass without the UPN = %+v, want it kept since %s", first, start)
+	}
+	// The record goes through the spool file between passes.
+	data, err := MarshalIdentitySpoolRecord(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = ParseIdentitySpoolRecord(data, "94403999"); err != nil {
+		t.Fatal(err)
+	}
+	later, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(23*time.Hour)), first)
+	if !kept || later.Facts.UPN == "" || !later.UPNKeptSince.Equal(start) {
+		t.Fatalf("a pass inside the bound = %+v, want the UPN kept since %s", later, start)
+	}
+	gone, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(IdentitySpoolKeptUPNMaxAge)), later)
+	if kept || gone.Facts.UPN != "" || gone.UPNSource != UPNSourceDerived || !gone.UPNKeptSince.IsZero() {
+		t.Fatalf("a pass a day after InfoPipe dropped the UPN = %+v, want the derived record", gone)
+	}
+	// A kept record an older build wrote (no UPNKeptSince) starts the bound now.
+	legacy := later
+	legacy.UPNKeptSince = time.Time{}
+	if got, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(30*time.Hour)), legacy); !kept || !got.UPNKeptSince.Equal(start.Add(30*time.Hour)) {
+		t.Fatalf("a legacy kept record = %+v, want the bound to start at this pass", got)
+	}
+}
+
 // A lookup failure must reach the guardian so its next pass uses the short
 // retry interval rather than treating partial directory facts as refreshed.
 func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
@@ -225,5 +268,21 @@ func TestIdentitySpoolStaleWhenOneAccountStopsRefreshing(t *testing.T) {
 	oldest, key, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
 	if !stale || now.Sub(oldest) < time.Hour || key != "1001" {
 		t.Fatalf("oldest record = %s (%q), stale = %v; want the stale account reported", oldest, key, stale)
+	}
+}
+
+// GAP-1075: a macOS record dscl returned by short name is refused unless its
+// UniqueID is the uid the enumerator resolves: another account's verified
+// identity must not be spooled under this uid.
+func TestMacOSRecordOfAnotherAccountIsRefused(t *testing.T) {
+	if err := checkMacOSRecordUID("UniqueID: 501\nAuthenticationAuthority: ;Kerberosv5;;alice@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\n", 501); err != nil {
+		t.Fatalf("the account's own record was refused: %v", err)
+	}
+	err := checkMacOSRecordUID("UniqueID: 1404012345\nAltSecurityIdentities: PlatformSSO:alice@contoso.example\n", 501)
+	if err == nil || !strings.Contains(err.Error(), "record belongs to another account") {
+		t.Fatalf("another account's record was accepted: %v", err)
+	}
+	if err := checkMacOSRecordUID("AuthenticationAuthority: ;ShadowHash;\n", 501); err == nil {
+		t.Fatal("a record without a UniqueID was accepted")
 	}
 }

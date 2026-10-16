@@ -20,7 +20,7 @@ YAML nodes, including repeated `asset_policy` entries. Split or simplify
 large lists before applying them.
 
 Admission is the check DefenseClaw runs when a skill, an MCP server or a plugin
-appears on a machine, or when you install one with the CLI. It answers one
+appears in a watched root, or when you install one with the CLI. It answers one
 question: may this asset be installed and run? Two sections of `config.yaml`
 (`config_version: 9`) answer it, and nothing else does:
 
@@ -107,6 +107,18 @@ while take_action was off, enforced once it was turned on`. This needs the
 periodic rescan (`watch.rescan_enabled`, on by default).
 Until then a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
+
+On managed Windows, the LocalSystem install watcher skips skill, plugin and
+MCP server roots inside enrolled users' profiles, so assets there do not
+receive its install-admission scan. Gateway health reports
+`watcher.details.profile_roots_skipped: true` when it skips those roots.
+Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
+and keep shared skills outside profiles. For policy on profile assets, set
+`runtime_detection.enabled: true` so hooks apply default, registry and
+approval rules to profile assets; use `asset_policy.mode: action` to block.
+Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
+even with runtime detection off. A brokered scan as the enrolled user is
+planned for a later release.
 
 ## The admission block
 
@@ -308,6 +320,10 @@ using either slash. A look-alike never matches:
 defenseclaw config set admission.skill.first_party_allow_list --json '[{"name":"acme-review","source_path_contains":[".acme/skills/acme-review"],"reason":"first-party Acme skill"}]'
 ```
 
+The account `alice`, skill `acme-review` and `.acme/skills/acme-review` path
+above are examples. Replace the skill name and path with your reviewed asset
+before copying the command; use your own account paths when checking matches.
+
 `codeguard` and `defenseclaw` are DefenseClaw's own asset names, and a folder
 in a skills or plugins folder can be written by anything the user installs (a
 `git clone`, `npx skills add`). So an entry with one of these names, built in or
@@ -489,6 +505,13 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
+Claude Code's `Skill` hook call names the skill. DefenseClaw looks in the
+connector's skill folders for folders that provide that name and judges each
+copy at its own path. An `asset_policy.skill.denied` rule pinned with
+`source_path_contains` to one copy blocks the call when that copy exists. If
+several copies exist, a matching deny on any copy blocks the call; a pin to a
+copy the caller does not have matches nothing.
+
 ### enabled and mode
 
 The explicit lists always apply, whatever `asset_policy.enabled` and
@@ -503,12 +526,27 @@ approved-catalog rules.
 `runtime_detection.enabled: false` (the default for skills and plugins) an
 agent hook still refuses a skill, plugin command or MCP server on the `denied`
 list; only the default, registry and approval rules are skipped at the hook.
-Those rules then apply only where the install watcher admits the asset
-(per-user installs and managed Windows). A managed Linux or macOS device runs
-no install watcher for skills and plugins, so there a `default: deny` or
-`registry_required` for them blocks nothing until you set
-`runtime_detection.enabled: true`; `ensure`, `status` and `verify` warn with
-`asset_policy_not_enforced`, and the gateway log says so when it starts.
+At install time, those rules apply only to assets the watcher admits: per-user
+installs and, on managed Windows, watched roots outside profiles. On managed
+Windows, profile assets have no install-watcher decision, so a skill or plugin
+`default: deny` or `registry_required` blocks nothing there until you set
+`asset_policy.enabled: true`, `runtime_detection.enabled: true` and
+`asset_policy.mode: action`. Managed Linux and macOS do not watch connector
+skill or plugin folders, so the same hook settings are needed for those
+assets. MCP runtime detection defaults to true, so configured MCP default and
+registry rules can apply to profile servers at the hook when asset policy is
+enabled, unless an administrator turns runtime detection off.
+On managed Linux and macOS, `ensure`, `status` and `verify` emit
+`asset_policy_not_enforced` for these rules when runtime detection is off
+and no explicit watcher folder admits that type.
+Windows `status` and `verify` do not emit `asset_policy_not_enforced`; the
+gateway log is the only warning on Windows for skills and plugins when
+runtime detection is off and no watched folder admits them.
+
+For MCP servers, an install admission scan can also record a runtime disable.
+That scan verdict still refuses MCP calls when
+`asset_policy.mcp.runtime_detection.enabled` is `false`; turning runtime
+detection off does not clear a rejected install verdict.
 
 ### Where a denied skill is refused
 
@@ -531,16 +569,22 @@ name. Two things stay out of reach of a hook:
   glob, or a `cd` into the skills folder followed by a relative path.
 
 Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`,
-`<project>/.codex/skills`) are watched once an agent session runs in the
-project: its first hook (the session start, or the first skill call) adds the
-project's existing skill folders to the install watcher, which restarts and
-admits what they hold, as at a gateway start. Until a project skill's first
-scan has finished, the hooks refuse it with "is not scanned yet ... try again
-in a minute". Up to 32 project folders are watched; on a managed computer only
-projects inside the user's home count, and explicit
-`gateway.watcher.skill.dirs` add none. The hooks also cover them as they cover every other folder: a denied name is refused at the
-Skill call, the `$name` selection and the folder read, wherever the skill
-lives. With `runtime_detection.enabled: true`, `mode: action` and a
+`<project>/.codex/skills`) can be watched after an agent session runs in the
+project. Its first hook (the session start, or the first skill call) adds
+eligible existing folders to the install watcher, which restarts and admits
+what they hold. Until a watched project skill's first scan finishes, the
+hooks refuse it with "is not scanned yet ... try again in a minute". Up to
+32 project folders are watched. On managed Linux and macOS, only projects
+inside the caller's real home count, after links are resolved. The managed
+service does not watch connector skill folders there, but eligible project
+folders can be registered by the hooks when the watcher, skill watching and
+periodic rescan are enabled. Explicit `gateway.watcher.skill.dirs` prevent
+project folders from being added on every platform. On managed Windows, the
+LocalSystem watcher skips profile roots before project folders are registered,
+so those skills receive no install scan or "is not scanned yet" refusal. The
+hooks still cover them: a denied name is refused at the Skill call, the `$name`
+selection and the folder read, wherever the skill lives. With
+`runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection
 of any project skill that is not approved are refused too.
 
@@ -550,36 +594,39 @@ and the `$name` selection, but not when Codex, asked for the skill in plain
 words, reads its `SKILL.md` and follows it. To keep such a skill from running
 in Codex, add it to `asset_policy.skill.denied` or take it off the device.
 
-Take a denied skill off the device to remove it from that index. Where the
-install watcher runs (per-user installs and managed Windows), a config change
-that adds a `denied` entry makes it check the installed skills, plugins and
-MCP servers at once: one the entry names is refused (a skill or plugin is
-quarantined), with an `install-rejected` audit row, without waiting for its
-files to change. An MCP server is matched on its definition too, so a
-`command` or `url` rule added later rejects a server that was already
-installed; the hooks refuse its tool calls from the moment the config
-applies. On other
-managed devices remove it with your device management tool; the hooks refuse
-it in the meantime.
+Take a denied skill off the device to remove it from that index. For watched
+roots (per-user installs and managed Windows roots outside profiles), a
+config change that adds a `denied` entry makes the watcher check installed
+skills, plugins and MCP servers at once: one the entry names is refused (a
+skill or plugin is quarantined), with an `install-rejected` audit row,
+without waiting for its files to change. An MCP server is matched on its
+definition too, so a `command` or `url` rule added later rejects a server
+that was already installed; the hooks refuse its tool calls once the config
+applies. Managed Windows profile assets and managed Linux/macOS connector
+assets are refused only by the hooks. Remove those assets with your device
+management tool while the hooks refuse them.
 
 A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin
 installed from a local marketplace folder (`claude plugin marketplace add
 <folder>`) from that folder, not from its copy under
 `~/.claude/plugins/cache`, and DefenseClaw never changes a marketplace folder,
-which other users may share. When `asset_policy.plugin` denies a plugin, or
-admission blocked it, the cache copy is quarantined as usual and the Claude
-Code hook refuses the plugin's skills and commands (`/<plugin>:<skill>`), its
-agents (`<plugin>:<agent>`) and its MCP tools
+which other users may share. When `asset_policy.plugin` denies a plugin, the
+Claude Code hook refuses the plugin's skills and commands
+(`/<plugin>:<skill>`), its agents (`<plugin>:<agent>`) and its MCP tools
 (`mcp__plugin_<plugin>_<server>__<tool>`). The hook sees the plugin name only,
 so a denied rule written as `plugin@marketplace` refuses that plugin from any
-marketplace. `claude plugin list` keeps showing such a plugin as enabled, since
-that list is Claude Code's own record and DefenseClaw does not edit it;
-`defenseclaw plugin list` shows the block.
+marketplace. For a per-user install, the watcher may quarantine a denied
+plugin's watched cache copy. The LocalSystem gateway skips a managed Windows
+profile cache, so no quarantine or install block is recorded for it.
+`claude plugin list` keeps showing a hook-refused plugin as enabled, since
+that list is Claude Code's own record and DefenseClaw does not edit it.
 
-The MCP servers a Claude Code plugin bundles are admitted with their plugin:
-they get no admission row or MCP inventory entry of their own. The hooks hold
-their tool calls to `asset_policy.mcp` all the same, under the name
-`plugin:<plugin>:<server>` and by their `command`, `args_prefix` or `url`.
+For a plugin in a watched root, bundled MCP servers are admitted with the
+plugin: they get no admission row or MCP inventory entry of their own. A
+profile plugin on managed Windows receives no install admission. The hooks
+hold bundled servers' tool calls to `asset_policy.mcp` all the same, under
+the name `plugin:<plugin>:<server>` and by their `command`, `args_prefix` or
+`url`.
 
 ### Tool lists
 
@@ -589,6 +636,12 @@ case-sensitively. For a tool call from connector C, the order is: denied for C,
 allowed for C, denied for any connector, allowed for any connector, then the
 normal guardrail checks. An allow skips the rule, pattern and judge checks, but
 a tool that writes files still goes through CodeGuard.
+
+On managed Windows, Claude Code reports `Bash` for shell calls, `Read` for
+file reads, and `Skill` for skill calls. Codex reports `Bash` for shell
+commands and `apply_patch` for file edits. Codex has no `Read` or `Skill` tool
+name. Write these exact names, including capitals, in
+`asset_policy.tool.denied`; a lower-case spelling does not match.
 
 ## Change the lists
 

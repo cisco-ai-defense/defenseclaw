@@ -124,3 +124,27 @@ func TestParseMacOSNetworkADWithoutDSConfigAD(t *testing.T) {
 		t.Fatalf("network AD facts = %+v", got)
 	}
 }
+
+// GAP-1075: the enumerator reads an account's record by short name through
+// /Search, which can return another account's record; the record's UniqueID
+// decides whose it is.
+func TestMacOSDSCLRecordUID(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		uid    int
+		ok     bool
+	}{
+		{"UniqueID: 501\nAuthenticationAuthority: ;ShadowHash;\n", 501, true},
+		{"AuthenticationAuthority: ;Kerberosv5;;alice@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\nUniqueID:\n 1404012345\n", 1404012345, true},
+		{"No such key: UniqueID\n", 0, false},
+		{"UniqueID: 501 502\n", 0, false},
+		{"UniqueID: -2\n", 0, false},
+		{"UniqueID: 5x1\n", 0, false},
+		{"dsAttrTypeNative:UniqueID: 501\n", 0, false},
+	} {
+		uid, ok := MacOSDSCLRecordUID(tc.output)
+		if uid != tc.uid || ok != tc.ok {
+			t.Errorf("MacOSDSCLRecordUID(%q) = %d, %v; want %d, %v", tc.output, uid, ok, tc.uid, tc.ok)
+		}
+	}
+}

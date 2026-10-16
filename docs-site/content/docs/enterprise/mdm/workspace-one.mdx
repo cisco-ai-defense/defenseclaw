@@ -87,8 +87,9 @@ The `content` folder holds the Setup, `config.yaml`, the
 launcher re-checks the SHA-256 pins in `intune-package.json` on the device,
 then starts `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure JSON=1`
 with an absolute `CONFIG=` path, because Setup refuses relative paths. It runs
-in 32- or 64-bit Windows PowerShell 5.1. The packager refuses a config that
-contains an inline `api_key`.
+in 32- or 64-bit Windows PowerShell 5.1. The packager requires a supplied
+`config_version: 9` config because migration would change the pinned detection
+hash; it also refuses an inline `api_key`.
 
 Setup also refuses a config file that a non-administrator can change, or that
 sits in a folder a non-administrator can replace. If the device's app cache
@@ -351,6 +352,9 @@ the wrapper stages the inline config in a root-only folder and runs
 or does nothing. It prints one lifecycle result document and exits with the
 lifecycle's code. On a device where the package is not installed yet it exits
 `1` with `mdm_not_installed`.
+If the MDM cancels an ensure, the wrapper stops its lifecycle child and reports
+`mdm_cancelled`. The next run sees a failed result; start a fresh MDM run after
+checking the deployment.
 
 ### Detect on macOS
 

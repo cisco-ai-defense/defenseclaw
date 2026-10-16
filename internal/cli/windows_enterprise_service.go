@@ -257,7 +257,6 @@ func init() {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
-	enterpriseWindowsCmd.AddCommand(newWindowsSecureClientFleetPreflightCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
@@ -1712,34 +1711,12 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	return cmd
 }
 
-// The signed enterprise module calls this on its authenticated source config
-// before changing the installed tree or SCM services. It shares the gateway's
-// bounded YAML parser, while avoiding asset checks that require installation.
-func newWindowsSecureClientFleetPreflightCommand() *cobra.Command {
-	var configPath string
-	cmd := &cobra.Command{
-		Use:          "preflight-secure-client-fleet",
-		Hidden:       true,
-		SilenceUsage: true,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := managed.ValidateTrustedFilePath(configPath, "Secure Client config"); err != nil {
-				return fmt.Errorf("Secure Client config source is untrusted: %w", err)
-			}
-			raw, err := readConfigV8Source(configPath)
-			if err != nil {
-				return err
-			}
-			return config.CheckSecureClientFleetSource(configPath, raw)
-		},
-	}
-	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")
-	_ = cmd.MarkFlagRequired("config")
-	return cmd
-}
-
 // The signed standalone installer asks its authenticated gateway whether the
 // candidate config opts into Fleet before admitting or copying the compiler.
 // The answer is one exact boolean line, with any parser error on stderr.
+// Only a Fleet opt-in has to come from an admin-protected path: a Fleet-off
+// answer installs nothing, so a 1.0.1 config in an Intune cache or an
+// admin-made ProgramData folder upgrades as it did before Fleet existed.
 func newWindowsStandaloneFleetInspectCommand() *cobra.Command {
 	var configPath string
 	cmd := &cobra.Command{
@@ -1747,14 +1724,16 @@ func newWindowsStandaloneFleetInspectCommand() *cobra.Command {
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := managed.ValidateTrustedFilePath(configPath, "standalone config"); err != nil {
-				return fmt.Errorf("standalone config source is untrusted: %w", err)
-			}
 			raw, err := readConfigV8Source(configPath)
 			if err != nil {
 				return err
 			}
-			enabled, err := config.FleetEnabledFromSource(configPath, raw)
+			enabled, err := config.StandaloneFleetSourceEnabled(configPath, raw, func() error {
+				if err := managed.ValidateTrustedFilePath(configPath, "standalone config"); err != nil {
+					return fmt.Errorf("standalone config source is untrusted: %w", err)
+				}
+				return nil
+			})
 			if err != nil {
 				return err
 			}

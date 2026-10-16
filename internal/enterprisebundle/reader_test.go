@@ -41,7 +41,7 @@ func archive(t testing.TB, entries ...entry) []byte {
 	tw := tar.NewWriter(gz)
 	for _, e := range entries {
 		hdr := &tar.Header{Name: e.name, Typeflag: e.typeflag, Mode: e.mode, Size: int64(len(e.body)), Linkname: e.link, PAXRecords: e.pax}
-		if e.typeflag != tar.TypeReg && e.typeflag != tar.TypeRegA {
+		if e.typeflag != tar.TypeReg && e.typeflag != tar.TypeRegA { //nolint:staticcheck // old archivers still write TypeRegA
 			hdr.Size = 0
 		}
 		if err := tw.WriteHeader(hdr); err != nil {

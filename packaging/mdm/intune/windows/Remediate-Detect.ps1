@@ -381,12 +381,19 @@ function Format-DefenseClawVerifyFailure {
     $detail = ''
     try {
         $document = $Json | ConvertFrom-Json
-        $errors = @($document.errors)
-        $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
-        if ($errors.Count -gt 0 -and @($errors | Where-Object { [string]$_.code -ne 'lifecycle_busy' }).Count -eq 0) {
+        $errors = @(if ($document.PSObject.Properties['errors']) { $document.errors })
+        $notBusy = @($errors | Where-Object { [string]$_.code -ne 'lifecycle_busy' })
+        if ($errors.Count -gt 0 -and $notBusy.Count -eq 0) {
             return $null
         }
-        $down = @(@($document.services) | Where-Object { $_.required -and [string]$_.state -ne 'running' } | ForEach-Object {
+        $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
+        # Verify warnings are informational; the failed condition comes from errors.
+        $specific = @($errors | Where-Object {
+            $null -ne $_ -and [string]$_.code -and @('lifecycle_error', 'lifecycle_busy') -notcontains [string]$_.code
+        } | Select-Object -First 1)
+        if ($specific.Count -gt 0) { $codes = [string]$specific[0].code }
+        $services = @(if ($document.PSObject.Properties['services']) { $document.services })
+        $down = @($services | Where-Object { $_.required -and [string]$_.state -ne 'running' } | ForEach-Object {
                 $mode = $_.PSObject.Properties['start_mode']
                 $text = [string]$_.name + ' is ' + [string]$_.state
                 if ($null -ne $mode -and [string]$mode.Value) { $text += ' (start ' + [string]$mode.Value + ')' }
@@ -394,6 +401,8 @@ function Format-DefenseClawVerifyFailure {
             })
         if ($down.Count -gt 0) {
             $detail = $down -join '; '
+        } elseif ($specific.Count -gt 0) {
+            $detail = [string]$specific[0].message
         } elseif ($errors.Count -gt 0) {
             $detail = [string]$errors[0].message
         }

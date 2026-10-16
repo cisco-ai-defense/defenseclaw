@@ -83,6 +83,9 @@ type claudeCodeHookRequest struct {
 	// nil for host traffic. Path-reading helpers go through it instead of the
 	// host filesystem (see sandbox_hook_scope.go).
 	sandboxView *sandboxauth.FSView
+	// guestCWD is a sandbox request's working directory in the guest's
+	// namespace (sandboxHookGuestCWD); CWD is its host mount.
+	guestCWD string
 }
 
 type claudeCodeHookResponse struct {
@@ -199,6 +202,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			EnforcementCapable:            true,
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			SandboxGuestCWD:               req.guestCWD,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {

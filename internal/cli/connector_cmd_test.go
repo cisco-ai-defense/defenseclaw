@@ -389,6 +389,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorTeardown(cmd, nil)
 	case "verify":
 		err = runConnectorVerify(cmd, nil)
+	case "prune-orphans":
+		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
 	case "launch":

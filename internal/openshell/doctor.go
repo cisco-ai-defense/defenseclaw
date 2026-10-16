@@ -81,9 +81,11 @@ const (
 	CheckIDMTLS              = "mtls-permissions"
 	CheckIDGatewayVersion    = "gateway-version"
 	CheckIDGatewayDriver     = "gateway-driver"
+	CheckIDManagedE2fsprogs  = "managed-e2fsprogs"
 	CheckIDGlobalPolicy      = "global-policy"
 	CheckIDBindMounts        = "bind-mounts"
 	CheckIDTelemetry         = "telemetry"
+	CheckIDDockerNamespace   = "docker-namespace"
 	CheckIDPortPrefix        = "port-"
 	installOpenShellCommand  = "defenseclaw sandbox setup --install-openshell"
 	setupCommand             = "defenseclaw sandbox setup"
@@ -395,6 +397,15 @@ type Doctor struct {
 	// processes and give fixes this account must not apply (GAP-0173,
 	// GAP-0174, GAP-0215).
 	Managed bool
+	// AdminE2fsprogsDir is the managed gateway's e2fsprogs_dir. Known is
+	// false when its settings call did not answer; an empty known value
+	// means only the account build is used, never a Homebrew keg (GAP-0004).
+	AdminE2fsprogsDir   string
+	AdminE2fsprogsKnown bool
+	// TrustedE2fsprogsDir is the exec shim's trusted-directory check.
+	// Tests can supply the same check for a rooted fixture.
+	TrustedE2fsprogsDir  func(path, label string) error
+	TrustedE2fsprogsFile func(path, label string) error
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
@@ -438,9 +449,9 @@ type Doctor struct {
 	Username      func() (string, error)
 	HomeDir       func() (string, error)
 	DockerDesktop func() (*DockerDesktop, error)
-	// TempDir is the system temp directory (default os.TempDir), where
-	// the hook-fire probe of an image build writes what it mounts into its
-	// containers (image.Builder.TempDir).
+	// TempDir is the parent of the files the hook-fire probe of an image
+	// build mounts into its containers (default HookFireProbeDir, the
+	// default of image.Builder, whose TempDir overrides it the same way).
 	TempDir func() string
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
@@ -540,7 +551,7 @@ func (d *Doctor) defaults() {
 		d.DockerDesktop = func() (*DockerDesktop, error) { return readDockerDesktop(d.GOOS, d.HomeDir) }
 	}
 	if d.TempDir == nil {
-		d.TempDir = os.TempDir
+		d.TempDir = HookFireProbeDir
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership
@@ -673,6 +684,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.checkDockerNamespace(ctx)
 	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
 	return r.report
@@ -841,7 +853,10 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 			serverErr = "unexpected docker info output"
 		}
 		c.Status, c.Detail = StatusFail, "the Docker daemon is not reachable: "+serverErr
-		c.Fix = r.dockerAccessFix(serverErr)
+		if r.GOOS == "darwin" && deniedDocker(serverErr) {
+			c.Detail = "Docker Desktop is not running in this account (" + serverErr + ")"
+		}
+		c.Fix = r.dockerAccessFix(ctx, serverErr)
 		return c, ""
 	}
 	r.docker = true
@@ -987,12 +1002,29 @@ func firstJSONLine(out []byte) []byte {
 	return nil
 }
 
-func (r *doctorRun) dockerAccessFix(msg string) *Fix {
-	denied := strings.Contains(strings.ToLower(msg), "permission denied")
+// deniedDocker reports whether the Docker client was refused the socket.
+func deniedDocker(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "permission denied")
+}
+
+func (r *doctorRun) dockerAccessFix(ctx context.Context, msg string) *Fix {
+	denied := deniedDocker(msg)
 	switch {
 	case r.GOOS == "darwin" && denied:
 		// macOS has no docker group: the socket is another account's
 		// Docker Desktop's, until this account's starts and takes it.
+		// Docker Desktop is a desktop app: an account that is not logged
+		// in to the desktop (one used over ssh only) cannot start it, and
+		// must never be sent to the other account's socket (GAP-0389).
+		if loggedIn, known := r.desktopSession(ctx); known && !loggedIn {
+			name, _ := r.Username()
+			if name == "" {
+				name = "this account"
+			}
+			return &Fix{Summary: "Docker Desktop runs only in a desktop session, and " + name + " is not logged in to this Mac's desktop: " +
+				"log in to the desktop as " + name + " (at the Mac or with Screen Sharing), start Docker Desktop there, then run " +
+				"`defenseclaw sandbox setup` again; /var/run/docker.sock leads to another account's Docker Desktop, which this account may not use"}
+		}
 		return &Fix{Summary: "start Docker Desktop in this account: /var/run/docker.sock leads to another account's Docker Desktop, " +
 			"which this account may not use (Docker Desktop points it at its own when it starts)"}
 	case r.GOOS == "darwin":
@@ -1014,6 +1046,24 @@ func (r *doctorRun) dockerAccessFix(msg string) *Fix {
 	return &Fix{Summary: "add yourself to the docker group, then log out and back in", Command: "sudo usermod -aG docker " + shellQuote(name), Sudo: true}
 }
 
+// desktopSession reports whether this account is logged in to the Mac's
+// desktop, where Docker Desktop runs: launchd keeps a GUI domain
+// (gui/<uid>) for an account only while it is logged in there. known is
+// false when launchctl could not be run.
+func (r *doctorRun) desktopSession(ctx context.Context) (loggedIn, known bool) {
+	_, err := r.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", "gui/" + strconv.Itoa(r.Geteuid())}, Timeout: 10 * time.Second})
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, true
+	case errors.As(err, &exit) && exit.ExitCode() > 0:
+		// launchctl ran and found no GUI domain for the account (one it
+		// could not finish, killed at the timeout, says nothing).
+		return false, true
+	}
+	return false, false
+}
+
 var checkTitles = map[string]string{
 	CheckIDDockerHostNetwork: "Docker host networking",
 	CheckIDDockerFileSharing: "Docker file sharing",
@@ -1025,6 +1075,9 @@ func (r *doctorRun) dockerDesktopChecks() (hostNet, sharing Check) {
 	sharing = Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
 	if !r.desktop {
 		hostNet.Status, hostNet.Detail = StatusPass, "Docker Engine shares the host network"
+		if r.GOOS == "darwin" {
+			return hostNet, r.macEngineFileSharing(sharing)
+		}
 		sharing.Status, sharing.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
 		return hostNet, sharing
 	}
@@ -1060,6 +1113,26 @@ func (r *doctorRun) dockerDesktopChecks() (hostNet, sharing Check) {
 		sharing.Fix = &Fix{Summary: "add your home directory in Docker Desktop → Settings → Resources → File sharing"}
 	}
 	return hostNet, sharing
+}
+
+// macEngineFileSharing is the Docker file sharing check of an engine other
+// than Docker Desktop on a Mac (Colima, OrbStack): it runs containers in a
+// Linux VM, so a bind mount reaches only what that VM sees, never straight
+// from the host filesystem. Colima and OrbStack let the VM see the home
+// directory by default; anything more is their own configuration, which
+// DefenseClaw does not read. A live sandbox mounts its project folder.
+func (r *doctorRun) macEngineFileSharing(c Check) Check {
+	home, _ := r.HomeDir()
+	if !filepath.IsAbs(home) {
+		c.Status, c.Detail = StatusWarn, "this Docker engine runs containers in a VM, and without a home directory DefenseClaw cannot tell which folders it can mount"
+		c.Fix = &Fix{Summary: "run DefenseClaw with HOME set to your home directory"}
+		return c
+	}
+	c.Status = StatusPass
+	c.Detail = "this Docker engine runs containers in a VM, which Colima and OrbStack let see your home directory (" + filepath.Clean(home) +
+		") by default, so project folders under it can be mounted; a project elsewhere needs the engine to share it " +
+		"(Colima: add it under mounts in ~/.colima/default/colima.yaml, then `colima restart`)"
+	return c
 }
 
 func sharedDir(shared []string, path string) bool {
@@ -1179,6 +1252,14 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	case !st.Installed:
 		c.Status, c.Detail = StatusFail, st.Unit+" is not installed"
 		c.Fix = &Fix{Summary: "install OpenShell", Command: installOpenShellCommand}
+		if held, other := r.gatewayPortHeld(); other {
+			// Another account's gateway holds the port: the install would
+			// start a service that cannot bind it, so this account is
+			// refused like one whose service is stopped (GAP-0390).
+			c.Detail += "; " + held
+			c.Fix, r.portHeld, r.portOther = r.portHeldFix(true), true, true
+			r.report.GatewayPortElsewhere = true
+		}
 	case !st.Active:
 		c.Status, c.Detail = StatusFail, st.Unit+" is "+st.Status
 		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}

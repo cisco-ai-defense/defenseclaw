@@ -78,6 +78,13 @@ func codexBackgroundServer(argv []string) bool {
 // scriptHosts run an agent CLI given as their first argument.
 var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "python": true, "python3": true}
 
+// agentModuleNames are agents launched through a script host's -c or -m argument.
+var agentModuleNames = map[string]string{"hermes_cli": "hermes"}
+
+func isScriptHost(name string) bool {
+	return scriptHosts[name] || strings.HasPrefix(name, "python3.")
+}
+
 // agentCLIOf names the agent CLI a command line runs, or "".
 func agentCLIOf(argv []string) string {
 	if len(argv) == 0 {
@@ -90,17 +97,18 @@ func agentCLIOf(argv []string) string {
 	if agentCLINames[name] {
 		return name
 	}
-	if !scriptHosts[name] && !strings.HasPrefix(name, "python3.") {
+	if !isScriptHost(name) {
 		return ""
 	}
 	for index, argument := range argv[1:] {
 		switch {
 		case argument == "-c" || argument == "-m":
-			// Hermes' launcher runs its own Python with `-I -c` and a
-			// bootstrap that imports hermes_cli, so no argument names the
-			// agent and it was never listed (GAP-0936).
-			if index+2 < len(argv) && strings.Contains(argv[index+2], "hermes_cli") {
-				return "hermes"
+			if index+2 < len(argv) {
+				for module, agent := range agentModuleNames {
+					if strings.Contains(argv[index+2], module) {
+						return agent
+					}
+				}
 			}
 			return ""
 		case strings.HasPrefix(argument, "-"):
@@ -121,6 +129,8 @@ type agentSession struct {
 	UID     int
 	Agent   string
 	Started time.Time
+	// Unknown marks an unreadable agent-shaped command on macOS.
+	Unknown bool
 	// CodexServer marks the Codex background server.
 	CodexServer bool
 }
@@ -234,11 +244,41 @@ func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
 		if pidErr != nil || uidErr != nil || !ok {
 			continue
 		}
-		if agent := agentCLIOf(fields[3:]); agent != "" {
-			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), CodexServer: codexBackgroundServer(fields[3:])})
+		argv, argvErr := darwinProcessArgv(pid)
+		if argvErr != nil {
+			argv = psArgv(fields[3:])
+		}
+		if agent := agentCLIOf(argv); agent != "" {
+			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), CodexServer: codexBackgroundServer(argv)})
+		} else if argvErr != nil && psUnknownAgent(fields[3:]) {
+			out = append(out, agentSession{PID: pid, UID: uid, Started: now.Add(-elapsed), Unknown: true})
 		}
 	}
 	return out
+}
+
+// psArgv keeps a script host's command or module argument together when ps
+// prints the arguments as text and kern.procargs2 is unavailable.
+func psArgv(fields []string) []string {
+	if len(fields) == 0 || !isScriptHost(filepath.Base(fields[0])) {
+		return fields
+	}
+	for i := 1; i < len(fields); i++ {
+		if fields[i] == "-c" || fields[i] == "-m" {
+			return append(append([]string{}, fields[:i+1]...), strings.Join(fields[i+1:], " "))
+		}
+	}
+	return fields
+}
+
+// psUnknownAgent accepts only the parenthesized command name ps uses when
+// it cannot show arguments, and only for a possible agent or script host.
+func psUnknownAgent(fields []string) bool {
+	if len(fields) != 1 || !strings.HasPrefix(fields[0], "(") || !strings.HasSuffix(fields[0], ")") {
+		return false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(fields[0], "("), ")")
+	return isScriptHost(name) || agentCLINames[name]
 }
 
 // parseElapsed reads the ps etime format, [[dd-]hh:]mm:ss.
@@ -267,9 +307,10 @@ func parseElapsed(text string) (time.Duration, bool) {
 }
 
 // describeAgentSessionsBeforeActivation warns, per account, about agent
-// sessions that started before this deployment was activated, and about
-// Claude Code sessions that were open while the DefenseClaw drop-in was
-// changed or removed before DefenseClaw put it back.
+// sessions that started before this deployment was activated, about
+// sessions that started before the guardian put back hooks a user changed or
+// removed, and about Claude Code sessions that were open while the
+// DefenseClaw drop-in was changed or removed before DefenseClaw put it back.
 func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, record *Deployment) {
 	if record == nil || record.NoStart {
 		return
@@ -282,9 +323,39 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	if err != nil {
 		return
 	}
-	l.warnAgentSessions(l.env.agentSessionsStartedBefore(ctx, activated, record.ServiceUID), func(sessions string) string {
+	var known, unknown []agentSession
+	for _, session := range l.env.agentSessionsStartedBefore(ctx, activated, record.ServiceUID) {
+		if session.Unknown {
+			unknown = append(unknown, session)
+		} else {
+			known = append(known, session)
+		}
+	}
+	l.warnAgentSessions(known, func(sessions string) string {
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
+	if l.env.GOOS == "darwin" {
+		restores := l.env.guardianRestores()
+		latestByUID := map[int]time.Time{}
+		latest := time.Time{}
+		for key, at := range restores {
+			if at.After(latestByUID[key.uid]) {
+				latestByUID[key.uid] = at
+			}
+			if at.After(latest) {
+				latest = at
+			}
+		}
+		if latest.After(activated) {
+			for _, session := range l.env.agentSessionsStartedBefore(ctx, latest, record.ServiceUID) {
+				if session.Unknown && !session.Started.Before(activated) && session.Started.Before(latestByUID[session.UID]) {
+					unknown = append(unknown, session)
+				}
+			}
+		}
+	}
+	l.warnUnknownAgentSessions(unknown)
+	l.describeAgentSessionsBeforeGuardianRestore(ctx, record, activated)
 	restored := l.env.claudeDropInRestoredAt()
 	if !restored.After(activated) {
 		return
@@ -300,6 +371,16 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	})
 }
 
+func (l *lifecycle) warnUnknownAgentSessions(sessions []agentSession) {
+	if len(sessions) == 0 {
+		return
+	}
+	l.warnAgentSessions(sessions, func(labels string) string {
+		return fmt.Sprintf("restart status unknown: the arguments of %s could not be read, so DefenseClaw cannot tell whether these are agents that started before hooks were installed, enabled or put back and run without DefenseClaw; ask that these sessions be restarted", labels)
+	})
+	l.result.SecurityComplete = false
+}
+
 // warnAgentSessions adds one agent_sessions_restart_required warning per
 // account; reason words the sessions listed. A Codex background server adds
 // how to restart it.
@@ -308,6 +389,9 @@ func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessi
 	server := map[int]bool{}
 	for _, session := range sessions {
 		label := fmt.Sprintf("%s (pid %d)", session.Agent, session.PID)
+		if session.Unknown {
+			label = fmt.Sprintf("unknown agent (pid %d)", session.PID)
+		}
 		if session.CodexServer {
 			label = fmt.Sprintf("the Codex background server (pid %d)", session.PID)
 			server[session.UID] = true

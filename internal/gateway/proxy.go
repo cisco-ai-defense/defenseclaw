@@ -454,12 +454,29 @@ func NewGuardrailProxy(
 		gatewayToken: gatewayToken,
 		notify:       notify,
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
-		mode:         cfg.Mode,
-		blockMessage: cfg.BlockMessage,
 		modelRouter:  nil,
 	}
+	p.mode, p.blockMessage = proxyPosture(cfg, p.servedConnectorLocked())
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
+}
+
+// proxyPosture is the guardrail mode and block message the proxy enforces for
+// the connector it serves: that connector's own values
+// (guardrail.connectors.<name>.mode and block_message, which `guardrail mode
+// action --connector <name>` and `setup <name> --mode` write) over the global
+// ones, as `guardrail status` and the hook path (inspectMode) resolve them.
+// Reading only the global mode left an OpenClaw set to action alerting on
+// what status said it blocked (GAP-0421). The Secure Client integration keeps
+// the global values, as inspectMode and toolCallAction do.
+func proxyPosture(cfg *config.GuardrailConfig, connectorName string) (mode, blockMessage string) {
+	if cfg == nil {
+		return "", ""
+	}
+	if ManagedEnterpriseActive() || strings.TrimSpace(connectorName) == "" {
+		return cfg.Mode, cfg.BlockMessage
+	}
+	return cfg.EffectiveMode(connectorName), cfg.EffectiveBlockMessage(connectorName)
 }
 
 // SetConnectorSwitchState stores the registry and setup options so the proxy
@@ -540,6 +557,12 @@ func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
 func (p *GuardrailProxy) servedConnector() string {
 	p.rtMu.RLock()
 	defer p.rtMu.RUnlock()
+	return p.servedConnectorLocked()
+}
+
+// servedConnectorLocked is servedConnector for a caller that holds rtMu (or
+// owns p before it is shared).
+func (p *GuardrailProxy) servedConnectorLocked() string {
 	if p.connector != nil {
 		return p.connector.Name()
 	}
@@ -611,8 +634,6 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	}
 	p.rtMu.Lock()
 	p.cfg = cfg
-	p.mode = cfg.Mode
-	p.blockMessage = cfg.BlockMessage
 	if cfg.ScannerMode == "local" || cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
 		p.inspector.SetScannerMode(cfg.ScannerMode)
 	}
@@ -631,6 +652,7 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
 		p.switchConnectorLocked(strings.ToLower(newName))
 	}
+	p.mode, p.blockMessage = proxyPosture(cfg, p.servedConnectorLocked())
 	p.rtMu.Unlock()
 }
 

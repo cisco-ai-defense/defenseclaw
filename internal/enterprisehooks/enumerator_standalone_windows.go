@@ -36,10 +36,14 @@ const windowsNativeClaudeMaxVersionEntries = 64
 const windowsWinGetUninstallKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`
 
 // windowsWinGetPackageIDs maps a connector to the WinGet package identifiers
-// that ship its CLI.
+// that ship its CLI, read at machine scope and, for a signed-in user, at
+// user scope (GAP-0226).
 var windowsWinGetPackageIDs = map[string][]string{
 	"claudecode": {"Anthropic.ClaudeCode"},
 	"codex":      {"OpenAI.Codex"},
+	"copilot":    {"GitHub.Copilot", "GitHub.Copilot.Prerelease"},
+	// OpenCode's executable admission accepts the per-user SST WinGet image.
+	"opencode": {"SST.opencode"},
 }
 
 // windowsMachineWinGetPackageVersion is the registry seam for machine-scope
@@ -64,8 +68,15 @@ func (c windowsStandaloneRowContext) unprotected(row *ManifestTarget, version, r
 	consequence := "it runs without DefenseClaw hooks"
 	if windowsStandaloneMachinePolicyConnector(row.Connector) {
 		consequence = "its machine-policy hooks refuse this user's tool calls until it is enrolled"
-		if strings.EqualFold(strings.TrimSpace(row.Connector), "cursor") && !windowsCursorMachinePolicyPublished() {
-			consequence = windowsCursorUnpublishedConsequence
+		switch strings.ToLower(strings.TrimSpace(row.Connector)) {
+		case "cursor":
+			if !windowsCursorMachinePolicyPublished() {
+				consequence = windowsCursorUnpublishedConsequence
+			}
+		case "codex":
+			if !windowsCodexMachinePolicyPublished() {
+				consequence = windowsCodexUnpublishedConsequence
+			}
 		}
 	}
 	c.reportAgent(row, version, reason, consequence)
@@ -100,10 +111,15 @@ func (c windowsStandaloneRowContext) pending(row *ManifestTarget, reason string)
 	if c.report == nil || !c.sessionActive {
 		return
 	}
-	version, _ := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+	version, _ := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
 	if version == "" {
 		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path == "" {
-			return
+			if installed, why := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed == "" {
+				if why == "" {
+					return
+				}
+				reason += "; " + why
+			}
 		}
 	}
 	c.unprotected(row, version, "its enrollment is pending: "+reason)
@@ -171,7 +187,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		// why; it is reported once the row's own fate is known.
 		var notFollowed, notFollowedReason string
 		if rowContext.sessionActive {
-			cliVersion, _ := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+			cliVersion, _ := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
 			// The row follows its app and extension surfaces too, and a
 			// rejected surface next to the CLI is reported.
 			discovered := windowsStandaloneSurfaceVersion(row, logf, rowContext, cliVersion)
@@ -199,7 +215,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 			default:
 				// Report it only while the agent is still installed: a row
 				// dropped because the user removed the agent is no gap.
-				if current, _ := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector); current != "" {
+				if current, _ := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector); current != "" {
 					rowContext.unprotected(row, version, reason)
 				}
 			}
@@ -212,7 +228,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		row.AgentVersion = version
 		return emit
 	}
-	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
+	version, reason := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
 	// A user with the desktop app or an editor extension is enrolled at the
 	// oldest admitted engine version (also without a CLI), and a rejected
 	// surface next to the CLI is reported.
@@ -238,6 +254,16 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		}
 		if path != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read, so no hook contract can be selected", path))
+			return false
+		}
+		// An install no version probe read (GAP-0226): say where it is and
+		// what to do instead of leaving the account without a row and
+		// without a reason.
+		if installed, fix := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed != "" {
+			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read; %s", installed, fix))
+		} else if fix != "" {
+			// The user's WinGet Packages folder was not fully listed.
+			rowContext.unprotected(row, "", fix)
 		}
 		return false
 	}
@@ -274,22 +300,39 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 }
 
 // standaloneWindowsAgentVersionExplain is the standalone profile's single
-// agent discovery: the per-user package-manager probes shared with the
-// Secure Client profile, then the Node version managers (nvm-windows, fnm,
-// Volta, pnpm and the .npmrc prefix), then the native per-user installers,
-// the native Claude installer (%USERPROFILE%\.local\bin\claude.exe) and the
-// native Cursor Agent CLI (%LOCALAPPDATA%\cursor-agent\versions), then
-// machine-scope WinGet packages. Cursor Desktop's package.json comes first,
-// so a user with both Cursor Desktop and the Agent CLI is enrolled at the
-// Desktop version, as before. Every source is static filesystem or registry
-// inspection; no discovered binary is executed.
+// agent discovery: for Codex the official installer's selected release
+// first (install.ps1 puts its folder first on the user's PATH), then the
+// per-user package-manager probes shared with the Secure Client profile,
+// then the Node version managers (nvm-windows, fnm, Volta, pnpm and the
+// .npmrc prefix), then the native per-user installers, the native Claude
+// installer (%USERPROFILE%\.local\bin\claude.exe) and the native Cursor
+// Agent CLI (%LOCALAPPDATA%\cursor-agent\versions), then machine-scope
+// WinGet packages. Cursor Desktop's package.json comes first, so a user with
+// both Cursor Desktop and the Agent CLI is enrolled at the Desktop version,
+// as before. Every source is static filesystem or registry inspection; no
+// discovered binary is executed.
 func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (string, string) {
+	return standaloneWindowsAgentVersionExplainFor("", profileHome, connectorName)
+}
+
+// standaloneWindowsAgentVersionExplainFor is standaloneWindowsAgentVersionExplain
+// for the account sid, which also reads the account's per-user WinGet
+// packages last.
+func standaloneWindowsAgentVersionExplainFor(sid, profileHome, connectorName string) (string, string) {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	var reasons []string
+	if connectorName == "codex" && filepath.IsAbs(strings.TrimSpace(profileHome)) {
+		standalone, standaloneReason := discoverWindowsCodexStandaloneVersion(filepath.Clean(strings.TrimSpace(profileHome)))
+		if standalone != "" {
+			return standalone, ""
+		}
+		reasons = append(reasons, standaloneReason)
+	}
 	version, reason := windowsAgentVersionExplain(profileHome, connectorName)
 	if version != "" {
 		return version, ""
 	}
-	reasons := []string{reason}
+	reasons = append(reasons, reason)
 	if filepath.IsAbs(strings.TrimSpace(profileHome)) {
 		if managed := discoverWindowsStandaloneVersionManagerAgentVersion(filepath.Clean(strings.TrimSpace(profileHome)), connectorName); managed != "" {
 			return managed, ""
@@ -321,6 +364,15 @@ func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (st
 			return machine, ""
 		}
 		reasons = append(reasons, machineReason)
+	}
+	if strings.TrimSpace(sid) != "" {
+		for _, packageID := range windowsWinGetPackageIDs[connectorName] {
+			user, userReason := windowsUserWinGetPackageVersion(sid, packageID)
+			if user != "" {
+				return user, ""
+			}
+			reasons = append(reasons, userReason)
+		}
 	}
 	return "", strings.Join(nonEmptyStrings(reasons), "; ")
 }
@@ -422,39 +474,10 @@ func windowsNativeClaudeVersionName(name string) bool {
 // administrator-only, so the value is an administrator's install record,
 // shared by every user on the device.
 func readWindowsMachineWinGetPackageVersion(packageID string) (string, string) {
-	root, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsWinGetUninstallKey, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
-	if err != nil {
-		return "", "machine uninstall registry is unavailable"
+	if version, ok := readWindowsWinGetPackageVersion(registry.LOCAL_MACHINE, windowsWinGetUninstallKey, registry.WOW64_64KEY, 0, packageID); ok {
+		return version, ""
 	}
-	defer root.Close()
-	names, err := root.ReadSubKeyNames(-1)
-	if err != nil {
-		return "", "machine uninstall registry is unreadable"
-	}
-	prefix := strings.ToLower(packageID) + "_"
-	best := ""
-	for _, name := range names {
-		if !strings.HasPrefix(strings.ToLower(name), prefix) {
-			continue
-		}
-		key, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsWinGetUninstallKey+`\`+name, registry.QUERY_VALUE|registry.WOW64_64KEY)
-		if err != nil {
-			continue
-		}
-		version, _, err := key.GetStringValue("DisplayVersion")
-		_ = key.Close()
-		version = strings.TrimSpace(version)
-		if err != nil || !isValidWindowsAgentVersion(version) {
-			continue
-		}
-		if best == "" || compareWindowsEnterpriseVersion(version, best) > 0 {
-			best = version
-		}
-	}
-	if best == "" {
-		return "", fmt.Sprintf("no machine-scope WinGet package %s", packageID)
-	}
-	return best, ""
+	return "", fmt.Sprintf("no machine-scope WinGet package %s", packageID)
 }
 
 func nonEmptyStrings(values []string) []string {

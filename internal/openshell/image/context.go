@@ -394,6 +394,9 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		fmt.Fprintf(&b, "# %s\n", step.Comment)
 		fmt.Fprintf(&b, "RUN %s\n", step.Run)
 	}
+	// After the harness's own steps, which keep the base image's python3.
+	shim := harness.WorkloadPythonShimStep()
+	fmt.Fprintf(&b, "# %s\nRUN %s\n", shim.Comment, shim.Run)
 	// p2-render-9: fail if the base image has managed-settings.d files that
 	// could override DC's drop-in (files are loaded alphabetically).
 	b.WriteString("RUN set -eu; " +

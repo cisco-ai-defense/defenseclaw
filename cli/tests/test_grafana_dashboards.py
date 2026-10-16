@@ -353,6 +353,7 @@ _FLEET_WIDE_LOG_PANELS = {
         "Kernel denials (every user)",
         "Would-blocks (every user)",
         "Kernel controls per host (last 10 minutes)",
+        "Hosts with enforcing controls",
         "Would-block (monitor)",
         "Events your policies saw (every process)",
     },

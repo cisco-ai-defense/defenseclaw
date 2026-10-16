@@ -184,6 +184,8 @@ runs the comparison for you, in the **Policy** row below.
 | Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. It shows until you acknowledge it with `defenseclaw config migrate --ack`, and is a WARN when the migration recorded conflicts. |
 | Custom-provider overlay | FAIL | `custom-providers.json` was edited by hand or no longer matches `llm_providers` in `config.yaml`. The gateway ignores those edits. `defenseclaw doctor --fix` rewrites it. |
 | Hook runtime files | FAIL | A generated hook script was edited or replaced: it no longer matches the digest in `hook_contract_lock.json`. `defenseclaw doctor --fix` re-renders it from `config.yaml`. |
+| Orphaned hook entries [connector] | FAIL or WARN | DefenseClaw entries remain for a connector that is no longer configured. A missing script or credential fails the check; an existing target warns. Run `defenseclaw setup remove CONNECTOR` to remove the entries. |
+| Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback or token rotation. Restart that agent and its background server, then run doctor again. |
 | Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a generated hook script was rendered by an older build, or bakes a hook fail mode that differs from `config.yaml`. The line names the command that regenerates it: `defenseclaw setup claude-code --yes --restart`, `defenseclaw setup codex --yes --restart`, or `defenseclaw-gateway restart`. |
 
 Real lines from a scratch install (paths shortened). A healthy gateway:
@@ -335,7 +337,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/guardrail). |
-| `defenseclaw setup remove CONNECTOR [--force] [--yes]` | Remove one connector from the active roster; the gateway restart tears down its hooks. Removing the last connector needs `--force`. To take DefenseClaw off the machine, use `defenseclaw uninstall`. |
+| `defenseclaw setup remove CONNECTOR [--force] [--yes]` | Remove one connector from the active roster; the gateway restart tears down its hooks. If the connector is already absent, the command removes DefenseClaw hook entries it left in the agent settings. Removing the last configured connector needs `--force`. To take DefenseClaw off the machine, use `defenseclaw uninstall`. |
 | `defenseclaw setup gateway [--api-port N] [--host H] [--port N] [--remote] [--non-interactive]` | Set the sidecar REST API port (`--api-port`) and the upstream agent gateway connection: host, WebSocket port, and auth token (`--remote`; the token can come from AWS SSM Parameter Store). Runs connectivity checks afterward unless `--no-verify`. |
 | `defenseclaw setup rotate-token [--yes]` | Rotate the gateway token and every connector-scoped hook credential in one transaction, then refresh the hooks and verify the restarted gateway. A failure after the gateway stops restores the previous credentials. Rotation is always global; `--connector` does not narrow it. |
 | `defenseclaw setup skill-scanner` / `setup mcp-scanner` | Configure the skill and MCP scanners: analyzers, the LLM judge, optional VirusTotal, AI Defense and OSV lookups, and the scan policy. They write `scanners.skill_scanner.*` or `scanners.mcp_scanner.*` (and the shared `llm:` block) in `config.yaml`, then restart a running gateway, as most `setup` subcommands do. `--non-interactive` takes every choice from flags; the [flags are listed below](#setup-skill-scanner-and-setup-mcp-scanner-flags). The scanner concepts are on [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner). |
@@ -1275,7 +1277,18 @@ moved keys and the upgrade steps.
 | `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On a native Windows Setup install, Setup runs first and the script-install leftovers go after it. On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
 | `defenseclaw uninstall --keep-openclaw` | Leave the OpenClaw config and plugin in place; the other connectors' teardown still runs. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Uninstall without the OpenShell sandbox teardown it runs first (when Docker or OpenShell are gone or broken); `defenseclaw sandbox teardown` removes the sandboxes later. `reset` takes it too. |
+| `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. First use `defenseclaw sandbox pull NAME --branch` for copy mode or `defenseclaw sandbox review NAME` for mount mode, then `defenseclaw sandbox stop NAME`. `reset` takes this option too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
+
+When the sandbox teardown would run, `uninstall` and `reset` also stop before
+any change if DefenseClaw cannot read the sandbox list: the gateway or its
+sandbox daemon may be stopped, the list may time out, or its output may not
+be readable. The message says why. Run `defenseclaw sandbox list` to check;
+start the gateway first if it says to. Pull back work or stop the sandboxes
+you want to keep, then retry, or use `--stop-sandboxes` to let teardown stop
+and delete any that still run. The `error`, `stopping`, `creating` and
+`deleting` phases count as running. Only `stopped`, `completed`, `deleted`
+and `missing` do not.
 
 ## Sandbox
 
@@ -1339,7 +1352,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `tetragon pause` | **Linux.** Move DefenseClaw's kernel controls to monitor mode until the pause ends. Survives restarts of the helper and of Tetragon. `--for <duration>` (default `4h`, at most `7d`), `--until-reboot`, `--reason <text>`. A runtime action, so it works on a managed computer |
 | `tetragon resume` | **Linux.** End a pause; the next helper pass applies the configured intent |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
-| `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
+| `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw` and its sandboxes. When an account keeps sandboxes, the gateway's registration store (`/var/lib/defenseclaw/sandbox` on Linux or `/opt/cisco/defenseclaw/runtime/sandbox` on macOS) and key (`/var/lib/defenseclaw/redaction-correlation.key` or `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay root-owned while the service account is gone; the next `ensure` adopts them. `--purge` removes them and each enrolled account's data and binaries for a clean image |
 
 | Flag | Actions | Meaning |
 | --- | --- | --- |
@@ -1354,8 +1367,8 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
 | `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
-| `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. It removes the sandbox registration store and key for a clean image. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall removes the config, credentials, most state, logs and the service account, but may keep `sandbox` registrations and `redaction-correlation.key` when an account keeps sandboxes |
+| `--keep-state` | uninstall | Keep the config, credentials, gateway and guardian state (the sandbox registrations and key included), logs, lifecycle state and the service account, so a reinstall resumes with them. Cannot combine with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |
 | `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins, tetragon status | Limit the view to one account (name, uid or SID). A bare name lists the account of that name in every domain; a qualified name (`alice@corp.example.com`, `CORP\alice`) lists only the rows of exactly that domain (on Windows, whose rows keep the bare name next to the SID, every account of that name) |

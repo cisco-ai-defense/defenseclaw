@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,8 +151,25 @@ func (r *OSUserResolver) GroupIDs(account Account) ([]int, error) {
 // it holds, so an account in more fails (a mobile Active Directory account) or
 // comes back cut at 256 (a local one) without an error (GAP-0201).
 func AccountGroupIDs(ctx context.Context, account *user.User) ([]string, error) {
+	return AccountGroupIDsChecking(ctx, account, nil)
+}
+
+// AccountGroupIDsChecking is AccountGroupIDs that, on macOS, also asks Open
+// Directory whether the account is a member of each group in named, by its
+// uid, and lists the ones it is in. macOS lists an account's groups by name
+// (getgrouplist), and that list leaves out a group the account is in only
+// through another group (an Active Directory nested group: id -G names
+// dc-nested but not dc-devs, which dsmemberutil confirms), and a directory
+// account named like a local one gets the local account's list; the uid
+// membership check answers both, as SSSD's list does on Linux (GAP-0528).
+// named are the groups guardrail profile assignments select by, so no
+// membership that selects a profile is left out. Other platforms ignore it.
+func AccountGroupIDsChecking(ctx context.Context, account *user.User, named []string) ([]string, error) {
+	if runtime.GOOS == "linux" {
+		return platformAccountGroupIDs(ctx, runTrustedCommand, account, nil, nil, nil)
+	}
 	ids, err := account.GroupIds()
-	return platformAccountGroupIDs(ctx, runTrustedCommand, account, ids, err)
+	return platformAccountGroupIDs(ctx, runTrustedCommand, account, ids, err, named)
 }
 
 // ListUsers enumerates local accounts; directory accounts are not listed.

@@ -24,6 +24,8 @@
     "allowed": {"type": "boolean"},
     "required_for": {"type": "array", "items": {"type": "string"}},
     "when_unavailable": {"type": "string", "enum": ["", "refuse", "alert"]},
+    "host_run_gate": {"type": "string", "enum": ["", "refused", "exempt"]},
+    "enrollment_exempt": {"type": "boolean"},
     "allowed_harnesses": {"type": "array", "items": {"type": "string"}},
     "allowed_credentials": {"type": "array", "items": {"type": "string"}},
     "egress_allow_only": {"type": "array", "items": {"type": "string"}},

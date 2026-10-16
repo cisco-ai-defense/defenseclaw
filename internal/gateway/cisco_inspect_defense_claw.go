@@ -293,15 +293,14 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		}
 	}
 	// The defense_claw endpoint's cloud-side tenant is the authoritative
-	// source of the enabled-rules catalog for managed calls. Sending our
-	// own hard-coded 12-rule list triggers a 400 on every request
-	// ("invalid rule name") which forced the shared HTTP helper into a
-	// two-round-trip retry cycle per inspection. Dropping the config
-	// block entirely on this path removes the retry — the cloud applies
-	// whatever rules the tenant has configured for managed callers.
-	// The API-key path (CiscoInspectClient / /api/v1/inspect/chat) still
-	// sends enabled_rules because opensource tenants rely on our default
-	// catalog when they haven't configured their own.
+	// source of the enabled-rules catalog for managed calls, so this path
+	// never sends a config block: the cloud applies whatever rules the
+	// tenant has configured for managed callers. A client-side rule list
+	// here drew a 400 ("invalid rule name") and a second round trip per
+	// inspection. The API-key path (CiscoInspectClient,
+	// /api/v1/inspect/chat) sends enabled_rules only when
+	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
+	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
 
 	// currentToken is captured by both setAuth and onUnauthorized so

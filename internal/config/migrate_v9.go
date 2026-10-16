@@ -1487,15 +1487,23 @@ func (m *v9Migrator) planShippedPacks() {
 }
 
 // seedShippedRulePack writes the embedded pack name to dir, which must not
-// exist: the files go to a sibling folder that is renamed into place.
+// exist: the files go to a new sibling folder that is renamed into place. A
+// fixed <dir>.seeding sibling was removed first, even when it was a custom
+// pack the config selects (GAP-1490).
 func seedShippedRulePack(dir, name string) error {
 	files, err := policyassets.Files()
 	if err != nil {
 		return err
 	}
 	prefix := "guardrail/" + name + "/"
-	staging := dir + ".seeding"
-	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".seeding-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
 	wrote := false
 	for _, f := range files {
 		rel, ok := strings.CutPrefix(f.Path, prefix)
@@ -1507,7 +1515,6 @@ func seedShippedRulePack(dir, name string) error {
 			return err
 		}
 		if err := cfgtxn.WriteFileDurable(target, f.Data, 0o600); err != nil {
-			_ = os.RemoveAll(staging)
 			return err
 		}
 		wrote = true
@@ -1515,15 +1522,7 @@ func seedShippedRulePack(dir, name string) error {
 	if !wrote {
 		return fmt.Errorf("this build ships no %s rule pack", name)
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	if err := os.Rename(staging, dir); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	return nil
+	return os.Rename(staging, dir)
 }
 
 // refreshRegoModules replaces every planned pre-9 module. A failure is
@@ -3071,16 +3070,28 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 	case policy == "":
 		v9Set(skill, v9Scalar("quiet"), "policy")
 		m.moved("config", prefix+"policy", prefix+"policy", "quiet")
-	case v9SkillPolicies[policy] || policy == "custom":
+	case v9SkillPolicies[policy]:
+	case policy == SkillScannerPolicyCustom && v8YAMLMapValue(skill, "policy_file") != nil:
+		// Already the config_version 9 form: the name and its pinned file.
 	default:
+		// Any other value is the path of a policy file, which 0.8.x read
+		// relative to the working directory. That includes a file named
+		// custom: 0.8.x had no custom name, and keeping it as one, with no
+		// policy_file, failed the upgrade (GAP-1286). A relative path is
+		// pinned as the absolute path of the file read here, so the 1.0
+		// gateway finds it whatever directory it starts in.
 		raw, err := os.ReadFile(policy)
 		if err != nil {
 			return fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
 		}
-		v9Set(skill, v9Scalar("custom"), "policy")
-		ref := v9Mapping("path", v9Scalar(policy), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
+		pinned := policy
+		if abs, err := filepath.Abs(policy); err == nil && !filepath.IsAbs(policy) {
+			pinned = abs
+		}
+		v9Set(skill, v9Scalar(SkillScannerPolicyCustom), "policy")
+		ref := v9Mapping("path", v9Scalar(pinned), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
 		v9Set(skill, ref, "policy_file")
-		m.moved("config", prefix+"policy", prefix+"policy_file", map[string]string{"path": policy})
+		m.moved("config", prefix+"policy", prefix+"policy_file", map[string]string{"path": pinned})
 	}
 	useVT := v9Pop(skill, "use_virustotal")
 	keyEnv := v9Pop(skill, "virustotal_api_key_env")
@@ -3364,7 +3375,11 @@ const ProvidersOverlayFile = "custom-providers.json"
 // in-memory load leaves it alone (the gateway still merges a legacy overlay
 // itself), as does a managed host, whose provider list is the admin's. An
 // overlay that uses request_overrides, which config can not hold, stays a
-// live input and is reported.
+// live input and is reported. A provider named twice, in the overlay or in
+// the overlay and llm_providers.custom, becomes one entry with the 0.8.x
+// overlay merge rules (configs.ApplyOverlay): lists are unioned and the
+// overlay's values win. Skipping the second entry lost its domains, env keys
+// and settings once the overlay was retired (GAP-0709).
 func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	if m.in.InMemory {
 		return
@@ -3392,18 +3407,18 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			return
 		}
 	}
-	existing := map[string]bool{}
-	for _, item := range v9SeqItems(v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")) {
-		existing[strings.ToLower(yamlScalarValue(v8YAMLMapValue(item, "name")))] = true
+	type overlayEntry struct {
+		key, name string
+		node      *yaml.Node
+		tls       bool
+		ca        *v9RegoRefresh
 	}
-	var custom []LLMCustomProvider
-	var names []string
+	var entries []overlayEntry
 	for _, p := range overlay.Providers {
 		name := strings.TrimSpace(p.Name)
-		if name == "" || existing[strings.ToLower(name)] {
+		if name == "" {
 			continue
 		}
-		existing[strings.ToLower(name)] = true
 		entry := LLMCustomProvider{
 			Name: name, Domains: p.Domains, EnvKeys: p.EnvKeys, BaseProviderType: p.BaseProviderType,
 			BaseURL: p.BaseURL, AllowedRequests: p.AllowedRequests, AvailableModels: p.AvailableModels,
@@ -3412,12 +3427,12 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		if p.ProfileID != nil {
 			entry.ProfileID = *p.ProfileID
 		}
+		var ca *v9RegoRefresh
 		if t := p.TLS; t != nil {
 			entry.TLS = &LLMCustomProviderTLS{InsecureSkipVerify: t.InsecureSkipVerify}
 			if pem := strings.TrimSpace(t.CACertPEM); pem != "" {
-				ca := filepath.Join(m.dataDir(), "provider-ca", v9ProviderCAName(name))
-				entry.TLS.CACertFile = ca
-				m.providerCAs = append(m.providerCAs, v9RegoRefresh{path: ca, data: []byte(t.CACertPEM)})
+				ca = &v9RegoRefresh{path: filepath.Join(m.dataDir(), "provider-ca", v9ProviderCAName(name)), data: []byte(t.CACertPEM)}
+				entry.TLS.CACertFile = ca.path
 			}
 		}
 		if b := p.Bedrock; b != nil {
@@ -3433,24 +3448,69 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			entry.Azure = &AzureKeyConfig{Endpoint: a.Endpoint, APIVersion: a.APIVersion, AuthMode: a.AuthMode,
 				DeploymentAliases: a.DeploymentAliases}
 		}
-		custom = append(custom, entry)
-		names = append(names, name)
+		var node yaml.Node
+		if err := node.Encode(entry); err != nil {
+			m.note("could not move provider %q from %s: %v", entry.Name, path, err)
+			return
+		}
+		entries = append(entries, overlayEntry{key: strings.ToLower(name), name: name, node: &node, tls: entry.TLS != nil, ca: ca})
 	}
-	if len(custom) > 0 {
-		list := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")
+	list := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")
+	byName := map[string]*yaml.Node{}
+	for _, item := range v9SeqItems(list) {
+		if key := strings.ToLower(yamlScalarValue(v8YAMLMapValue(item, "name"))); byName[key] == nil {
+			byName[key] = item
+		}
+	}
+	var added []*yaml.Node
+	var names, merged []string
+	cas := map[string]*v9RegoRefresh{}
+	var caKeys []string
+	for _, e := range entries {
+		if into := byName[e.key]; into != nil {
+			v9MergeOverlayProvider(into, e.node)
+			if !slices.Contains(merged, e.key) {
+				merged = append(merged, e.key)
+			}
+		} else {
+			byName[e.key] = e.node
+			added = append(added, e.node)
+			names = append(names, e.name)
+		}
+		// The overlay's tls replaces the entry's, with or without its CA.
+		if e.tls {
+			if !slices.Contains(caKeys, e.key) {
+				caKeys = append(caKeys, e.key)
+			}
+			cas[e.key] = e.ca
+		}
+	}
+	for _, key := range caKeys {
+		if ca := cas[key]; ca != nil {
+			m.providerCAs = append(m.providerCAs, *ca)
+		}
+	}
+	if len(added) > 0 {
 		if list == nil || list.Kind != yaml.SequenceNode {
 			list = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
 			v9Set(root, list, "llm_providers", "custom")
 		}
-		for _, entry := range custom {
-			var node yaml.Node
-			if err := node.Encode(entry); err != nil {
-				m.note("could not move provider %q from %s: %v", entry.Name, path, err)
-				return
-			}
-			list.Content = append(list.Content, &node)
+		list.Content = append(list.Content, added...)
+	}
+	var mergedNames []string
+	for _, key := range merged {
+		name := yamlScalarValue(v8YAMLMapValue(byName[key], "name"))
+		mergedNames = append(mergedNames, name)
+		if !slices.Contains(names, name) {
+			names = append(names, name)
 		}
+	}
+	if len(names) > 0 {
 		m.moved(ProvidersOverlayFile, path, "llm_providers.custom", names)
+	}
+	if len(mergedNames) > 0 {
+		m.note("%s names provider(s) %s more than once, or llm_providers.custom already has them; each became one entry, "+
+			"with the lists unioned and the overlay's values kept, as 0.8.x merged them", path, strings.Join(mergedNames, ", "))
 	}
 	if len(overlay.OllamaPorts) > 0 && v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "ollama_ports") == nil {
 		ports := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
@@ -3461,6 +3521,40 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", overlay.OllamaPorts)
 	}
 	m.providersOverlay = path
+}
+
+// v9MergeOverlayProvider folds src, an overlay provider, into dst, the
+// provider of the same name, with the 0.8.x overlay merge rules
+// (configs.ApplyOverlay): a list gains the items it lacks, the string maps
+// take src's keys (ApplyOverlay drops extra_headers; it is kept here) and any
+// other field src sets replaces dst's. src holds only the fields its overlay
+// entry sets.
+func v9MergeOverlayProvider(dst, src *yaml.Node) {
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		key, value := src.Content[i].Value, src.Content[i+1]
+		have := v8YAMLMapValue(dst, key)
+		switch {
+		case key == "name":
+		case have != nil && have.Kind == yaml.SequenceNode && value.Kind == yaml.SequenceNode:
+			seen := map[string]bool{}
+			for _, item := range have.Content {
+				seen[item.Value] = true
+			}
+			for _, item := range value.Content {
+				if !seen[item.Value] {
+					seen[item.Value] = true
+					have.Content = append(have.Content, item)
+				}
+			}
+		case (key == "request_path_overrides" || key == "extra_headers") &&
+			have != nil && have.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode:
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				v9Set(have, value.Content[j+1], value.Content[j].Value)
+			}
+		default:
+			v9Set(dst, value, key)
+		}
+	}
 }
 
 // v9ProviderCAName gives each case-insensitive provider a stable CA path.

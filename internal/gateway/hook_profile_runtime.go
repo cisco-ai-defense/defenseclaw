@@ -118,6 +118,7 @@ func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payl
 		req.Payload["agent_name"] = agentName
 	}
 	req.AgentType = firstNonEmpty(req.AgentType, agentType)
+	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
 	req.CWD = hookCWDForContext(ctx, req.CWD)
 	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
 	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)
@@ -135,6 +136,7 @@ func decodeCodexRequestForContext(ctx context.Context, rawBody []byte, payload m
 	var req codexHookRequest
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
+	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
 	req.CWD = hookCWDForContext(ctx, req.CWD)
 	req.sandboxView, _ = sandboxHookView(ctx)
 	return req

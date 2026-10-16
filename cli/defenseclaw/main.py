@@ -149,12 +149,24 @@ def _cli_audit_db(cfg) -> str:
     descriptor = managed_descriptor()
     audit_db = cfg.audit_db
     if descriptor:
-        folder = os.path.dirname(os.path.abspath(audit_db))
+        try:
+            folder = os.path.dirname(os.path.abspath(audit_db))
+            managed_folder = os.path.dirname(os.path.abspath(descriptor))
+        except OSError:
+            return audit_db
+        try:
+            same_folder = os.path.normcase(os.path.realpath(folder)) == os.path.normcase(
+                os.path.realpath(managed_folder)
+            )
+            if not same_folder and os.path.isdir(folder) and os.path.isdir(managed_folder):
+                same_folder = os.path.samefile(folder, managed_folder)
+        except OSError:
+            same_folder = os.path.normcase(folder) == os.path.normcase(managed_folder)
         # An administrator's shell aimed at the managed config has no data
         # folder of its own (root's home has no .defenseclaw), and a local
         # writer must still reach its managed refusal instead of failing to
         # open a store (GAP-0168).
-        if folder == os.path.dirname(descriptor) or not os.path.isdir(folder):
+        if same_folder or not os.path.isdir(folder):
             return ":memory:"
     return audit_db
 

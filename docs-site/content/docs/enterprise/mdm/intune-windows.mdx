@@ -340,6 +340,13 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
 | Run script in 64-bit PowerShell | **No** (the default). The scripts work in either. |
 | Schedule | **Daily**, or **Hourly** every 4 to 8 hours |
 
+If you assign the package with Microsoft Graph, read the assignment back:
+Graph can accept `runRemediationScript: true` on the assignment and store
+`false`, and scheduled runs may then only detect. When it reads `false`, turn
+on the remediation script for that assignment in the Intune admin center. An
+on-demand run (**Run remediation** on the device in the admin center, or Graph
+`initiateOnDemandProactiveRemediation`) runs both scripts either way.
+
 - `Remediate-Detect.ps1` runs the installed CLI's
   `enterprise windows verify --profile standalone --json`. It exits `0` on a
   healthy host, and also on a host without the deployment, because installing
@@ -375,7 +382,7 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   gateway is down for one to two minutes and hooks fail closed meanwhile. It
   exits with the lifecycle's code. After an upgrade that a restart or a power
   loss cut off, the installed (older) CLI rolls the change back: the line says
-  `repaired: ensure rolled back an interrupted lifecycle change`, names the
+  `repaired (recovered_pending_transaction): ensure rolled back an interrupted lifecycle change`, names the
   release that runs again, and asks you to run the newer Setup `/ensure` again
   (the Win32 app retries it). Status, verify and the install record then report
   the release that is installed.
@@ -395,16 +402,16 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   gateway enforces the bundle. Only then does it exit `0`, with a line such as
 
   ```text
-  DefenseClaw <version>: repaired: config.yaml was not the config of signed policy bundle <id> version <n>; ensure re-applied the bundle from the bundle store; signed policy bundle <id> version <n> is applied
+  DefenseClaw <version>: repaired (bundle_config_restored): config.yaml was not the config of signed policy bundle <id> version <n>; ensure re-applied the bundle from the bundle store; signed policy bundle <id> version <n> is applied
   ```
 
-  (`repaired: config.yaml was missing; ensure re-applied signed policy bundle
+  (`repaired (bundle_config_restored): config.yaml was missing; ensure re-applied signed policy bundle
   <id> version <n> from the bundle store; ...` for a deleted file). Otherwise
   it exits `1603`. When the bundle store cannot give the config back (for
   example a damaged version directory) the line is
 
   ```text
-  DefenseClaw <version>: still failing (bundle_restore_failed,bundle_not_applied): signed policy bundle <id> version <n> is confirmed, but its config cannot be read from the bundle store (<reason>), so the device cannot prove it enforces it; deliver the bundle again or a newer one
+  DefenseClaw <version>: still failing (bundle_restore_failed): signed policy bundle <id> version <n> is confirmed, but its config cannot be read from the bundle store (<reason>), so the device cannot prove it enforces it; deliver the bundle again or a newer one
   ```
 
   and nothing was started on the edited file. When `ensure` succeeds but the
@@ -516,8 +523,12 @@ script or Remediation for each upgraded build.
 refuses a direct `CONFIG=` change with `bundle_required`. For a base-only
 deployment, Setup applies a new config when it runs `/ensure` with a config
 that differs from the installed one. The registry rule detects by version
-only, so Intune does not re-run an app for a config-only change. To change a
-base-only deployment:
+only, so Intune does not re-run an app for a config-only change. To roll out a
+new config, re-author `config.yaml` as `config_version: 9` (see
+`packaging/identity/entra/admin-config.windows.example.yaml`). The packager
+refuses a missing or older version. Setup migrates an older file during install,
+so its installed hash would differ from the hash pinned in the package and the
+custom detection rule would never match. To change a base-only deployment:
 
 1. Build a package from the same Setup and the new `config.yaml`.
 2. Create it as a separate Win32 app without supersedence of a base app that
@@ -554,7 +565,10 @@ changes made outside Setup are not validated.
 
 **Roll back.** `/ensure` refuses a Setup older than the installed version
 (`downgrade_refused`, `1603`), so superseding with an older app does nothing.
-Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
+First remove the newer **Required** Intune assignment from the target group
+(`intune_tenant.py remove-assignment --app NAME --group GROUP [--apply]`, or
+remove it in Intune admin center). Then follow
+[Roll back](/docs/enterprise/lifecycle#roll-back).
 
 ## 7. Remove DefenseClaw
 

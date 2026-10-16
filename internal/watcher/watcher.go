@@ -1800,6 +1800,28 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		ScannerName:   s.Name(),
 		Findings:      toFindingInputs(result.Findings),
 	}
+	// A default deny or registry_required that a reload switched on while
+	// the scan ran applies as the pre-scan check applies it; the lists
+	// alone missed it (GAP-1155).
+	if post := decisionPolicy.Config; post != nil {
+		if decision := post.EvaluateAssetPolicy(w.withMCPDefinition(post, evt, config.AssetPolicyInput{
+			TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
+			Connector: connector, SourcePath: evt.Path, RuntimeSurface: "watcher",
+		})); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
+			scanID := w.logScanID(ctx, evt, result, "blocked")
+			w.enforceBlock(ctx, evt)
+			w.recordAdmission(ctx, "blocked", targetType)
+			res = AdmissionResult{
+				ScanID: scanID,
+				Event:  evt, Verdict: VerdictBlocked, Reason: decision.Reason,
+				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+				InstallAction: "block",
+			}
+			return res
+		}
+	}
 	if input.BlockListed() {
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,

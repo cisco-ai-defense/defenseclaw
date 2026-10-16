@@ -1,0 +1,56 @@
+{
+  "launcher": "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",
+  "guard": {
+    "type": "command",
+    "command": "C:\\Windows\\System32\\cmd.exe",
+    "args": [
+      "/d",
+      "/c",
+      "if",
+      "exist",
+      "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",
+      "(",
+      "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",
+      "hook",
+      "--connector",
+      "claudecode",
+      ")",
+      "else",
+      "(",
+      "echo",
+      "DefenseClaw",
+      "blocked",
+      "this:",
+      "its",
+      "Claude",
+      "Code",
+      "hook",
+      "launcher",
+      "is",
+      "missing.",
+      "Run",
+      "the",
+      "DefenseClaw",
+      "installer",
+      "again",
+      "to",
+      "repair",
+      "it.",
+      "1>&2",
+      "&",
+      "exit",
+      "/b",
+      "2",
+      ")"
+    ]
+  },
+  "exec": {
+    "type": "command",
+    "command": "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",
+    "args": [
+      "hook",
+      "--connector",
+      "claudecode"
+    ]
+  }
+}

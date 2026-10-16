@@ -125,7 +125,9 @@ first if you are new to how DefenseClaw uses identity.
    group IDs outside the local accounts of your hosts. The host step limits SSSD
    to the range 1710000 to 1729999 by default (`--id-min` and `--id-max` of
    `install-sssd-okta.sh`), which holds the IDs that `assign-posix` hands out by
-   default.
+   default. If the host uses another SSSD range, pass the matching `--id-min`
+   and `--id-max` to both `assign-posix` and `install-sssd-okta.sh`; the
+   assignment checks the range before writing.
 
 <Callout type="warn" title="Password-only sign-in">
 An LDAP bind cannot answer a second-factor prompt, so the LDAP Interface needs a
@@ -249,7 +251,8 @@ It:
    write unless you pass `--force`. A rerun also refuses to replace a marked
    file that contains another SSSD domain (for example, one added by an Active
    Directory join). Merge the updated Okta settings into that file manually,
-   or pass `--force` if replacing every domain is intentional;
+   or pass `--force` if replacing every domain is intentional. An unchanged
+   rerun repairs the file's owner and mode when they drift;
 4. selects the authselect `sssd` profile with home directories (`with-mkhomedir`)
    and enables `oddjobd`;
 5. writes `/etc/ssh/sshd_config.d/45-okta-ldap.conf`, so members of the allowed
@@ -257,6 +260,10 @@ It:
    default;
 6. restarts SSSD when the config changed and waits for the `okta` domain to be
    Online.
+
+If the sshd reload fails, the installer leaves a pending marker. Run the
+installer again after fixing the cause; it retries the reload even when the
+drop-in is unchanged.
 
 A second run with the same options reports every step as unchanged. On another
 distribution, `--render-only FILE` writes the SSSD config to a file and checks it,
@@ -285,7 +292,9 @@ The names are bare (`alice`, `ml-research`) unless you set
 ### Check the accounts
 
 `verify-okta-identity.sh` only reads. Run it as root on the host for every check,
-or as a normal user for the account checks:
+or as a normal user for the account checks. It asks the SSSD NSS source
+explicitly, so a local account with the same name does not satisfy the Okta
+account check:
 
 ```bash
 sudo ./verify-okta-identity.sh --user alice --expect-group ml-research --allow-group linux-users

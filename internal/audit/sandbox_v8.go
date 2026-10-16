@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -647,7 +648,19 @@ type SandboxRecorder struct {
 	// managedLimit bounds the managed sandboxes tracked for one account
 	// (LimitManagedPhases); 0 is no bound.
 	managedLimit int
+	// exported are the connectors whose active gauge the recorder exported,
+	// and activeExportedAt when RecordActiveSandboxes last exported them
+	// all: a gauge point is one data point, so the gauge is exported again
+	// every SandboxActiveExportInterval (#1241).
+	exported         map[string]bool
+	activeExportedAt time.Time
 }
+
+// SandboxActiveExportInterval is how often metric.defenseclaw.sandbox.active
+// is exported again while nothing changes: well inside Prometheus's
+// five-minute staleness window, so a sandbox that runs quietly for longer
+// still counts (#1241).
+const SandboxActiveExportInterval = time.Minute
 
 type sandboxTrackedPhase struct {
 	connector string
@@ -655,6 +668,10 @@ type sandboxTrackedPhase struct {
 	// owner is the account (SandboxLifecycleEvent.UserID) of a managed
 	// sandbox, which LimitManagedPhases bounds.
 	owner string
+	// fromRegistration is a phase TrackManagedSandbox set from the managed
+	// gateway's registration, not a lifecycle record: never a lifecycle
+	// record's previous phase.
+	fromRegistration bool
 }
 
 var _ SandboxTelemetry = (*SandboxRecorder)(nil)
@@ -741,7 +758,7 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	defer recorder.lifecycle.Unlock()
 	previous := input.PreviousPhase
 	phaseKey := sandboxPhaseKey(identity)
-	if tracked, known := recorder.phases[phaseKey]; previous == "" && known {
+	if tracked, known := recorder.phases[phaseKey]; previous == "" && known && !tracked.fromRegistration {
 		previous = tracked.phase
 	}
 	if err := recorder.managedPhaseRoomLocked(phaseKey, input); err != nil {
@@ -797,12 +814,89 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	metrics := make([]RuntimeV8GeneratedMetric, 0, len(activeCounts)+1)
 	for _, count := range activeCounts {
 		metrics = append(metrics, newSandboxActiveMetric(event, count.connector, count.active))
+		recorder.noteExportedLocked(count.connector)
 	}
 	if previous != identity.Phase && (previous != "" || identity.Phase == SandboxPhaseCreating) {
 		metrics = append(metrics, newSandboxTransitionMetric(event, identity.Connector, previous, identity.Phase))
 	}
 	recorder.recordCompanions(ctx, binding, log, disposition, metrics)
 	return nil
+}
+
+// noteExportedLocked remembers that connector's active gauge was exported.
+// The caller holds recorder.lifecycle.
+func (recorder *SandboxRecorder) noteExportedLocked(connector string) {
+	if recorder.exported == nil {
+		recorder.exported = make(map[string]bool)
+	}
+	recorder.exported[connector] = true
+}
+
+// RecordActiveSandboxes exports metric.defenseclaw.sandbox.active again for
+// every connector the recorder exported it for, with the count it tracks
+// now. Lifecycle records export the gauge only when a phase changes, and a
+// gauge point is a single data point: a sandbox that ran quietly for longer
+// than Prometheus's staleness window read as no sandbox on the Sandboxes
+// board (#1241). A connector whose sandboxes all stopped keeps exporting 0.
+// The gateway calls it every SandboxActiveExportInterval.
+func (recorder *SandboxRecorder) RecordActiveSandboxes(ctx context.Context) error {
+	if err := recorder.ready(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	recorder.lifecycle.Lock()
+	defer recorder.lifecycle.Unlock()
+	recorder.activeExportedAt = time.Now()
+	if len(recorder.exported) == 0 {
+		return nil
+	}
+	connectors := make([]string, 0, len(recorder.exported))
+	for connector := range recorder.exported {
+		connectors = append(connectors, connector)
+	}
+	sort.Strings(connectors)
+	return recorder.exportActiveLocked(ctx, connectors)
+}
+
+// exportActiveLocked exports metric.defenseclaw.sandbox.active for each of
+// connectors with the count the recorder tracks now, and remembers them as
+// exported. The caller holds recorder.lifecycle.
+func (recorder *SandboxRecorder) exportActiveLocked(ctx context.Context, connectors []string) error {
+	for _, connector := range connectors {
+		recorder.noteExportedLocked(connector)
+	}
+	if err := recorder.ready(); err != nil {
+		return err
+	}
+	binding := recorder.logger.runtimeV8BindingSnapshot()
+	if binding.metricBatch == nil {
+		return fmt.Errorf("audit: sandbox v8 runtime is unavailable")
+	}
+	metrics := make([]RuntimeV8GeneratedMetric, 0, len(connectors))
+	for _, connector := range connectors {
+		event := recorder.newEvent(ctx, ActionSandboxLifecycle, SandboxIdentity{Connector: connector}, "", "", time.Now())
+		metrics = append(metrics, newSandboxActiveMetric(event, connector, recorder.activeLocked(connector)))
+	}
+	return recorder.logger.recordRuntimeV8GeneratedMetricBatch(ctx, binding, metrics)
+}
+
+// RecordActiveSandboxesIfDue is RecordActiveSandboxes when the last export
+// of every connector's gauge is at least every ago: a caller without a
+// ticker of its own (the managed gateway, on its daemons' polls) exports at
+// most that often.
+func (recorder *SandboxRecorder) RecordActiveSandboxesIfDue(ctx context.Context, every time.Duration) error {
+	if recorder == nil {
+		return nil
+	}
+	recorder.lifecycle.Lock()
+	due := time.Since(recorder.activeExportedAt) >= every
+	recorder.lifecycle.Unlock()
+	if !due {
+		return nil
+	}
+	return recorder.RecordActiveSandboxes(ctx)
 }
 
 // RecordSandboxEgress emits log.egress.allowed or log.egress.blocked with the

@@ -78,7 +78,10 @@ func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	}
 	if payload.Standalone() && !payload.Manifest.Unsigned {
 		if err := verifySignedEnterpriseSetup(file, path); err != nil {
-			return enterprisePayload{}, fmt.Errorf("signed standalone Setup image is not trusted: %w", err)
+			// The outer signature is what vouches for the unsignable Fleet
+			// compiler. Without it, withhold only the compiler instead of
+			// refusing every Fleet-off Setup run (DAMAGE-678 A1).
+			payload = payload.withoutPolicyCompiler()
 		}
 	}
 	return payload, nil
@@ -163,6 +166,7 @@ func executeEnterpriseSetup(
 	}
 	opts.Standalone = standalone
 	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
+	opts.OmitPolicyCompiler = standalone && !payload.CarriesPolicyCompiler()
 	opts.ProductVersion = payload.Manifest.Version
 	for _, input := range []struct {
 		label string
@@ -671,8 +675,8 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
 		appendValue("--sensor-helper-binary", filepath.Join(stageRoot, "defenseclaw-sensor-helper.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
-		if opts.Standalone {
-			appendValue("--policy-compiler", filepath.Join(stageRoot, "policy_compiler.py"))
+		if opts.Standalone && !opts.OmitPolicyCompiler {
+			appendValue("--policy-compiler", filepath.Join(stageRoot, policyCompilerPayloadName))
 		}
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)

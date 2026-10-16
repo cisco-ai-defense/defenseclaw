@@ -536,6 +536,15 @@ When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. See
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
 
+### Cisco AI Defense API-key rule selection
+
+For an API-key inspection sent to `/api/v1/inspect/chat`, an unset, null or
+empty `cisco_ai_defense.enabled_rules` sends no `config` or `enabled_rules` in
+the request. The AI Defense connection's own policy then applies. A nonempty
+list sends only the named cloud rules, in the configured order. If you relied
+on the earlier implicit rule list, put those cloud rule names explicitly in
+`cisco_ai_defense.enabled_rules`.
+
 ### Guardrail profiles and identity keys
 
 | Key | Default | Meaning |
@@ -890,7 +899,7 @@ openshell:
   ingress_port: 0              # sandbox hook ingress; 0 = gateway.api_port + 1
   egress_port: 0               # DefenseClaw egress proxy; 0 = gateway.api_port + 2
   pack: ""                     # "" = open; a built-in, a name under pack_dir, or an absolute path
-  pack_dir: ~/.defenseclaw/policies/sandbox   # default <data_dir>/policies/sandbox
+  pack_dir: ~/.defenseclaw/policies/sandbox   # default <data_dir>/policies/sandbox; managed standalone: <policy_dir>/sandbox
   profile: ""                  # "" follows the pack; open | balanced | strict
   yolo: null                   # null follows the pack; true | false
   llm: auto                    # model credential a run shares; see below
@@ -946,7 +955,7 @@ openshell:
 | `ingress_port` | `0` | The sandbox hook ingress port, 0–65535. `0` means `gateway.api_port + 1` (18971 by default). Its OpenShell provider profile is `defenseclaw-ingress-<port>`. Sandboxes keep the port their image and policy were built for, so re-create them after a change. |
 | `egress_port` | `0` | The egress proxy port, 0–65535. `0` means `gateway.api_port + 2` (18972 by default). |
 | `pack` | `""` | The sandbox policy pack: `open`, `balanced`, `strict`, a custom pack name under `pack_dir`, or an absolute path (or `~/…`) to a `pack.yaml` or its directory. Empty selects `open`. |
-| `pack_dir` | `<data_dir>/policies/sandbox` | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. |
+| `pack_dir` | `<data_dir>/policies/sandbox`; `<policy_dir>/sandbox` on a managed standalone install | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. On a managed standalone install the default is the administrator-owned `<policy_dir>/sandbox` that `ensure` and `verify` check; a host upgraded from 1.0.1 keeps reading its packs from `<data_dir>/policies/sandbox` until `<policy_dir>/sandbox` exists (see [Packs](/docs/enterprise/sandboxes#packs)). |
 | `profile` | `""` | `open`, `balanced`, or `strict`. Empty follows the pack's network mode. |
 | `yolo` | `null` | Skip-permissions mode for the harness. `null` follows the pack. |
 | `keep_headless` | `false` | `true` keeps the sandbox a headless `sandbox run` creates (`--prompt`, or the harness's print mode, such as the shell wrapper's `claude -p`), as `--keep` does for one run. By default it is deleted when the run ends and nothing is left in it to bring back or undo, by the rules of `--rm`. |
@@ -1100,7 +1109,8 @@ refused. That includes a request to skip permissions or to mount a host folder
 when the required pack keeps the prompts or works on a copy. In a
 `managed_enterprise` install, a custom required pack must be a file that root
 owns and no other user can modify, together with every directory above it,
-such as an absolute path under an administrator-owned directory. The default
+such as an absolute path under an administrator-owned directory. On a managed
+standalone install the default `pack_dir`, `<policy_dir>/sandbox`, is one; a
 `pack_dir` in the data directory usually does not qualify.
 
 `locked` keeps the configured value of each listed key against run options

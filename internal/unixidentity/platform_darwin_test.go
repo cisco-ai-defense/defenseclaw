@@ -85,6 +85,9 @@ func TestAccountGroupIDsListPastTheOSUserLimit(t *testing.T) {
 	var gotArgs []string
 	runWith := func(gids int, exitCode int) commandRunner {
 		return func(_ context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
+			if path == darwinDSMemberUtil {
+				return commandResult{stdout: []byte("user is a member of the group\n")}, nil
+			}
 			gotArgs = args
 			var out strings.Builder
 			for gid := 20; gid < 20+gids; gid++ {
@@ -104,20 +107,20 @@ func TestAccountGroupIDsListPastTheOSUserLimit(t *testing.T) {
 			listing = listErr
 		}
 		gotArgs = nil
-		got, err := platformAccountGroupIDs(context.Background(), runWith(437, 0), account, ids, listing)
+		got, err := platformAccountGroupIDs(context.Background(), runWith(437, 0), account, ids, listing, nil)
 		if err != nil || len(got) != 437 || got[0] != "20" || strings.Join(gotArgs, " ") != "-G -- alice" {
 			t.Fatalf("%s: ids = %d, err = %v, id args %v; want the 437 groups once each from id -G -- alice", name, len(got), err, gotArgs)
 		}
-		if _, err := platformAccountGroupIDs(context.Background(), runWith(3, 1), account, ids, listing); err == nil {
+		if _, err := platformAccountGroupIDs(context.Background(), runWith(3, 1), account, ids, listing, nil); err == nil {
 			t.Fatalf("%s: a failing id answered with the os/user list", name)
 		}
 	}
 	whole := []string{"20", "12", "61"}
 	gotArgs = nil
-	if got, err := platformAccountGroupIDs(context.Background(), runWith(1, 1), account, whole, nil); err != nil || len(got) != 3 || gotArgs != nil {
+	if got, err := platformAccountGroupIDs(context.Background(), runWith(1, 1), account, whole, nil, nil); err != nil || len(got) != 3 || gotArgs != nil {
 		t.Fatalf("a list below the buffer = %v, %v (id args %v); want it as is without running id", got, err, gotArgs)
 	}
-	if _, err := platformAccountGroupIDs(context.Background(), runWith(maxDirectoryGroups+1, 0), account, nil, listErr); err == nil {
+	if _, err := platformAccountGroupIDs(context.Background(), runWith(maxDirectoryGroups+1, 0), account, nil, listErr, nil); err == nil {
 		t.Fatal("an account in more than maxDirectoryGroups groups listed")
 	}
 }

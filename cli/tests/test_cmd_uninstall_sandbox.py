@@ -43,6 +43,17 @@ class SandboxTeardownTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        home = patch.dict(
+            os.environ,
+            {
+                "HOME": self._tmp.name,
+                "USERPROFILE": self._tmp.name,
+                "XDG_CONFIG_HOME": os.path.join(self._tmp.name, ".config"),
+                "XDG_STATE_HOME": os.path.join(self._tmp.name, ".local", "state"),
+            },
+        )
+        home.start()
+        self.addCleanup(home.stop)
         self.gateway = os.path.join(self._tmp.name, "defenseclaw-gateway")
         Path(self.gateway).write_text("#!/bin/sh\n")
 
@@ -51,6 +62,8 @@ class SandboxTeardownTests(unittest.TestCase):
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             os.mkdir(os.path.join(data_dir, "sandboxes"))
             Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
+            self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
+            Path(data_dir, "sandboxes", "owned-sandbox", "run.json").write_text("{}")
             self.assertTrue(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "win32"))
         enabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": True, "wrappers": []})()})()
@@ -83,7 +96,9 @@ class SandboxTeardownTests(unittest.TestCase):
             ' {"name": "copy-one", "workdir_mode": "copy", "phase": "stopped"}]}'
         )
         with patch("subprocess.run", return_value=_completed(stdout=listed)) as run:
-            live = cmd_uninstall._live_mounted_sandboxes(self.gateway)
+            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+        live = cmd_uninstall._live_mounted_sandboxes(rows)
+        self.assertEqual(error, "")
         self.assertEqual(run.call_args.args[0], [self.gateway, "sandbox", "list", "--output", "json"])
         self.assertEqual(live, ("edge-ub-uninstall",))
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name, live_sandboxes=live)
@@ -95,7 +110,9 @@ class SandboxTeardownTests(unittest.TestCase):
             " ".join(buf.getvalue().split()),
         )
         with patch("subprocess.run", return_value=_completed(returncode=1)):
-            self.assertEqual(cmd_uninstall._live_mounted_sandboxes(self.gateway), ())
+            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+        self.assertEqual(cmd_uninstall._live_mounted_sandboxes(rows), ())
+        self.assertIn("`sandbox list` failed", error)
 
     def test_teardown_runs_before_the_sidecar_stops(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
@@ -214,6 +231,7 @@ class SandboxTeardownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             os.mkdir(os.path.join(data_dir, "sandboxes"))
             Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
+            Path(data_dir, "sandboxes", "owned-sandbox", "run.json").write_text("{}")
             with (
                 patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(data_dir)),
                 patch.object(
@@ -263,6 +281,47 @@ class SandboxTeardownTests(unittest.TestCase):
         with patch("subprocess.run") as run, capture_click_output():
             cmd_uninstall._sandbox_teardown(plan)
         run.assert_not_called()
+
+
+class SandboxTeardownReceiptTests(unittest.TestCase):
+    """#1096/GAP-1073: the way on keeps the teardown receipt."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.gateway = os.path.join(self.tmp.name, "defenseclaw-gateway")
+        Path(self.gateway).write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def _failure(self, **plan_fields):
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway, **plan_fields)
+
+        def fake_run(argv, **_kwargs):
+            if argv[-1] == "--help":
+                return _completed(stdout="--keep-images\n")
+            return _completed(
+                returncode=1,
+                stdout="  ✗ remove images: Cannot connect to the Docker daemon; rerun with --keep-images\n",
+            )
+
+        with patch("subprocess.run", side_effect=fake_run), capture_click_output() as buf:
+            with self.assertRaises(click.ClickException) as ctx:
+                cmd_uninstall._sandbox_teardown(plan)
+        return ctx.exception.message, buf.getvalue()
+
+    def test_an_uninstall_that_removes_the_data_keeps_the_receipt_on_the_way_on(self):
+        # With --all, --skip-sandbox-teardown also deleted the receipt a later
+        # teardown restores the OpenShell gateway configuration from.
+        for fields in ({"remove_data_dir": True}, {"remove_binaries": True}):
+            message, printed = self._failure(**fields)
+            self.assertIn("without --all or --binaries", message)
+            self.assertIn("the receipt teardown restores the OpenShell gateway configuration from", message)
+            self.assertNotIn("to leave the sandboxes for a later teardown", message)
+            self.assertIn("without --all or --binaries", printed)
+
+    def test_an_uninstall_that_keeps_the_data_still_offers_the_skip(self):
+        message, printed = self._failure()
+        self.assertIn("rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown", message)
+        self.assertIn("rerun uninstall with --skip-sandbox-teardown", printed)
 
 
 if __name__ == "__main__":

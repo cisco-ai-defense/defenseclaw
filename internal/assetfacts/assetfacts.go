@@ -63,6 +63,11 @@ type Facts struct {
 	// that exist in the skill folders of its agent, found as the user. The
 	// gateway takes only folders it would look at itself (GAP-1212).
 	SkillDirs []string `json:"skill_dirs,omitempty"`
+	// SkillsTruncated says Skills holds only the first maxSkills claims: a
+	// folder the request reaches into may declare a name no claim names, so
+	// a gateway that cannot read it cannot prove it is not a denied skill
+	// (GAP-1303).
+	SkillsTruncated bool `json:"skills_truncated,omitempty"`
 }
 
 // SourceCommandLine marks an MCP definition read from the agent's command
@@ -93,7 +98,7 @@ type MCPServer struct {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -125,7 +130,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -143,7 +148,11 @@ func bounded(facts Facts) Facts {
 	var skills []Skill
 	for _, skill := range facts.Skills {
 		folder, declared := clean(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
-		if folder == "" || declared == "" || len(skills) == maxSkills {
+		if folder == "" || declared == "" {
+			continue
+		}
+		if len(skills) == maxSkills {
+			facts.SkillsTruncated = true
 			continue
 		}
 		skills = append(skills, Skill{Folder: folder, Declared: declared})

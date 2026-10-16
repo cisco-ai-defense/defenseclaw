@@ -1,0 +1,3 @@
+{"providers": [
+  {"name": "ACME", "domains": ["us.llm.acme.internal"], "env_keys": ["ACME_US_KEY"]}
+]}

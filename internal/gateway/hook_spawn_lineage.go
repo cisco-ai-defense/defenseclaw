@@ -542,7 +542,7 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 		meta.ParentSessionID != "" || meta.LineageProvenance == "reported" {
 		return linked
 	}
-	if _, seen := a.hookSessionStateSnapshot("copilot", meta.SessionID, ""); seen {
+	if _, seen := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); seen {
 		return meta
 	}
 	a.llmPromptMu.Lock()
@@ -573,10 +573,12 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 }
 
 func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
-	parent, ok := a.hookSessionStateSnapshot("copilot", meta.SessionID,
-		agentNodeID(meta.AgentIdentityID, "copilot", meta.SessionID, "root"))
+	// Session IDs are caller-supplied and can repeat across accounts: the
+	// parent is a session of the same agent identity and user (GAP-1047).
+	parent, ok := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID,
+		agentNodeID(meta.AgentIdentityID, "copilot", meta.SessionID, "root"), &meta)
 	if !ok {
-		if parent, ok = a.hookSessionStateSnapshot("copilot", meta.SessionID, ""); !ok {
+		if parent, ok = a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); !ok {
 			return
 		}
 	}

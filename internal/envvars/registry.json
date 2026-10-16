@@ -3344,7 +3344,7 @@
     {
       "name": "DEFENSECLAW_NO_SANDBOX",
       "category": "security_opt_out",
-      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: on a managed computer whose policy lists the agent in `required_for` the host run is still refused. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: on a managed computer whose policy lists the agent in `required_for` the host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5712,10 +5712,10 @@
     {
       "name": "DEFENSECLAW_TEST_PWSH",
       "category": "test_fixture",
-      "purpose": "Test-only path to the PowerShell 7 (pwsh) binary the Intune remediation and rule-pack kit tests run the packaging scripts with; the tests fall back to pwsh on PATH and skip when neither exists.",
-      "default": "unset",
+      "purpose": "Names the PowerShell 7 executable the MDM kit tests run the Intune remediation, uninstall-retry and rule-pack scripts with, when pwsh is not on PATH; the tests skip when neither exists.",
+      "default": "unset (pwsh or pwsh.exe from PATH)",
       "accepted_values": [
-        "absolute file path",
+        "path to a pwsh executable",
         "unset"
       ],
       "security_impact": "none",
@@ -5723,11 +5723,23 @@
       "managed": "ignore",
       "consumers": [
         {
+          "location": "cli/tests/test_mdm_kit.py",
+          "description": "Intune remediation script tests; never read by production runtime paths"
+        },
+        {
+          "location": "cli/tests/test_mdm_kit_remediation.py",
+          "description": "Intune Remediate-Detect/Remediate-Fix fixtures; never read by production runtime paths"
+        },
+        {
           "location": "cli/tests/test_intune_remediation_bundle.py",
-          "description": "Selects the pwsh binary that runs Remediate-Detect.ps1 and Remediate-Fix.ps1 against the stand-in CLI"
+          "description": "Runs Remediate-Detect.ps1 and Remediate-Fix.ps1 against the stand-in CLI in signed-bundle mode; never read by production runtime paths"
+        },
+        {
+          "location": "cli/tests/test_mdm_intune_uninstall_retry.py",
+          "description": "Runs the Intune uninstall launcher retry path against a stand-in Setup; never read by production runtime paths"
         }
       ],
-      "since": "1.0.0"
+      "since": "1.0.2"
     },
     {
       "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",

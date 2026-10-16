@@ -60,6 +60,12 @@ Windows PowerShell with `-EncodedCommand`, synchronously starts the protected
 `--event` and `--hook-contract` values. This bridge is native Windows plumbing;
 it does not use a POSIX hook shell or WSL.
 
+On managed Windows, the enumerator enrolls Codex installed with npm, the
+official `install.ps1` at its default location, or WinGet. A Codex install
+under a relocated `CODEX_HOME`, or another folder that discovery finds but
+cannot enroll, is reported as `agent_unprotected`; use one of the supported
+install locations named in [Enrollment](/docs/enterprise/enrollment#where-agents-are-found).
+
   </Tab>
 </Tabs>
 

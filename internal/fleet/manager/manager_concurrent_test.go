@@ -164,12 +164,13 @@ func TestConcurrentFleetHealth(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				if n%3 == 0 {
+				switch n % 3 {
+				case 0:
 					fm.GetFleetHealth()
-				} else if n%3 == 1 {
+				case 1:
 					hb := &Heartbeat{DeviceID: uint32(n % 10), Flags: 0}
 					fm.ProcessHeartbeat(1, 1, uint32(n%10), hb)
-				} else {
+				default:
 					fm.CheckOfflineDevices()
 				}
 			}

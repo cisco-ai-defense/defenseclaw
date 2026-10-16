@@ -166,13 +166,19 @@ DC_CONFIG_FILE="/Library/Management/DefenseClaw/config.yaml"
 The wrapper refuses a config file that is not owned by root or that another
 account can write, anywhere on its path (`mdm_untrusted_input`). The stage
 script creates the folder and the file with the right owner and mode.
+It refuses a secret containing a NUL byte as `mdm_invalid_arguments`; if Jamf
+cancels the run, it stops the lifecycle child and reports `mdm_cancelled`.
 
 ### DefenseClaw uninstall
 
 Upload `uninstall.sh` and add the same `set --` line to its settings block.
-The uninstall always removes the config, credentials, state and logs. Set
-`DC_PURGE=1` to also remove each enrolled user's `~/.defenseclaw` and per-user
-binaries.
+The uninstall always removes the config, credentials, most of the state and
+the logs. If an account keeps sandboxes, the gateway's sandbox registration
+store (`/opt/cisco/defenseclaw/runtime/sandbox`) and its key
+(`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay, root-owned,
+until the next `ensure` adopts them. Set `DC_PURGE=1` to also remove each
+enrolled user's `~/.defenseclaw`, per-user binaries and the kept sandbox store
+and key.
 
 ## Install
 
@@ -317,9 +323,13 @@ Admin, which Jamf Pro 11.7 removed
 ([Policy Payload Reference](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Policy_Payload_Reference)).
 Remove DefenseClaw with a policy that runs `DefenseClaw uninstall`. It runs
 `enterprise macos uninstall`, which stops the services, removes DefenseClaw's
-hooks and machine-policy entries, the binaries and the machine state, and
-forgets the package receipt. On a Mac without the deployment it prints a no-op result and
-exits `0`. Remove the Mac from the install and ensure policies first, and
+hooks and machine-policy entries, the binaries and most machine state, and
+forgets the package receipt. If an account keeps sandboxes,
+`/opt/cisco/defenseclaw/runtime/sandbox` and
+`/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay root-owned
+while the service account is gone; the next `ensure` adopts them. Use
+`--purge` for a clean image. On a Mac without the deployment it prints a no-op
+result and exits `0`. Remove the Mac from the install and ensure policies first, and
 remove `/Library/Management/DefenseClaw` if you no longer need the staged
 config.
 

@@ -247,6 +247,56 @@ func TestDockerfileShape(t *testing.T) {
 	}
 }
 
+// #1238: every image installs the python3 and python shims that run the
+// workload venv's interpreter (harness.WorkloadPythonShimStep), after the
+// harness's own install steps and before DefenseClaw's files, in the
+// directory that leads the harness's PATH and that the hooks' baked PATH
+// leaves out.
+func TestDockerfileInstallsThePythonShim(t *testing.T) {
+	step := harness.WorkloadPythonShimStep()
+	for _, h := range []*harness.Spec{harness.ClaudeCode, harness.Codex} {
+		c := mustContext(t, testSpec(h))
+		df := string(c.Dockerfile)
+		run := "# " + step.Comment + "\nRUN " + step.Run + "\n"
+		at := strings.Index(df, run)
+		if at < 0 || strings.Count(df, run) != 1 {
+			t.Fatalf("%s: the Dockerfile does not install the python shim once:\n%s", h.Name, df)
+		}
+		steps, err := h.InstallSteps(c.HarnessVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last := steps[len(steps)-1]; strings.Index(df, "RUN "+last.Run+"\n") > at {
+			t.Errorf("%s: the shim comes before the harness's install steps", h.Name)
+		}
+		if copyAt := strings.Index(df, "\nCOPY "); copyAt < at {
+			t.Errorf("%s: the shim comes after DefenseClaw's files", h.Name)
+		}
+	}
+	if !strings.Contains(step.Run, "dir="+"'"+harness.WorkloadPythonShimDir+"'") || !strings.HasPrefix(harness.LauncherSystemPATH, harness.WorkloadPythonShimDir+":") {
+		t.Fatalf("the shims are not in the directory that leads the harness's PATH (%s)", harness.LauncherSystemPATH)
+	}
+	if slices.Contains(strings.Split(connector.SandboxHookPATH, ":"), harness.WorkloadPythonShimDir) {
+		t.Fatalf("the hooks' baked PATH %s finds the workload's python3", connector.SandboxHookPATH)
+	}
+	if hardening := renderedHardening(t); !strings.Contains(hardening, `DEFENSECLAW_BAKED_HOOK_PATH="`+connector.SandboxHookPATH+`"`) {
+		t.Fatalf("the sandbox _hardening.sh does not bake %s", connector.SandboxHookPATH)
+	}
+}
+
+// renderedHardening is the _hardening.sh a Claude Code image carries.
+func renderedHardening(t *testing.T) string {
+	t.Helper()
+	c := mustContext(t, testSpec(harness.ClaudeCode))
+	for _, f := range c.ImageFiles {
+		if strings.HasSuffix(f.Path, "/_hardening.sh") {
+			return string(f.Data)
+		}
+	}
+	t.Fatal("no _hardening.sh in the image")
+	return ""
+}
+
 // GAP-0030: the image names the run-as uid, so whoami works in the sandbox:
 // the base image's sandbox user takes the uid and gid unless an entry has
 // them already, and a second run changes nothing.

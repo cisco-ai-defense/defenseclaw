@@ -60,6 +60,10 @@ import click
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import (
+    HOOK_CONTRACT_MANIFEST,
+    HOOK_CONTRACTS,
+    PROXY_CONNECTORS,
+    normalize_connector,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -2204,6 +2208,14 @@ _REVIEW_BLOCK_ALLOW_LISTS = (
 )
 
 
+# SQLite changes the files it opens (it can fold a WAL into the main file), so recovery
+# works on a copy of the whole archive set, never on the archive itself (GAP-0575).
+_ARCHIVE_COPY_FIRST = (
+    "Copy the archive together with its -wal, -shm and any -journal files to a new folder before you "
+    "use SQLite tools, and work on the copy."
+)
+
+
 def _moved_store_block_allow_summary(moved: Path) -> str:
     """Say what the gateway's note (internal/audit/corrupt_store.go) recorded
     about the block/allow entries it carried over from a moved store."""
@@ -2250,8 +2262,9 @@ def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
         "0.x audit store archive",
         f"the audit store DefenseClaw 0.x wrote failed SQLite's integrity check during the upgrade, so it is kept as "
         f"an archive in {archive} ({size}). 1.0 starts a new audit history after a 0.x upgrade in any case, and "
-        f"block/allow lists live in config.yaml, so they are not affected. Read it with: sqlite3 {archive} .recover; "
-        f"delete {archive} and its -wal/-shm files when you no longer need it",
+        f"block/allow lists live in config.yaml, so they are not affected. {_ARCHIVE_COPY_FIRST} "
+        f"Then read the copy with: sqlite3 <copy> .recover. Delete {archive} and its -wal, -shm and -journal "
+        "files when you no longer need them",
         r=r,
         check_id="doctor.state.audit-db-archive",
         reason_code="audit-db-0x-archive",
@@ -2284,19 +2297,22 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     newest = moved[-1]
     size = _human_size(sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()))
     count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
-    recover = f"Recover them with: sqlite3 {newest} .recover"
+    recover = f"{_ARCHIVE_COPY_FIRST} Then recover them from the copy with: sqlite3 <copy> .recover"
     if shutil.which("sqlite3") is None:
         recover += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
     _emit(
         "warn",
         "Audit store moved aside",
         f"{count} moved aside by the gateway, which {_moved_store_block_allow_summary(newest)} "
-        f"Older audit records stay in {newest} ({size}). {recover}; "
-        f"delete {newest} and its -wal/-shm files when they are no longer needed",
+        f"Older audit records stay in {newest} ({size}). {recover}. "
+        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",
         reason_code="audit-db-moved-aside",
-        remediation=f"sqlite3 {newest} .recover",
+        remediation=(
+            f"copy {newest} with its -wal, -shm and any -journal files to a new folder, "
+            "then run sqlite3 <copy> .recover on the copy"
+        ),
     )
 
 
@@ -6855,6 +6871,66 @@ def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
     return "start OpenCode (restart it if it is open) so it loads the plugin, then rerun `defenseclaw doctor`"
 
 
+# OpenCode loads every {plugin,plugins}/*.{js,ts} file of a config folder.
+_OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
+
+
+def _opencode_sibling_plugins(path: str) -> list[str]:
+    """Other OpenCode plugin files in the config folder of DefenseClaw's plugin *path*."""
+    own = os.path.realpath(path)
+    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    found: list[str] = []
+    for folder in ("plugin", "plugins"):
+        directory = os.path.join(config_dir, folder)
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if (
+                name.endswith(_OPENCODE_PLUGIN_SUFFIXES)
+                and os.path.realpath(candidate) != own
+                and os.path.isfile(candidate)
+            ):
+                found.append(candidate)
+    return found
+
+
+def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
+    """Warn in action mode when another plugin can load after DefenseClaw's.
+
+    OpenCode runs plugin hooks in load order and a later plugin can change a
+    tool call's arguments after DefenseClaw checked them, so in action mode
+    the bridge refuses every tool call while one is loaded (bridge v7). The
+    refusal reason is in the plugin's toast and in the failed tool, but
+    OpenCode's TUI shows only that the command was blocked (GAP-0469,
+    GAP-0465).
+    """
+
+    if _doctor_effective_guardrail_mode(getattr(cfg, "guardrail", None), "opencode") != "action":
+        return
+    others = _opencode_sibling_plugins(path)
+    if not others:
+        return
+    names = ", ".join(os.path.basename(other) for other in others)
+    _emit(
+        "warn",
+        "OpenCode plugin order",
+        f"other OpenCode plugins beside {path}: {names}. When OpenCode loads one after "
+        "defenseclaw.js, action mode refuses every tool call (\"later plugin argument mutations "
+        "are not observable\") and OpenCode shows only that the command was blocked",
+        r=r,
+        remediation=(
+            "move "
+            + " ".join(shlex.quote(other) for other in others)
+            + " out of the OpenCode plugin folder (a project's .opencode/plugins counts too), "
+            "or keep them and use `defenseclaw guardrail mode observe --connector opencode`; "
+            "then restart OpenCode"
+        ),
+    )
+
+
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     """Report whether the managed OpenCode bridge actually loaded.
 
@@ -8622,6 +8698,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             r=r,
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
+                _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
@@ -11418,7 +11495,7 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
         # cannot stop a background server's attempts (GAP-0313).
         remediation = (
             "attempts are recent. An agent that was already running when its DefenseClaw token "
-            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
             "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
@@ -12313,6 +12390,7 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    _check_orphaned_hook_entries(cfg, active_connector, r)
     # Surface a dead-end asset_policy.plugin.registry_required flag, which can
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
     # blocks all plugins under enforcement. (OTHER-5)
@@ -13777,12 +13855,10 @@ def _run_fixers(
     # this list. Doctor is a diagnostic — it *reports* inactive-connector
     # residue (a WARN from _check_connector_residue) but must never run
     # ``connector teardown`` as a side effect of ``--fix``, which on a
-    # multi-connector install could destroy a live connector. The
-    # _fix_connector_residue helper is retained (and still excludes the full
-    # active set) for the tracked follow-up that promotes teardown to a
-    # first-class ``defenseclaw connector teardown`` CLI surface; until then,
-    # operators run ``defenseclaw-gateway connector teardown --connector
-    # <name>`` explicitly.
+    # multi-connector install could destroy a live connector. Operators run
+    # ``defenseclaw-gateway connector teardown --connector <name>`` for
+    # residue, and ``defenseclaw setup remove <name>`` for hook entries a
+    # connector that is not configured left in its agent settings.
     specs = _doctor_repair_specs()
     known_ids = {spec.repair_id for spec in specs}
     explicit_ids = set(fix_ids)
@@ -14271,6 +14347,89 @@ def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
     return name, digest.strip() if isinstance(digest, str) else ""
 
 
+_PROMPT_BLOCKS = "blocks"
+_PROMPT_NO_HOOK = "no-hook"
+_PROMPT_SURFACE = "surface"
+_PROMPT_UNKNOWN = "unknown"
+
+# What a connector whose prompt veto depends on the client that runs its hook
+# (_PROMPT_SURFACE) does with a prompt, per client. Kiro: the IDE vetoes a
+# blocked prompt; neither kiro-cli engine does (kiro.mdx, threat-model.mdx).
+_PROMPT_SURFACE_DETAIL = {
+    "kiro": "prompts still block only in Kiro IDE; kiro-cli sends every prompt to the model and blocks tool calls only",
+}
+
+
+def _prompt_block_capability(connector: str) -> str:
+    """Whether *connector* can stop a user prompt, from the hook contract manifest.
+
+    A proxy connector's LLM proxy inspects every model request, so its
+    prompts block. A hook connector blocks prompts only when one of its
+    contract's ``block_events`` is a prompt event (the gateway's own test,
+    internal/openshell/manager/hooks.go isPromptEvent: the name contains
+    "prompt"). A connector whose contracts disagree, or that the manifest
+    does not know, gets no claim either way.
+
+    A connector without versioned contracts (Kiro) lists its events in
+    ``native_hook_inventory``, whose ``block_events`` the gateway resolves per
+    request from the hook surface that invoked it, not from the release
+    (KiroBlockEventsForSurface: an unmarked request gets the set without a
+    prompt event). A prompt event there blocks only on some of its clients:
+    surface-dependent, never "prompts still block" (GAP-0461).
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    per_surface = False
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+            per_surface = True
+    answers = {
+        any(isinstance(event, str) and "prompt" in event.lower() for event in events)
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if per_surface and answers == {True}:
+        return _PROMPT_SURFACE
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def _detection_only_prompt_clause(connector: str) -> str:
+    """The prompt half of the detection-only rule-pack warning for *connector*.
+
+    GAP-0461: the row said "prompts still block" for every connector, also
+    for OpenCode, whose user prompts reach the model because it has no hook
+    that can block one.
+    """
+    capability = _prompt_block_capability(connector) if connector else _PROMPT_UNKNOWN
+    if capability == _PROMPT_BLOCKS:
+        return "; prompts still block"
+    if capability == _PROMPT_NO_HOOK:
+        label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+        return (
+            f"; {label} has no hook that can block a prompt, so no rule stops its user prompts: "
+            "they reach the model, and only tool calls are blocked"
+        )
+    if capability == _PROMPT_SURFACE:
+        name = normalize_connector(connector)
+        label = _CONNECTOR_LABELS.get(name, connector)
+        detail = _PROMPT_SURFACE_DETAIL.get(
+            name,
+            f"whether {label} blocks a prompt depends on the client that runs its hook, "
+            "so a prompt-only rule may not stop its user prompts; tool calls are still blocked",
+        )
+        return f"; {detail}"
+    return ""
+
+
 def _emit_rule_pack_row(
     path: str,
     kind: str,
@@ -14278,6 +14437,7 @@ def _emit_rule_pack_row(
     *,
     validation_cache: dict[str, object] | None = None,
     pack: tuple[str, str] = ("", ""),
+    connector: str = "",
 ) -> None:
     """Authoritatively validate a resolved rule pack and emit one doctor row.
 
@@ -14291,6 +14451,7 @@ def _emit_rule_pack_row(
     overlay itself enables rules. *pack* is the selected ``(name, pinned
     digest)``: a custom pack whose files no longer match its pin FAILs, because
     the gateway refuses the edit and keeps the pack it loaded before.
+    *connector* picks the prompt wording of the detection-only warning.
     """
     cache_key = _rule_pack_cache_key(path)
     outcome: object
@@ -14403,7 +14564,7 @@ def _emit_rule_pack_row(
             "Rule pack",
             f"{kind} {shown_path}: {enabled_rule_count}/{rule_count} rules enabled, but "
             f"{' and '.join(problems)} with no expression: they are detection-only for tool calls "
-            "(a match is recorded, never blocked; prompts still block)",
+            f"(a match is recorded, never blocked{_detection_only_prompt_clause(connector)})",
             r=r,
             remediation=remediation,
         )
@@ -14586,6 +14747,7 @@ def _check_connector_inventory(
                 r,
                 validation_cache=rule_pack_validation_cache,
                 pack=pack,
+                connector=connector,
             )
         else:
             # No explicit rule pack → the gateway resolves the built-in
@@ -14603,6 +14765,7 @@ def _check_connector_inventory(
                     "built-in default rule pack",
                     r,
                     validation_cache=rule_pack_validation_cache,
+                    connector=connector,
                 )
             else:
                 _emit(
@@ -15301,6 +15464,123 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
+
+
+def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
+    """Flag DefenseClaw hook entries of a connector that is not configured (GAP-0009).
+
+    A rollback restores the data directory from before a connector was set
+    up, but the agent settings keep that connector's DefenseClaw hook
+    entries. They run a hook script of this data directory that the restored
+    install does not have: Claude Code then blocks every prompt. The next
+    upgrade removes them, and so does ``defenseclaw setup remove <name>``.
+    Windows registers the native launcher, not a script, so the hook entry
+    check is a POSIX one. A plugin-file connector (OpenCode, Amp) is
+    registered by DefenseClaw's managed plugin instead, which reads its
+    credential from this data directory: without it the plugin refuses every
+    tool call. That check runs on every OS. A clean install prints no row.
+    """
+    from defenseclaw import hook_integrity
+    from defenseclaw.connector_paths import connector_config_files
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return
+    hooks_dir = os.path.join(data_dir, "hooks")
+    active_set = _residue_active_set(cfg, active)
+    found: list[tuple[str, str, str]] = []  # (connector, agent config file, hook script)
+    for name, script_name in sorted(hook_integrity.HOOK_SCRIPT_NAMES.items()):
+        if os.name == "nt" or name in active_set:
+            continue
+        script = os.path.join(hooks_dir, script_name)
+        pattern = re.compile(re.escape(script) + r"(?![A-Za-z0-9._/-])")
+        for path in connector_config_files(name):
+            document = hook_integrity._read_agent_config(Path(path))
+            if document is None:
+                continue
+            if any(pattern.search(command) for command in hook_integrity._registered_commands(document)):
+                found.append((name, path, script))
+                break
+    # Nothing to say when there are none, as for ACP bindings.
+    for name, path, script in found:
+        if os.path.lexists(script):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured, and they run "
+                f"{script}, which does not exist, so the agent cannot run them (Claude Code blocks every "
+                "prompt); a rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+    plugins = {
+        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
+        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+    }
+    for name, path in sorted(plugins.items()):
+        token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
+        if not token:
+            continue
+        if os.path.lexists(token):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured, and it reads its "
+                f"credential from {token}, which does not exist, so {name} refuses every tool call; a "
+                "rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+
+
+_MANAGED_PLUGIN_MARKER = re.compile(r"// defenseclaw-managed-plugin v[1-9][0-9]*")
+_MANAGED_PLUGIN_CREDENTIAL = re.compile(r'^const DC_TOKEN_FILE = ("(?:[^"\\\r\n]|\\.)*");?\r?$', re.MULTILINE)
+_MANAGED_PLUGIN_LIMIT = 4 << 20
+
+
+def _managed_plugin_credential(path: str, hooks_dir: str) -> str:
+    """Return the credential file DefenseClaw's managed plugin at *path* reads.
+
+    Only when the plugin is DefenseClaw's (a regular file whose first line is
+    the ownership marker, the test its teardown removes it by) and the
+    credential is a file of *hooks_dir*; "" otherwise, so the operator's own
+    plugins and another data directory's plugin are never named.
+    """
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MANAGED_PLUGIN_LIMIT:
+            return ""
+        with open(path, "rb") as handle:
+            text = handle.read(_MANAGED_PLUGIN_LIMIT).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _MANAGED_PLUGIN_CREDENTIAL.search(text)
+    if match is None or not _MANAGED_PLUGIN_MARKER.fullmatch(text.split("\n", 1)[0].rstrip("\r")):
+        return ""
+    try:
+        token = json.loads(match.group(1))
+    except ValueError:
+        return ""
+    if not isinstance(token, str) or not os.path.isabs(token):
+        return ""
+    folder = os.path.normcase(os.path.normpath(os.path.dirname(token)))
+    return token if folder == os.path.normcase(os.path.normpath(os.path.abspath(hooks_dir))) else ""
 
 
 def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
@@ -17231,86 +17511,3 @@ def _fix_acp_guard_pins(
     if not done:
         return ("skip", "the ACP guard pins are current")
     return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
-
-
-def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Run ``defenseclaw-gateway connector teardown`` for every inactive
-    connector that still has artifacts on disk.
-
-    Inactive-connector residue is detected with the same logic as
-    :func:`_check_connector_residue`, then this fixer shells out to the
-    S7.2 sentinel for each residual connector. The sentinel is the
-    canonical place to do this — ``Connector.Teardown`` knows about
-    hook scripts, env files, and config patches that the residue check
-    can't reasonably enumerate. We never call the OpenClaw Python
-    helpers here because the gateway sentinel handles every connector
-    uniformly.
-    """
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if not data_dir:
-        return ("skip", "no data dir configured")
-
-    # Exclude the FULL active set so the teardown sentinel can never fire
-    # against a live connector (D7) — the same rule the residue *check* uses.
-    active_set = _residue_active_set(cfg, _active_connector(cfg))
-    inactive_residue: list[str] = []
-    for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
-        if name in active_set:
-            continue
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
-            inactive_residue.append(name)
-
-    if "openclaw" not in active_set:
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
-            inactive_residue.append("openclaw")
-        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
-        oc_path = os.path.expanduser(oc_path)
-        if oc_path and os.path.isfile(oc_path + ".pristine"):
-            inactive_residue.append("openclaw")
-
-    if not inactive_residue:
-        return ("skip", "no inactive-connector residue detected")
-
-    inactive_residue = sorted(set(inactive_residue))
-
-    if not assume_yes and not click.confirm(
-        f"    Run 'defenseclaw-gateway connector teardown' for {', '.join(inactive_residue)}?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    # The custody-checked gateway, run through the file that was checked
-    # (#643): never whatever `defenseclaw-gateway` PATH resolves first.
-    gw = _watchdog_lifecycle_executable()
-    if not gw:
-        return ("warn", "no verified defenseclaw-gateway executable is installed — install it and re-run")
-
-    cleaned: list[str] = []
-    failed: list[str] = []
-
-    for name in inactive_residue:
-        try:
-            proc = run_pinned_executable(
-                [gw, "connector", "teardown", "--connector", name],
-                capture_output=True,
-                text=True,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            failed.append(f"{name}: {exc}")
-            continue
-        if proc.returncode == 0:
-            cleaned.append(name)
-        else:
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()
-            tail = err[-1] if err else f"rc={proc.returncode}"
-            failed.append(f"{name}: {tail}")
-
-    if cleaned and not failed:
-        return ("pass", f"teardown ran for: {', '.join(cleaned)}")
-    if cleaned and failed:
-        return ("warn", f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
-    return ("warn", f"teardown failed: {'; '.join(failed)}")

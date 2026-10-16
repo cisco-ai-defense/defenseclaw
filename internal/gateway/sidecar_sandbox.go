@@ -217,7 +217,11 @@ type sandboxRuntimeDeps struct {
 	// registration and onGeneration are forwarding mode's
 	// (SandboxIngressConfig.Registration, OnGeneration).
 	registration func(sandboxauth.Binding) (string, bool)
-	onGeneration func(uint64)
+	onGeneration func(string, uint64)
+	// egressRefresh brings a sandbox's policy up to date before its egress
+	// proxy decides a new connection (egress.Options.Refresh): a managed
+	// daemon's; nil for the per-user gateway, whose policy is local.
+	egressRefresh func(context.Context, egress.Principal) *egress.Decision
 }
 
 // buildSandboxRuntime prepares the hook ingress, the egress proxy and the
@@ -312,7 +316,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
-				ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef, AlertsLow: d.AlertsLow,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {
@@ -322,20 +326,23 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			return mgr.EgressUnblock(b.ID, b.SandboxName, host)
 		},
 		EgressRefusals: func(b sandboxauth.Binding) []SandboxEgressRefusal {
-			refused := mgr.EgressRefusals(b.ID, b.SandboxName)
-			if len(refused) == 0 {
-				return nil
-			}
-			out := make([]SandboxEgressRefusal, 0, len(refused))
-			for _, r := range refused {
-				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
-					Cut: r.Cut, Sent: r.Sent, Note: r.Note})
-			}
-			return out
+			return sandboxEgressRefusalsOf(mgr.EgressRefusals(b.ID, b.SandboxName))
 		},
 	}
 	if opts.Managed {
 		ingress.Relay, ingress.Registration, ingress.OnGeneration = opts.Relay, deps.registration, deps.onGeneration
+		// The managed gateway tells the agent (#1192): the daemon sends the
+		// untold refusals with each hook call and marks the ones it told.
+		ingress.EgressRefusals = func(b sandboxauth.Binding) []SandboxEgressRefusal {
+			return sandboxEgressRefusalsOf(mgr.PendingEgressRefusals(b.ID, b.SandboxName))
+		}
+		ingress.EgressRefusalsTold = func(b sandboxauth.Binding, told []SandboxEgressRefusal) {
+			out := make([]manager.EgressRefusal, 0, len(told))
+			for _, r := range told {
+				out = append(out, manager.EgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, Note: r.Note})
+			}
+			mgr.EgressRefusalsTold(b.ID, b.SandboxName, out)
+		}
 	}
 	if err := api.SetSandboxIngress(ingress); err != nil {
 		return nil, err
@@ -351,6 +358,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
 		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),
+		Refresh: deps.egressRefresh,
 	})
 	if err != nil {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})
@@ -409,6 +417,13 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 		rt.reportMu.Unlock()
 	}()
 
+	if active, ok := rt.tel.(sandboxActiveExporter); ok {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exportSandboxActive(ctx, active, audit.SandboxActiveExportInterval)
+		}()
+	}
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
@@ -435,6 +450,45 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 	rt.api.SetSandboxController(nil)
 	rt.health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// sandboxActiveExporter is the recorder that exports the active-sandbox
+// gauge (audit.SandboxRecorder).
+type sandboxActiveExporter interface {
+	RecordActiveSandboxes(ctx context.Context) error
+}
+
+// exportSandboxActive exports the active-sandbox gauge every interval until
+// ctx ends: lifecycle records export it only when a phase changes, and a
+// running sandbox must not read as none once Prometheus marks the last point
+// stale (#1241).
+func exportSandboxActive(ctx context.Context, active sandboxActiveExporter, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if err := active.RecordActiveSandboxes(ctx); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "[sandbox] %s: export the active-sandbox gauge: %v\n", gatewaylog.ErrCodeOpenShellTelemetryFailed, err)
+			}
+		}
+	}
+}
+
+// sandboxEgressRefusalsOf is the manager's refusals as the ingress tells
+// them.
+func sandboxEgressRefusalsOf(refused []manager.EgressRefusal) []SandboxEgressRefusal {
+	if len(refused) == 0 {
+		return nil
+	}
+	out := make([]SandboxEgressRefusal, 0, len(refused))
+	for _, r := range refused {
+		out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+			Cut: r.Cut, Sent: r.Sent, Note: r.Note})
+	}
+	return out
 }
 
 // listenerLost handles the loss of the sandbox listener part (ingress or

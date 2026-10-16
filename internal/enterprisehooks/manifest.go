@@ -138,7 +138,7 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	// nothing between there and here reproves it — a swap in the read
 	// window would silently give us bytes from a different file. Re-Lstat
 	// AFTER ReadAll and require size + inode identity to still match the
-	// open handle's Stat. Same pattern as stableManagedArtifactDigest in
+	// open handle's Stat. Same pattern as stableManagedArtifactDigestWith in
 	// internal/gateway/connector/connector_state.go.
 	final, err := os.Lstat(path)
 	if err != nil {

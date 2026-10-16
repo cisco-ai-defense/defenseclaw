@@ -1,0 +1,33 @@
+config_version: 9
+data_dir: '@HOME@'
+# The config 1.0.0's upgrade (its MigrateV9) wrote from a 0.8.10 home with an
+# operator rule pack, a skill-scanner policy file (at an absolute path:
+# 1.0.0 could not upgrade one named custom) and a provider overlay that named
+# acme twice (1.0.0 kept only the first entry). The operator then wrote a
+# new legacy custom-providers.json that names acme again.
+guardrail:
+  mode: action
+  custom_packs:
+    team:
+      path: @HOME@/policies/guardrail/team
+      digest: sha256:723919560cad01dd787dcf3c97e83755fea957570c62d9970da65f944b3c5d28
+  rule_pack: team
+scanners:
+  skill_scanner:
+    policy: custom
+    policy_file:
+      path: @HOME@/skill-policy.yaml
+      digest: sha256:5c96c04167f2684aae76877470b96254b0636a029dd291f9a4d4d5194d0f6b18
+observability: {}
+update:
+  check: false
+llm_providers:
+  custom:
+    - name: acme
+      domains:
+        - llm.acme.internal
+      env_keys:
+        - ACME_KEY
+      base_url: https://llm.acme.internal/v1
+      available_models:
+        - acme-small

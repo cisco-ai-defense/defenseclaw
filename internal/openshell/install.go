@@ -900,12 +900,22 @@ func (i *Installer) staleCLIRemoval(e *ExistingInstall) string {
 		if sameFile(e.Path, i.PackageCLI) {
 			return ""
 		}
-	} else if home, err := os.UserHomeDir(); err != nil || !strings.HasPrefix(e.Path, home+string(filepath.Separator)) {
-		// Homebrew replaces its own CLI; only a tarball install in the
-		// home directory is left behind.
+	} else if home, err := os.UserHomeDir(); err != nil || !strings.HasPrefix(e.Path, home+string(filepath.Separator)) || i.homebrewCLI(e.Path) {
+		// Homebrew replaces its own CLI, also in a Homebrew of your own
+		// under the home directory (GAP-0391: the formula 0.1.1 in
+		// ~/homebrew was refused as installed another way); only a
+		// tarball install in the home directory is left behind.
 		return ""
 	}
 	return removeCommand(e.Path)
+}
+
+// homebrewCLI reports whether path is the openshell that the Homebrew at
+// BrewPrefix links into its bin directory, which a reinstall of the
+// formula replaces.
+func (i *Installer) homebrewCLI(path string) bool {
+	return i.GOOS == "darwin" && filepath.IsAbs(i.BrewPrefix) &&
+		filepath.Clean(path) == filepath.Join(filepath.Clean(i.BrewPrefix), "bin", DefaultBinary)
 }
 
 func removeCommand(path string) string {

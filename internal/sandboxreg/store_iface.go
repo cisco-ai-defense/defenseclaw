@@ -16,7 +16,11 @@
 
 package sandboxreg
 
-import "github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+import (
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+)
 
 // Store keeps registrations per uid: <DataDir>/sandbox/registrations/<uid>.json,
 // directory 0700 and files 0600 owned by the service account, written
@@ -43,6 +47,13 @@ type Store interface {
 	Update(uid int, r Registration) error
 	// Purge removes the whole store.
 	Purge() error
+}
+
+// GuestStore adds the managed gateway's persisted guest sighting. Read-only
+// registration views need only Store.
+type GuestStore interface {
+	Store
+	MarkGuestSeen(uid int, id string, at time.Time) error
 }
 
 // DecisionStore keeps saved decisions per uid:

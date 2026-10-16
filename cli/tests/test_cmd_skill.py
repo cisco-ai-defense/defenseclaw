@@ -4002,6 +4002,26 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         mock_info.assert_not_called()
 
 
+class TestSkillBareUnblockConfigScopes(SkillCommandTestBase):
+    """GAP-1307: a bare unblock fans out to connector rules in config.yaml alone."""
+
+    def test_bare_unblock_clears_a_config_only_connector_allow(self):
+        from defenseclaw.enforce import asset_lists
+
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.allow_for_connector("skill", "sample", "codex", "manual")
+        # The allow lives in config.yaml only: no journal row, no copy on disk.
+        self.assertIsNone(self.app.store.get_action("skill", "sample", "codex"))
+        self.assertTrue(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "codex", "allow"))
+
+        result = self.invoke(["unblock", "sample"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[skill] Unblocked 'sample' (codex).", result.output)
+        self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "codex", "allow"))
+
+
+
 if __name__ == "__main__":
     unittest.main()
 

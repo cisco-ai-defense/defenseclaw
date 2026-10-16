@@ -33,21 +33,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-var defaultEnabledRules = []map[string]string{
-	{"rule_name": "Prompt Injection"},
-	{"rule_name": "Jailbreak"},
-	{"rule_name": "PII Detection"},
-	{"rule_name": "Sensitive Data"},
-	{"rule_name": "Data Leakage"},
-	{"rule_name": "Harassment"},
-	{"rule_name": "Hate Speech"},
-	{"rule_name": "Profanity"},
-	{"rule_name": "Sexual Content & Exploitation"},
-	{"rule_name": "Social Division & Polarization"},
-	{"rule_name": "Violence & Public Safety Threats"},
-	{"rule_name": "Code Detection"},
-}
-
 const ciscoUnknownFindingID = "CISCO-UNKNOWN"
 
 // canonicalCiscoFindingID converts cloud-controlled classification and rule
@@ -246,10 +231,9 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 			//   1. legacy: "already has rules configured" /
 			//      "pre-configured"
 			//   2. preview-2026: "invalid rule name: <X>" (the
-			//      preview deployment validates the names in our
-			//      defaultEnabledRules slice against the operator's
-			//      configured rule catalog, and emits this when our
-			//      hard-coded names don't exist there)
+			//      preview deployment validates the rule names this client
+			//      sends from cisco_ai_defense.enabled_rules against the
+			//      connection's rule catalog)
 			//   3. catch-all on rules / configuration / enabled_rules
 			// In every case the right retry is to drop the `config`
 			// block — the operator's pre-configured rules on the AID
@@ -333,9 +317,10 @@ func ciscoInspectStatusError(status int) error {
 // &CiscoInspectClient{apiKey, endpoint, client}, so these must remain
 // direct fields rather than promoted via an embedded struct.
 type CiscoInspectClient struct {
-	apiKey       string
-	endpoint     string
-	timeout      time.Duration
+	apiKey   string
+	endpoint string
+	timeout  time.Duration
+	// enabledRules is nil unless an operator configured cisco_ai_defense.enabled_rules.
 	enabledRules []map[string]string
 	client       *http.Client
 
@@ -445,12 +430,8 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 	}
 
 	var rules []map[string]string
-	if len(cfg.EnabledRules) > 0 {
-		for _, r := range cfg.EnabledRules {
-			rules = append(rules, map[string]string{"rule_name": r})
-		}
-	} else {
-		rules = defaultEnabledRules
+	for _, r := range cfg.EnabledRules {
+		rules = append(rules, map[string]string{"rule_name": r})
 	}
 
 	return &CiscoInspectClient{

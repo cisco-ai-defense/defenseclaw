@@ -92,8 +92,17 @@ func launcherOffers(args []string) bool {
 		return true
 	case "help":
 		// `help` explains the sandbox tree; cobra would answer `help status`
-		// with the root help, as if status existed.
-		return len(args) == 1 || args[1] == "sandbox"
+		// with the root help, as if status existed. `help --help` is the
+		// help command's own usage: the root help lists `help`, so asking
+		// about it must answer (GAP-0471).
+		if len(args) == 1 {
+			return true
+		}
+		switch args[1] {
+		case "sandbox", "-h", "--help":
+			return true
+		}
+		return false
 	}
 	return false
 }

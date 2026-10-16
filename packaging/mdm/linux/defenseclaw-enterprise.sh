@@ -138,6 +138,8 @@ DC_SECRET_STDIN=0
 DC_STAGE=""
 DC_CHILD=""
 DC_RESULT=""
+DC_CONFIG_STAGED=""
+DC_CONFIG_ORIGIN=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
@@ -415,6 +417,37 @@ dc_stage_file() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "$label or one of its directories is not root-owned or is writable by other accounts: $src$DC_TRUST_ACL"
     fi
     dc_read_bounded "$dest" "$limit" "$label" <"$src"
+}
+
+# Read the raw credential before putting it in a shell variable, since command
+# substitution discards NUL bytes. The temporary copy is removed immediately.
+dc_read_secret() {
+    secret_input="$DC_STAGE/secret-input"
+    if [ "$DC_SECRET_STDIN" = 1 ]; then
+        (umask 077; head -c "$((DC_MAX_SECRET_BYTES + 1))" >"$secret_input")
+    else
+        case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
+        if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
+        fi
+        dc_trusted_path "$DC_SECRET_FILE" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE$DC_TRUST_ACL"
+        (umask 077; head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE" >"$secret_input")
+    fi
+    secret_bytes=$(wc -c <"$secret_input" | tr -d ' ')
+    if [ "$secret_bytes" -gt "$DC_MAX_SECRET_BYTES" ]; then
+        rm -f "$secret_input"
+        dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
+    fi
+    without_nul=$(tr -d '\000' <"$secret_input" | wc -c | tr -d ' ')
+    if [ "$secret_bytes" != "$without_nul" ]; then
+        rm -f "$secret_input"
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret contains a NUL byte"
+    fi
+    [ "$secret_bytes" != 0 ] || { rm -f "$secret_input"; dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"; }
+    secret_data=$(cat "$secret_input"; printf x)
+    secret_data=${secret_data%x}
+    rm -f "$secret_input"
 }
 
 dc_usage() {
@@ -696,6 +729,14 @@ dc_install_package() {
             [ "$arch" = "$(dpkg --print-architecture)" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .deb is for $arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(dpkg-query -W -f='${Status} ${Version}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
+            case "$installed" in
+                "install ok installed "*)
+                    installed_version=${installed#install ok installed }
+                    if dpkg --compare-versions "$version" lt "$installed_version"; then
+                        dc_fail_result "$DC_EXIT_FAILURE" downgrade_refused "package version $version is older than the installed $installed_version; nothing was installed"
+                    fi
+                    ;;
+            esac
             if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
@@ -926,9 +967,20 @@ dc_extract_payload() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive has absolute or parent-relative members"
     fi
     payload="$DC_STAGE/payload"
-    mkdir "$payload"
-    tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>/dev/null ||
+    if ! mkdir_err=$(mkdir "$payload" 2>&1 >/dev/null); then
+        available=$(df -Pk "$DC_STAGE" 2>/dev/null | awk 'END { print $4 }')
+        if printf '%s\n' "$mkdir_err" | grep -Eiq 'No space left|ENOSPC|Disk quota exceeded' || [ "$available" = 0 ]; then
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_full "the staging filesystem is full at $DC_STAGE; choose a staging folder with more space"
+        fi
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "cannot create the payload staging folder $payload: $mkdir_err"
+    fi
+    if ! tar_err=$(tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>&1 >/dev/null); then
+        available=$(df -Pk "$DC_STAGE" 2>/dev/null | awk 'END { print $4 }')
+        if printf '%s\n' "$tar_err" | grep -Eiq 'No space left|ENOSPC|Disk quota exceeded' || [ "$available" = 0 ]; then
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_full "the staging filesystem is full at $DC_STAGE; choose a staging folder with more space"
+        fi
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive did not extract"
+    fi
     if [ -n "$(find "$payload" \( ! -type f ! -type d \) -o \( -type f -links +1 \) | head -n 1)" ]; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive contains links or special files"
     fi
@@ -1234,6 +1286,28 @@ dc_check_base_config() {
     done
 }
 
+# Replace the private staging path in the version-8 warning with the source
+# the administrator actually supplied.
+dc_relabel_config_source() {
+    [ -n "$DC_CONFIG_STAGED" ] && [ -n "$DC_CONFIG_ORIGIN" ] || return 0
+    grep -q '"code": "config_version_8"' "$DC_RESULT" || return 0
+    DC_AWK_OLD=$(dc_json_escape "$DC_CONFIG_STAGED")
+    DC_AWK_NEW=$(dc_json_escape "$DC_CONFIG_ORIGIN")
+    export DC_AWK_OLD DC_AWK_NEW
+    awk '
+        BEGIN { old = ENVIRON["DC_AWK_OLD"]; source = ENVIRON["DC_AWK_NEW"]; warning = 0 }
+        /"code"[[:space:]]*:[[:space:]]*"config_version_8"/ { warning = 1 }
+        {
+            if (warning && (at = index($0, old)) > 0) {
+                $0 = substr($0, 1, at - 1) source substr($0, at + length(old))
+                warning = 0
+            }
+            print
+        }
+    ' "$DC_RESULT" >"$DC_STAGE/result-source.json"
+    DC_RESULT="$DC_STAGE/result-source.json"
+}
+
 # dc_put_anchors <src>: atomically replace the trust anchor file with src
 # (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
 dc_put_anchors() {
@@ -1301,6 +1375,7 @@ dc_restore_anchors() {
 # this wrapper writes to stdout on success or on a lifecycle failure.
 dc_emit_result() {
     [ -n "$DC_RESULT" ] || return 0
+    dc_relabel_config_source
     dc_print_result <"$DC_RESULT"
     dc_log "result $(tr -d '\n' <"$DC_RESULT")"
 }
@@ -1313,8 +1388,11 @@ dc_run_lifecycle() {
     shift
     result="$DC_STAGE/result.json"
     set +e
-    "$gateway" enterprise "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null
+    "$gateway" enterprise "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
     status=$?
+    DC_CHILD=""
     set -e
     if [ -s "$result" ]; then
         DC_RESULT=$result
@@ -1356,7 +1434,7 @@ dc_main() {
     dc_sweep_stages "$DC_STAGE_PARENT"
     DC_STAGE=$(mktemp -d "$DC_STAGE_PARENT/defenseclaw-mdm.XXXXXX")
     trap dc_cleanup EXIT
-    trap 'dc_stop_child; exit 1' HUP INT TERM
+    trap 'dc_stop_child; dc_fail_result "$DC_EXIT_FAILURE" mdm_cancelled "the MDM run was cancelled; the lifecycle was stopped"' HUP INT TERM
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
     printf '%s\n' "$$" >"$DC_STAGE/pid"
@@ -1374,17 +1452,21 @@ dc_main() {
     config=""
     if [ "$DC_CONFIG_STDIN" = 1 ]; then
         config="$DC_STAGE/config.yaml"
+        DC_CONFIG_ORIGIN="MDM standard input"
         dc_read_bounded "$config" "$DC_MAX_CONFIG_BYTES" "config"
     elif [ -n "$DC_CONFIG_FILE" ]; then
         config="$DC_STAGE/config.yaml"
+        DC_CONFIG_ORIGIN=$DC_CONFIG_FILE
         dc_stage_file "$DC_CONFIG_FILE" "$config" "$DC_MAX_CONFIG_BYTES" "config" trusted
     else
         inline="$DC_STAGE/inline-config.yaml"
         dc_inline_config >"$inline"
         if grep -q '[^[:space:]]' "$inline"; then
             config=$inline
+            DC_CONFIG_ORIGIN="MDM inline config"
         fi
     fi
+    DC_CONFIG_STAGED=$config
     bundle=""
     if [ -n "$DC_BUNDLE_FILE" ]; then
         bundle="$DC_STAGE/policy.dcbundle"
@@ -1414,24 +1496,11 @@ dc_main() {
         anchors="$DC_STAGE/bundle-anchors.json"
         dc_inline_trust_anchors | dc_read_bounded "$anchors" "$DC_MAX_ANCHORS_BYTES" "trust anchor file"
     fi
-    # The credential stays in memory and reaches the lifecycle through a
-    # pipe: a staged copy outlived a run killed before its cleanup.
+    # After a raw-byte check, the credential stays in memory and reaches the
+    # lifecycle through a pipe. No staged copy remains during the lifecycle.
     secret_data=""
     if [ -n "$DC_SECRET_NAME" ]; then
-        if [ "$DC_SECRET_STDIN" = 1 ]; then
-            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))")
-        else
-            case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
-            if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
-                dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
-            fi
-            dc_trusted_path "$DC_SECRET_FILE" ||
-                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE$DC_TRUST_ACL"
-            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE")
-        fi
-        [ "$(printf '%s' "$secret_data" | wc -c | tr -d ' ')" -le "$DC_MAX_SECRET_BYTES" ] ||
-            dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
-        [ -n "$secret_data" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
+        dc_read_secret
     fi
 
     DC_CHANNEL_FLAG=""

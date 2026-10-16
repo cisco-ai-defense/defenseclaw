@@ -99,6 +99,10 @@ class _GatewayConfigRecorder:
             self._emit_with_token(payload, gateway, refreshed)
             self._runtime_token = refreshed
 
+    def keep_token(self, token: str) -> None:
+        """Send the next facts with *token* first (:meth:`Logger.keep_gateway_token`)."""
+        self._runtime_token = token or None
+
     def _emit_with_token(
         self,
         payload: Mapping[str, Any],
@@ -190,6 +194,30 @@ def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
     return next((values.get(name, "") for name in candidates if values.get(name)), "")
 
 
+def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: str) -> None:
+    """Keep *logger* on *running*, the token the running gateway loaded, when a command saves *saved*.
+
+    A new gateway token takes effect when the gateway starts again. Until
+    then the running gateway accepts only the token it started with, so a
+    command that saved a new token and then sent its own audit event with it
+    got 401 and failed after the change was saved: ``setup openclaw
+    --no-restart`` and ``setup gateway --token`` (GAP-0464), an ``init``
+    re-run or the guided first run adopting the OpenClaw token (GAP-0490).
+    Nothing changes when the tokens match or no gateway runs: a stopped
+    gateway starts on the saved token. Call it before the new token is saved.
+    """
+
+    if not running or running == saved or not data_dir:
+        return
+    from defenseclaw.process_liveness import pid_file_alive
+
+    if not pid_file_alive(os.path.join(data_dir, "gateway.pid")):
+        return
+    keep = getattr(logger, "keep_gateway_token", None)
+    if callable(keep):
+        keep(running)
+
+
 class _NoRuntimeRecorder:
     """Explicit bootstrap/recovery capability: no buffering and no writes."""
 
@@ -219,6 +247,17 @@ class Logger:
         if cfg is None or getattr(cfg, "gateway", None) is None:
             raise CanonicalObservabilityError("gateway configuration is unavailable")
         return cls(_GatewayConfigRecorder(cfg))
+
+    def keep_gateway_token(self, token: str) -> None:
+        """Authenticate this process's facts with *token*, the one the running gateway loaded.
+
+        Call it through :func:`keep_running_gateway_token`. A gateway that
+        restarted on the new token still admits the facts: a 401 retries once
+        with the token saved in the data directory.
+        """
+        keep = getattr(self._recorder, "keep_token", None)
+        if token and callable(keep):
+            keep(token)
 
     @classmethod
     def no_runtime(cls) -> Logger:

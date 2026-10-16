@@ -12,8 +12,8 @@
 
 Verifies that ``defenseclaw doctor`` detects when an inactive connector
 has left state behind (backup files, hook scripts), and that
-``--fix`` mode delegates to ``defenseclaw-gateway connector teardown``
-for each residual connector.
+the row names ``defenseclaw-gateway connector teardown`` for each
+residual connector (``--fix`` never tears a connector down).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -34,7 +34,6 @@ from defenseclaw.commands.cmd_doctor import (
     _CONNECTOR_RESIDUE_ARTIFACTS,
     _check_connector_residue,
     _DoctorResult,
-    _fix_connector_residue,
 )
 
 
@@ -169,131 +168,6 @@ class CheckConnectorResidueTests(unittest.TestCase):
         self.assertEqual(r.warned, 1)
 
 
-class FixConnectorResidueTests(unittest.TestCase):
-    def _cfg_with_residue(self, data_dir: str, *files: str):
-        for f in files:
-            with open(os.path.join(data_dir, f), "w") as fh:
-                fh.write("{}")
-        cfg = _cfg(data_dir)
-        cfg.active_connector = lambda: "openclaw"
-        cfg.guardrail = SimpleNamespace(connector="openclaw")
-        return cfg
-
-    def test_skip_when_no_residue(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg_with_residue(data_dir)
-            tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "skip")
-        self.assertIn("no inactive-connector residue", detail)
-
-    def test_calls_gateway_teardown_for_each_residual(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg_with_residue(
-                data_dir, "codex_backup.json", "claudecode_backup.json",
-            )
-            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                run_mock.return_value.returncode = 0
-                run_mock.return_value.stdout = ""
-                run_mock.return_value.stderr = ""
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "pass", msg=detail)
-        # Both connectors must have been torn down.
-        self.assertEqual(run_mock.call_count, 2)
-        called_args = [c.args[0] for c in run_mock.call_args_list]
-        connectors = [args[args.index("--connector") + 1] for args in called_args]
-        self.assertEqual(set(connectors), {"codex", "claudecode"})
-
-    def test_calls_gateway_teardown_for_every_native_connector_receipt(self):
-        native_connectors = {
-            "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-            "hermes", "omnigent", "opencode",
-            legacy_connector.RETIRED_DESKTOP_ID,
-        }
-        with tempfile.TemporaryDirectory() as data_dir:
-            for name in native_connectors:
-                marker = os.path.join(data_dir, _CONNECTOR_RESIDUE_ARTIFACTS[name][0])
-                os.makedirs(os.path.dirname(marker), exist_ok=True)
-                with open(marker, "w", encoding="utf-8") as fh:
-                    fh.write("{}")
-            cfg = self._cfg_with_residue(data_dir)
-            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="defenseclaw-gateway.exe"), \
-                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                run_mock.return_value.returncode = 0
-                run_mock.return_value.stdout = ""
-                run_mock.return_value.stderr = ""
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-
-        self.assertEqual(tag, "pass", msg=detail)
-        called = {
-            call.args[0][call.args[0].index("--connector") + 1]
-            for call in run_mock.call_args_list
-        }
-        self.assertEqual(called, native_connectors)
-
-    def test_calls_gateway_teardown_for_managed_residual(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            managed = os.path.join(
-                data_dir,
-                "connector_backups",
-                "codex",
-                "config.toml.json",
-            )
-            os.makedirs(os.path.dirname(managed), exist_ok=True)
-            with open(managed, "w") as fh:
-                fh.write("{}")
-            cfg = self._cfg_with_residue(data_dir)
-            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                run_mock.return_value.returncode = 0
-                run_mock.return_value.stdout = ""
-                run_mock.return_value.stderr = ""
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "pass", msg=detail)
-        run_mock.assert_called_once()
-        args = run_mock.call_args.args[0]
-        self.assertEqual(args[args.index("--connector") + 1], "codex")
-
-    def test_warns_when_gateway_binary_missing(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg_with_residue(data_dir, "codex_backup.json")
-            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value=None):
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "warn")
-        self.assertIn("no verified defenseclaw-gateway", detail)
-
-    def test_partial_success_when_one_teardown_fails(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg_with_residue(
-                data_dir, "codex_backup.json", "claudecode_backup.json",
-            )
-            with patch.object(cmd_doctor, "_watchdog_lifecycle_executable", return_value="/usr/bin/defenseclaw-gateway"), \
-                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                def side_effect(args, **_kwargs):
-                    rv = MagicMock()
-                    name = args[args.index("--connector") + 1]
-                    rv.returncode = 0 if name == "codex" else 1
-                    rv.stdout = ""
-                    rv.stderr = "boom" if rv.returncode else ""
-                    return rv
-                run_mock.side_effect = side_effect
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "warn")
-        self.assertIn("partial", detail)
-        self.assertIn("codex", detail)
-        self.assertIn("claudecode", detail)
-
-    def test_declined_by_user_skips(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg_with_residue(data_dir, "codex_backup.json")
-            with patch("click.confirm", return_value=False), \
-                 patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                tag, detail = _fix_connector_residue(cfg, assume_yes=False)
-        self.assertEqual(tag, "skip")
-        self.assertIn("declined", detail)
-        run_mock.assert_not_called()
-
-
 class MultiConnectorResidueTests(unittest.TestCase):
     """D7: residue is decided against the FULL ``active_connectors()`` set, not
     just the singular primary, so a multi-connector install never flags (or
@@ -335,21 +209,6 @@ class MultiConnectorResidueTests(unittest.TestCase):
         self.assertIn("claudecode", detail)
         # codex is active — it must not appear as a residue group.
         self.assertNotIn("codex:", detail)
-
-    def test_fixer_skips_active_connector(self):
-        """The teardown helper must also exclude the full active set so it can
-        never shell ``connector teardown`` against a live connector."""
-        with tempfile.TemporaryDirectory() as data_dir:
-            with open(os.path.join(data_dir, "codex_backup.json"), "w") as fh:
-                fh.write("{}")
-            cfg = self._cfg_multi(data_dir, ["hermes", "codex"])
-            cfg.active_connector = lambda: "hermes"
-            cfg.guardrail = SimpleNamespace(connector="hermes")
-            with patch.object(cmd_doctor, "run_pinned_executable") as run_mock:
-                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
-        self.assertEqual(tag, "skip")
-        self.assertIn("no inactive-connector residue", detail)
-        run_mock.assert_not_called()
 
 
 class ResidueArtifactsContractTests(unittest.TestCase):

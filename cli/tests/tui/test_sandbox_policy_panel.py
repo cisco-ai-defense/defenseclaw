@@ -133,6 +133,18 @@ def test_policy_pairs_follow_the_plan() -> None:
     assert refused["Policy id"].endswith("access: contact your IT help desk")
 
 
+def test_exempt_policy_pairs_use_the_gateway_host_run_gate() -> None:
+    exempt = dict(managed_policy_pairs({**EXPLAIN, "host_run_gate": "exempt", "enrollment_exempt": True}, NOW))
+    assert exempt["Required"] == (
+        "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
+        "claude and codex may also run on this computer outside a sandbox, where their calls are still inspected and logged"
+    )
+    refused = dict(managed_policy_pairs({**EXPLAIN, "host_run_gate": "refused"}, NOW))
+    assert refused["Required"] == "claude and codex run only in a sandbox on this computer"
+    empty = dict(managed_policy_pairs({**EXPLAIN, "host_run_gate": "", "required_for": []}, NOW))
+    assert empty["Required"] == "no agent has to run in a sandbox"
+
+
 def test_the_explain_sets_the_switches_instead_of_the_local_file() -> None:
     # The local admin read is gone on a managed computer.
     cfg = SimpleNamespace(
@@ -251,6 +263,13 @@ def test_only_an_answer_with_the_managed_object_is_the_users_policy() -> None:
     assert dict(model.policy_pairs(NOW))["Required"].startswith("claude and codex")
 
 
+def test_an_exempt_account_can_run_on_the_host_when_sandboxes_are_disallowed() -> None:
+    pairs = dict(managed_policy_pairs({**EXPLAIN, "allowed": False, "host_run_gate": "exempt"}, NOW))
+    assert "doesn't allow sandboxes" in pairs["Sandboxes"]
+    assert "required_for doesn't apply" in pairs["Required"]
+    assert "outside a sandbox" in pairs["Required"]
+
+
 def test_a_failed_policy_read_backs_off_before_the_next_try() -> None:
     model = _model()
     assert model.managed_explain_due(100.0)
@@ -308,3 +327,18 @@ async def test_the_policy_section_fits_80x24_and_e_opens_it(managed_daemon) -> N
         assert screen.query_one("#sandbox-detail-close").region.bottom <= 24
         await pilot.press("escape")
         await pilot.pause()
+
+
+def test_the_approvals_row_matches_what_approve_always_does() -> None:
+    # GAP-0169 (#1200): under allow_unblock: false the managed gateway refuses
+    # approve --always, so an approval lasts this session only, as `sandbox
+    # policy explain` says.
+    def row(approvals: str, unblock: bool) -> str:
+        return dict(managed_policy_pairs({**EXPLAIN, "user_approvals": approvals, "allow_unblock": unblock}, NOW))["Approvals"]
+
+    assert row("", True) == "you may approve asks for a session or for good"
+    assert row("", False) == "you may approve asks for this session only; you can't unblock destinations"
+    assert row("session", True) == "you may approve asks for this session only"
+    assert row("session", False) == "you may approve asks for this session only; you can't unblock destinations"
+    assert row("none", True) == "you can't approve asks; they are refused"
+    assert row("none", False) == "you can't approve asks; they are refused; you can't unblock destinations"

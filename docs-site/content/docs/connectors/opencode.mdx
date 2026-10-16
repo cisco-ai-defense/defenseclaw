@@ -267,7 +267,7 @@ covers setup, the session and every flag. The first run builds the OpenCode
 image; `defenseclaw sandbox image build opencode` builds it ahead of time.
 `defenseclaw sandbox setup` builds the images of the harnesses in
 `openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
-replaces that list, so name every harness you want:
+adds to that list:
 `defenseclaw sandbox setup --harness claudecode --harness codex --harness opencode`.
 
 - **User tier.** The hooks are a root-owned bridge plugin registered from
@@ -276,11 +276,12 @@ replaces that list, so name every harness you want:
   other plugin and custom tool into the same process, where one could answer
   for the bridge. So the launcher refuses to start, naming the file, while
   any other plugin or custom tool would load, and refuses `--pure`, which
-  loads none. The refusal also gives the commands that remove the file from
-  your machine (`defenseclaw sandbox start <name> && defenseclaw sandbox exec
-  <name> -- rm <file>`, then `defenseclaw sandbox connect <name>`); the
-  refused start does not appear in `sandbox activity`, as the launcher has no
-  way to report there. DefenseClaw also reports a sandbox whose hooks go
+  loads none. The refusal names the conflicting configuration. Remove an
+  operator-added plugin or custom tool in its owning configuration before
+  starting the sandbox again. The managed config is root-owned, so a user-tier
+  hook-removal silence check is unavailable; that positive check is untested.
+  The refused start does not appear in `sandbox activity`, as the launcher has
+  no way to report there. DefenseClaw also reports a sandbox whose hooks go
   silent while the harness is active.
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
   command line only, in red, and shows the reason only when you click that

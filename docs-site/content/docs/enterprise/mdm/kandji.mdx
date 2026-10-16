@@ -197,6 +197,9 @@ config into a root-only staging folder and runs `enterprise macos ensure` with
 it. `ensure` applies a changed config, repairs drift, or does nothing when the
 Mac already matches, and the wrapper exits with its code. So the audit passes
 when the Mac matches, and a failure raises an alert.
+The wrapper refuses a secret containing a NUL byte as
+`mdm_invalid_arguments`. A cancelled run stops its lifecycle child and reports
+`mdm_cancelled`; inspect the deployment before retrying.
 
 The script is its own audit because `detect.sh` does not compare configs. An
 audit built on it would keep passing after you change the config, and the
@@ -303,9 +306,13 @@ Remove the DefenseClaw Library Items from the Blueprints first. Then run
 `uninstall.sh` once as a Mac Custom Script (**Install once per device**, or on
 demand from Self Service). It runs `enterprise macos uninstall`, which stops
 the services, removes DefenseClaw's hooks and machine-policy entries, the
-binaries and the machine state (config, credentials, state and logs), and
-forgets the package receipt. Set `DC_PURGE=1` in its settings block to also
-remove each enrolled user's `~/.defenseclaw` and per-user binaries. On a Mac without the deployment it prints a no-op result and
+binaries and most of the machine state (config, credentials, state and logs),
+and forgets the package receipt. If an account keeps sandboxes, the gateway's
+sandbox registration store (`/opt/cisco/defenseclaw/runtime/sandbox`) and its
+key (`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay,
+root-owned, until the next `ensure` adopts them. Set `DC_PURGE=1` in its
+settings block to also remove each enrolled user's `~/.defenseclaw`, per-user
+binaries and the kept sandbox store and key. On a Mac without the deployment it prints a no-op result and
 exits `0`.
 
 ## Logs

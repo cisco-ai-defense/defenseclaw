@@ -186,9 +186,11 @@ func matchedGroupSource(_ *guardrailProfileSet, subject *profileSubject, group s
 
 // accountGroupIDs lists an OS account's group ids: os/user's listing, which
 // on macOS is read again with `id -G` when it failed or filled its 256-group
-// buffer (an account in more groups, GAP-0201).
+// buffer (an account in more groups, GAP-0201), and on macOS also each group
+// a profile assignment selects by that Open Directory confirms the account's
+// uid is in, nested memberships included (GAP-0528).
 var accountGroupIDs = func(account *osuser.User) ([]string, error) {
-	return unixidentity.AccountGroupIDs(context.Background(), account)
+	return unixidentity.AccountGroupIDsChecking(context.Background(), account, profileAssignmentGroups())
 }
 
 // profileUserEntryUnresolved says why a DOMAIN\user users entry that names

@@ -208,6 +208,49 @@ func requiredAnywhere(cfg *config.Config, connectorName string) bool {
 	return false
 }
 
+// requireSandboxHostGate is the gate's rule for a host run: "" where the
+// caller's floor does not require the connector (required: required_for
+// lists it), requireSandboxExempt for an account exempt_users lists, else
+// requireSandboxRefused, which requireSandboxDecision turns into an
+// unavailable outcome where no sandbox can run. The hook decision and every
+// policy view (enterprise policy show and verify, sandbox policy explain)
+// take the host-run answer from it, so a view never says a host run is
+// refused for an account whose host runs the hook allows (GAP-0555).
+func requireSandboxHostGate(required, exempt bool) string {
+	switch {
+	case !required:
+		return ""
+	case exempt:
+		return requireSandboxExempt
+	}
+	return requireSandboxRefused
+}
+
+// Host-run answers of RequireSandboxHostGate.
+const (
+	// RequireSandboxHostRunExempt: the floor requires it, but the account
+	// is in enterprise.enrollment.exempt_users, so its host run is allowed.
+	RequireSandboxHostRunExempt = requireSandboxExempt
+	// RequireSandboxHostRunRefused: the host run is refused (or, where no
+	// sandbox can run, handled by when_unavailable).
+	RequireSandboxHostRunRefused = requireSandboxRefused
+)
+
+// RequireSandboxHostGate is requireSandboxHostGate for connectorName under a
+// floor that requires requiredFor, for the administrator's policy views.
+func RequireSandboxHostGate(requiredFor []string, connectorName string, exempt bool) string {
+	return requireSandboxHostGate(connectorListed(requiredFor, config.NormalizeConnectorName(connectorName)), exempt)
+}
+
+// EnrollmentExemptFromSandbox reports whether enrollment exempts the Unix
+// account uid/name from required_for as the hook socket does
+// (managedHookAuthorizer.hostRunExempt): by its uid or account name, and in
+// the gateway by its verified directory facts. A view that can't ask the
+// gateway uses it.
+func EnrollmentExemptFromSandbox(enrollment config.EnterpriseEnrollmentConfig, uid int, name string) bool {
+	return (&managedHookAuthorizer{enrollment: enrollment}).hostRunExempt(managedHookPeer{UID: uid, Name: name})
+}
+
 // requireSandboxExemptUser reports an account enterprise.enrollment.exempt_users
 // lists: the hook socket marks it (managedHookPeerAuth); a per-user
 // credential (Windows) is matched here, as Windows enrollment matches it
@@ -341,10 +384,13 @@ func (a *APIServer) requireSandboxDecision(ctx context.Context, connectorName, e
 		}
 		return requireSandboxOutcome{}
 	}
-	if !connectorListed(floor.RequiredFor, connectorName) {
+	// The exemption is looked up only for a required connector (on Windows
+	// it can take an account lookup).
+	required := connectorListed(floor.RequiredFor, connectorName)
+	switch requireSandboxHostGate(required, required && requireSandboxExemptUser(ctx, cfg)) {
+	case "":
 		return requireSandboxOutcome{}
-	}
-	if requireSandboxExemptUser(ctx, cfg) {
+	case requireSandboxExempt:
 		return requireSandboxOutcome{Outcome: requireSandboxExempt}
 	}
 	// A floor from the default profile only because the directory lookup

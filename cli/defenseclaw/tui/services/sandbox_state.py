@@ -1342,6 +1342,18 @@ def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -
     required = [harness_command(_text(name)) for name in _list(explain.get("required_for"))]
     if explain.get("allowed") is False:
         pairs.append(("Sandboxes", "your organization doesn't allow sandboxes for you"))
+        if required and explain.get("host_run_gate") == "exempt":
+            pairs.append((
+                "Required",
+                "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
+                f"{_and_list(required)} may run on this computer outside a sandbox, where their calls are still inspected and logged",
+            ))
+    elif required and explain.get("host_run_gate") == "exempt":
+        pairs.append((
+            "Required",
+            "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
+            f"{_and_list(required)} may also run on this computer outside a sandbox, where their calls are still inspected and logged",
+        ))
     elif required:
         required_text = f"{_and_list(required)} run only in a sandbox on this computer"
         if explain.get("when_unavailable") == "alert":
@@ -1369,10 +1381,16 @@ def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -
         egress.append(f"{len(blocked)} {noun} always blocked ({_host_list(blocked)})")
     pairs.append(("Egress", "; ".join(egress) or "your organization limits no hosts; the pack's network rules apply"))
 
-    approvals = {
-        "none": "you can't approve asks; they are refused",
-        "session": "you may approve asks for this session only",
-    }.get(_text(explain.get("user_approvals")), "you may approve asks for a session or for good")
+    # What the managed gateway allows (sandboxreg.CheckApprovals), as `sandbox
+    # policy explain` says: under allow_unblock: false an approval lasts this
+    # session only and approve --always is refused (#1200, GAP-0169).
+    user_approvals = _text(explain.get("user_approvals"))
+    if user_approvals == "none":
+        approvals = "you can't approve asks; they are refused"
+    elif user_approvals == "session" or explain.get("allow_unblock") is False:
+        approvals = "you may approve asks for this session only"
+    else:
+        approvals = "you may approve asks for a session or for good"
     if explain.get("allow_unblock") is False:
         approvals += "; you can't unblock destinations"
     pairs.append(("Approvals", approvals))

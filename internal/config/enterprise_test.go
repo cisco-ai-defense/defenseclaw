@@ -12,6 +12,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -99,34 +100,42 @@ func TestSecureClientFleetRejectedFromRuntimeConfigSource(t *testing.T) {
 	}
 }
 
-func TestSecureClientFleetSourcePreflight(t *testing.T) {
-	t.Setenv(managed.DeploymentModeEnv, "")
-	t.Setenv(managed.EnterpriseProfileEnv, "")
+// TestStandaloneFleetSourceTrustOnlyGatesAnOptIn pins DAMAGE-678 A3: the
+// admin-protected path check #678 added to the Windows standalone lifecycle
+// must not refuse a Fleet-off config (a 1.0.1 upgrade from an Intune cache
+// or an admin-made ProgramData folder). A Fleet opt-in still needs it.
+func TestStandaloneFleetSourceTrustOnlyGatesAnOptIn(t *testing.T) {
+	untrusted := errors.New("config source is writable by Users")
 	for _, tc := range []struct {
-		name string
-		raw  string
-		want string
+		name, raw, wantError string
+		trust                error
+		wantEnabled          bool
+		wantTrustCalled      bool
 	}{
-		{"v8 disabled", "config_version: 8\nfleet:\n  enabled: false\n", ""},
-		{"v9 omitted", "config_version: 9\n", ""},
-		{"v9 standalone omitted", "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", ""},
-		{"v9 managed Secure Client", "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n", "newer DefenseClaw"},
-		{"v8 enabled", "config_version: 8\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
-		{"v9 enabled", "config_version: 9\nfleet:\n  enabled: true\n", "fleet.enabled is unsupported"},
-		{"string enabled", "config_version: 8\nfleet:\n  enabled: 'true'\n", "fleet.enabled must be a boolean"},
-		{"duplicate enabled", "config_version: 8\nfleet:\n  enabled: false\n  enabled: true\n", "duplicate"},
-		{"malformed fleet", "config_version: 8\nfleet: true\n", "fleet must be a mapping"},
+		{"1.0.1 config, untrusted folder", "config_version: 9\n", "", untrusted, false, false},
+		{"Fleet off, untrusted folder", "config_version: 9\nfleet:\n  enabled: false\n", "", untrusted, false, false},
+		{"Fleet on, untrusted folder", "config_version: 9\nfleet:\n  enabled: true\n", "writable by Users", untrusted, false, true},
+		{"Fleet on, trusted folder", "config_version: 9\nfleet:\n  enabled: true\n", "", nil, true, true},
+		{"Fleet on through an escaped key", "config_version: 9\n\"\\x66leet\": {enabled: true}\n", "writable by Users", untrusted, false, true},
+		{"malformed Fleet", "config_version: 9\nfleet: true\n", "fleet must be a mapping", untrusted, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckSecureClientFleetSource(tc.name+".yaml", []byte(tc.raw))
-			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("preflight rejected valid source: %v", err)
+			called := false
+			enabled, err := StandaloneFleetSourceEnabled("fleet.yaml", []byte(tc.raw), func() error {
+				called = true
+				return tc.trust
+			})
+			if called != tc.wantTrustCalled {
+				t.Fatalf("trust check called = %t, want %t", called, tc.wantTrustCalled)
+			}
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("preflight error = %v, want %q", err, tc.want)
+			if err != nil || enabled != tc.wantEnabled {
+				t.Fatalf("enabled = %t, error = %v; want %t", enabled, err, tc.wantEnabled)
 			}
 		})
 	}
@@ -142,6 +151,7 @@ func TestFleetEnabledFromSourceForOptionalInstallerPayload(t *testing.T) {
 		{"enabled", "config_version: 9\nfleet:\n  enabled: true\n", "", true},
 		{"wrong type", "config_version: 9\nfleet:\n  enabled: 'true'\n", "must be a boolean", false},
 		{"duplicate", "config_version: 9\nfleet:\n  enabled: false\n  enabled: true\n", "duplicate", false},
+		{"malformed", "config_version: 8\nfleet: true\n", "fleet must be a mapping", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			enabled, err := FleetEnabledFromSource("fleet.yaml", []byte(tc.raw))

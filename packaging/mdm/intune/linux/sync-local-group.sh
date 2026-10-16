@@ -44,10 +44,40 @@ fi
 current=$(getent -s files group "$GROUP_NAME" | cut -d: -f4)
 IFS=, read -ra current_members <<< "$current"
 normalize() { printf '%s\n' "$@" | sed '/^$/d' | LC_ALL=C sort -u; }
-if [[ $(normalize "${current_members[@]}") == $(normalize "${MEMBERS[@]}") ]]; then
+passwd_entries=$(getent -s files passwd) || { echo 'error: cannot read local accounts' >&2; exit 1; }
+mapfile -t primary_members < <(printf '%s\n' "$passwd_entries" | awk -F: -v gid="$gid" '$4 == gid { print $1 }')
+wanted_supplementary=()
+for user in "${MEMBERS[@]}"; do
+  primary=0
+  for member in "${primary_members[@]}"; do
+    [[ $user != "$member" ]] || primary=1
+  done
+  [[ $primary == 1 ]] || wanted_supplementary+=("$user")
+done
+unwanted_primary=()
+for member in "${primary_members[@]}"; do
+  wanted=0
+  for user in "${MEMBERS[@]}"; do
+    [[ $user != "$member" ]] || wanted=1
+  done
+  [[ $wanted == 1 ]] || unwanted_primary+=("$member")
+done
+current_all=$(normalize "${current_members[@]}" "${primary_members[@]}")
+wanted_all=$(normalize "${MEMBERS[@]}")
+current_supplementary=$(normalize "${current_members[@]}")
+wanted_supplementary_set=$(normalize "${wanted_supplementary[@]}")
+if [[ $current_all == "$wanted_all" && $current_supplementary == "$wanted_supplementary_set" ]]; then
   echo "unchanged: $GROUP_NAME"
   exit 0
 fi
-wanted=$(IFS=,; echo "${MEMBERS[*]}")
-gpasswd -M "$wanted" "$GROUP_NAME"
-echo "updated: $GROUP_NAME (${#MEMBERS[@]} member(s))"
+if [[ $current_supplementary != "$wanted_supplementary_set" ]]; then
+  wanted=$(IFS=,; echo "${wanted_supplementary[*]}")
+  gpasswd -M "$wanted" "$GROUP_NAME"
+  echo "updated: $GROUP_NAME (${#MEMBERS[@]} requested member(s))"
+fi
+if [[ ${#unwanted_primary[@]} -gt 0 ]]; then
+  for member in "${unwanted_primary[@]}"; do
+    echo "warning: $member remains in $GROUP_NAME because its primary group must be changed" >&2
+  done
+  exit 1
+fi

@@ -68,7 +68,7 @@ The `content` folder holds:
 | File | Role |
 | --- | --- |
 | `DefenseClawSetup-Enterprise-Standalone-x64.exe` | The standalone Setup |
-| `config.yaml` | Your administrator config. The packager refuses one with an inline `api_key`. |
+| `config.yaml` | Your administrator `config_version: 9` config. The packager refuses version 8 because migration changes the pinned detection hash; it also refuses an inline `api_key`. |
 | `Install-DefenseClawIntune.ps1` | The launcher that runs as the installation program |
 | `intune-package.json` | The SHA-256 pins of the Setup and the config |
 

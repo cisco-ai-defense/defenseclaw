@@ -168,7 +168,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	// alice is enrolled per user for Codex only.
 	perUser := map[string]map[string]bool{"alice": {"codex": true}}
-	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now, enterprisehooks.Manifest{}, perUser); removed != 2 {
+	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now, enterprisehooks.Manifest{}, perUser, ""); removed != 2 {
 		t.Fatalf("removed %d, log:\n%s", removed, log.String())
 	}
 	if loadedFrom != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixEligibleAccountsFileName {
@@ -212,12 +212,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	}
 
 	// Within the interval nothing runs again; a new account does.
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), enterprisehooks.Manifest{}, perUser)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), enterprisehooks.Manifest{}, perUser, "")
 	if len(requests) != 1 {
 		t.Fatal("cleanup must be throttled")
 	}
 	accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7})
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser, "")
 	if len(requests) != 3 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
 	}
@@ -268,7 +268,7 @@ func TestStandaloneForeignCleanupBlocksPersonalClaudeWithoutManifestRow(t *testi
 		return runEnterpriseHookWorkerApply(ctx, request), nil
 	}
 	now := time.Now()
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now, enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now, enterprisehooks.Manifest{}, nil, "")
 	if !called {
 		t.Fatal("eligible user with no Claude manifest row did not get a blocking repair")
 	}
@@ -280,7 +280,7 @@ func TestStandaloneForeignCleanupBlocksPersonalClaudeWithoutManifestRow(t *testi
 	if err := os.WriteFile(path, old, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now.Add(enterpriseHookForeignCleanupInterval), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now.Add(enterpriseHookForeignCleanupInterval), enterprisehooks.Manifest{}, nil, "")
 	output, err = exec.Command("/bin/sh", path).CombinedOutput()
 	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !bytes.Contains(output, []byte("this computer is managed")) {
 		t.Fatalf("reverted personal hook exit=%v output=%q", err, output)
@@ -313,7 +313,7 @@ func TestStandaloneForeignCleanupSkipsRecreatedHomes(t *testing.T) {
 		t.Fatal("no worker may run for a home recreated since enumeration")
 		return enterpriseHookWorkerResponse{}, nil
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), enterprisehooks.Manifest{}, nil, "")
 }
 
 // GAP-1101: rows written as enrollment.mdx documents (user, or user_home,
@@ -446,16 +446,16 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 		return enterpriseHookWorkerResponse{CopilotVSCode: runEnterpriseHookWorkerCopilotVSCode(request)}, nil
 	}
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now, enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now, enterprisehooks.Manifest{}, nil, "")
 	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(time.Minute), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(time.Minute), enterprisehooks.Manifest{}, nil, "")
 	if _, err := os.Stat(hookFile); err != nil || runs != 1 {
 		t.Fatalf("first pass must place the file and the next stay idle: runs=%d err=%v", runs, err)
 	}
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(2*time.Minute), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(2*time.Minute), enterprisehooks.Manifest{}, nil, "")
 	if _, err := os.Stat(hookFile); err != nil || runs != 2 {
 		t.Fatalf("a deleted hook file must be rewritten on the next pass: runs=%d err=%v", runs, err)
 	}
@@ -467,8 +467,8 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(3*time.Minute), enterprisehooks.Manifest{}, nil)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(4*time.Minute), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(3*time.Minute), enterprisehooks.Manifest{}, nil, "")
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(4*time.Minute), enterprisehooks.Manifest{}, nil, "")
 	if runs != 3 {
 		t.Fatalf("an unrepaired hook file must not re-run the cleanup every pass: runs=%d", runs)
 	}
@@ -543,7 +543,7 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 		return response, nil
 	}
 	var log bytes.Buffer
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, nil, "")
 	if got := requests["dave"].CopilotVSCode; got == nil || len(got.RemoveDirs) != 2 {
 		t.Fatalf("dave's removal %+v, want the folders the guardian created in his home", got)
 	}

@@ -151,7 +151,7 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 		KeepAlive:                     60,
 		CleanStartOnInitialConnection: true,
 		SessionExpiryInterval:         0,
-		ConnectRetryDelay:             time.Second,
+		ReconnectBackoff:              autopaho.NewConstantBackoff(time.Second),
 		OnConnectionUp: func(cm *autopaho.ConnectionManager, connack *paho.Connack) {
 			log.Printf("[mqtt-paho] connected to %s (session_present=%v)", brokerURL.String(), connack.SessionPresent)
 
@@ -183,28 +183,8 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 			log.Printf("[mqtt-paho] connect error: %v (will retry)", err)
 		},
 		ClientConfig: paho.ClientConfig{
-			ClientID: c.id,
-			Router: paho.NewSingleHandlerRouter(func(p *paho.Publish) {
-				msg := Message{
-					Topic:   p.Topic,
-					Payload: p.Payload,
-					QoS:     p.QoS,
-				}
-				// Dispatch to the matching subscription handler
-				c.mu.RLock()
-				var handler func(Message)
-				for filter, h := range c.subs {
-					if mqttTopicMatch(msg.Topic, filter) {
-						handler = h
-						break
-					}
-				}
-				c.mu.RUnlock()
-
-				if handler != nil {
-					handler(msg)
-				}
-			}),
+			ClientID:          c.id,
+			OnPublishReceived: []func(paho.PublishReceived) (bool, error){c.onPublishReceived},
 		},
 	}
 
@@ -236,6 +216,36 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 	c.cm = cm
 	c.mu.Unlock()
 	return nil
+}
+
+// onPublishReceived hands every inbound PUBLISH to the handler of the first
+// matching subscription filter (what the deprecated
+// paho.NewSingleHandlerRouter did). It reports whether a handler took it.
+func (c *PahoClient) onPublishReceived(pr paho.PublishReceived) (bool, error) {
+	p := pr.Packet
+	if p == nil {
+		return false, nil
+	}
+	msg := Message{
+		Topic:   p.Topic,
+		Payload: p.Payload,
+		QoS:     p.QoS,
+	}
+	c.mu.RLock()
+	var handler func(Message)
+	for filter, h := range c.subs {
+		if mqttTopicMatch(msg.Topic, filter) {
+			handler = h
+			break
+		}
+	}
+	c.mu.RUnlock()
+
+	if handler == nil {
+		return false, nil
+	}
+	handler(msg)
+	return true, nil
 }
 
 // Subscribe registers a topic filter with a message handler.

@@ -1735,10 +1735,12 @@ func managedHookScriptDigests(
 		if pathInsideConnectorDataDir(opts.DataDir, path) {
 			limit = managedHookRuntimeArtifactMaxBytes
 		}
-		digest, exists, err := stableManagedArtifactDigest(
+		digest, exists, err := stableManagedArtifactDigestWith(
 			path,
 			"managed hook runtime artifact",
 			limit,
+			"",
+			managedArtifactDigestMemoWanted(opts.DataDir, path),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("digest managed hook artifact %s: %w", path, err)
@@ -1841,20 +1843,43 @@ func pathInsideConnectorDataDir(dataDir, path string) bool {
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func stableManagedArtifactDigest(
-	path, label string,
-	maxBytes int64,
-) (string, bool, error) {
-	return stableManagedArtifactDigestForOwner(path, label, maxBytes, "")
-}
-
 func stableManagedArtifactDigestForOwner(
 	path, label string,
 	maxBytes int64,
 	expectedOwnerSID string,
 ) (string, bool, error) {
+	return stableManagedArtifactDigestWith(path, label, maxBytes, expectedOwnerSID, false)
+}
+
+// stableManagedArtifactDigestWith uses the shared ten-minute target memo.
+// A guarded file with a full journal stamp, or an attribute-only stamp with
+// the ten-minute backstop, needs one read. Other files retain the two-pass
+// check against the opened identity (GAP-0438).
+func stableManagedArtifactDigestWith(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+) (string, bool, error) {
+	return stableManagedArtifactDigestWithAge(
+		path, label, maxBytes, expectedOwnerSID, memoize, managedArtifactDigestMaxAge,
+	)
+}
+
+func stableManagedArtifactDigestWithAge(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+	maxAge time.Duration,
+) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
+	}
+	if memoize {
+		lock := managedArtifactDigestPathLock(path)
+		lock.Lock()
+		defer lock.Unlock()
 	}
 	expected, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1869,7 +1894,7 @@ func stableManagedArtifactDigestForOwner(
 	if expected.Size() < 0 || expected.Size() > maxBytes {
 		return "", true, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
-	file, err := os.Open(path)
+	file, guarded, err := openManagedArtifactForDigest(path, memoize)
 	if err != nil {
 		return "", true, err
 	}
@@ -1887,12 +1912,65 @@ func stableManagedArtifactDigestForOwner(
 	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
 		return "", true, err
 	}
+	var stamp managedArtifactStamp
+	stamped := false
+	attributeOnly := false
+	fullStampAvailable := false
+	if memoize {
+		// A memo hit only takes the stamp. Ending the change epoch here
+		// would itself move the journal number and end every hit.
+		if guarded {
+			seenFull, fullOK := managedArtifactStampOf(file)
+			fullStampAvailable = fullOK
+			if fullOK {
+				if digest, ok := rememberedManagedArtifactDigest(path, seenFull, maxAge, false, true); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						return digest, true, nil
+					}
+				}
+			}
+			if seenAttributes, ok := managedArtifactAttributeStampOf(file); ok {
+				seenAttributes.USN = 0
+				if digest, ok := rememberedManagedArtifactDigest(path, seenAttributes, maxAge, true, fullOK); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						noticeManagedArtifactDegraded(path)
+						return digest, true, nil
+					}
+				}
+			}
+		}
+		// A full read. It first ends the change epoch of the file on this
+		// deny-write handle, so the next change gets a new journal number
+		// even while another handle stays open, and takes the full stamp
+		// after that. If the journal is unavailable, an attribute-only stamp
+		// under the same guarded handle permits one pass with a backstop.
+		// Without either guarded stamp, the two-pass check remains.
+		forgetManagedArtifactDigest(path)
+		if guarded {
+			if endManagedArtifactChangeEpoch(file) == nil {
+				stamp, stamped = managedArtifactStampOf(file)
+				fullStampAvailable = stamped
+			}
+			if !stamped {
+				stamp, stamped = managedArtifactAttributeStampOf(file)
+				attributeOnly = stamped
+				if stamped {
+					stamp.USN = 0
+					noticeManagedArtifactDegraded(path)
+				}
+			}
+		}
+	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return [sha256.Size]byte{}, 0, err
 		}
 		hash := sha256.New()
-		count, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+		count, err := managedArtifactDigestRead(hash, file, maxBytes)
 		if err != nil {
 			return [sha256.Size]byte{}, count, err
 		}
@@ -1911,13 +1989,18 @@ func stableManagedArtifactDigestForOwner(
 	if err != nil {
 		return "", true, err
 	}
-	between, err := file.Stat()
-	if err != nil {
-		return "", true, err
-	}
-	second, secondSize, err := hashOnce()
-	if err != nil {
-		return "", true, err
+	var between os.FileInfo
+	var second [sha256.Size]byte
+	var secondSize int64
+	if !stamped {
+		between, err = file.Stat()
+		if err != nil {
+			return "", true, err
+		}
+		second, secondSize, err = hashOnce()
+		if err != nil {
+			return "", true, err
+		}
 	}
 	after, err := file.Stat()
 	if err != nil {
@@ -1931,15 +2014,30 @@ func stableManagedArtifactDigestForOwner(
 		!current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||
 		firstSize != opened.Size() ||
-		secondSize != firstSize ||
-		between.Size() != opened.Size() ||
+		(!stamped && (secondSize != firstSize || between.Size() != opened.Size() ||
+			!between.ModTime().Equal(opened.ModTime()) || first != second)) ||
 		after.Size() != opened.Size() ||
-		!between.ModTime().Equal(opened.ModTime()) ||
-		!after.ModTime().Equal(opened.ModTime()) ||
-		first != second {
+		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
-	return "sha256:" + hex.EncodeToString(first[:]), true, nil
+	if stamped {
+		stampOf := managedArtifactStampOf
+		if attributeOnly {
+			stampOf = managedArtifactAttributeStampOf
+		}
+		later, ok := stampOf(file)
+		if attributeOnly {
+			later.USN = 0
+		}
+		if !ok || later != stamp {
+			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+		}
+	}
+	digest := "sha256:" + hex.EncodeToString(first[:])
+	if stamped {
+		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
+	}
+	return digest, true, nil
 }
 
 func sharedHookScriptName(name string) bool {

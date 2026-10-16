@@ -9,9 +9,14 @@ import "time"
 type AgentProcess struct {
 	PID       int
 	Connector string
-	// User is DOMAIN\account of the process token, "" when this account
-	// cannot open the process.
+	// User is DOMAIN\account of the process token, or "" when the process
+	// cannot be opened or its token's account name cannot be resolved.
 	User string
+	// OwnerSID is the SID of the account this process runs as, from the
+	// snapshot's SessionOwnerID: the token SID where Remote Desktop Services
+	// shows it, else the account signed in to its session. It is empty in
+	// session 0 or when the owner is unknown.
+	OwnerSID string
 	// StartedAt is zero when this account cannot open the process.
 	StartedAt time.Time
 }
@@ -43,7 +48,7 @@ func RunningWindowsAgentProcesses() ([]AgentProcess, error) {
 	var out []AgentProcess
 	for _, proc := range procs {
 		if proc.Connector != "" && supported[normalizeAIID(proc.Connector)] {
-			out = append(out, AgentProcess{PID: proc.PID, Connector: proc.Connector, User: proc.User, StartedAt: proc.StartedAt})
+			out = append(out, AgentProcess{PID: proc.PID, Connector: proc.Connector, User: proc.User, OwnerSID: proc.SessionOwnerID, StartedAt: proc.StartedAt})
 		}
 	}
 	return out, nil

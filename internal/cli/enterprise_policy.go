@@ -49,7 +49,7 @@ var (
 // and `enterprise macos`, the per-OS spelling the other administrator views
 // use (profile-explain, sandbox list) and the docs give (GAP-0201,
 // GAP-0240). Both trees bind the same flag variables; one runs per process.
-var enterprisePolicyCmd, enterprisePolicyShowCmd, enterprisePolicyExportCmd, enterprisePolicyVerifyCmd = newEnterprisePolicyGroup("")
+var enterprisePolicyCmd, _, _, enterprisePolicyVerifyCmd = newEnterprisePolicyGroup("")
 
 // newEnterprisePolicyGroup builds `enterprise policy` (platform "") or
 // `enterprise <platform> policy` with its show, export and verify commands.
@@ -383,6 +383,8 @@ var enterprisePolicyResolveTarget = enterprisePolicyTarget
 // keeps an account out of the guardian manifest regardless of its agents:
 // exclude_users, exempt_users (both match the name or the decimal uid, as
 // the enumerator does) and uid 0. It returns "" for any other account.
+// Root listed in exempt_users is not exempt: the hook socket never marks
+// its calls exempt, and enrollment.root decides them (GAP-0555).
 func unixEnrollmentExclusion(enrollment config.EnterpriseEnrollmentConfig, name string, uid int) string {
 	listed := func(values []string) bool {
 		for _, value := range values {
@@ -393,16 +395,16 @@ func unixEnrollmentExclusion(enrollment config.EnterpriseEnrollmentConfig, name 
 		return false
 	}
 	switch {
-	case listed(enrollment.ExcludeUsers):
-		return "excluded by enterprise.enrollment.exclude_users: never enrolled, so DefenseClaw installs no per-user hooks for this account"
-	case listed(enrollment.ExemptUsers):
-		return "exempt by enterprise.enrollment.exempt_users: not enrolled; its agent calls are allowed, inspected and logged"
 	case uid == 0:
 		root := strings.TrimSpace(enrollment.Root)
 		if root == "" {
 			root = config.EnterpriseRootInspect
 		}
 		return "root is never enrolled; enterprise.enrollment.root (" + root + ") decides how its agent calls are treated"
+	case listed(enrollment.ExcludeUsers):
+		return "excluded by enterprise.enrollment.exclude_users: never enrolled, so DefenseClaw installs no per-user hooks for this account"
+	case listed(enrollment.ExemptUsers):
+		return "exempt by enterprise.enrollment.exempt_users: not enrolled; its agent calls are allowed, inspected and logged"
 	}
 	return ""
 }

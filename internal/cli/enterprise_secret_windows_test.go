@@ -157,6 +157,34 @@ func TestWindowsSecretStoreUsesTheGatewayReaderDACL(t *testing.T) {
 	}
 }
 
+// GAP-1507: remove deleted a credential and restarted the gateway when it
+// could not read the installed config, which may still reference it.
+func TestWindowsSecretRemoveRefusesAnUnreadableConfig(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true}, "remove-guard-value\n"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A folder in the config's place cannot be read as the config.
+	layout.ConfigPath = t.TempDir()
+	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	restarted := false
+	windowsSecretRestartGateway = func() (bool, error) { restarted = true; return true, nil }
+	_, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key"}, "")
+	if err == nil || !strings.Contains(err.Error(), "cannot read the installed config") || !strings.Contains(err.Error(), "nothing was removed") {
+		t.Fatalf("remove with an unreadable config: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key")); statErr != nil {
+		t.Fatalf("credential removed despite the unreadable config: %v", statErr)
+	}
+	if restarted {
+		t.Fatal("gateway restarted after a refused remove")
+	}
+}
+
 func TestWindowsSecretRefusals(t *testing.T) {
 	windowsSecretTestHarness(t)
 	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x"); err == nil || commandExitCode(err) != windowsSecretExitInvalid {

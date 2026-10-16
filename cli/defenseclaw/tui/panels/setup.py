@@ -9064,7 +9064,7 @@ def _cisco_ai_defense_fields(cfg: object | Mapping[str, Any] | None) -> tuple[Co
         _field(cfg, "API Key (redacted)", "cisco_ai_defense.api_key", "password", hint="Inline Cisco key."),
         _field(cfg, "API Key Env", "cisco_ai_defense.api_key_env", hint="Env var NAME holding Cisco key."),
         _field(cfg, "Timeout (ms)", "cisco_ai_defense.timeout_ms", "int", hint="HTTP timeout for probes."),
-        _field(cfg, "Enabled Rules", "cisco_ai_defense.enabled_rules", hint="CSV cloud rules."),
+        _field(cfg, "Enabled Rules", "cisco_ai_defense.enabled_rules", hint="Comma-separated; blank uses the connection policy (API-key inspection)."),
     )
 
 

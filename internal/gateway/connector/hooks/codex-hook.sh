@@ -291,14 +291,7 @@ if [ -n "${API_TOKEN}" ]; then
 fi
 {{if and .Managed (not .SecureClient)}}# Resolve write operands in the user's hook process; the managed gateway
 # cannot inspect this home under ProtectHome. Keep the payload off argv.
-_DC_RESOLVED_WRITES=
-if [ -z "${DEFENSECLAW_SESSION_FACTS_BIN:-}" ] ||
-   ! _DC_RESOLVED_WRITES="$("${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" ||
-   [ -z "${_DC_RESOLVED_WRITES}" ]; then
-  # A truncated fact map makes the gateway evaluate writes with incomplete
-  # evidence; an absent header would incorrectly permit local resolution.
-  _DC_RESOLVED_WRITES=eyJcdTAwMDB0cnVuY2F0ZWQiOiIxIn0
-fi
+_DC_RESOLVED_WRITES="$(/opt/defenseclaw/bin/defenseclaw-gateway hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
 RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")

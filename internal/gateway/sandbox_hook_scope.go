@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -171,6 +172,33 @@ func hookActiveHome(ctx context.Context) string {
 		return sandboxauth.SandboxHome
 	}
 	return trustedActiveHome(ctx)
+}
+
+// sandboxHookGuestCWD is the working directory of a sandbox tool call in
+// the guest's namespace, lexically: the reported working directory, joined
+// with the tool's own relative one (absolute replaces it). It is "" for a
+// host request, and when either is not a plain path. The guest resolves a
+// relative target against it, while the request's working directory is
+// its host mount (hookCWDForContext), which only host-side checks read.
+func sandboxHookGuestCWD(ctx context.Context, reportedCWD, toolCWD string) string {
+	if !isSandboxHookRequest(ctx) {
+		return ""
+	}
+	cwd := strings.TrimSpace(reportedCWD)
+	if toolCWD = strings.TrimSpace(toolCWD); toolCWD != "" {
+		if strings.HasPrefix(toolCWD, "~") {
+			return ""
+		}
+		if path.IsAbs(toolCWD) {
+			cwd = toolCWD
+		} else {
+			cwd = path.Join(cwd, toolCWD)
+		}
+	}
+	if !path.IsAbs(cwd) || strings.ContainsAny(cwd, "\\\x00") {
+		return ""
+	}
+	return path.Clean(cwd)
 }
 
 // sandboxHookCWD maps a sandbox working directory to the real host

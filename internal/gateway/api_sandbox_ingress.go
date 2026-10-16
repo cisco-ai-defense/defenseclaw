@@ -158,8 +158,15 @@ type SandboxIngressConfig struct {
 	// of, and marks them told. The post-tool hook of a shell or fetch tool
 	// call adds them to its context (addSandboxEgressRefusals): the 403
 	// body of a refused CONNECT never reaches the agent. Nil tells nothing.
-	// It runs on the request goroutine and must not block.
+	// It runs on the request goroutine and must not block. In forwarding
+	// mode it must not mark them told: the forwarder sends them with each
+	// hook call (sandboxrelay.EgressRefusalsHeader), the managed gateway
+	// tells the agent, and EgressRefusalsTold marks the ones its answer
+	// told of.
 	EgressRefusals func(binding sandboxauth.Binding) []SandboxEgressRefusal
+	// EgressRefusalsTold marks told, in forwarding mode, the refusals the
+	// managed gateway's answer told the agent of. It must not block.
+	EgressRefusalsTold func(binding sandboxauth.Binding, told []SandboxEgressRefusal)
 	// OnHookFailure observes every authenticated hook or inspect post the
 	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
 	// on such an answer, so the harness did not do what the hook was about.
@@ -178,8 +185,9 @@ type SandboxIngressConfig struct {
 	Relay        sandboxrelay.Client
 	Registration func(sandboxauth.Binding) (string, bool)
 	// OnGeneration is told the policy generation each relayed answer
-	// carries (sandboxrelay.GenerationHeader). It must not block.
-	OnGeneration func(uint64)
+	// carries (sandboxrelay.GenerationHeader) and the registration it is
+	// for, before the answer goes to the sandbox. It must not block.
+	OnGeneration func(registration string, generation uint64)
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -215,6 +223,9 @@ type SandboxHookDecision struct {
 	// message names. Empty for every other event.
 	ModelError  string
 	ModelStatus int
+	// AlertsLow reports that the guardrail profile which decided the call
+	// alerts at LOW itself (manager.HookDecision.AlertsLow).
+	AlertsLow bool
 	// CallRef is manager.ContentRef of SessionID, Tool and ToolInput, set
 	// for a relayed call's verdict trailer (the tool input itself never
 	// crosses back to the daemon).
@@ -255,11 +266,13 @@ type sandboxIngressState struct {
 	// egressRefusals is the manager's refusal lookup
 	// (SandboxIngressConfig.EgressRefusals).
 	egressRefusals func(sandboxauth.Binding) []SandboxEgressRefusal
+	// egressRefusalsTold is SandboxIngressConfig.EgressRefusalsTold.
+	egressRefusalsTold func(sandboxauth.Binding, []SandboxEgressRefusal)
 	// relay, registration and onGeneration are forwarding mode
 	// (SandboxIngressConfig.Relay).
 	relay        sandboxrelay.Client
 	registration func(sandboxauth.Binding) (string, bool)
-	onGeneration func(uint64)
+	onGeneration func(string, uint64)
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -313,8 +326,10 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		egressUnblock:  cfg.EgressUnblock,
 		egressRefusals: cfg.EgressRefusals,
 		relay:          cfg.Relay,
-		registration:   cfg.Registration,
-		onGeneration:   cfg.OnGeneration,
+
+		egressRefusalsTold: cfg.EgressRefusalsTold,
+		registration:       cfg.Registration,
+		onGeneration:       cfg.OnGeneration,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -947,6 +962,7 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 		ResultStatus: strings.TrimSpace(payloadString(req.Payload, "status")),
 		Action:       resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
 		ModelError: modelError, ModelStatus: modelStatus,
+		AlertsLow: a.sandboxAlertsLow(ctx, binding.Connector),
 	}
 	if sink != nil {
 		// The tool input stays on this gateway: the daemon pairs a
@@ -957,6 +973,15 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 		return
 	}
 	st.onHookDecision(decision)
+}
+
+// sandboxAlertsLow reports that the guardrail profile deciding the request
+// sets alert_at: low for connectorName itself (not the rule pack's own
+// levels, whose LOW alerts stay in the audit log): its LOW alerts are
+// findings of the sandbox session (#1207).
+func (a *APIServer) sandboxAlertsLow(ctx context.Context, connectorName string) bool {
+	cfg := a.decisionConfig(ctx)
+	return cfg != nil && cfg.Guardrail.EffectiveAlertAt(connectorName) == "LOW"
 }
 
 // sandboxModelStatus finds the HTTP status in Claude Code's "API Error: 401
@@ -1090,6 +1115,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		switch route {
 		case sandboxauth.RouteHook:
 			call.Class, call.Target = sandboxrelay.RouteHook, binding.Connector
+			call.EgressRefusals = relayEgressRefusals(ctx, st, binding, body)
 		case sandboxauth.RouteNotify:
 			call.Class, call.Target = sandboxrelay.RouteNotify, binding.Connector
 		case sandboxauth.RouteInspect:
@@ -1110,8 +1136,16 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		}
 		if st.onGeneration != nil {
 			if g, err := strconv.ParseUint(resp.Header.Get(sandboxrelay.GenerationHeader), 10, 64); err == nil {
-				st.onGeneration(g)
+				st.onGeneration(registration, g)
 			}
+		}
+		if resp.Status >= 200 && resp.Status <= 299 && resp.Decision != nil && resp.Decision.EgressTold &&
+			len(call.EgressRefusals) > 0 && st.egressRefusalsTold != nil {
+			told := make([]SandboxEgressRefusal, 0, len(call.EgressRefusals))
+			for _, r := range call.EgressRefusals {
+				told = append(told, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, Note: r.Note})
+			}
+			st.egressRefusalsTold(binding, told)
 		}
 		w.WriteHeader(resp.Status)
 		_, _ = w.Write(resp.Body)
@@ -1123,9 +1157,30 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
 			Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID, SessionID: d.SessionID,
 			ResultStatus: d.ResultStatus, Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity,
-			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
+			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef, AlertsLow: d.AlertsLow,
 		})
 	})
+}
+
+// relayEgressRefusals are the refusals a relayed hook call carries: the
+// ones the sandbox's agent has not been told of (the daemon's egress proxy
+// made them, so only the daemon knows them; #1192), bounded for the
+// header. A call whose payload names a refused direct connection waits for
+// OpenShell's record of it, like a local sandbox ingress's post-tool hook
+// (awaitSandboxDirectRefusal), when the connector's agent reads post-tool
+// context at all.
+func relayEgressRefusals(ctx context.Context, st *sandboxIngressState, binding sandboxauth.Binding, body []byte) []sandboxrelay.EgressRefusal {
+	if st.egressRefusals == nil || st.egressRefusalsTold == nil {
+		return nil
+	}
+	refusals := st.egressRefusals(binding)
+	if len(postToolContextEvents[binding.Connector]) > 0 {
+		refusals = awaitSandboxDirectRefusal(ctx, body, refusals, func() []SandboxEgressRefusal { return st.egressRefusals(binding) })
+	}
+	if len(refusals) == 0 {
+		return nil
+	}
+	return sandboxrelay.FitEgressRefusals(sandboxRelayWireRefusals(refusals))
 }
 
 // writeSandboxRelayError answers a call the relay could not complete: a

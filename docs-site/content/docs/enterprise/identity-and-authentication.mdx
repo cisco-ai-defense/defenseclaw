@@ -411,13 +411,11 @@ defenseclaw audit export --since 10m \
 ```
 
 On a managed Linux host, export through the installed gateway as root and
-inspect the output file:
+pipe its JSONL output to `jq`:
 
 ```bash
-audit_file=$(mktemp)
-sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 10m -o "$audit_file" --force
-jq -c 'select(.action=="hook_decision") | .structured' "$audit_file"
-rm "$audit_file"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 10m \
+  | jq -c 'select(.action=="hook_decision") | .structured'
 ```
 
 A per-user install shows `domain` `corp.example.com`, `directory`
@@ -573,8 +571,9 @@ ai_discovery:
 Then check the file with `defenseclaw config validate`. A running gateway
 applies the change on its next reload; on a managed host, edit the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives)
-instead. Confirm with the audit export in the first guide: the `principal`
-and `kerberos_principal` keys are absent while the setting is off. A home-directory
+instead. Confirm with the audit export above: the projected `principal`
+and `kerberos_principal` values are `null` while the setting is off. The
+projection creates those keys even when the audit record omits them. A home-directory
 path can still contain the UPN on SSSD hosts with fully qualified names; see
 [End-user identity](/docs/observability/end-user-identity#optional-principal).
 

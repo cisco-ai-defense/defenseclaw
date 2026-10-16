@@ -566,6 +566,59 @@ def assess_connector_health(
     return tuple(findings)
 
 
+def connector_agent_missing(data_dir: str, connector: str) -> bool:
+    """Whether ``connector``'s agent is not installed, so nothing runs the
+    hooks setup staged for it (GAP-0513).
+
+    The proof is the gateway's (``connector.CachedAgentNotFound``): the last
+    recorded discovery scan found no installation and no executable, however
+    old it is, because neither ``status`` nor ``doctor`` rescans and the
+    cache's one-day lifetime made a staged connector RUNNING again on day
+    two. An executable on PATH now (an agent installed after the scan,
+    GAP-0052) and a verified harness image for the connector (the
+    sandbox-only layout, in which setup and the gateway admit the connector
+    for the agent inside the image) are not missing. Without a recorded scan
+    there is no proof, so the answer is then False. Nothing is scanned or
+    run.
+    """
+
+    if not _last_scan_found_no_agent(data_dir, connector):
+        return False
+    from defenseclaw.inventory import agent_discovery
+
+    if agent_discovery.binary_on_path(connector):
+        return False
+    from defenseclaw.sandbox_images import verified_harness_contract
+
+    return verified_harness_contract(data_dir, connector) is None
+
+
+def _last_scan_found_no_agent(data_dir: str, connector: str) -> bool:
+    """Whether agent_discovery.json, read whatever its age, records
+    ``connector`` as not installed with no executable path."""
+
+    import json
+
+    from defenseclaw.inventory.agent_discovery import _cache_path
+
+    if not isinstance(data_dir, str) or not data_dir or "\x00" in data_dir:
+        return False
+    try:
+        path = _cache_path(data_dir=data_dir)
+        if path.stat().st_size > 4 << 20:
+            return False
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    agents = payload.get("agents") if isinstance(payload, Mapping) else None
+    signal = agents.get(connector.strip().lower()) if isinstance(agents, Mapping) else None
+    if not isinstance(signal, Mapping):
+        return False
+    binary_path = signal.get("binary_path")
+    return signal.get("installed") is False and not (isinstance(binary_path, str) and binary_path.strip())
+
+
 def build_health_report(
     active_connectors: Iterable[str],
     discovery: Any | None,

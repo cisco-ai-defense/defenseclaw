@@ -205,7 +205,7 @@ def test_tampered_config_is_not_compliant_until_the_remediation_restores_the_bun
     code, out = _run(engine, fix, device)
     assert code == 0, out
     assert out == (
-        f"DefenseClaw 9.9.9: repaired: config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3; "
+        f"DefenseClaw 9.9.9: repaired (bundle_config_restored): config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3; "
         f"ensure re-applied the bundle from the bundle store; signed policy bundle {BUNDLE_ID} version 3 is applied"
     ), out
     code, out = _run(engine, detect, device)
@@ -230,7 +230,7 @@ def test_remediation_that_cannot_restore_the_bundle_fails(engine, scripts, tmp_p
     code, out = _run(engine, fix, device)
     assert code == FAILED, out
     assert out.startswith(
-        f"DefenseClaw 9.9.9: still failing (bundle_restore_failed,bundle_not_applied): signed policy bundle {BUNDLE_ID} "
+        f"DefenseClaw 9.9.9: still failing (bundle_restore_failed): signed policy bundle {BUNDLE_ID} "
         "version 3 is confirmed, but its config cannot be read from the bundle store (file_hash_mismatch)"
     ), out
 
@@ -256,7 +256,7 @@ def test_side_service_fast_path_still_runs_ensure_while_the_bundle_is_not_applie
     code, out = _run(engine, fix, device)
     assert code == 0, out
     assert "repaired (started" not in out, out
-    assert f"repaired: config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3" in out, out
+    assert f"repaired (bundle_config_restored): config.yaml was not the config of signed policy bundle {BUNDLE_ID} version 3" in out, out
     calls = _calls(device)
     assert "start DefenseClawHookGuardian" in calls, calls
     assert "enterprise windows ensure" in calls, calls
@@ -279,7 +279,7 @@ def test_untampered_bundle_device_is_compliant_and_remediation_is_a_noop(engine,
     assert "is applied (the gateway enforces it)" in out, out
     code, out = _run(engine, fix, device)
     assert code == 0, out
-    assert "already healthy; signed policy bundle" in out, out
+    assert "no repair needed after verify; signed policy bundle" in out, out
 
 
 def test_base_only_device_is_unaffected(engine, scripts, tmp_path):
@@ -290,7 +290,7 @@ def test_base_only_device_is_unaffected(engine, scripts, tmp_path):
     assert "healthy; no signed policy bundle is confirmed; the installed config enforces" in out, out
     code, out = _run(engine, fix, device)
     assert code == 0, out
-    assert out.endswith("already healthy"), out
+    assert out.endswith("no repair needed after verify"), out
     assert "enterprise bundle status" not in _calls(device)
 
 

@@ -4208,19 +4208,6 @@ func curlMainProxyOptionUsesHTTP(canonical string, scheme string) bool {
 		(canonical == "--proxy" || canonical == "--proxy1.0")
 }
 
-func curlProxyInertFlag(option curlOptionToken) bool {
-	if !option.Known || option.ValuePresent || option.TakesValue {
-		return false
-	}
-	switch option.Role {
-	case curlOptionNeutral, curlOptionHead, curlOptionNoHead,
-		curlOptionNoRemoteName, curlOptionNoRemoteNameAll:
-		return true
-	default:
-		return false
-	}
-}
-
 func curlProxyHeaderCandidateIsTransmitted(
 	value string,
 	targets []curlTransferTarget,
@@ -4773,35 +4760,6 @@ func curlProxiedOriginRequestMetadata(
 			metadata.HTTPRequestComponents = append(
 				metadata.HTTPRequestComponents,
 				component(query),
-			)
-		}
-	}
-	return metadata
-}
-
-func curlProxiedFTPControlMetadata(
-	command CommandFact,
-	parsed curlArgvParse,
-	values []string,
-	mode curlFTPProxyTunnelMode,
-) CurlTransmittedMetadata {
-	metadata := CurlTransmittedMetadata{}
-	if len(values) == 0 || mode == curlFTPProxyTunnelNone {
-		return metadata
-	}
-	for _, target := range parsed.Targets {
-		network, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
-		if !ok || network.Scheme != "ftp" && network.Scheme != "ftps" ||
-			mode == curlFTPProxyTunnelFTPS && network.Scheme != "ftps" {
-			continue
-		}
-		for _, value := range values {
-			metadata.FTPRequestComponents = append(
-				metadata.FTPRequestComponents,
-				TransmittedRequestComponent{
-					Value: value, Scheme: network.Scheme,
-					Host: network.Host, Port: network.Port,
-				},
 			)
 		}
 	}

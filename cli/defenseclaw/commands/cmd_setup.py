@@ -118,7 +118,11 @@ from defenseclaw.file_permissions import (
     windows_acl_write_error,
 )
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+from defenseclaw.logger import (
+    CanonicalObservabilityError,
+    CanonicalObservabilityUnavailableError,
+    keep_running_gateway_token,
+)
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
@@ -127,6 +131,7 @@ from defenseclaw.platform_support import (
     local_shell_stacks_supported,
 )
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
+from defenseclaw.sandbox_images import verified_harness_contract
 from defenseclaw.scanner import settings as scanner_settings
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
@@ -4741,6 +4746,8 @@ def setup_gateway(
     gw = app.cfg.gateway
     previous_api_port = gw.api_port
     previous_target = (gw.host, gw.port)
+    # The running gateway keeps this token until the restart after this command.
+    previous_token = gw.resolved_token()
 
     data_dir = app.cfg.data_dir
     uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
@@ -4794,6 +4801,7 @@ def setup_gateway(
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
     gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    keep_running_gateway_token(app.logger, data_dir, previous_token, gw.resolved_token())
     # The running gateway keeps its old OpenClaw host and port until the
     # restart that follows this command, so checking it now reports a
     # "reconnecting" FAIL row that the restart fixes (GAP-2478).
@@ -5654,6 +5662,22 @@ def _check_connector_version_supported_for_setup(
 
     if not installed:
         if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+            # F9: no agent on this host is not the same as no verified hook
+            # surface. In the layout the sandbox documentation recommends the
+            # agent lives inside the harness image, and that image carries a
+            # harness version DefenseClaw pinned and hook-fire verified. Accept
+            # that evidence here; the gateway accepts the same evidence at
+            # admission (hook_contract_sandbox_evidence.go), so setup and the
+            # daemon do not disagree about the same host.
+            evidence = verified_harness_contract(data_dir, connector)
+            if evidence is not None:
+                if emit:
+                    ux.ok(
+                        f"{label}: connector was not detected locally, but the verified harness "
+                        f"image {evidence.tag} carries {evidence.harness_version} "
+                        f"({evidence.contract_id}); action mode will enforce that contract."
+                    )
+                return True
             if emit:
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")
@@ -12139,6 +12163,47 @@ def _connector_not_shipped(cfg, name: str) -> bool:
     return normalized not in declared and name.strip().lower() not in declared
 
 
+def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str]:
+    """Remove the DefenseClaw hook entries of *connector*, which is not configured.
+
+    Runs ``defenseclaw-gateway connector prune-orphans`` for this data
+    directory, which removes only DefenseClaw-owned entries and never
+    touches a connector config.yaml or the runtime state names. Returns the
+    agent config files it cleaned and a problem, "" when there was none.
+    """
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return [], "no verified defenseclaw-gateway executable is installed"
+    data_dir = str(cfg.data_dir)
+    # The gateway reads config.yaml of this data directory, not of $HOME.
+    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    try:
+        result = run_pinned_executable(
+            [executable, "connector", "prune-orphans", "--connector", connector, "--data-dir", data_dir, "--json"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            env=env,
+        )
+    except (UnsafePathError, subprocess.TimeoutExpired, OSError) as exc:
+        return [], str(exc)
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        payload = _json.loads(lines[-1]) if lines else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        tail = ((result.stderr or result.stdout or "").strip().splitlines() or [f"exit status {result.returncode}"])[-1]
+        return [], tail
+    failed = payload.get("failed") or {}
+    if failed:
+        return [], "; ".join(str(reason) for reason in failed.values())
+    removed = payload.get("removed") or {}
+    return [str(path) for path in removed.get(connector) or []], ""
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -12185,7 +12250,26 @@ def _remove_connector(
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         if requested_norm in _CONNECTOR_META:
+            # A rollback can leave DefenseClaw hook entries of a connector the
+            # restored install never configured; they ran a missing hook
+            # script and Claude Code blocked every prompt (GAP-0009).
+            cleaned, problem = _prune_orphaned_connector_hooks(cfg, requested_norm)
+            if cleaned:
+                ux.echo(
+                    f"  ✓ Connector {requested_norm!r} is not configured; removed the DefenseClaw hook "
+                    f"entries it had left in {', '.join(cleaned)}."
+                )
+                return True
+            if problem and not problem.startswith("no verified"):
+                ux.echo(
+                    f"  ✗ Connector {requested_norm!r} is not configured, but the DefenseClaw hook entries "
+                    f"it may have left could not be removed: {problem}",
+                    err=True,
+                )
+                return False
             ux.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            if problem:
+                ux.echo(f"    Its agent settings were not checked for DefenseClaw hook entries: {problem}.")
             return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
         ux.echo(
@@ -12973,10 +13057,14 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     """
     detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file) or "").strip()
     gw = app.cfg.gateway
-    if not detected or detected == gw.resolved_token():
+    previous = gw.resolved_token()
+    if not detected or detected == previous:
         return
     data_dir = app.cfg.data_dir
     stopped = restart and _stop_gateway_before_token_swap(data_dir)
+    if not stopped:
+        # --no-restart: the running gateway keeps the old token (GAP-0464).
+        keep_running_gateway_token(app.logger, data_dir, previous, detected)
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)

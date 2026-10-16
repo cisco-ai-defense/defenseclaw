@@ -645,7 +645,6 @@ function confirmRestart(answers: Answers): boolean {
   const hasAnswers =
     answers.block.size > 0 ||
     answers.allow.size > 0 ||
-    answers.firstPartyExtra.length > 0 ||
     answers.domainsExtra.length > 0 ||
     Object.values(answers.sinks).some((s) => s.enabled && s.url) ||
     answers.posture !== 'default' ||

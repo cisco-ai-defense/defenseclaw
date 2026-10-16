@@ -1173,11 +1173,11 @@ func TestHookFireProbeMountsRunFiles(t *testing.T) {
 // TestHookFireMicroVMScenario pins AG-MAC-F2: the probe of an image for
 // the MicroVM driver also runs the harness with a MicroVM's name
 // resolution (no localhost in /etc/hosts, a resolver that answers
-// nothing), on both network modes, from files in the system temp
-// directory, which Docker Desktop shares by default wherever the data dir
-// is. A harness that cannot start there because it could not resolve
-// localhost (Antigravity CLI before the image answered it) leaves the probe
-// passing and records why a MicroVM cannot, naming the lookup that failed;
+// nothing), on both network modes, from a private directory under the
+// user's cache directory. A harness that cannot start there because it
+// could not resolve localhost (Antigravity CLI before the image answered
+// it) leaves the probe passing and records why a MicroVM cannot, naming
+// the lookup that failed;
 // VerifyHooks then keeps the image verified but not for a MicroVM. Any
 // other failure there settles nothing: the image stays unchecked for a
 // MicroVM, and is checked again.
@@ -1188,7 +1188,14 @@ func TestHookFireMicroVMScenario(t *testing.T) {
 			t.Run(string(mode)+"/"+output, func(t *testing.T) {
 				c := hookFireVMContext(t)
 				sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, relay: mode == HookFireNetworkRelay, microVMOutput: output}
-				tmp := t.TempDir()
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CACHE_HOME", "")
+				cache, err := os.UserCacheDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				parent := filepath.Join(cache, "defenseclaw", "hookfire")
 				var sources []string
 				docker := verifyDocker(t, c, sim, func(args []string) int {
 					for i := 0; i+1 < len(args); i++ {
@@ -1199,7 +1206,7 @@ func TestHookFireMicroVMScenario(t *testing.T) {
 					return 0
 				})
 				store := testStore(t)
-				b := &Builder{Docker: docker, Store: store, TempDir: tmp}
+				b := &Builder{Docker: docker, Store: store}
 				opts := HookFireOptions{Network: mode, SinkHost: "127.0.0.1"}
 				if _, err := b.Build(context.Background(), c.Spec, BuildOptions{SkipHookFire: true}); err != nil {
 					t.Fatal(err)
@@ -1231,13 +1238,13 @@ func TestHookFireMicroVMScenario(t *testing.T) {
 						t.Fatalf("MicroVM inconclusive = %q (problem %q), want it to start %q", rec.MicroVMInconclusive, rec.MicroVMProblem, want)
 					}
 				}
-				// The scenario mounted its two files from the temp directory,
-				// not the data dir, and they are gone with its container.
-				if len(sources) != 2 || !strings.HasPrefix(sources[0], "type=bind,source="+tmp+string(filepath.Separator)+"defenseclaw-hookfire-microvm-") ||
-					!strings.HasPrefix(sources[1], "type=bind,source="+tmp+string(filepath.Separator)+"defenseclaw-hookfire-microvm-") {
+				// The scenario mounted its two files from the private cache
+				// directory, not the data dir, and removed them afterwards.
+				if len(sources) != 2 || !strings.HasPrefix(sources[0], "type=bind,source="+parent+string(filepath.Separator)+"defenseclaw-hookfire-microvm-") ||
+					!strings.HasPrefix(sources[1], "type=bind,source="+parent+string(filepath.Separator)+"defenseclaw-hookfire-microvm-") {
 					t.Fatalf("MicroVM scenario mounts = %v", sources)
 				}
-				if left, _ := filepath.Glob(filepath.Join(tmp, "*")); len(left) != 0 {
+				if left, _ := filepath.Glob(filepath.Join(parent, "*")); len(left) != 0 {
 					t.Fatalf("MicroVM scenario files left behind: %v", left)
 				}
 				if left, _ := filepath.Glob(filepath.Join(filepath.Dir(store.Path()), "*microvm*")); len(left) != 0 {

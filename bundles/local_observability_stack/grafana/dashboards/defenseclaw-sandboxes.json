@@ -1136,6 +1136,65 @@
       }
     },
     {
+      "id": 131,
+      "type": "stat",
+      "title": "Sandbox registrations without a guest",
+      "description": "Alerts for registrations bound by a build with this signal that have had no accepted guest record since bind, after the grace period. The first accepted record ends the watch; later guest disappearance is outside this tripwire. Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched; re-create those sandboxes after the upgrade to bring them under the signal. Root-owned attestation in a later release replaces this signal. Zero means no alert was recorded.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.registration_without_guest\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
       "id": 114,
       "type": "bargauge",
       "title": "Sandboxes by profile",
@@ -1146,7 +1205,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 18,
         "w": 8,
         "h": 8
       },
@@ -1201,7 +1260,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 14,
+        "y": 18,
         "w": 16,
         "h": 8
       },
@@ -1264,7 +1323,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 26,
         "w": 6,
         "h": 8
       },
@@ -1319,7 +1378,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 22,
+        "y": 26,
         "w": 6,
         "h": 8
       },
@@ -1374,7 +1433,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 22,
+        "y": 26,
         "w": 12,
         "h": 8
       },
@@ -1432,7 +1491,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 34,
         "w": 24,
         "h": 1
       }
@@ -1448,7 +1507,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 35,
         "w": 12,
         "h": 8
       },
@@ -1500,7 +1559,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 31,
+        "y": 35,
         "w": 12,
         "h": 8
       },
@@ -1552,7 +1611,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 43,
         "w": 24,
         "h": 8
       },
@@ -1582,7 +1641,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 51,
         "w": 24,
         "h": 1
       }
@@ -1591,14 +1650,14 @@
       "id": 124,
       "type": "timeseries",
       "title": "Required-sandbox refusals by reason",
-      "description": "Host runs refused or unavailable by event and machine-readable reason (required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, ...).",
+      "description": "Host runs refused or unavailable by event and machine-readable reason (required_for, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, ...).",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
       },
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 52,
         "w": 12,
         "h": 8
       },
@@ -1650,7 +1709,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 48,
+        "y": 52,
         "w": 12,
         "h": 8
       },
@@ -1702,7 +1761,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 60,
         "w": 8,
         "h": 8
       },
@@ -1757,7 +1816,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 56,
+        "y": 60,
         "w": 8,
         "h": 8
       },
@@ -1812,7 +1871,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 56,
+        "y": 60,
         "w": 8,
         "h": 8
       },
@@ -1864,7 +1923,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 68,
         "w": 24,
         "h": 8
       },
@@ -1898,7 +1957,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 76,
         "w": 24,
         "h": 8
       },
@@ -1928,7 +1987,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 80,
+        "y": 84,
         "w": 24,
         "h": 1
       }
@@ -1944,7 +2003,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 81,
+        "y": 85,
         "w": 12,
         "h": 8
       },
@@ -1994,7 +2053,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 81,
+        "y": 85,
         "w": 12,
         "h": 8
       },
@@ -2046,7 +2105,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 89,
+        "y": 93,
         "w": 24,
         "h": 8
       },
@@ -2076,7 +2135,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 97,
+        "y": 101,
         "w": 24,
         "h": 1
       }
@@ -2092,7 +2151,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 98,
+        "y": 102,
         "w": 12,
         "h": 8
       },
@@ -2144,7 +2203,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 98,
+        "y": 102,
         "w": 12,
         "h": 8
       },
@@ -2197,7 +2256,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 106,
+        "y": 110,
         "w": 12,
         "h": 8
       },
@@ -2256,7 +2315,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 106,
+        "y": 110,
         "w": 12,
         "h": 8
       },
@@ -2307,7 +2366,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 114,
+        "y": 118,
         "w": 24,
         "h": 1
       }
@@ -2323,7 +2382,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 115,
+        "y": 119,
         "w": 6,
         "h": 8
       },
@@ -2378,7 +2437,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 115,
+        "y": 119,
         "w": 6,
         "h": 8
       },
@@ -2433,7 +2492,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 115,
+        "y": 119,
         "w": 12,
         "h": 8
       },
@@ -2490,7 +2549,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 123,
+        "y": 127,
         "w": 24,
         "h": 1
       }
@@ -2506,7 +2565,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 124,
+        "y": 128,
         "w": 24,
         "h": 9
       },
@@ -2673,7 +2732,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 133,
+        "y": 137,
         "w": 24,
         "h": 8
       },
@@ -2703,7 +2762,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 141,
+        "y": 145,
         "w": 24,
         "h": 1
       }
@@ -2719,7 +2778,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 142,
+        "y": 146,
         "w": 8,
         "h": 8
       },
@@ -2782,7 +2841,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 142,
+        "y": 146,
         "w": 16,
         "h": 8
       },
@@ -2844,7 +2903,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 150,
+        "y": 154,
         "w": 24,
         "h": 8
       },
@@ -2874,7 +2933,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 158,
+        "y": 162,
         "w": 24,
         "h": 1
       }
@@ -2890,7 +2949,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 159,
+        "y": 163,
         "w": 12,
         "h": 8
       },
@@ -2942,7 +3001,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 159,
+        "y": 163,
         "w": 12,
         "h": 8
       },
@@ -2972,7 +3031,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 167,
+        "y": 171,
         "w": 24,
         "h": 1
       }
@@ -2988,7 +3047,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 168,
+        "y": 172,
         "w": 12,
         "h": 8
       },
@@ -3040,7 +3099,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 168,
+        "y": 172,
         "w": 12,
         "h": 8
       },

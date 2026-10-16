@@ -21,6 +21,7 @@ from __future__ import annotations
 import configparser
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default"
@@ -53,3 +54,39 @@ def test_every_sourcetype_the_macros_search_extracts_json_once() -> None:
     assert searched
     for sourcetype in sorted(searched):
         assert props[sourcetype]["KV_MODE"] == "json", sourcetype
+
+
+def _ai_runtime_query(title: str) -> str:
+    view = ElementTree.parse(APP / "data/ui/views/ai_runtime_planes.xml").getroot()
+    panels = [panel for panel in view.iter("panel") if panel.findtext("title") == title]
+    assert len(panels) == 1, title
+    query = panels[0].findtext("./single/search/query") or panels[0].findtext("./chart/search/query")
+    assert query, title
+    return query
+
+
+def test_ai_runtime_activity_counts_distinct_findings_without_collapsing_unknown_ids() -> None:
+    macros = _conf("macros.conf")
+    fields = macros["defenseclaw_demo_ai_runtime_fields"]["definition"]
+    assert re.search(r'runtime_finding_id=coalesce\([^\n]+, "\(unknown\)"\)', fields)
+
+    searches = (
+        ("Agent activity with no hook decision", "runtime_hook_seen", "runtime_tactic", "stats count"),
+        ("Would-block by control (monitor mode)", "runtime_kernel_outcome", "runtime_kernel_control", "timechart"),
+    )
+    for title, filter_field, distinct_field, aggregation in searches:
+        query = _ai_runtime_query(title)
+        commands = [command.strip() for command in query.split(" | ")]
+        assert filter_field in commands[1], title
+        assert commands[2] == "streamstats count as runtime_event_row", title
+        assert commands[3] == (
+            'eval runtime_activity_key=if(runtime_finding_id="(unknown)" OR runtime_finding_id="", '
+            '"event:" . runtime_event_row, "finding:" . runtime_finding_id)'
+        ), title
+        assert commands[4] == f"dedup host runtime_activity_key {distinct_field}", title
+        assert commands[5].startswith(aggregation), title
+
+    assert _ai_runtime_query("Would-block (monitor mode)") == (
+        '`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" '
+        'AND runtime_plane="c" | stats sum(runtime_kernel_would_block_delta) as would_block'
+    )

@@ -1211,12 +1211,14 @@ func (b *Builder) hookFireRun(
 	}
 	name := prefix + "-" + c.Spec.Harness.Name + "-" + sc.name + "-" + suffix
 	netArgs := netw.dockerArgs()
+	var microVMProbeDir string
 	if sc.microVM {
 		files, cleanup, err := b.microVMMounts(netw, sc.hostGateway)
 		if err != nil {
 			return run, err
 		}
 		defer cleanup()
+		microVMProbeDir = filepath.Dir(files[0].HostPath)
 		netArgs = netw.microVMDockerArgs()
 		mounts = append(mounts, files...)
 	}
@@ -1272,6 +1274,9 @@ func (b *Builder) hookFireRun(
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_, _ = output(cleanupCtx, b.Docker, nil, "rm", "-f", name)
 		cleanupCancel()
+		if sc.microVM && microVMMountRefused(err) {
+			err = fmt.Errorf("the MicroVM name-resolution check could not run because the container engine cannot see probe directory %q; make your home directory visible to the container engine (Docker Desktop: Settings > Resources > File sharing, add your home directory; Colima: mount your home directory, which is its default; OrbStack shares /Users by default), then run `defenseclaw sandbox image build %s --force` again: %w", microVMProbeDir, c.Spec.Harness.Name, err)
+		}
 		return run, fmt.Errorf("openshell image: hook-fire %s run: %w", sc.name, err)
 	}
 	for _, line := range strings.Split(out, "\n") {
@@ -1309,19 +1314,73 @@ func (b *Builder) hookFireRun(
 	return run, nil
 }
 
+// microVMMountRefused reports a container engine's refusal to mount host
+// files it cannot see.
+func microVMMountRefused(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, phrase := range []string{"mounts denied", "is not shared from the host", "invalid mount config", "bind source path does not exist"} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// microVMProbeParent returns the parent of the MicroVM scenario's mounted
+// files. The default is openshell.HookFireProbeDir, private and under the
+// user's cache directory, which container engines that share the user's home
+// directory can see; the doctor checks that Docker shares the same directory.
+func (b *Builder) microVMProbeParent() (string, error) {
+	if b.TempDir != "" {
+		return b.TempDir, nil
+	}
+	parent := openshell.HookFireProbeDir()
+	if parent == "" {
+		return "", errors.New("openshell image: hook-fire MicroVM scenario needs a home directory for its probe files: no user cache directory")
+	}
+	check := func() error {
+		info, err := os.Lstat(parent)
+		if err != nil {
+			return fmt.Errorf("openshell image: hook-fire MicroVM probe directory %q: %w", parent, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("openshell image: hook-fire MicroVM probe directory %q is a symlink", parent)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("openshell image: hook-fire MicroVM probe directory %q is not a directory", parent)
+		}
+		return nil
+	}
+	if _, err := os.Lstat(parent); err == nil {
+		if err := check(); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("openshell image: hook-fire MicroVM probe directory %q: %w", parent, err)
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", fmt.Errorf("openshell image: create hook-fire MicroVM probe directory %q: %w", parent, err)
+	}
+	if err := check(); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return "", fmt.Errorf("openshell image: make hook-fire MicroVM probe directory %q private: %w", parent, err)
+	}
+	return parent, nil
+}
+
 // microVMMounts writes the MicroVM scenario's /etc/hosts and
 // /etc/resolv.conf (hookFireNet.microVMFiles) to a new directory under
-// Builder.TempDir (the system temp directory), which Docker Desktop's file
-// sharing reaches by default wherever the data dir is, and returns their
-// read-only mounts and what removes them.
+// microVMProbeParent and returns their read-only mounts and what removes them.
 func (b *Builder) microVMMounts(netw hookFireNet, hostGateway string) ([]RunFile, func(), error) {
 	hosts, resolv, err := netw.microVMFiles(hostGateway)
 	if err != nil {
 		return nil, nil, err
 	}
-	parent := b.TempDir
-	if parent == "" {
-		parent = os.TempDir()
+	parent, err := b.microVMProbeParent()
+	if err != nil {
+		return nil, nil, err
 	}
 	dir, err := os.MkdirTemp(parent, "defenseclaw-hookfire-microvm-")
 	if err != nil {

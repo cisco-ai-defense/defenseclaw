@@ -208,6 +208,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 	a.printSandbox(sb)
 	if sb.Phase == "ready" {
 		a.printDetachedRun(ctx, sb)
+		a.printOverlayDisk(ctx, sb)
 	}
 	if sb.Phase == "stopped" {
 		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
@@ -762,10 +763,16 @@ func execEndedText(sb *sandboxapi.Sandbox) string {
 // StopOptions are the `sandbox stop` flags.
 type StopOptions struct {
 	Name string
-	// Yes stops a sandbox whose detached run is still going without
-	// asking.
+	// Yes stops a sandbox whose detached run is still going, or a MicroVM
+	// whose own disk could not be looked at, without asking. A copy-mode
+	// MicroVM whose disk is full keeps running even so (fullDiskStop).
 	Yes bool
 }
+
+// ExitStopKept is the exit status of a `sandbox stop` that kept the
+// sandbox running because stopping it would lose work (fullDiskStop): the
+// TUI says why from it.
+const ExitStopKept = 5
 
 // Stop is `sandbox stop`. A detached run the stop would end is confirmed
 // on a terminal (said otherwise); the daemon's stop marks it interrupted
@@ -773,7 +780,8 @@ type StopOptions struct {
 // The copy of a copy-mode sandbox nothing runs in any more is looked at
 // first: what it holds as it stops is remembered (markStoppedCopy), so
 // `delete` need not warn about work that came back already, and the next
-// pull need not start it.
+// pull need not start it. A copy-mode MicroVM whose own disk is full keeps
+// running while its copy holds work that was not pulled (fullDiskStop).
 func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	a.defaults()
 	api, err := a.api()
@@ -801,6 +809,12 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
 				copyAt = a.copyAtStop(ctx, cli, sb)
 			}
+			if ok, err := a.fullDiskStop(ctx, cli, sb, copyAt, o.Yes); err != nil || !ok {
+				if err == nil {
+					a.note(sb.Name + " keeps running")
+				}
+				return err
+			}
 		}
 	}
 	stopped, err := api.Stop(ctx, o.Name)
@@ -825,6 +839,147 @@ func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 		return nil
 	}
 	return &st
+}
+
+// fullDiskStop looks, before sb stops, at the own disk of a copy-mode
+// MicroVM whose copy may hold work that was not pulled (look, what
+// copyAtStop found, is nil or says so): a MicroVM stopped with that disk
+// full cannot start again, so that work could not be read any more
+// (#1144). A full disk keeps it running, with what to do first; a disk the
+// bounded look could not read (a MicroVM that does not answer) is
+// confirmed on a terminal unless yes and said otherwise, so a hung MicroVM
+// still stops. It reports whether the stop goes ahead.
+func (a *App) fullDiskStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, look *workspace.CopyStatus, yes bool) (bool, error) {
+	if sb.WorkdirMode != config.OpenShellWorkdirCopy || createdDriver(*sb) != string(openshell.DriverVM) || look != nil && !unpulledWork(look.Work) {
+		return true, nil
+	}
+	disk := a.overlayDiskOf(ctx, cli, sb.Name)
+	if !disk.known {
+		return a.confirmEnding("could not read how full "+sb.Name+"'s own disk is (it did not answer within "+overlayDiskLook.String()+
+			"); a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost", "Stop anyway?", yes)
+	}
+	if !disk.full() {
+		return true, nil
+	}
+	if look == nil {
+		// A detached run or another session kept it from being looked at
+		// before: what matters now is whether anything would be lost.
+		if look = a.copyAtStop(ctx, cli, sb); look != nil && !unpulledWork(look.Work) {
+			return true, nil
+		}
+	}
+	// Not even with --yes, which the macOS app and scripts pass to skip the
+	// question about a detached run: stopped now, the MicroVM could never
+	// start again, so a stop would only lose the work. Deleting it is the
+	// way to give the work up.
+	a.warn(fullDiskKeepText(sb.Name) + "; to give that work up, delete it: `" + CommandName + " delete " + sb.Name + "`")
+	return false, &ExitError{Code: ExitStopKept, Err: &Silent{Err: errors.New(sb.Name + " keeps running: its own disk is full")}}
+}
+
+// unpulledWork reports copy work a stopped MicroVM with a full disk would
+// lose: changes never pulled, or a copy that could not be looked at. A pull
+// that was not applied is on this machine already.
+func unpulledWork(w workspace.CopyWork) bool {
+	return w == workspace.CopyWorkUnpulled || w == workspace.CopyWorkUnknown
+}
+
+// overlayDisk is a running MicroVM's own disk as `df` inside it reads it
+// (overlayDiskOf). A MicroVM writes its changes to an overlay disk of its
+// own ([openshell.drivers.vm] overlay_disk_mib), and one stopped with that
+// disk full cannot start again (GAP-0297).
+type overlayDisk struct {
+	// known reports that the look answered in time.
+	known bool
+	// size and avail are in bytes.
+	size, avail int64
+}
+
+// overlayDiskLook bounds the look at a MicroVM's own disk: one that hangs
+// answers nothing, and the stop does not wait on it.
+const overlayDiskLook = 15 * time.Second
+
+// overlayDiskWarnPercent is how full a MicroVM's own disk is when a
+// session and `sandbox status` say it is filling (#1148).
+const overlayDiskWarnPercent = 90
+
+// full reports a disk with no room left to start the MicroVM again on.
+func (d overlayDisk) full() bool { return d.known && d.avail < lowDiskBytes }
+
+// percent is how much of the disk is used.
+func (d overlayDisk) percent() int64 {
+	if d.size <= 0 {
+		return 0
+	}
+	return (d.size - d.avail) * 100 / d.size
+}
+
+// filling reports a disk that is full or nearly so.
+func (d overlayDisk) filling() bool {
+	return d.known && (d.full() || d.percent() >= overlayDiskWarnPercent)
+}
+
+// overlayDiskOf looks at the own disk of the running MicroVM name with
+// `df -Pk /` in it, within overlayDiskLook.
+func (a *App) overlayDiskOf(ctx context.Context, cli openshell.CLI, name string) overlayDisk {
+	inv, err := cli.Exec(name, []string{"df", "-Pk", "/"}, openshell.CLIExecOptions{Timeout: overlayDiskLook})
+	if err != nil {
+		return overlayDisk{}
+	}
+	var out strings.Builder
+	if code, err := a.Streamer.Stream(ctx, inv, &out, io.Discard); err != nil || code != 0 {
+		return overlayDisk{}
+	}
+	return parseOverlayDF(out.String())
+}
+
+// parseOverlayDF reads the size and the space left from `df -Pk` output:
+// the last line's fields, counted from its end (the file system's name may
+// hold spaces).
+func parseOverlayDF(out string) overlayDisk {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return overlayDisk{}
+	}
+	f := strings.Fields(lines[len(lines)-1])
+	if len(f) < 6 {
+		return overlayDisk{}
+	}
+	size, err := strconv.ParseInt(f[len(f)-5], 10, 64)
+	if err != nil || size <= 0 {
+		return overlayDisk{}
+	}
+	avail, err := strconv.ParseInt(f[len(f)-3], 10, 64)
+	if err != nil || avail < 0 {
+		return overlayDisk{}
+	}
+	return overlayDisk{known: true, size: size << 10, avail: avail << 10}
+}
+
+// overlayDiskFillingText says that the MicroVM name's own disk is full or
+// filling, and what to do before it stops; copyMode names a copy-mode
+// sandbox, whose work a pull brings back.
+func overlayDiskFillingText(name string, d overlayDisk, copyMode bool) string {
+	text := fmt.Sprintf("%s's own disk is %d%% full (%s of %s free): a MicroVM stopped with its disk full cannot start again → `%s exec %s -- df -h /` shows it",
+		name, d.percent(), humanBytes(d.avail), humanBytes(d.size), CommandName, name)
+	if copyMode {
+		text += "; `" + CommandName + " pull " + name + "` brings its work back before it fills"
+	}
+	return text
+}
+
+// printOverlayDisk warns in `sandbox status` when the running MicroVM sb's
+// own disk is full or filling (#1148).
+func (a *App) printOverlayDisk(ctx context.Context, sb *sandboxapi.Sandbox) {
+	if createdDriver(*sb) != string(openshell.DriverVM) {
+		return
+	}
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return
+	}
+	if disk := a.overlayDiskOf(ctx, a.cli(gateway), sb.Name); disk.filling() {
+		a.warn(overlayDiskFillingText(sb.Name, disk, sb.WorkdirMode == config.OpenShellWorkdirCopy))
+	}
 }
 
 // StartOptions are the `sandbox start` flags.

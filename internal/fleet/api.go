@@ -286,6 +286,25 @@ func (a *API) Handler() http.Handler {
 	return a.mux
 }
 
+// AuthConfigured reports whether the Fleet API has a token that can
+// authenticate a request. A nil API (Fleet off) has none.
+func (a *API) AuthConfigured() bool {
+	if a == nil {
+		return false
+	}
+	if tp := a.currentToken.Load(); tp != nil && *tp != "" {
+		return true
+	}
+	a.tenantScopesMu.RLock()
+	defer a.tenantScopesMu.RUnlock()
+	for token, tenantID := range a.tenantScopes {
+		if token != "" && tenantID != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // authMiddleware wraps an http.HandlerFunc with Bearer token validation.
 func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1374,7 +1393,8 @@ func csrfValueValid(val string) bool {
 		return false
 	}
 	for _, c := range val {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
+		alnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !alnum && c != '-' {
 			return false
 		}
 	}

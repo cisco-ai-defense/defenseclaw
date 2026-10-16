@@ -154,6 +154,9 @@ guardrail:
       mode: action       # this agent blocks; the others only observe
 ```
 
+`guardrail.block_message` and each connector's `block_message` may contain at
+most 4096 characters. `ensure` refuses a longer value as `config_invalid`.
+
 - **`guardrail.mode`.** `observe` inspects every call and logs the verdict
   without blocking. `action` blocks what policy denies. The default is
   `observe`. A connector's own `mode` overrides the global value for that
@@ -416,16 +419,23 @@ rules on Linux and macOS:
    from a copy of a shipped pack: `policies/guardrail/default`, `strict` or
    `permissive` in the DefenseClaw source release of the version you deploy,
    or the `share/policies/guardrail` folder above on a host where DefenseClaw
-   is already installed. Create the parent before copying: packages do not
-   create the administrator's `policies/guardrail` directory. For example on
-   macOS, run `sudo mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail`
-   before `sudo cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default
-   /opt/cisco/defenseclaw/etc/policies/guardrail/<name>`. On Linux, use
-   `/etc/defenseclaw/policies/guardrail` and the `/opt/defenseclaw/share/`
-   source instead. The packages ship no copy before they install, so
-   for a first install put the pack in place before the package (with your
-   MDM, for example) or install with the built-in packs first and switch
-   `rule_pack` afterwards. Keep every file and folder owned by root,
+   is already installed. Packages do not create the administrator's
+   `policies/guardrail` directory. Create the parent and copy the pack under
+   `umask 022`, so the new parents and copied pack are readable by the gateway.
+   Replace `my-pack` with your pack name. On macOS, run
+   `sudo sh -c 'umask 022 && mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail && cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack'`.
+   On Linux, run
+   `sudo sh -c 'umask 022 && mkdir -p /etc/defenseclaw/policies/guardrail && cp -R /opt/defenseclaw/share/policies/guardrail/default /etc/defenseclaw/policies/guardrail/my-pack'`.
+   The packages ship no copy before they install, so for a first install put
+   the pack in place before the package (with your MDM, for example) or install
+   with the built-in packs first and switch `rule_pack` afterwards. To repair a
+   copy made with restrictive modes, change only the created parent folders
+   and this pack. On macOS, run
+   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt/cisco/defenseclaw/etc/policies/guardrail`
+   and `sudo chmod -R u=rwX,go=rX /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
+   On Linux, run `sudo chmod 0755 /etc/defenseclaw/policies /etc/defenseclaw/policies/guardrail`
+   and `sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies/guardrail/my-pack`.
+   Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
    `data_dir`, which the gateway can write. Before it changes anything it
@@ -597,8 +607,9 @@ enabled destination references is stored and passes the file checks in
 [Where the key is stored](/docs/enterprise/ai-defense-key#where-the-key-is-stored).
 Otherwise it refuses the config, names the credential and the destination
 field, and keeps the running config. `enterprise secret remove` likewise
-refuses a credential that an enabled destination of the installed config
-still references, because the gateway could not start without it, and one
+refuses when it cannot read the installed config, or when an enabled destination
+of that config still references the credential, because the gateway could not
+start without it, and one
 that `enterprise.inspection.llm.credential` (or an enabled
 `enterprise.inspection.ai_defense.credential`) names, because the judge and
 the scanners would run without their key: remove the reference and apply the

@@ -103,6 +103,24 @@ func unitDisabled(ctx context.Context, services ServiceManager, unit Unit) bool 
 	return ok && reporter.Disabled(ctx, unit)
 }
 
+// loadedReporter is implemented by service managers whose units can be
+// loaded without running (launchd: a KeepAlive daemon between two runs is
+// "spawn scheduled").
+type loadedReporter interface {
+	Loaded(ctx context.Context, unit Unit) bool
+}
+
+// unitStarted reports a unit the service manager runs, or has loaded to
+// run: what starting it again restores. A refused macOS uninstall put back
+// only the jobs that were "running" when it looked, so a KeepAlive job
+// launchd was about to respawn stayed unloaded (GAP-1520).
+func unitStarted(ctx context.Context, services ServiceManager, unit Unit) bool {
+	if reporter, ok := services.(loadedReporter); ok && reporter.Loaded(ctx, unit) {
+		return true
+	}
+	return services.Active(ctx, unit)
+}
+
 // maskReporter is implemented by service managers whose units can be masked
 // (systemd): a masked unit can be neither enabled nor started.
 type maskReporter interface {
@@ -597,6 +615,12 @@ func (m *launchdManager) Active(ctx context.Context, unit Unit) bool {
 		return status.State != "not_loaded"
 	}
 	return status.State == "running"
+}
+
+// Loaded is true for a job launchd has loaded, running or not.
+func (m *launchdManager) Loaded(ctx context.Context, unit Unit) bool {
+	status, _ := m.Status(ctx, unit)
+	return status.State != "not_loaded"
 }
 
 // PlannedRestart is a KeepAlive daemon whose respawn launchd scheduled

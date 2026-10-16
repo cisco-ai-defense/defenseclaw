@@ -105,7 +105,10 @@ func sandboxEgressNoticeTool(connectorName, toolName string) bool {
 // the agent has not been told of, to the hook's additional context, and
 // re-renders the harness output around it. A block or ask keeps its own
 // answer (and leaves the refusals for the next call), and so does every
-// other request.
+// other request. A relayed call (a managed host) carries the refusals of
+// its user's daemon, which runs the sandbox's egress proxy
+// (sandboxrelay.EgressRefusalsHeader): the managed gateway's own sandbox
+// manager never had them (#1192).
 func (a *APIServer) addSandboxEgressRefusals(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -115,12 +118,12 @@ func (a *APIServer) addSandboxEgressRefusals(
 	payload map[string]interface{},
 	resp agentHookResponse,
 ) agentHookResponse {
-	st := a.sandboxIngressState()
-	if st == nil || st.egressRefusals == nil {
-		return resp
-	}
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
+		return resp
+	}
+	take, wait := a.sandboxEgressRefusalSource(ctx)
+	if take == nil {
 		return resp
 	}
 	// postToolContextEvents (kernel_block_notice.go): the post-tool events
@@ -134,14 +137,9 @@ func (a *APIServer) addSandboxEgressRefusals(
 	case "block", "confirm":
 		return resp
 	}
-	refusals := st.egressRefusals(binding)
-	if len(refusals) == 0 && sandboxDirectRefusalResult(rawBody) {
-		// OpenShell's record of the refusal may still be on its way.
-		deadline := time.Now().Add(sandboxDirectRefusalWait)
-		for len(refusals) == 0 && ctx.Err() == nil && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-			refusals = st.egressRefusals(binding)
-		}
+	refusals := take(binding)
+	if wait {
+		refusals = awaitSandboxDirectRefusal(ctx, rawBody, refusals, func() []SandboxEgressRefusal { return take(binding) })
 	}
 	if len(refusals) == 0 {
 		return resp
@@ -154,6 +152,39 @@ func (a *APIServer) addSandboxEgressRefusals(
 	resp.AdditionalContext = notice
 	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
 	return resp
+}
+
+// sandboxEgressRefusalSource is where a sandbox request's refusals come
+// from: a relayed call's own (the daemon waited for a direct refusal
+// before it sent them, so wait is false), else the local sandbox
+// manager's. take is nil when there are none to tell.
+func (a *APIServer) sandboxEgressRefusalSource(ctx context.Context) (take func(sandboxauth.Binding) []SandboxEgressRefusal, wait bool) {
+	if state := sandboxRelayStateFrom(ctx); state != nil {
+		return func(sandboxauth.Binding) []SandboxEgressRefusal { return state.takeEgressRefusals() }, false
+	}
+	st := a.sandboxIngressState()
+	if st == nil || st.egressRefusals == nil {
+		return nil, false
+	}
+	return st.egressRefusals, true
+}
+
+// awaitSandboxDirectRefusal waits, while refusals is empty, for the record
+// of a refused direct connection the hook payload rawBody names
+// (sandboxDirectRefusalResult), up to sandboxDirectRefusalWait, and
+// returns what take then gives.
+func awaitSandboxDirectRefusal(ctx context.Context, rawBody []byte, refusals []SandboxEgressRefusal,
+	take func() []SandboxEgressRefusal) []SandboxEgressRefusal {
+	if len(refusals) > 0 || !sandboxDirectRefusalResult(rawBody) {
+		return refusals
+	}
+	// OpenShell's record of the refusal may still be on its way.
+	deadline := time.Now().Add(sandboxDirectRefusalWait)
+	for len(refusals) == 0 && ctx.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		refusals = take()
+	}
+	return refusals
 }
 
 // sandboxDirectRefusalWait bounds how long the post-tool hook of a call

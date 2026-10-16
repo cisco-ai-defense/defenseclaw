@@ -627,18 +627,6 @@ func effectiveACPMode(cfg config.ACPConfig, profileName string) string {
 	return "observe"
 }
 
-func resolveACPProfile(cfg config.ACPConfig, requested string) (string, config.ACPProfile, bool) {
-	name := strings.TrimSpace(requested)
-	if name == "" {
-		name = strings.TrimSpace(cfg.DefaultProfile)
-	}
-	if name == "" {
-		name = "default"
-	}
-	profile, ok := cfg.Profiles[name]
-	return name, profile, ok
-}
-
 func acpBindingAllowed(allow []string, value string) bool {
 	return len(allow) == 0 || slices.Contains(allow, value)
 }

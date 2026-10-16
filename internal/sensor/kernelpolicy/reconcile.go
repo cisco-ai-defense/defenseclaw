@@ -164,6 +164,11 @@ type Controller struct {
 	scans [3]time.Time
 	// progressAt is when each user's last uid_progress change was emitted.
 	progressAt map[int]time.Time
+	// retained are the enforcing controls policies the plan replaced that
+	// the last apply kept for the live sessions only they marked, with how
+	// many such sessions; retainedRoots are those sessions (#1156).
+	retained      map[string]int
+	retainedRoots map[rootKey]bool
 	// retireForeign are the policies in DefenseClaw's name pattern that the
 	// last retire step (off and consume) found in Tetragon unrecorded: the
 	// customer's, reported as tetragon_foreign_defenseclaw_name.

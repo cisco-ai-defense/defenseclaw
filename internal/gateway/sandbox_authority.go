@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -104,12 +105,13 @@ type sandboxAuthority struct {
 	// records is each account's sandbox telemetry records budget, and
 	// eventRecords the budget of the records of its daemon's other events.
 	records, eventRecords sandboxRecordBudget
+	guestSignals          sandboxGuestSignals
 }
 
 // sandboxRegistrationStore is the registration store with the run record
 // of each pending or live registration (sandboxreg.FileStore).
 type sandboxRegistrationStore interface {
-	sandboxreg.Store
+	sandboxreg.GuestStore
 	CreateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	Run(uid int, id string) (sandboxreg.Run, bool, error)
 	UpdateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
@@ -536,6 +538,7 @@ func (a *APIServer) sandboxRelayAdmit(w http.ResponseWriter, r *http.Request, ro
 	if !sandboxAdmitsCalls(w, auth, reg) {
 		return nil, reg, false
 	}
+	a.sandboxGuestSignal(r.Context(), auth, reg, audit.SandboxGuestRelayWithoutGuest)
 	w.Header().Set(sandboxrelay.ProfileHeader, reg.Profile)
 	w.Header().Set(sandboxrelay.GenerationHeader, strconv.FormatUint(a.sandboxViewGeneration(cfg, reg), 10))
 	return withSandboxRelayRegistration(r.Context(), reg), reg, true

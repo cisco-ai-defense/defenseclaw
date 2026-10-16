@@ -179,15 +179,37 @@ jobs:
           git restore --worktree -- .
           test -z "$(git status --porcelain)"
 
+      # GoReleaser comes straight from its GitHub release, pinned by version
+      # and by the sha256 of goreleaser_Linux_x86_64.tar.gz in that release's
+      # checksums.txt (cosign-verified against goreleaser's release workflow).
+      # goreleaser-action looked the version up on goreleaser.com first, and an
+      # outage there failed the build with an empty error (rel-1-0-1:CI-a).
+      # release.yaml and ci.yml pin the same version and checksum.
+      - name: Install GoReleaser
+        env:
+          GORELEASER_VERSION: v2.15.4
+          GORELEASER_SHA256: aae00c71a4a6d55e08cce9273a1516bdce33c1e07cffb7e502fa6fec4377dede
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)/$(uname -m)" == Linux/x86_64 ]] || { echo "::error::the pinned GoReleaser checksum is for Linux x86_64"; exit 1; }
+          dir="$RUNNER_TEMP/goreleaser"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused -o "$dir/goreleaser.tar.gz" \
+            "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz"
+          echo "${GORELEASER_SHA256}  $dir/goreleaser.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/goreleaser.tar.gz" -C "$dir" goreleaser
+          "$dir/goreleaser" --version
+          echo "$dir" >> "$GITHUB_PATH"
       # .goreleaser.yaml disables its release and has no publishers; a dry run
       # also skips the publish stage outright.
       - name: Build gateway archives and SBOMs
-        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
-        with:
-          version: "v2.15.4"
-          args: release --clean${{ inputs.dry_run && ' --skip=publish' || '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          args=(release --clean)
+          if [[ "$DRY_RUN" == true ]]; then args+=(--skip=publish); fi
+          goreleaser "${args[@]}"
 
       - name: Build the wheel, hashed requirements and installers
         run: |

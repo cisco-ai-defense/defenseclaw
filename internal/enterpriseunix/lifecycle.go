@@ -124,6 +124,12 @@ const (
 	codeRecovered           = "recovered_interrupted_transaction"
 	codeUninstall           = "uninstall_failed"
 	codeUninstallPrecheck   = "uninstall_precheck_refused"
+	// codeUninstallIncomplete: the uninstall stopped before removing the
+	// binaries, because per-user hook registrations or vendor machine policy
+	// still name them, and started the services again. The package removal
+	// (preremove.sh) matches this code exactly and keeps the package files
+	// (GAP-1519).
+	codeUninstallIncomplete = "uninstall_incomplete"
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
@@ -175,6 +181,11 @@ type lifecycle struct {
 	// policiesKept is set when a Linux uninstall kept the administrator
 	// policies in Layout.PolicyDir (GAP-0960).
 	policiesKept bool
+	// sandboxesKept names the accounts whose sandboxes a non-purge
+	// uninstall kept; sandboxStoreKept is set once it kept the gateway's
+	// registrations of them with it (GAP-0598).
+	sandboxesKept    []string
+	sandboxStoreKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -186,6 +197,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
+	// rollbackConfigFile is the file of that config.yaml: a writer that
+	// puts the same bytes back after the restart replaces it, which the
+	// digest alone cannot tell (GAP-1411).
+	rollbackConfigFile os.FileInfo
 	// configACLWritable is set when a transaction found a macOS ACL entry
 	// that let another account write config.yaml after the plan checked it,
 	// or could not read the ACLs: bytes that changed since are not applied,
@@ -529,7 +544,11 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 
 // removeLifecycleStateKeepingLock clears transaction state without replacing
 // the lock inode, which this run still holds. Waiters can have the file open
-// before this run acquired it.
+// before this run acquired it. The deployment record stays too: the
+// uninstall removes it last, once everything else is gone. Removed here, an
+// uninstall that then failed to remove another state folder left no record,
+// so its rerun was a not_installed no-op and the leftovers needed
+// --adopt-existing (GAP-1440).
 func (e *Env) removeLifecycleStateKeepingLock() error {
 	dir := e.P(e.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
@@ -537,7 +556,7 @@ func (e *Env) removeLifecycleStateKeepingLock() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName {
+		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -586,9 +605,17 @@ func (l *lifecycle) removeLockWithLastState(record *Deployment) {
 }
 
 // removeInstallRootKeepingLock preserves the lock when macOS stores its
-// lifecycle directory inside the install root.
-func (e *Env) removeInstallRootKeepingLock() error {
-	if filepath.Dir(e.Layout.LifecycleDir) != e.Layout.InstallRoot {
+// lifecycle directory inside the install root, and each folder in keep
+// that is a direct child of the install root (the macOS data folder with
+// the kept sandbox registrations, GAP-0598).
+func (e *Env) removeInstallRootKeepingLock(keep ...string) error {
+	skip := map[string]bool{}
+	for _, dir := range append([]string{e.Layout.LifecycleDir}, keep...) {
+		if filepath.Dir(dir) == e.Layout.InstallRoot {
+			skip[filepath.Base(dir)] = true
+		}
+	}
+	if len(skip) == 0 {
 		return os.RemoveAll(e.P(e.Layout.InstallRoot))
 	}
 	root := e.P(e.Layout.InstallRoot)
@@ -607,7 +634,7 @@ func (e *Env) removeInstallRootKeepingLock() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == filepath.Base(e.Layout.LifecycleDir) {
+		if skip[entry.Name()] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
@@ -1153,7 +1180,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		p.payload.CompilerSource, p.payload.CompilerSHA = compiler, digest
 		if p.payload.CompilerSHA == "" {
-			return nil, &codedError{code: codePayload, err: fmt.Errorf("Fleet is enabled but the managed payload has no %s; provide a release payload or package with the Fleet compiler", compilerFileName)}
+			return nil, &codedError{code: codePayload, err: fmt.Errorf("fleet.enabled is set but the managed payload has no %s; provide a release payload or package with the Fleet compiler", compilerFileName)}
 		}
 		if record != nil && record.Files[compilerPath] != "" && record.Files[compilerPath] != digest &&
 			l.opts.Reason != "package" && p.payload.Version == record.ProductVersion {
@@ -1893,7 +1920,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if record != nil {
 		activatedAt = record.ActivatedAt
 	}
-	if !l.opts.NoStart && record != nil && record.NoStart {
+	// The activation is the start of the services, not the plan: a first
+	// install that fell back to InstalledAt (taken when the run planned)
+	// missed the agent sessions started while it published the hooks and
+	// started the services (GAP-1367). A record written by an older version
+	// without the field keeps the InstalledAt fallback: it was activated
+	// when it was installed.
+	if !l.opts.NoStart && (record == nil || record.NoStart) {
 		activatedAt = env.Now().UTC().Format(time.RFC3339Nano)
 	}
 	newRecord := &Deployment{
@@ -2538,8 +2571,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if beforeStart != nil {
 		beforeStart()
 	}
-	l.rollbackConfigSHA = ""
+	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
+		l.rollbackConfigFile, _ = os.Stat(env.P(env.Layout.ConfigPath))
 		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
 	generationErr := l.recordRestoredGeneration(ctx)
@@ -3003,7 +3037,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// stops short of removing the deployment puts it back (GAP-1500).
 	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
 	for _, unit := range units {
-		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasActive[unit.Name] = unitStarted(ctx, env.Services, unit)
 		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
 	}
 	stillRunning := stopGroup(true)
@@ -3089,7 +3123,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if policyLeft {
 			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		// Its own code: the package removal must keep the binaries these
+		// registrations call, which an uninstall_failed result does not ask
+		// for (GAP-1519).
+		r.AddError(codeUninstallIncomplete, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
@@ -3241,6 +3278,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				// config that names them turns the deployment on again
 				// (GAP-0960). A purge removes them.
 				l.policiesKept, err = removeAllExcept(env.P(dir), env.P(env.Layout.PolicyDir))
+			} else if dir == env.Layout.DataDir && l.keepSandboxStore() {
+				// The sandboxes the accounts keep need the gateway's
+				// registrations of them and their key at the next
+				// activation (GAP-0598). A purge removes them.
+				l.sandboxStoreKept, err = removeDataDirKeepingSandboxStore(env.P(dir))
 			} else {
 				err = os.RemoveAll(env.P(dir))
 			}
@@ -3258,7 +3300,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			errs = append(errs, err)
 		}
 		if !packageManaged {
-			if err := env.removeInstallRootKeepingLock(); err != nil {
+			var keep []string
+			if l.sandboxStoreKept {
+				keep = append(keep, env.Layout.DataDir)
+			}
+			if err := env.removeInstallRootKeepingLock(keep...); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -3289,6 +3335,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				if err != nil {
 					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
 				}
+			}
+		}
+		if l.sandboxStoreKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
+			// The account that owned the kept registrations is gone.
+			if err := env.handSandboxStoreToRoot(); err != nil {
+				r.AddWarning(codeLeftovers, fmt.Sprintf("could not hand the kept sandbox registrations in %s to root: %v; before the next ensure run `chown -R root:root %s`",
+					env.Layout.DataDir, err, env.Layout.DataDir))
 			}
 		}
 		if l.policiesKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
@@ -3324,7 +3377,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	_ = removeFile(env.deploymentPath())
 	_ = removeFile(env.policyStatePath())
-	if l.opts.KeepState && record != nil {
+	if (l.opts.KeepState || l.sandboxStoreKept) && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.
 		if err := env.recordRetainedState(); err != nil {
@@ -3421,6 +3474,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 			reenable = "installing the payload again with the same config, `<payload>/" + binGateway + " enterprise linux ensure --payload <payload> --config <file>`, turns the deployment on again"
 		}
 		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so "+reenable+"; --purge removes them")
+	}
+	if kept := l.keptSandboxStoreLine(); kept != "" {
+		lines = append(lines, kept)
 	}
 	if !l.opts.Purge {
 		if kept := l.keptPerUserLine(record); kept != "" {
@@ -3554,8 +3610,9 @@ func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
 // --purge on a purge) and reports what it could not do, one message per
 // account and connector: an error for a registration that is still in
-// place, a warning for an account whose home is unavailable or whose
-// per-user state stayed, and for a check that names no registration. It
+// place, a warning for an account whose home is unavailable, that was
+// removed (with the reason remove-all gives), or whose per-user state
+// stayed, and for a check that names no registration. It
 // returns whether any registration is left.
 func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	env, r := l.env, l.result
@@ -3588,11 +3645,15 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
 			// A check that names no registration (an unreadable eligible
-			// accounts file, say) does not hold up the uninstall.
-			r.AddWarning(codePerUserHooks, "some per-user hook registrations were not checked: "+entry)
+			// accounts file, say) says registrations may be left, which
+			// call the binaries: they stay, as for a named one. The precheck
+			// refuses such a report before anything changes; one here was
+			// only a warning, and the binaries went (GAP-1140).
+			r.AddError(codePerUserHooks, "some per-user hook registrations were not checked: "+entry+"; fix the cause and rerun "+rerun)
+			left = true
 			continue
 		}
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause; for a pending guardian cleanup, fix the account's home to an existing directory it owns, without symlinks or group/other write, or remove the account; then rerun %s", connector, user, reason, rerun))
 		left = true
 	}
 	if err != nil && len(report.Failed) == 0 {
@@ -3600,7 +3661,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		left = true
 	}
 	for _, entry := range report.Pending {
-		user, connector, _, _ := cutPerUserEntry(entry)
+		user, connector, reason, _ := cutPerUserEntry(entry)
+		if reason != "" {
+			// A removed account: its reason names the home and the remedy.
+			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
+			continue
+		}
 		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
 	}
 	for _, entry := range report.StateFailed {

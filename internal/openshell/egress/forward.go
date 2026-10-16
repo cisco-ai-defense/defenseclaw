@@ -128,7 +128,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, shuttingDownResponse())
 		return
 	}
-	pr, cred, presented, ok, off := p.authenticate(r)
+	pr, cred, presented, ok, off := p.authenticateCurrent(r)
 	if off != nil {
 		p.refuseForward(w, pr, r.Method, suspendedRefusal(*off, r.URL.Host), start)
 		return

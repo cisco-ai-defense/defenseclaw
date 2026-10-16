@@ -472,6 +472,12 @@ type HookDecision struct {
 	Reason      string `json:"reason,omitempty"`
 	ModelError  string `json:"model_error,omitempty"`
 	ModelStatus int    `json:"model_status,omitempty"`
+	// AlertsLow reports that the guardrail profile which decided the call
+	// alerts at LOW itself, so a LOW alert is a finding of the session.
+	AlertsLow bool `json:"alerts_low,omitempty"`
+	// EgressTold reports that the answer told the agent of the call's
+	// EgressRefusalsHeader refusals; the daemon then marks them told.
+	EgressTold bool `json:"egress_told,omitempty"`
 }
 
 // StateReport is POST registrations/{id}/state: whether the daemon sees the
@@ -505,6 +511,10 @@ type CurrentPolicy struct {
 	Live          LiveFields `json:"live"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
+	// Profile is the guardrail profile of the same match as Digest: after
+	// a regroup re-matched the registration, status and refusals name it,
+	// not the profile the sandbox was created under (#1199).
+	Profile string `json:"profile,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`

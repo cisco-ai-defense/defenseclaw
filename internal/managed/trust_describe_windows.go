@@ -89,14 +89,23 @@ const DefaultGatewayServiceAccount = `NT SERVICE\DefenseClawGateway`
 // works before the service exists (a first install): looking the account up
 // fails until the service is installed.
 func RulePackServiceReadGrant(serviceAccount string) string {
+	return serviceGrantPrincipal(serviceAccount) + ":(OI)(CI)RX"
+}
+
+// serviceGrantPrincipal is the icacls principal for the gateway service
+// account: "*<service SID>", derived from the service name, so a printed
+// grant also works before the service exists, when icacls refuses the
+// account name and its looked-up SID (error 1332, #1251). An account that is
+// not an NT SERVICE name is named as given.
+func serviceGrantPrincipal(serviceAccount string) string {
 	account := strings.TrimSpace(serviceAccount)
 	if account == "" {
 		account = DefaultGatewayServiceAccount
 	}
 	if name, err := ntServiceName(account); err == nil {
-		account = "*" + WindowsServiceSIDString(name)
+		return "*" + WindowsServiceSIDString(name)
 	}
-	return account + ":(OI)(CI)RX"
+	return account
 }
 
 // StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,

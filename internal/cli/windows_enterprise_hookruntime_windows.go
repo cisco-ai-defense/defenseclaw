@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"sort"
 	"strings"
@@ -104,11 +105,37 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 }
 
 // applyWindowsEnterpriseHookRuntimeAccess fails status and verify on a
-// drifted hook runtime folder.
+// drifted hook runtime folder, and on a missing one.
 func applyWindowsEnterpriseHookRuntimeAccess(result *enterprisestatus.Result) {
+	if problem := windowsEnterpriseHookRuntimeMissing(); problem != "" {
+		result.AddError("machine_policy_summary_missing", problem)
+		return
+	}
 	if _, problem := windowsEnterpriseHookRuntimeDrift(); problem != "" {
 		result.AddError("machine_policy_summary_untrusted", problem)
 	}
+}
+
+// windowsEnterpriseHookRuntimeMissing names the hook runtime folder when an
+// installed deployment that enrolls an account has none. The hook reads a
+// missing machine policy summary as no policy and skips its foreign-hook
+// check, so status and verify said healthy while that check was off
+// (GAP-1461). A deployment that enrolls nobody has no hook to read it.
+func windowsEnterpriseHookRuntimeMissing() string {
+	dir, err := windowsEnterpriseHookRuntimeDir()
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	targets, err := windowsEnterpriseEnrolledTargets()
+	if err != nil || len(targets) == 0 {
+		return ""
+	}
+	return dir + " is missing. It holds the machine policy summary (" + enterprisepolicy.PublicPolicyFileName +
+		") every enrolled user's agent hook reads; without it the hook skips its foreign-hook check." +
+		" Fix: run " + windowsEnterpriseAdminCommand("repair") + "; the hook guardian writes the folder and the summary back"
 }
 
 // repairWindowsEnterpriseHookRuntimeAccess writes the hook runtime folder's

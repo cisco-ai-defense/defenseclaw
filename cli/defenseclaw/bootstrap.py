@@ -46,10 +46,7 @@ from defenseclaw import platform_support
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
     connector_config_files,
-    connector_home,
-    copilot_home,
-    devin_hook_config_path,
-    devin_user_config_path,
+    connector_hook_config_paths,
     hermes_config_path,
     omnigent_config_path,
     opencode_writable_plugin_folder,
@@ -555,7 +552,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config)
+        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger)
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -1408,8 +1405,15 @@ def _apply_first_run_choices(
     profile: str,
     scanner_mode: str,
 ) -> None:
+    # Keep a pinned workspace only when every connector in the new first-run
+    # roster was already pinned. Adding a peer starts at global scope as before.
+    # The existing-roster check also requires a workspace pin.
+    keep_workspace = bool(cfg.claw.workspace_dir) and set(_first_run_connector_roster(options, connector)) <= set(
+        cfg.active_connectors()
+    )
     cfg.claw.mode = connector
-    cfg.claw.workspace_dir = ""
+    if not keep_workspace:
+        cfg.claw.workspace_dir = ""
     cfg.guardrail.connector = connector
     # A first-run walkthrough that asks for connector selection should not
     # inherit stale peers from a previous multi-connector config. Preserve the
@@ -1661,7 +1665,11 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             port_note = f", OpenClaw gateway port {app.cfg.gateway.port} from openclaw.json"
     try:
         with sink:
-            ok, warnings = execute_guardrail_setup(app, save_config=True)
+            ok, warnings = execute_guardrail_setup(
+                app,
+                save_config=True,
+                workspace_dir=app.cfg.claw.workspace_dir or None,
+            )
     except Exception as exc:
         detail = str(exc)
         if not verbose and buf.getvalue().strip():
@@ -2074,39 +2082,28 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
     if connector == "cursor":
-        path = os.path.expanduser("~/.cursor/hooks.json")
+        path = connector_hook_config_paths("cursor")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
         return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
     if connector == "devin":
-        claw_cfg = getattr(cfg, "claw", None)
-        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        workspace = cfg.connector_workspace_dir()
+        path = connector_hook_config_paths("devin", workspace)[0]
         if workspace:
-            if os.path.isfile(devin_hook_config_path(workspace)):
+            if os.path.isfile(path):
                 return StepResult("Connector", "pass", "Devin project hooks found")
-        elif _file_mentions_defenseclaw(devin_user_config_path()):
+        elif _file_mentions_defenseclaw(path):
             # Devin reads user-global hooks from its config.json; only a pinned
             # workspace moves them to <workspace>/.devin/hooks.v1.json.
             return StepResult("Connector", "pass", "Devin hooks found")
         return StepResult("Connector", "warn", "Devin hooks not found yet", "defenseclaw setup devin")
     if connector == "copilot":
-        claw_cfg = getattr(cfg, "claw", None)
-        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
-        if workspace:
-            path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
-        else:
-            path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
+        path = connector_hook_config_paths("copilot", cfg.connector_workspace_dir())[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
     if connector == "openhands":
-        claw_cfg = getattr(cfg, "claw", None)
-        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
-        candidates = [
-            os.path.expanduser("~/.openhands/hooks.json"),
-        ]
-        if workspace:
-            candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
+        candidates = connector_hook_config_paths("openhands", cfg.connector_workspace_dir())
         if any(os.path.isfile(path) for path in candidates):
             return StepResult("Connector", "pass", "OpenHands hooks found")
         return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
@@ -2114,7 +2111,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         # DefenseClaw owns only the documented global hook file, under the
         # effective Antigravity config home. Workspace .agents/hooks.json is a
         # host customization surface but is not a setup-complete signal here.
-        canonical = os.path.join(connector_home("antigravity"), "hooks.json")
+        canonical = connector_hook_config_paths("antigravity")[0]
         if os.path.isfile(canonical):
             return StepResult("Connector", "pass", "Antigravity hooks found")
         return StepResult(
@@ -2194,11 +2191,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         # Kiro merges hooks from every scope; setup writes the global
         # ~/.kiro/hooks/defenseclaw.json and, with claw.workspace_dir, the
         # project's .kiro/hooks/defenseclaw.json. Either one is enough here.
-        claw_cfg = getattr(cfg, "claw", None)
-        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
-        candidates = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
-        if workspace:
-            candidates.append(os.path.join(workspace, ".kiro", "hooks", "defenseclaw.json"))
+        candidates = connector_hook_config_paths("kiro", cfg.connector_workspace_dir())
         for path in candidates:
             if os.path.isfile(path):
                 return StepResult("Connector", "pass", f"Kiro hooks found at {path}")
@@ -2388,7 +2381,7 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
     report.splunk_bridge_dest = dest
 
 
-def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
+def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | None = None) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
     Returns True when a gateway token was detected (either from
@@ -2408,12 +2401,16 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
       auto-generates on first boot, so the Python and Go halves now
       agree out of the box instead of needing Phase 4's migration to
       reconcile them.
+
+    A running gateway keeps the token it loaded until it restarts, so
+    *logger* sends this run's audit events with that one (GAP-0490).
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
         _resolve_gateway_for_connector,
     )
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+    from defenseclaw.logger import keep_running_gateway_token
 
     # SU-03/ND-2: this used to read openclaw.json unconditionally and pin
     # OPENCLAW_GATEWAY_TOKEN whenever a token was reachable — with NO connector
@@ -2430,6 +2427,7 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
     token_configured = False
     token = gw.get("token", "")
     if token:
+        keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"

@@ -154,7 +154,7 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	// Only manifest rows prove enrollment: an eligible account without one
 	// (frank, gina) may have only personal state and gets no purge
 	// (GAP-0495); alice is purged once.
-	notPurged := addEnterpriseHookStatePurges(jobs, resolveEnterpriseHookRemoveRows(manifest), map[int]bool{1004: true})
+	notPurged := addEnterpriseHookStatePurges(jobs, resolveEnterpriseHookRemoveRows(manifest), map[int]string{1004: enterpriseHookPurgeSkipFailed})
 	if jobs[1006] != nil || jobs[1007] != nil {
 		t.Fatalf("purge added accounts without a manifest row: %+v", jobs)
 	}

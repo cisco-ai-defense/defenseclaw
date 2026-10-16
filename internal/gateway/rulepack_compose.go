@@ -146,7 +146,7 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 			}
 			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest; "+
 				"review the pack, then pin the digest above in that key (`defenseclaw-gateway rulepack validate --dir <pack dir>` "+
-				"prints it as files_digest; a pin computed by a release before the digest covered only the pack's own files "+
+				"prints it on the \"custom_packs pin\" line; a pin computed by a release before the digest covered only the pack's own files "+
 				"needs this one-time re-pin)%s",
 				scope, s.ref.Name, got, s.ref.Name, hint)
 		}

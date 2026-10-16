@@ -545,7 +545,32 @@ var (
 	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
+	// release whose hook-contract lock a target still carries. Tests
+	// replace it.
+	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// The reconcile's deferred-session check and machine-enrollment steps.
+	// Tests replace them.
+	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookDeferredTargetSessionAvailable
+	enterpriseHookReconcileStageDeferredPolicies    = stageEnterpriseHookDeferredManagedPolicies
+	enterpriseHookReconcileSyncEnrollments          = syncEnterpriseHookManagedEnrollments
 )
+
+// enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
+// an earlier DefenseClaw release protected that fails this release's
+// verification while its account is signed out (GAP-0644). An upgrade
+// renders new hooks that only the account's own Windows session installs,
+// and Windows 11 signs in one account at a time, so such a target waits for
+// that account's next sign-in, when the guardian repairs it. Status, verify
+// and Setup report it as pending until then, not as protected; the
+// protected records keep it as an unrepaired row (its last protected row
+// stays authorized for that repair). The error goes on to say the session
+// is unavailable, as every signed-out repair error does.
+const enterpriseHookAwaitingSignInPrefix = "enterprise hooks: protected target waits for its account's next sign-in"
+
+// errEnterpriseHookAwaitingSignIn marks the reconcile error of such a
+// target, so the reconcile counts exactly the rows it left waiting.
+var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPrefix)
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
@@ -561,8 +586,8 @@ func enterpriseHookVerifyOrRepairTarget(
 		result, err := enterpriseHookReconcileInstaller(ctx, opts)
 		return result, false, err
 	}
-	result, err := enterpriseHookReconcileVerifier(ctx, opts)
-	if err == nil {
+	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
+	if verifyErr == nil {
 		return result, false, nil
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
@@ -570,8 +595,23 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
+		// Only a deferred target of the standalone profile whose lock
+		// another release wrote waits for the sign-in. One this release
+		// protected that no longer verifies was changed while its account
+		// was signed out, and stays a failure; Secure Client is unchanged.
+		if target.IsDeferred() {
+			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
+						"it at the account's next sign-in (verification: %v)",
+					errEnterpriseHookAwaitingSignIn, written, verifyErr,
+				)
+			}
+		}
 		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
+			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: %v)",
+			verifyErr,
 		)
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
@@ -651,11 +691,14 @@ type enterpriseHookStatusReport struct {
 	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
 	Errors     []string                   `json:"errors,omitempty"`
 	// Warnings name rows that do not fail the host: those of a deleted
-	// account (enterpriseHookRemovedAccountFailures).
+	// account and those waiting for their account's next sign-in
+	// (enterpriseHookExcusedFailures).
 	Warnings []string `json:"warnings,omitempty"`
-	// RemovedAccountFailures counts those rows, so the Windows lifecycle's
-	// manifest adoption accepts exactly them, as verify does.
+	// RemovedAccountFailures and AwaitingSignInFailures count those rows, so
+	// the Windows lifecycle's manifest adoption accepts exactly them, as
+	// verify does.
 	RemovedAccountFailures int `json:"removed_account_failures,omitempty"`
+	AwaitingSignInFailures int `json:"awaiting_sign_in_failures,omitempty"`
 }
 
 // enterpriseHookEnrollment is one account's connectors in the last
@@ -702,7 +745,7 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 		switch {
 		case row.OK:
 			state = "enrolled"
-		case row.Pending:
+		case row.Pending, enterpriseHookAwaitingSignInError(row):
 			state = "pending"
 		}
 		entry.Connectors = append(entry.Connectors, enterpriseHookEnrollmentState{
@@ -818,21 +861,28 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 
 	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
 	state, stateExists, stateErr := records.State, records.StateExists, records.StateErr
-	removedAccountFailures := 0
+	excusedFailures := 0
 	if stateErr != nil {
 		report.Errors = append(report.Errors, stateErr.Error())
 	} else if !stateExists {
 		report.Errors = append(report.Errors, "hook guardian has not completed a reconcile")
 	} else {
 		report.State = &state
-		removedAccountFailures = enterpriseHookRemovedAccountFailures(state)
-		report.RemovedAccountFailures = removedAccountFailures
-		if removedAccountFailures > 0 {
-			for _, issue := range enterpriseHookGuardianFailureIssues(state) {
+		report.RemovedAccountFailures, report.AwaitingSignInFailures = enterpriseHookExcusedFailures(state)
+		excusedFailures = report.RemovedAccountFailures + report.AwaitingSignInFailures
+		for _, row := range state.Results {
+			if row.OK || row.Pending {
+				continue
+			}
+			issue := enterpriseHookGuardianFailureIssue(row)
+			switch {
+			case excusedFailures == 0:
+				report.Errors = append(report.Errors, issue)
+			case enterpriseHookAwaitingSignInRow(row):
+				report.Warnings = append(report.Warnings, issue)
+			default:
 				report.Warnings = append(report.Warnings, issue+enterpriseHookRemovedAccountNote)
 			}
-		} else {
-			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
 		}
 		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
 		markEnterpriseHookDeletedAccounts(report.Enrollment)
@@ -871,7 +921,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			activation,
 			enterpriseHookManifest,
 			expectedManifestSHA256,
-			removedAccountFailures,
+			excusedFailures,
 		)...)
 		// The Guardian is the trusted live verifier on native Windows: it runs
 		// as LocalSystem, reconciles every enabled target, and publishes this
@@ -897,7 +947,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
-			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount, state.TargetCount)
+			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount+report.AwaitingSignInFailures, state.TargetCount)
 		for _, warning := range report.Warnings {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("•", "fg=yellow", "bold"), warning)
 		}
@@ -976,26 +1026,47 @@ func enterpriseHookManifestActivationIssue(
 		activation.ManifestSHA256, manifestSHA256), false
 }
 
-// enterpriseHookRemovedAccountFailures is the number of failed rows in the
-// last reconcile when every one of them belongs to an account confirmed
-// removed by the platform (enterpriseHookRemovedAccountRow), and 0
-// otherwise. The enumerator eventually drops these rows; until then
-// status reports them as warnings instead of failing the whole host.
-func enterpriseHookRemovedAccountFailures(state enterpriseHookGuardianState) int {
-	failed := 0
+// enterpriseHookExcusedFailures counts the failed rows of the last reconcile
+// that do not fail the host: those of an account confirmed removed by the
+// platform (enterpriseHookRemovedAccountRow), which the enumerator
+// eventually drops, and those waiting for their signed-out account's next
+// sign-in (enterpriseHookAwaitingSignInRow). Both counts are 0 unless every
+// failed row is one of them; status and verify then report them as
+// warnings instead of failing the whole host.
+func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, awaiting int) {
 	for _, row := range state.Results {
 		if row.OK || row.Pending {
 			continue
 		}
-		if !enterpriseHookRemovedAccountRow(row) {
-			return 0
+		switch {
+		case enterpriseHookRemovedAccountRow(row):
+			removed++
+		case enterpriseHookAwaitingSignInRow(row):
+			awaiting++
+		default:
+			return 0, 0
 		}
-		failed++
 	}
-	if failed != state.FailureCount {
-		return 0
+	if removed+awaiting != state.FailureCount {
+		return 0, 0
 	}
-	return failed
+	return removed, awaiting
+}
+
+// enterpriseHookAwaitingSignInRow reports, on a standalone deployment only,
+// a guardian row that waits for its signed-out account's next sign-in
+// (enterpriseHookAwaitingSignInPrefix). It is not protected until the
+// guardian repairs it then.
+func enterpriseHookAwaitingSignInRow(row enterpriseHookReconcileRow) bool {
+	return cfg != nil && cfg.StandaloneEnterprise() && enterpriseHookAwaitingSignInError(row)
+}
+
+// enterpriseHookAwaitingSignInError is enterpriseHookAwaitingSignInRow for
+// readers of the standalone Windows guardian's own records, which load no
+// config; only that guardian writes the error.
+func enterpriseHookAwaitingSignInError(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending &&
+		strings.HasPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix)
 }
 
 func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []string {
@@ -1004,26 +1075,39 @@ func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []st
 		if row.OK || row.Pending {
 			continue
 		}
-		if account := enterpriseHookSignedOutAccount(row); account != "" {
-			// The same next step the refused repair gives: nothing an
-			// administrator runs helps until the account signs in.
-			issues = append(issues, fmt.Sprintf(
-				"the guardian cannot repair %s for %s while that account is signed out: have the account sign in, "+
-					"or remove it with its profile, then run repair again. The guardian repairs DefenseClaw hooks "+
-					"only in the account's own Windows session",
-				strings.TrimSpace(row.Connector), account))
-			continue
-		}
-		detail := strings.TrimSpace(row.Error)
-		if detail == "" {
-			detail = "no target error was recorded"
-		}
-		issues = append(
-			issues,
-			fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail),
-		)
+		issues = append(issues, enterpriseHookGuardianFailureIssue(row))
 	}
 	return issues
+}
+
+// enterpriseHookGuardianFailureIssue words one failed row of the last
+// reconcile for status.
+func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
+	account := enterpriseHookSignedOutAccount(row)
+	if enterpriseHookAwaitingSignInRow(row) {
+		if account == "" {
+			account = enterpriseHookTargetLabel(row)
+		}
+		return fmt.Sprintf(
+			"%s for %s is pending until that account signs in: an earlier DefenseClaw release protected it, and "+
+				"the guardian installs this release's hooks only in the account's own Windows session, at its next "+
+				"sign-in; it is not protected until then",
+			strings.TrimSpace(row.Connector), account)
+	}
+	if account != "" {
+		// The same next step the refused repair gives: nothing an
+		// administrator runs helps until the account signs in.
+		return fmt.Sprintf(
+			"the guardian cannot repair %s for %s while that account is signed out: have the account sign in, "+
+				"or remove it with its profile, then run repair again. The guardian repairs DefenseClaw hooks "+
+				"only in the account's own Windows session",
+			strings.TrimSpace(row.Connector), account)
+	}
+	detail := strings.TrimSpace(row.Error)
+	if detail == "" {
+		detail = "no target error was recorded"
+	}
+	return fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail)
 }
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
@@ -1096,7 +1180,7 @@ func compareEnterpriseHookGuardianRecords(
 
 // enterpriseHookGuardianRecordComplete reports whether a guardian record
 // accounts for every target. Its only failures may be the excused ones
-// (enterpriseHookRemovedAccountFailures); the guardian never writes a record
+// (enterpriseHookExcusedFailures); the guardian never writes a record
 // with failures OK.
 func enterpriseHookGuardianRecordComplete(ok bool, successes, failures, pending, total, excused int) bool {
 	if excused > 0 {
@@ -1107,7 +1191,7 @@ func enterpriseHookGuardianRecordComplete(ok bool, successes, failures, pending,
 
 // compareEnterpriseHookGuardianRecordsExcusing is
 // compareEnterpriseHookGuardianRecords that accepts exactly excused failed
-// rows (enterpriseHookRemovedAccountFailures) in all three records.
+// rows (enterpriseHookExcusedFailures) in all three records.
 func compareEnterpriseHookGuardianRecordsExcusing(
 	state enterpriseHookGuardianState,
 	authorization enterpriseHookGuardianAuthorization,
@@ -1323,13 +1407,33 @@ type enterpriseHookVerifyRun struct {
 	Rows     []enterpriseHookReconcileRow
 	Failures int
 	Pending  int
-	// Excused are the failed rows of a confirmed removed account, when
-	// every failed row of the last guardian reconcile qualifies
-	// (enterpriseHookRemovedAccountFailures). They count in Failures, so
-	// the dispositions still match the guardian's records, and verify
-	// reports them as warnings, as status does.
+	// Excused are the failed rows of a confirmed removed account and those
+	// waiting for their signed-out account's next sign-in, when every failed
+	// row of the last guardian reconcile qualifies
+	// (enterpriseHookExcusedFailures). They count in Failures, so the
+	// dispositions still match the guardian's records, and verify reports
+	// them as warnings, as status does. AwaitingSignIn are those of Excused
+	// that wait for a sign-in.
 	Excused          []enterpriseHookReconcileRow
+	AwaitingSignIn   []enterpriseHookReconcileRow
 	AuthorizationErr error
+}
+
+// enterpriseHookAwaitingSignInNote follows a verify row that waits for its
+// signed-out account's next sign-in.
+const enterpriseHookAwaitingSignInNote = " (pending until the account signs in: an earlier DefenseClaw release " +
+	"protected it, and the guardian repairs it in the account's own Windows session at its next sign-in; " +
+	"it is not protected until then)"
+
+// enterpriseHookVerifyExcusedNote is the note of one of run.Excused.
+func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterpriseHookReconcileRow) string {
+	key := enterpriseHookProtectedTargetKey(row)
+	for _, awaiting := range run.AwaitingSignIn {
+		if key != "" && enterpriseHookProtectedTargetKey(awaiting) == key {
+			return enterpriseHookAwaitingSignInNote
+		}
+	}
+	return enterpriseHookRemovedAccountNote
 }
 
 // enterpriseHookVerifyRowExcused reports whether row is one of run.Excused.
@@ -1341,6 +1445,22 @@ func enterpriseHookVerifyRowExcused(run enterpriseHookVerifyRun, row enterpriseH
 		}
 	}
 	return false
+}
+
+// enterpriseHookVerifyAwaitingSignIn reports a failed verify row that the
+// last guardian reconcile recorded as waiting for its account's next
+// sign-in, while that account is still signed out. Once the account signs
+// in, the row fails verify until the guardian has repaired it.
+func enterpriseHookVerifyAwaitingSignIn(
+	awaiting map[string]struct{},
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+) bool {
+	if _, ok := awaiting[enterpriseHookProtectedTargetKey(row)]; !ok || !target.IsDeferred() {
+		return false
+	}
+	available, err := enterpriseHookReconcileSessionAvailable(target)
+	return err == nil && !available
 }
 
 var enterpriseHookDeferredPendingStateVerifier = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
@@ -1409,7 +1529,7 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		if len(run.Excused) != 0 {
 			warnings := make([]string, 0, len(run.Excused))
 			for _, row := range run.Excused {
-				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookRemovedAccountNote)
+				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookVerifyExcusedNote(run, row))
 			}
 			payload["warnings"] = warnings
 		}
@@ -1427,7 +1547,7 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else if enterpriseHookVerifyRowExcused(run, row) {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: %s%s\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row), row.Error, enterpriseHookRemovedAccountNote)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: %s%s\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row), row.Error, enterpriseHookVerifyExcusedNote(run, row))
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
 		}
@@ -1601,11 +1721,19 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
 	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
 	// The rows of a deleted account whose profile folder was removed fail
-	// every reconcile until the enumerator drops them; verify accepts exactly
-	// those failures, as status does.
+	// every reconcile until the enumerator drops them, and those an earlier
+	// release protected fail until their signed-out account signs in again;
+	// verify accepts exactly those failures, as status does.
 	excused := 0
+	awaitingSignIn := map[string]struct{}{}
 	if guardianStateErr == nil && guardianStateExists {
-		excused = enterpriseHookRemovedAccountFailures(guardianState)
+		removed, awaiting := enterpriseHookExcusedFailures(guardianState)
+		excused = removed + awaiting
+		for _, row := range guardianState.Results {
+			if awaiting > 0 && enterpriseHookAwaitingSignInRow(row) {
+				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = struct{}{}
+			}
+		}
 	}
 	if authorizationErr != nil {
 		run.AuthorizationErr = authorizationErr
@@ -1766,6 +1894,9 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			run.Failures++
 			if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
+			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
+				run.Excused = append(run.Excused, row)
+				run.AwaitingSignIn = append(run.AwaitingSignIn, row)
 			}
 		}
 		run.Rows = append(run.Rows, row)
@@ -1945,7 +2076,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
-		return runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		started := time.Now()
+		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		if err == nil {
+			recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run)
+		}
+		return run, err
 	}
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
 		return run, err
@@ -1973,7 +2109,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
-	if err := syncEnterpriseHookManagedEnrollments(manifest, apiAddr, false); err != nil {
+	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
 		return run, fmt.Errorf(
 			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
 			err,
@@ -1993,14 +2129,20 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
+	// awaitingSignIn counts the failures that wait for their signed-out
+	// account's next sign-in (errEnterpriseHookAwaitingSignIn).
+	awaitingSignIn := 0
 	pending := 0
 	repairs := 0
+	var restored []enterpriseHookGuardianRestore
+	var notices []enterpriseHookGuardianNotice
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
-	for _, target := range manifest.Targets {
+	for index, target := range manifest.Targets {
+		enterpriseHookStartup.target(os.Stderr, index, len(manifest.Targets))
 		if !target.IsEnabled() {
 			continue
 		}
@@ -2032,7 +2174,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
 			var available bool
-			available, err = enterpriseHookDeferredTargetSessionAvailable(target)
+			available, err = enterpriseHookReconcileDeferredSessionAvailable(target)
 			if err == nil && !available {
 				row.Pending = true
 				pending++
@@ -2097,11 +2239,21 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				if err == nil {
 					if repaired {
 						repairs++
+						restored = append(restored, enterpriseHookGuardianRestore{
+							SID:        row.SID,
+							Connector:  row.Connector,
+							RestoredAt: time.Now().UTC().Format(time.RFC3339Nano),
+						})
 					}
 					row.OK = true
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					if result.AgentConfig != "" {
+						// A Hermes or Devin config put back or recreated
+						// (GAP-0588).
+						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+					}
 					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
@@ -2121,21 +2273,37 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		if err != nil {
 			failures++
+			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+				awaitingSignIn++
+			}
 			row.OK = false
 			row.Error = err.Error()
 		}
 		rows = append(rows, row)
 	}
+	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
+	recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
+	if runtime.GOOS == "windows" && enterpriseHookGuardianRestoresEnabled() {
+		// The standalone Windows guardian; Linux and macOS record theirs
+		// in their own reconcile, and Secure Client records none.
+		writeEnterpriseHookGuardianNotices(os.Stderr, cfg.DataDir, notices)
+	}
 
+	// A target an earlier release protected that waits for its signed-out
+	// account (GAP-0644) keeps the SID enrollment that release published, and
+	// the exact set covers every enabled target, so such failures alone do
+	// not hold back staging new pending targets or publishing the exact set.
+	// Without that, one account that never signs in again keeps every new
+	// target unenrolled and verify failing. Any other failure blocks both.
 	var enrollmentErr error
-	if failures == 0 {
-		enrollmentErr = stageEnterpriseHookDeferredManagedPolicies(
+	if failures == awaitingSignIn {
+		enrollmentErr = enterpriseHookReconcileStageDeferredPolicies(
 			manifest,
 			pendingTargets,
 			apiAddr,
 		)
 		if enrollmentErr == nil {
-			enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+			enrollmentErr = enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, true)
 		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
@@ -2340,7 +2508,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
-	if _, err := reconcile("startup"); err != nil {
+	// The standalone Windows guardian records how far this first reconcile
+	// has come, for the Setup coverage wait (GAP-0401).
+	enterpriseHookStartup.begin(cmd.ErrOrStderr(), cfg.DataDir)
+	_, startupErr := reconcile("startup")
+	enterpriseHookStartup.end(cmd.ErrOrStderr())
+	if err := startupErr; err != nil {
 		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
 		}
@@ -3330,23 +3503,6 @@ func previousEnterpriseHookProtection(
 		return protection, nil
 	}
 	return protection, nil
-}
-
-func previousEnterpriseHookSuccess(
-	dataDir,
-	userName,
-	userHome,
-	sid,
-	connectorName string,
-) (bool, error) {
-	protection, err := previousEnterpriseHookProtection(
-		dataDir,
-		userName,
-		userHome,
-		sid,
-		connectorName,
-	)
-	return protection.PreviouslyProtected, err
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {

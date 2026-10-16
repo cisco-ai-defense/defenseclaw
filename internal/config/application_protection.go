@@ -367,11 +367,21 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 }
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
+	return c.effectiveHookFailModeForConnector(connector, false)
+}
+
+// EffectiveActionHookFailModeForConnector applies the installed hook's fail
+// mode precedence to an action-mode decision selected by a request profile.
+func (c *Config) EffectiveActionHookFailModeForConnector(connector string) string {
+	return c.effectiveHookFailModeForConnector(connector, true)
+}
+
+func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
 	if c == nil {
 		return "closed"
 	}
 	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
-		if strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
+		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
 			return "closed"
 		}
 		return "open"
@@ -387,7 +397,11 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 		}
 	}
 	if configured == "" {
-		configured = c.Guardrail.EffectiveHookFailModeFor(connector)
+		if actionDecision {
+			configured = c.Guardrail.effectiveHookFailModeForMode(connector, "action")
+		} else {
+			configured = c.Guardrail.EffectiveHookFailModeFor(connector)
+		}
 	}
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
 }

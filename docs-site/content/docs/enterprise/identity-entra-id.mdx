@@ -60,7 +60,7 @@ Windows or macOS. Each is marked where it comes up.
 | Entra-joined Windows 10 or 11 | Entra ID at the Windows sign-in screen | Directory `entra_id`, the user SID, the UPN and the tenant ID | Standalone enterprise profile: an Entra group by SID, once a built-in local group lists it ([step 2](#2-windows-entra-joined-computers)). Per-user install: no groups, use `users` |
 | Azure Linux VM with Entra SSH sign-in | `az ssh vm`, with the `aad` module | Directory `entra_id`, source `nss_aad`, the UPN | No Entra group: the module gives the account only a private group. Use `users`, or one of the two routes below |
 | Linux with Himmelblau | `ssh` with the Entra password, an MFA code and a Hello PIN | Directory `entra_id`, source `himmelblau`; the UPN when accounts are named by it | The user's Entra groups, by name ([Himmelblau](#himmelblau)) |
-| Linux joined to Microsoft Entra Domain Services | `ssh` with the Entra password, through SSSD | Directory `active_directory`, source `sssd` (`sssd_infopipe` on standalone enterprise), the UPN, the domain | The synced Entra groups, as `name@domain` unless SSSD uses short names ([Entra Domain Services](#microsoft-entra-domain-services-with-sssd)) |
+| Linux joined to Microsoft Entra Domain Services | `ssh` with the Entra password, through SSSD | Directory `active_directory` and the domain. A per-user install uses source `sssd` and may have only a realm-derived principal; standalone enterprise uses `sssd_infopipe` and can read the UPN | The synced Entra groups, as `name@domain` unless SSSD uses short names ([Entra Domain Services](#microsoft-entra-domain-services-with-sssd)) |
 | Mac with Platform SSO (Company Portal) | Entra ID at the macOS login window | Standalone enterprise: directory `entra_id`, source `macos_platform_sso`, the UPN. Per-user: directory `local` | No Entra group: Platform SSO gives none. A local group that carries the membership ([step 4](#4-macos-platform-sso)) |
 | Linux desktop enrolled in Intune | A local account; Intune enrolls the device and does not sign users in | Directory `local`, expected. Not observed with DefenseClaw installed | Local groups |
 | Hybrid-joined Windows, Entra Kerberos | | The readers exist ([identity sources](/docs/enterprise/identity-sources)) | Not run on a live tenant |
@@ -122,9 +122,16 @@ python3 entra_setup.py sids --group defenseclaw-ml-team
 ```
 
 A token in `GRAPH_ACCESS_TOKEN` works instead of the app registration. The
-script creates objects that do not exist and leaves the others alone, so it is
-safe to run again. New users get a generated password that goes only to the
+script creates missing objects, leaves existing users unchanged and adds
+requested group memberships where allowed, so it is safe to run again. New
+users get a generated password that goes only to the
 `--password-file` (mode 0600), never to the screen.
+
+A Microsoft Graph read failure stops the plan, including a preview; the script
+does not treat it as a missing object. Group references in the config match
+planned groups without regard to letter case. The script refuses existing
+dynamic or mail-enabled groups because it cannot manage their membership;
+use a static security group instead.
 
 `sids` prints the object ID and the Windows SID of the group:
 
@@ -205,6 +212,8 @@ reports `Added`, `AlreadyMember`, `Removed` or `NotMember`. `-Remove` undoes it.
 It warns when you name a group other than the six Windows reads, and when you
 name Administrators, because that makes every member of the Entra group a local
 administrator.
+If `-LocalGroup` names a qualified domain group whose SID differs from the local
+group with the same short name, the script refuses the change.
 
 The script ran on Windows Server 2025 in Windows PowerShell 5.1 and PowerShell
 7 against a throwaway local group. The same API call put an Entra group into
@@ -530,7 +539,12 @@ install cannot read the record and reports `local`.
 
 ## 5. Map users and groups to profiles
 
-Write the assignments with the UPN for users and the SID for groups. Starter
+Write `users` assignments with the principal the host actually resolves, and
+use the SID for Entra groups on Windows. A Windows name or UPN may resolve to
+a SID before that user first signs in if the host's account lookup can reach
+the directory; a signed-in token is still needed for current group membership.
+On Azure Linux, check that NSS resolves the account by uid as well as name
+before relying on a `users` assignment. Starter
 files: `per-user-profiles.example.yaml` for a user's own config and
 `admin-config.windows.example.yaml` for the standalone profile. The keys are
 the ones in [User- and group-based policies](/docs/guardrail/user-and-group-policies);
@@ -566,7 +580,7 @@ standalone enterprise profile, which reads the machine config.
 | Windows, standalone enterprise | Matched before a lane-owned account's UPN rename and stopped matching after it; the account SID stayed the same | By SID, after the local group step. Matched in the live test |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
 | Linux Himmelblau, per-user and standalone | With `cn_name_mapping = false` | By name, as `id` shows it. Matched in the live test |
-| Linux Entra Domain Services, per-user and standalone | By the UPN on standalone enterprise | `ml-team@domain`, or `ml-team` with short names. Matched in the live test |
+| Linux Entra Domain Services, per-user and standalone | By the UPN on standalone enterprise after InfoPipe supplies it; a per-user SSSD install may have only the realm-derived account principal | `ml-team@domain`, or `ml-team` with short names. Matched in the live test |
 | macOS Platform SSO, standalone | By the UPN | Only a local group that carries the membership. Matched in the live test |
 | macOS Platform SSO, per-user | No: the account reports `local` without a UPN | Only a local group, as above |
 
@@ -635,10 +649,13 @@ before a timed run, or deploy an approved Setup Assistant skip payload.
   DefenseClaw's 15 minutes; the measured times are under
   [Himmelblau](#himmelblau) and [Entra Domain Services](#microsoft-entra-domain-services-with-sssd).
   On macOS a change reaches DefenseClaw when the bridge script runs again.
-- **A user who has not signed in yet.** An Entra user who has never signed in to
-  a Windows computer has no account there yet, so there is no SID to match. On
-  the Azure Linux VM, the module resolved such a user by name but not by uid,
-  and `profile explain` said `unixidentity: not found`.
+- **A user who has not signed in yet.** On Windows, the host may resolve an
+  Entra name or UPN to a SID before first sign-in; that depends on the host's
+  account lookup and directory reachability. It has no current sign-in token
+  from that user for group membership. On Azure Linux, NSS may resolve a name
+  before it can map a uid back to the account. Check the lookup on the target
+  host; `profile explain` reports `unixidentity: not found` when uid lookup
+  is unavailable.
 - **An Entra outage or a computer with no network.** In a nine-minute Windows
   sign-in endpoint outage test, open sessions kept the same hook decisions,
   including after a gateway restart: DefenseClaw reads the identity store,
@@ -654,7 +671,7 @@ before a timed run, or deploy an approved Setup Assistant skip payload.
 | Symptom | Cause and fix |
 | --- | --- |
 | A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, verify the account belongs to that Entra security group, then sign out and in if membership was recently added. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
-| `profile explain --user <name>` on Windows says "Windows has no account by this name" | The user has not signed in to this computer yet, or the name is misspelled. Pass the SID, `AzureAD\Name` or the UPN |
+| `profile explain --user <name>` on Windows says "Windows has no account by this name" | The host cannot resolve that name now; an account may resolve before first sign-in when its directory is reachable. Check the spelling and try the SID, `AzureAD\Name` or the UPN |
 | `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
 | `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users`, Himmelblau or Entra Domain Services |
 | `getent group ml-team` finds nothing on a Himmelblau host, but `id` lists the group | Expected: Himmelblau finds groups only by gid or object ID. DefenseClaw matches the name `id` shows |
@@ -665,7 +682,7 @@ before a timed run, or deploy an approved Setup Assistant skip payload.
 | `explain` says a group is not known to this host by that name and names `ml-team@domain` | SSSD uses qualified names. Write the qualified name, or switch to short names |
 | `id` on a Mac shows no Entra group after Platform SSO registration | Expected: Platform SSO gives no groups. Use the bridge script, or `users` on standalone enterprise |
 | The records of a Platform SSO user say `local` | A per-user install cannot read the Platform SSO link; standalone enterprise reports `entra_id`. An account that never registered stays `local` |
-| `profile explain` says `unixidentity: not found` for an Entra user on Linux | The OS names the account but cannot map its uid back to it, as seen for users who had not signed in. Have the user sign in, then ask again |
+| `profile explain` says `unixidentity: not found` for an Entra user on Linux | This host's NSS lookup cannot map the uid back to the account, even if name lookup works. Confirm with `id` and `getent passwd`; after the account is available to NSS, ask again |
 | Records have no principal | `ai_discovery.include_user_principal` is off, the default |
 | `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |
 | `Add-EntraGroupToLocalGroup.ps1` says to run elevated | It changes a local group. Run it as an administrator or as SYSTEM, or use `-WhatIf` |

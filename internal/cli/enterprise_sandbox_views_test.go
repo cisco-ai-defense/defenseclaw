@@ -426,8 +426,8 @@ func TestSandboxCommandKeepsSecureClientAnnotationOnEveryPlatform(t *testing.T) 
 func TestPolicyVerifySandboxRows(t *testing.T) {
 	prevProfile, prevGroups := enterprisePolicySandboxProfile, enterpriseAccountGroups
 	t.Cleanup(func() { enterprisePolicySandboxProfile, enterpriseAccountGroups = prevProfile, prevGroups })
-	enterprisePolicySandboxProfile = func(string) (string, string, string, error) {
-		return "contractors", "group", `CORP\Contractors`, nil
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) {
+		return "contractors", "group", `CORP\Contractors`, false, nil
 	}
 	c := &config.Config{}
 	c.OpenShell.Enabled = true
@@ -462,7 +462,9 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 		t.Errorf("in the docker group it still fails: %+v", got.Rows)
 	}
 	// An unresolved profile is a note, never a failure on its own.
-	enterprisePolicySandboxProfile = func(string) (string, string, string, error) { return "", "", "", errors.New("gateway down") }
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) {
+		return "", "", "", false, errors.New("gateway down")
+	}
 	if got := buildEnterprisePolicySandbox(c, "linux", "alice", 1001, states); got.Note == "" || got.failed() {
 		t.Errorf("unresolved profile = %+v", got)
 	}
@@ -483,7 +485,9 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 func TestPolicyVerifyRequiredPackRows(t *testing.T) {
 	prevProfile, prevGroups := enterprisePolicySandboxProfile, enterpriseAccountGroups
 	t.Cleanup(func() { enterprisePolicySandboxProfile, enterpriseAccountGroups = prevProfile, prevGroups })
-	enterprisePolicySandboxProfile = func(string) (string, string, string, error) { return "contractors", "group", "contractors", nil }
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) {
+		return "contractors", "group", "contractors", false, nil
+	}
 	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"docker"}, nil }
 	strict, err := packs.Builtin("strict")
 	if err != nil {

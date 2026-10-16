@@ -394,9 +394,11 @@ func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool 
 	case "read":
 		return hasAny("limit", "offset", "pages")
 	case "edit":
-		return hasAny("old_string", "new_string", "replace_all")
+		return hasAny("old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str")
 	case "multiedit", "multi_edit", "multi-edit":
 		return hasAny("edits")
+	case "create":
+		return hasAny("file_text")
 	case "grep", "glob":
 		return hasAny("pattern")
 	case "webfetch":
@@ -410,6 +412,33 @@ func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool 
 	}
 }
 
+// codingAgentEditKeys names the arguments of a coding-agent edit tool in one
+// dialect: Claude Code's snake_case, OpenCode's camelCase (its native edit
+// and multiedit tools take filePath, oldString, newString and replaceAll), or
+// the Copilot CLI edit tool's path, old_str and new_str (no replace-all).
+type codingAgentEditKeys struct{ path, old, new, all string }
+
+var (
+	snakeCaseEditKeys = codingAgentEditKeys{"file_path", "old_string", "new_string", "replace_all"}
+	camelCaseEditKeys = codingAgentEditKeys{"filePath", "oldString", "newString", "replaceAll"}
+	copilotEditKeys   = codingAgentEditKeys{path: "path", old: "old_str", new: "new_str"}
+)
+
+// codingAgentEditDialect picks the dialect of an edit call by its arguments.
+// A call that mixes dialects is not a reviewed contract: the keys of the
+// other dialect stay unknown and the parse stays partial.
+func codingAgentEditDialect(object map[string]any) codingAgentEditKeys {
+	if _, ok := object[camelCaseEditKeys.path]; ok {
+		return camelCaseEditKeys
+	}
+	for _, key := range []string{copilotEditKeys.old, copilotEditKeys.new} {
+		if _, ok := object[key]; ok {
+			return copilotEditKeys
+		}
+	}
+	return snakeCaseEditKeys
+}
+
 // extractClosedCodingAgentArgs projects the reviewed argument contracts used
 // by common coding-agent file and web tools. Pagination, presentation, and
 // search selectors are validated but do not become executable content.
@@ -418,6 +447,7 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 	if problem.status != "" {
 		return problem
 	}
+	edit := codingAgentEditDialect(object)
 	out := extractedInput{status: StatusComplete}
 	allowed := map[string]func(string, any) bool{}
 	require := map[string]bool{}
@@ -427,7 +457,7 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 			return false
 		}
 		canonical := key
-		if key == "file_path" || key == "root" || key == "notebook_path" {
+		if key == "file_path" || key == "filePath" || key == "root" || key == "notebook_path" {
 			canonical = "path"
 		}
 		return appendExtractedPath(&out, canonical, text)
@@ -461,41 +491,65 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 		allowed["pages"] = metadataString
 		require["file_path"] = true
 	case "edit":
-		allowed["file_path"] = stringField
-		allowed["old_string"] = literalText
-		allowed["new_string"] = func(_ string, value any) bool {
+		allowed[edit.path] = stringField
+		allowed[edit.old] = literalText
+		allowed[edit.new] = func(_ string, value any) bool {
 			text, ok := value.(string)
 			if ok {
 				out.payload = append(out.payload, extractedPayload{key: "content", nonEmpty: text != ""})
 			}
 			return ok
 		}
-		allowed["replace_all"] = boolean
-		require["file_path"], require["old_string"], require["new_string"] = true, true, true
+		if edit.all != "" {
+			allowed[edit.all] = boolean
+		}
+		require[edit.path], require[edit.old], require[edit.new] = true, true, true
+	case "create":
+		// The Copilot CLI create tool writes file_text to a new file.
+		allowed["path"] = stringField
+		allowed["file_text"] = func(_ string, value any) bool {
+			text, ok := value.(string)
+			if ok {
+				out.payload = append(out.payload, extractedPayload{key: "content", nonEmpty: text != ""})
+			}
+			return ok
+		}
+		require["path"], require["file_text"] = true, true
 	case "multiedit", "multi_edit", "multi-edit":
-		allowed["file_path"] = stringField
+		allowed[edit.path] = stringField
 		allowed["edits"] = func(_ string, value any) bool {
 			edits, ok := value.([]any)
 			if !ok || len(edits) == 0 || len(edits) > 64 {
 				return false
 			}
 			for _, value := range edits {
-				edit, ok := value.(map[string]any)
-				if !ok || len(edit) < 2 || len(edit) > 3 {
+				item, ok := value.(map[string]any)
+				if !ok || len(item) < 2 || len(item) > 4 {
 					return false
 				}
-				old, oldOK := edit["old_string"].(string)
-				newText, newOK := edit["new_string"].(string)
+				old, oldOK := item[edit.old].(string)
+				newText, newOK := item[edit.new].(string)
 				if !oldOK || !newOK || validateScalar(old, maxScalarBytes) != "" ||
 					validateScalar(newText, maxScalarBytes) != "" {
 					return false
 				}
-				for key, value := range edit {
-					if key == "replace_all" {
+				for key, value := range item {
+					switch key {
+					case edit.old, edit.new:
+					case edit.all:
 						if _, ok := value.(bool); !ok {
 							return false
 						}
-					} else if key != "old_string" && key != "new_string" {
+					case camelCaseEditKeys.path:
+						// OpenCode's multiedit items repeat the edit tool's
+						// arguments, filePath included, but it applies every
+						// item to the call's own filePath, which is the write
+						// target judged here. The item's copy is metadata.
+						text, ok := value.(string)
+						if edit != camelCaseEditKeys || !ok || validateScalar(text, maxScalarBytes) != "" {
+							return false
+						}
+					default:
 						return false
 					}
 				}
@@ -503,7 +557,7 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 			}
 			return true
 		}
-		require["file_path"], require["edits"] = true, true
+		require[edit.path], require["edits"] = true, true
 	case "grep":
 		allowed["pattern"] = metadataString
 		allowed["path"] = stringField
@@ -708,10 +762,6 @@ func statusForStructuredJSONIssue(issue IssueCode) ParseStatus {
 		return StatusAmbiguous
 	}
 	return statusForInputIssue(issue)
-}
-
-func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {
-	return extractArgsAtSchema(raw, projectionDepth, false)
 }
 
 func extractArgsAtSchema(

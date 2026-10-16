@@ -51,8 +51,10 @@ type Deployment struct {
 	ProductVersion string `json:"product_version"`
 	Channel        string `json:"channel"`
 	InstalledAt    string `json:"installed_at"`
-	// ActivatedAt records the first successful start after a --no-start staging.
-	// Older records use InstalledAt as the activation time.
+	// ActivatedAt records the first start of the services: at the end of a
+	// first install that starts them, or of the first run after a
+	// --no-start staging. Older records use InstalledAt as the activation
+	// time.
 	ActivatedAt string `json:"activated_at,omitempty"`
 	UpdatedAt   string `json:"updated_at"`
 	NoStart     bool   `json:"no_start"`

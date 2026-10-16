@@ -107,7 +107,29 @@ func (a *App) accountOutage(ctx context.Context, err error) error {
 	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
 		return errors.New("your account can't be looked up on this computer right now (ssh found no user for it); try again in a moment")
 	}
-	return errors.New(sandboxapi.AccountUnknownText + " " + sandboxapi.AccessContact(a.managedFacts(ctx).RequestAccess))
+	return errors.New(sandboxapi.AccountUnknownText + " " + accountOutageNote + " " + accountOutageContact(a.managedFacts(ctx).RequestAccess))
+}
+
+// accountOutageNote is why a managed run stops while the computer can't look
+// the account up, although `sandbox policy explain` shows the organization's
+// default policy (provisional) for it: OpenShell reaches every sandbox over
+// ssh as the account, and ssh refuses an account the computer does not know
+// (SSSD stopped, or no cached entry). The refusal is not the policy, so it
+// does not ask for a policy exception (GAP-0505).
+const accountOutageNote = "Until it can, a new sandbox can't start and `sandbox connect` and `sandbox exec` can't reach a running one; " +
+	"agents already running keep working. This isn't your organization's sandbox policy."
+
+// accountOutageContact is the closing sentence of the account outage refusal:
+// whom to tell when it lasts.
+func accountOutageContact(contact string) string {
+	text := sandboxapi.RequestAccessText(contact)
+	if text == sandboxapi.RequestAccessFallback {
+		return "If it lasts, " + text + "."
+	}
+	if !strings.HasSuffix(text, ".") {
+		text += "."
+	}
+	return "If it lasts, tell IT: " + text
 }
 
 // checkAccount stops a managed run at its start when the account cannot be
@@ -199,6 +221,7 @@ var managedNotices = map[string]bool{
 	"sandbox_account_busy":              true,
 	sandboxrelay.EventSettingsDrift:     true,
 	sandboxrelay.ReasonPolicyUnloadable: true,
+	sandboxrelay.DetailSetupChanging:    true,
 }
 
 // managedReasonTexts word the reason codes a refusal may carry without a
@@ -301,6 +324,28 @@ func managedSentence(e *sandboxapi.Error) (sentence, code string) {
 		return detail, code
 	}
 	return strings.TrimRight(msg, ". ") + " (" + strings.TrimRight(detail, ". ") + ")", code
+}
+
+// gatewayTransportErrors are the words of the OpenShell gateway's gRPC
+// transport failures as its client library prints them.
+var gatewayTransportErrors = []string{
+	"client connection is closing", "transport is closing", "code = unavailable", "connection error: desc",
+	"error reading from server", "grpc: ",
+}
+
+// gatewayTransportText is why with a raw gRPC transport failure of the
+// OpenShell gateway ("Cancelled: grpc: the client connection is closing")
+// put in words: such text named nothing the user could act on, and the
+// message around it gives the recovery step (#1202). Any other why is
+// returned unchanged.
+func gatewayTransportText(why string) string {
+	lower := strings.ToLower(why)
+	for _, raw := range gatewayTransportErrors {
+		if strings.Contains(lower, raw) {
+			return "the connection to the OpenShell gateway closed"
+		}
+	}
+	return why
 }
 
 // reasonCode reports a bare snake_case reason code ("sandbox_not_allowed"):

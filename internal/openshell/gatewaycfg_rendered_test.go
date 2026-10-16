@@ -49,8 +49,9 @@ func TestRenderGatewayTOML(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The docker driver honors DefenseClaw's read-only driver-config mounts
-	// (GAP-0449).
-	if !strings.Contains(squashTOML(string(got)), "compute_driver = 'docker' [openshell.drivers] [openshell.drivers.docker] allow_driver_config = true enable_bind_mounts = true [openshell.drivers.docker.resource_admission] enabled = false") {
+	// (GAP-0449) and keeps its Docker objects in the managed namespace
+	// (GAP-0566).
+	if !strings.Contains(squashTOML(string(got)), "compute_driver = 'docker' [openshell.drivers] [openshell.drivers.docker] allow_driver_config = true enable_bind_mounts = true sandbox_label = 'defenseclaw-managed' [openshell.drivers.docker.resource_admission] enabled = false") {
 		t.Errorf("docker gateway.toml =\n%s", got)
 	}
 	vm.DriverDir = "/usr/libexec/openshell"

@@ -74,8 +74,8 @@ func NeverReachPrefixes() []netip.Prefix { return slices.Clone(neverReach) }
 type guardClass uint8
 
 const (
-	// guardPass is a public destination; the other layers decide it.
-	guardPass guardClass = iota
+	// The zero value is a public destination; the other layers decide it.
+	_ guardClass = iota
 	// guardPrivate is on a private network: an RFC 1918, carrier-grade NAT
 	// or unique local address, another host on one of this machine's public
 	// subnets, or an intranet name. Only an operator allow rule opens it

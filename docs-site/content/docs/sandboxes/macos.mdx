@@ -120,6 +120,10 @@ Either have the owner give you write access, or install a Homebrew of your
 own in your home directory (see Homebrew's
 [installation guide](https://docs.brew.sh/Installation)), put it first on
 `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again.
+Add that shell setup to your profile for SSH sessions too. Setup can upgrade
+the `nvidia/openshell` formula in your own Homebrew in place; if doctor says
+the gateway uses a different Homebrew, select your own prefix with that
+`brew shellenv` command before running setup.
 
 A Homebrew of your own works, with two differences. The OpenShell CLI looks
 for the gateway's client certificates only under `/opt/homebrew` and
@@ -155,18 +159,18 @@ first):
 ```text
 DefenseClaw sandbox setup
   Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
-Install OpenShell 0.1.2 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
+Install OpenShell 0.1.3 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
 ```
 
 Then it:
 
-1. **Installs OpenShell 0.1.2** from the `nvidia/openshell` Homebrew
+1. **Installs OpenShell 0.1.3** from the `nvidia/openshell` Homebrew
    formula, without `sudo`. NVIDIA's installer script is checked against a
    pinned SHA-256 before it runs. The plan lists what else changes: Homebrew
    may update itself first, and the gateway is registered as `openshell` in
    `~/.config/openshell`. With the same consent it installs `e2fsprogs`
-   when it is missing. On OpenShell 0.1.1 setup offers the upgrade to 0.1.2
-   in place instead (`brew reinstall` of the formula; see
+   when it is missing. On OpenShell 0.1.1 or 0.1.2 setup offers the upgrade to
+   0.1.3 in place instead (`brew reinstall` of the formula; see
    [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 2. **Switches the gateway to MicroVMs.** It asks:
 
@@ -247,8 +251,8 @@ in a terminal first:
 defenseclaw sandbox setup --install-openshell
 ```
 
-On OpenShell 0.1.1 the same command also upgrades OpenShell to 0.1.2 in
-place, which restarts the gateway (see
+On OpenShell 0.1.1 or 0.1.2 the same command also upgrades OpenShell to
+0.1.3 in place, which restarts the gateway (see
 [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 
 </Tab>
@@ -269,25 +273,25 @@ On a Mac set up through Homebrew, the output looks like this:
   ✓ Docker                     Docker 29.1.5 (Docker Desktop)
   ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1-desktop.2)
   - Docker host networking     the MicroVM driver does not use Docker's network
-  ✓ Docker file sharing        /var/folders/…/T is shared with Docker Desktop (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)
+  ✓ Docker file sharing        /Users/alice/Library/Caches/defenseclaw/hookfire is shared with Docker Desktop (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)
   ✓ MicroVM driver             e2fsprogs in /opt/homebrew/opt/e2fsprogs/sbin; /opt/homebrew/opt/openshell/libexec/openshell-driver-vm signed for Apple's Hypervisor
   ✓ MicroVM sandbox user       sandboxes run as 501:20, your user
   ✓ MicroVM resources          every MicroVM gets 4 vCPUs, 4096 MiB of memory and a 16384 MiB disk for its changes
   ✓ Disk space                 37.8 GiB free under ~/.local/state/openshell/vm-driver
   - Login session              Homebrew services, the OpenShell gateway among them, run while you are logged in
   ✓ Gateway service            nvidia/openshell/openshell started
-  ✓ OpenShell CLI              0.1.2 at /opt/homebrew/bin/openshell
+  ✓ OpenShell CLI              0.1.3 at /opt/homebrew/bin/openshell
   ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
   ✓ Gateway registration       openshell at https://localhost:17670 (mtls)
   ✓ Gateway mTLS files         private key is owner-only
-  ✓ Gateway                    0.1.2 healthy at https://localhost:17670
+  ✓ Gateway                    0.1.3 healthy at https://localhost:17670
   ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
   ✓ Global policy              none; sandbox policies apply
   - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
   ✓ OpenShell telemetry        OpenShell usage telemetry is off in ~/.config/openshell/gateway.env, which the Homebrew service reads
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.2 gateway openshell (MicroVM driver); ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.3 gateway openshell (MicroVM driver); ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              no sandbox is running
   ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
   ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
@@ -295,6 +299,11 @@ On a Mac set up through Homebrew, the output looks like this:
 
   ✓ ready for sandboxes
 ```
+
+With Colima or OrbStack, the **Docker file sharing** check says that the
+`~/Library/Caches/defenseclaw/hookfire` directory is under your home directory,
+which those engines share with their container VM by default. If the probe
+directory is outside home, doctor warns that the engine may not see it.
 
 The **Platform** warning is expected on every Mac: it says that the
 MicroVM driver is experimental upstream. The checks marked `-` do not apply
@@ -465,6 +474,10 @@ Applying a copy's work and undoing it, replayed from a real run:
 | Checks after start | After each create and start, DefenseClaw checks inside the MicroVM that it runs as your uid with no capabilities and that its hooks and settings are the files DefenseClaw prepared. A sandbox that is not as prepared is stopped. |
 | Stopping | `defenseclaw sandbox stop NAME` saves the MicroVM's disk. A gateway restart stops every MicroVM on it, and setup asks before it restarts a gateway with sandboxes running. |
 
+While a session runs, DefenseClaw warns once when its overlay disk reaches
+90% use. `defenseclaw sandbox status NAME` shows the same warning while the
+MicroVM is running.
+
 ## Limits on a Mac
 
 - **Always a copy.** There is no live mount and no pre-session snapshot.
@@ -491,11 +504,15 @@ Applying a copy's work and undoing it, replayed from a real run:
 
 OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs
 as the Homebrew service of the account that started it. A Mac runs one
-gateway, so only that account can run sandboxes. In a second account,
+gateway, so only that account can run sandboxes. Each account would also need
+its own Docker Desktop and Homebrew service, which run only in that account's
+desktop session; per-user gateway ports are planned. In a second account,
 `defenseclaw sandbox doctor` says that the gateway's port is held by a
-process of another account. When the Homebrew prefix belongs to the first
-account, the doctor also says that its gateway configuration belongs to
-that account, so the compute driver is not known in the second account.
+process of another account, even if OpenShell is not installed in the second
+account. Setup installs and starts nothing there. When the Homebrew prefix
+belongs to the first account, the doctor also says that its gateway
+configuration belongs to that account, so the compute driver is not known
+in the second account.
 The checks that follow from the gateway (its registration, the gateway
 itself, Docker Desktop) are skipped (`not checked: the OpenShell gateway on
 this machine is another account's`), and `sandbox setup` stops at that one
@@ -512,7 +529,8 @@ runs it:
 brew services stop nvidia/openshell/openshell
 ```
 
-Then run `defenseclaw sandbox setup` in the other account. When that
+Then run `defenseclaw sandbox setup` in the other account, adding
+`--install-openshell` if OpenShell is not installed there. When that
 account cannot use the Homebrew prefix, setup says which account owns it.
 Several users on one machine are tracked upstream in
 [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
@@ -528,7 +546,8 @@ Several users on one machine are tracked upstream in
 | A run ends with `import provider profile …: openshell: exec: "openshell": executable file not found in $PATH` | The daemon started before your shell had the OpenShell CLI on its `PATH`. Run `defenseclaw sandbox setup` again (it records the CLI's path as `openshell.binary`), or restart the daemon from this shell: `defenseclaw-gateway restart`. |
 | **MicroVM driver** fails: the driver is not signed for Apple's Hypervisor | `brew postinstall nvidia/openshell/openshell`. Setup runs it for you when you agree. |
 | **Docker** fails | Start Docker Desktop. |
-| **Docker file sharing** fails: your temporary folder is not shared with Docker Desktop | Add the folder it names in Docker Desktop → Settings → Resources → File sharing. `/var/folders` and `/tmp` are shared by default. |
+| **Docker file sharing** fails: the hook-fire probe directory is not visible to the container engine | Share your home directory, including `~/Library/Caches/defenseclaw/hookfire`, with the engine's VM, then run the image build again. In Docker Desktop use Settings → Resources → File sharing; Colima mounts home by default, and OrbStack shares `/Users` by default. |
+| **Docker** says `Docker Desktop is not running in this account (permission denied ...)` | Log in to the Mac's desktop as this account, start Docker Desktop there, then run `defenseclaw sandbox setup` again. Do not point `DOCKER_HOST` at another account's socket. |
 | `no sandbox can start on this gateway: it runs sandboxes on the docker driver` | Run `defenseclaw sandbox setup` and answer yes to the MicroVM question. |
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | A first run fails after about 5 minutes with `ProvisioningTimedOut: Provisioning repair window expired after 300 seconds` | The volume most often ran full while the MicroVM disk was prepared (several first starts at once each need one). Check **Disk space** in `defenseclaw sandbox doctor`, then run `defenseclaw sandbox image prune`: it also removes the half-prepared disks that failed or cancelled first starts leave in `~/.local/state/openshell/vm-driver/images`, once nothing has written to them for 15 minutes. |

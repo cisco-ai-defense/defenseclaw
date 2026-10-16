@@ -397,9 +397,10 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	// Lock ordering: mu (global map lock) before shard lock.
 	// Auto-register needs mu.Lock, so acquire mu first when device is unknown.
 	fm.mu.RLock()
-	dev, exists := fm.devices[fullID]
+	_, exists := fm.devices[fullID]
 	fm.mu.RUnlock()
 
+	var dev *Device
 	if !exists {
 		if !fm.AutoRegister {
 			return false
@@ -408,10 +409,8 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		fm.mu.Lock()
 		// Double-check under write lock — another goroutine may have registered
 		// between the RUnlock and Lock above.
-		if existing, ok := fm.devices[fullID]; ok {
-			dev = existing
-		} else {
-			dev = &Device{
+		if _, ok := fm.devices[fullID]; !ok {
+			fm.devices[fullID] = &Device{
 				DeviceID:      fullID,
 				TenantID:      tenantID,
 				FleetID:       fleetID,
@@ -423,7 +422,6 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 				RegisteredAt:  time.Now(),
 				LastHeartbeat: time.Now(),
 			}
-			fm.devices[fullID] = dev
 		}
 		fm.mu.Unlock()
 

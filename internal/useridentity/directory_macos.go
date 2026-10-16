@@ -4,16 +4,20 @@
 package useridentity
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
 
 // macOS directory facts, verified by the root enumerator from:
 //
-//   - dscl /Search -read /Users/<name> AuthenticationAuthority
-//     OriginalNodeName: an AD-bound or mobile account carries a
-//     ;Kerberosv5;;user@REALM;REALM; authority (local accounts carry an LKDC
-//     one, which is skipped) and its original node names the directory;
+//   - dscl /Search -read /Users/<name> UniqueID AuthenticationAuthority
+//     OriginalNodeName dsAttrTypeNative:userPrincipalName: the UniqueID must
+//     be the account's uid (MacOSDSCLRecordUID); an AD-bound or mobile
+//     account carries a ;Kerberosv5;;user@REALM;REALM; authority (local
+//     accounts carry an LKDC one, which is skipped), its original node names
+//     the directory, and the domain's record its userPrincipalName, the UPN
+//     a users entry may name (GAP-0534);
 //   - dsconfigad -show: the AD domain the Mac is bound to;
 //   - app-sso platform -s: the Platform SSO extension, which names the
 //     identity provider (Microsoft Company Portal for Entra ID, Okta Verify
@@ -94,6 +98,13 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 	}
 	if facts.Directory != DirectoryActiveDirectory {
 		facts.AccountDomain = ""
+	} else {
+		for _, value := range attrs["dsAttrTypeNative:userPrincipalName"] {
+			if upn := NormalizeUPN(value); upn != "" {
+				facts.UPN = upn
+				break
+			}
+		}
 	}
 	if upn := platformSSOLoginUPN(attrs["AltSecurityIdentities"]); upn != "" && facts.Directory == "" {
 		facts.Directory = platformSSOProvider(in.AppSSO)
@@ -110,8 +121,37 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 	return facts
 }
 
+// MacOSDSCLRecordUID is the UniqueID in the output of a `dscl -read` that
+// asked for it, and whether the output names exactly one numeric UniqueID.
+// The root enumerator reads a record by short name through /Search, so the
+// record it gets can belong to another account (a directory account named
+// like a local one, a reused name); it refuses one whose UniqueID is not the
+// uid it resolves (GAP-1075). A mobile Active Directory account answers that
+// read with its local copy and the domain's record, so its UniqueID comes
+// twice, with the same value: refusing every repeated value left no bound
+// Mac's AD account a guardian record, so users entries naming its UPN
+// selected nobody and its facts were dropped minutes into an outage
+// (GAP-0534, GAP-0538). Two different values are still refused.
+func MacOSDSCLRecordUID(output string) (int, bool) {
+	values := parseDSCLAttributes(output)["UniqueID"]
+	if len(values) == 0 {
+		return 0, false
+	}
+	uid := -1
+	for _, value := range values {
+		parsed, err := strconv.ParseUint(value, 10, 31)
+		if err != nil || uid >= 0 && int(parsed) != uid {
+			return 0, false
+		}
+		uid = int(parsed)
+	}
+	return uid, true
+}
+
 // parseDSCLAttributes parses dscl -read output: "Name: v1 v2" on one line,
-// or "Name:" followed by indented value lines when a value has spaces.
+// or "Name:" followed by indented value lines when a value has spaces. A
+// native attribute of the directory node's own schema
+// (dsAttrTypeNative:userPrincipalName) is kept under its whole name.
 func parseDSCLAttributes(output string) map[string][]string {
 	attrs := map[string][]string{}
 	current := ""
@@ -132,7 +172,14 @@ func parseDSCLAttributes(output string) map[string][]string {
 			continue
 		}
 		current = strings.TrimSpace(name)
-		if strings.HasPrefix(current, "dsAttrTypeNative") || strings.ContainsAny(current, " \t") {
+		if current == "dsAttrTypeNative" {
+			native, value, ok := strings.Cut(rest, ":")
+			if !ok || native == "" || strings.ContainsAny(native, " \t") {
+				current = ""
+				continue
+			}
+			current, rest = "dsAttrTypeNative:"+native, value
+		} else if strings.ContainsAny(current, " \t") {
 			current = ""
 			continue
 		}

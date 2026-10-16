@@ -95,7 +95,8 @@
         "state": { "type": "string", "enum": ["ready", "not_prepared", "untrusted", "missing"] },
         "versions": { "type": "object", "additionalProperties": { "type": "string" } },
         "policy": { "type": "string" },
-        "judge_model": { "type": "string" }
+        "judge_model": { "type": "string" },
+        "problem": { "type": "string", "description": "The missing or changed file when a prepared scanner runtime is damaged." }
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },

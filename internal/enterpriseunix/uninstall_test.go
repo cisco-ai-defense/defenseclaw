@@ -300,6 +300,7 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 			}}
 			failed := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, failed, codePerUserHooks)
+			requireError(t, failed, codeUninstallIncomplete)
 			got := messagesOf(failed.Errors, codePerUserHooks)
 			if !strings.Contains(got, "devin hooks for user alice were not removed: devin teardown: remove hook entries: permission denied") ||
 				!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
@@ -364,9 +365,14 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
 	failed := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireError(t, failed, codeUninstall)
-	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "operation not permitted") ||
-		!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
-		t.Fatalf("the uninstall does not name the policy failure and the rerun: %s", got)
+	// GAP-1519: the stop has its own code, which the package removal keeps
+	// the package files on.
+	requireError(t, failed, codeUninstallIncomplete)
+	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "operation not permitted") {
+		t.Fatalf("the uninstall does not name the policy failure: %s", got)
+	}
+	if got := messagesOf(failed.Errors, codeUninstallIncomplete); !strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
+		t.Fatalf("the uninstall does not name the rerun: %s", got)
 	}
 	hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
 	if !exists(hook) || !exists(h.env.deploymentPath()) {
@@ -726,5 +732,103 @@ func TestPackageUninstallLeavesNoEmptyPolicyFoldersSoTheReenableWorks(t *testing
 				t.Fatal("the re-enable changed the custom pack file")
 			}
 		})
+	}
+}
+
+// spawnScheduledServices reports label loaded but not running, as launchd
+// reports a KeepAlive job between two runs ("spawn scheduled").
+type spawnScheduledServices struct {
+	*fakeServices
+	label string
+}
+
+func (s spawnScheduledServices) Active(ctx context.Context, unit Unit) bool {
+	if unit.Name == s.label {
+		return false
+	}
+	return s.fakeServices.Active(ctx, unit)
+}
+
+func (s spawnScheduledServices) Loaded(_ context.Context, unit Unit) bool {
+	return s.isActive(unit.Name)
+}
+
+// GAP-1520: an uninstall that stops short of removing the deployment puts
+// back the services it stopped (GAP-1500), but on macOS it put back only the
+// jobs that were "running" when it looked: a KeepAlive gateway launchd was
+// about to respawn stayed unloaded. A loaded job is loaded again.
+func TestRefusedUninstallLoadsASpawnScheduledJobAgain(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if !h.services.isActive(labelGateway) {
+		t.Fatal("the gateway job is not loaded after install")
+	}
+	h.env.Services = spawnScheduledServices{fakeServices: h.services, label: labelGateway}
+	fail := true
+	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	refused := h.run(Options{Action: ActionUninstall})
+	requireError(t, refused, codeUninstallIncomplete)
+	if !h.services.isActive(labelGateway) {
+		t.Fatalf("the refused uninstall left the spawn-scheduled gateway job unloaded; calls: %v", h.services.calls)
+	}
+}
+
+// GAP-1140: a remove-all failure that names no registration (an unreadable
+// eligible-accounts file) was only a warning, so the uninstall removed the
+// binaries the registrations it could not check may still call. It keeps
+// them, as for a named registration, and the rerun finishes.
+func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	unchecked := true
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		if unchecked {
+			return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["eligible accounts: open unix_eligible_accounts.json: permission denied"]}`)}, errors.New("exit 1")
+		}
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}}
+	failed := h.run(Options{Action: ActionUninstall})
+	requireError(t, failed, codePerUserHooks)
+	requireError(t, failed, codeUninstallIncomplete)
+	if got := messagesOf(failed.Errors, codePerUserHooks); !strings.Contains(got, "were not checked: eligible accounts") {
+		t.Fatalf("the uninstall does not name the unchecked registrations: %s", got)
+	}
+	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	if !exists(gateway) || !exists(h.env.deploymentPath()) {
+		t.Fatal("the uninstall removed the binaries while registrations were not checked")
+	}
+	unchecked = false
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if exists(gateway) || exists(h.env.deploymentPath()) {
+		t.Fatal("the rerun did not finish the removal")
+	}
+}
+
+// GAP-1440: the uninstall removed the lifecycle state, the deployment record
+// with it, before it knew every state folder was gone; when one could not be
+// removed, the rerun found no record and was a not_installed no-op. The
+// record stays until the removal is complete.
+func TestUninstallKeepsTheRecordWhenAStateFolderStays(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove a folder from a read-only parent")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	parent := filepath.Dir(h.env.P(h.env.Layout.LogDir))
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	requireError(t, h.run(Options{Action: ActionUninstall}), codeUninstall)
+	if !exists(h.env.deploymentPath()) {
+		t.Fatal("the failed uninstall removed the deployment record")
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retry := h.run(Options{Action: ActionUninstall})
+	requireOK(t, retry)
+	if retry.Noop || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.LogDir)) {
+		t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
 	}
 }

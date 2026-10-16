@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -182,6 +183,52 @@ func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
 	if !strings.Contains(got, "claude (pid 5001)") || !strings.Contains(got, "drop-in was changed or removed") || strings.Contains(got, "5002") {
 		t.Fatalf("status does not name exactly the session open through the drop-in change: %q", got)
+	}
+}
+
+// startClockServices runs onStart before each service start.
+type startClockServices struct {
+	ServiceManager
+	onStart func()
+}
+
+func (s startClockServices) Start(ctx context.Context, unit Unit) error {
+	s.onStart()
+	return s.ServiceManager.Start(ctx, unit)
+}
+
+// GAP-1367: a first install fell back to InstalledAt, which the run takes
+// when it plans, so an agent session started while it published the hooks
+// and started the services (it read no DefenseClaw hooks) was not named.
+// The activation time is taken once the services started.
+func TestStatusNamesAgentSessionsStartedDuringTheFirstInstall(t *testing.T) {
+	h := newTestHost(t, "linux")
+	offset := time.Duration(0)
+	h.env.Now = func() time.Time { return time.Now().Add(offset) }
+	// The services start two minutes after the run planned.
+	h.env.Services = startClockServices{ServiceManager: h.services, onStart: func() { offset = 2 * time.Minute }}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record == nil {
+		t.Fatalf("no deployment: %v", err)
+	}
+	planned, err := time.Parse(time.RFC3339, record.InstalledAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt); err != nil || activated.Sub(planned) < 2*time.Minute {
+		t.Fatalf("installed_at %q activated_at %q, want the activation time after the services started", record.InstalledAt, record.ActivatedAt)
+	}
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", planned.Unix()))
+	agent := func(pid string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", "claude\x00")
+		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (claude) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
+	}
+	agent("4331", 60*100)  // a minute after the plan, before the services started
+	agent("4332", 180*100) // after the activation
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "claude (pid 4331)") || strings.Contains(got, "4332") {
+		t.Fatalf("status does not name exactly the session started during the install: %q", got)
 	}
 }
 

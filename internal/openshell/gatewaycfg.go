@@ -465,6 +465,10 @@ type GatewayConfigState struct {
 	// compute_driver. Empty when neither names one: the gateway then
 	// detects one, which is never vm.
 	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
+	// DockerNamespace is [openshell.drivers.docker] sandbox_label, the
+	// sandbox namespace of the docker driver's containers and volumes; empty
+	// when unset, which OpenShell reads as DefaultDockerNamespace.
+	DockerNamespace string `json:"docker_namespace,omitempty"`
 	// VM is the MicroVM (vm) driver's configuration.
 	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
@@ -655,6 +659,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 						SupervisorImage     string `toml:"supervisor_image"`
 						SandboxRuntimeImage string `toml:"sandbox_runtime_image"`
 						SupervisorBin       string `toml:"supervisor_bin"`
+						SandboxLabel        string `toml:"sandbox_label"`
 					} `toml:"docker"`
 					VM struct {
 						SandboxUID     *int64 `toml:"sandbox_uid"`
@@ -679,6 +684,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
 		}
 		st.docker = dockerRuntime{SupervisorImage: d.SupervisorImage, SandboxRuntimeImage: d.SandboxRuntimeImage, SupervisorBin: d.SupervisorBin}
+		st.DockerNamespace = strings.TrimSpace(d.SandboxLabel)
 		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
 	st.overrideFromEnv()
@@ -742,6 +748,11 @@ type GatewayChanges struct {
 	Env map[string]string
 	// UnsetEnv removes gateway.env entries.
 	UnsetEnv []string
+	// DockerNamespace sets the docker driver's sandbox namespace
+	// ([openshell.drivers.docker] sandbox_label; AccountDockerNamespace).
+	// The gateway lists only its namespace's sandboxes, so it is set only
+	// on a gateway without sandboxes in the namespace it leaves.
+	DockerNamespace string
 }
 
 // tomlSettings are the gateway.toml assignments the changes make. Where
@@ -753,6 +764,12 @@ func (ch GatewayChanges) tomlSettings() ([]tomlSetting, error) {
 	}
 	if ch.ComputeDriver != "" {
 		out = append(out, tomlSetting{Table: gatewayTable, Key: "compute_driver", Value: string(ch.ComputeDriver)})
+	}
+	if ns := ch.DockerNamespace; ns != "" {
+		if !validDockerNamespace(ns) {
+			return nil, fmt.Errorf("openshell: %q is not a docker sandbox namespace (lowercase letters, digits, '.', '_' and '-')", ns)
+		}
+		out = append(out, tomlSetting{Table: dockerDriverTable, Key: "sandbox_label", Value: ns})
 	}
 	if id := ch.VMIdentity; id != nil {
 		if id.UID <= 0 || id.GID <= 0 {
@@ -1531,12 +1548,26 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	// A stopped systemd service starts on the restored files (Homebrew's
 	// state is not asked: `brew services info` is slow).
 	if g.GOOS != "darwin" {
-		if svc, err := g.ServiceState(ctx); err == nil && svc.Installed && !svc.Active {
+		svc, err := g.ServiceState(ctx)
+		switch {
+		case err == nil && svc.Installed && !svc.Active:
 			if err := g.restore(ctx, res); err != nil {
 				return err
 			}
 			g.clearRestartPending()
 			return ErrGatewayServiceStopped
+		case noUserManager(err):
+			// No systemd user manager runs for this account (it is signed
+			// out and has no linger), so neither does its gateway service,
+			// and there is nothing to restart it through: the restart
+			// failed and stopped the per-user uninstall half done
+			// (GAP-0369). The files go back; the service loads them when it
+			// next starts.
+			if err := g.restore(ctx, res); err != nil {
+				return err
+			}
+			g.clearRestartPending()
+			return fmt.Errorf("%w: this session reaches no systemd user manager", ErrGatewayServiceStopped)
 		}
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
@@ -1551,6 +1582,18 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return err
 	}
 	return g.restart(ctx)
+}
+
+// noUserManager reports a `systemctl --user` failure that means this
+// session reaches no systemd user manager: systemctl says "Failed to
+// connect to bus" (No such file or directory, No medium found) or, since
+// systemd 248, "Failed to connect to user scope bus".
+func noUserManager(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Failed to connect to bus") || strings.Contains(msg, "Failed to connect to user scope bus")
 }
 
 // NoService reports that the service manager has no gateway service

@@ -12630,6 +12630,39 @@ groups:
     mandatory_floor: []
     compatibility_profiles:
     - local-observability-v1
+- id: body.sandbox.registration_without_guest
+  type: body_group
+  brief: 'Managed registration alert when a watched registration has not had an accepted guest record since it was bound.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+- id: log.sandbox.registration_without_guest
+  type: log
+  brief: 'Canonical sandbox.registration_without_guest log identity; a watched registration used or reported running after grace without an accepted guest record since bind.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.registration_without_guest
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.registration_without_guest
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: body.sandbox.settings_drift
   type: body_group
   brief: 'OpenShell settings drift body: a user-changed OpenShell setting that no longer matches enterprise.openshell, which pauses the user''s sandboxes.'
@@ -15263,6 +15296,9 @@ producer_identity_sets:
   - event_name: sandbox.settings_drift
     bucket: enforcement.action
     family: log.sandbox.settings_drift
+  - event_name: sandbox.registration_without_guest
+    bucket: compliance.activity
+    family: log.sandbox.registration_without_guest
 - id: identity_set.sandbox_health
   identities:
   - event_name: subsystem.lifecycle

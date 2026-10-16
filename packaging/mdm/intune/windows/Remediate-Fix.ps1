@@ -518,34 +518,59 @@ if (@(0, 1603, 1618, 1639, 3010) -notcontains $code) { $code = 1603 }
 $summary = "exit $code"
 try {
     $document = $run.StdOut | ConvertFrom-Json
-    $codes = (@($document.errors) | ForEach-Object { $_.code }) -join ','
+    $ok = $false
+    if ($document.PSObject.Properties['ok']) { $ok = [bool]$document.ok }
+    $warnings = @(if ($document.PSObject.Properties['warnings']) { $document.warnings })
     # The installed CLI has no payload to install a missing scanner runtime
     # from: its ensure succeeds with a warning while verify keeps failing, so
     # this is not repaired, and only Setup /repair fixes it (GAP-0631).
-    $runtime = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'scanner_runtime_unavailable' } | Select-Object -First 1
+    $runtime = @($warnings | Where-Object { $null -ne $_ -and $_.code -eq 'scanner_runtime_unavailable' } | Select-Object -First 1)
+    if ($ok -and $runtime.Count -gt 0) { $code = 1603 }
+    $errors = @(if ($document.PSObject.Properties['errors']) { $document.errors })
+    $changes = @(if ($document.PSObject.Properties['changes']) { $document.changes })
+    $noop = $false
+    if ($document.PSObject.Properties['noop']) { $noop = [bool]$document.noop }
+    $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
     # A rollback of an interrupted change (an upgrade cut off by a restart or
     # a power loss) is repaired, but the change itself did not finish: say
     # so and name the next step (GAP-0767).
-    $recovered = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'recovered_pending_transaction' } | Select-Object -First 1
+    $recovered = @($warnings | Where-Object { $null -ne $_ -and $_.code -eq 'recovered_pending_transaction' } | Select-Object -First 1)
     # A config.yaml changed outside the lifecycle that ensure put back from
     # the confirmed policy bundle is a repair, even when nothing else was
     # left to do (GAP-0114).
-    $restored = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'bundle_config_restored' } | Select-Object -First 1
-    if ($document.ok -and $null -ne $runtime) {
-        $summary = "not repaired (scanner_runtime_unavailable): $($runtime.message)"
-        $code = 1603
+    $restored = @($warnings | Where-Object { $null -ne $_ -and $_.code -eq 'bundle_config_restored' } | Select-Object -First 1)
+    $specificErrors = @($errors | Where-Object {
+        $null -ne $_ -and [string]$_.code -and [string]$_.code -ne 'lifecycle_error'
+    } | Select-Object -First 1)
+    # These Windows ensure warnings describe a repair; other warnings are
+    # informational and must not be named as the repaired problem.
+    $repairWarnings = @($warnings | Where-Object {
+        $null -ne $_ -and @('config_reverted', 'ensure_config_applied') -contains [string]$_.code
+    } | Select-Object -First 1)
+    $specificProblem = $null
+    if ($specificErrors.Count -gt 0) { $specificProblem = $specificErrors[0] }
+    elseif ($repairWarnings.Count -gt 0) { $specificProblem = $repairWarnings[0] }
+    $repairChanges = @($changes | Where-Object { [string]$_ })
+    if ($ok -and $runtime.Count -gt 0) {
+        $summary = "not repaired (scanner_runtime_unavailable): $($runtime[0].message)"
     }
-    elseif ($document.ok -and $null -ne $recovered) { $summary = "repaired: $($recovered.message)" }
-    elseif ($document.ok -and $null -ne $restored) { $summary = "repaired: $($restored.message)" }
-    elseif ($document.ok -and $document.noop) { $summary = 'already healthy' }
-    elseif ($document.ok) { $summary = 'repaired' }
+    elseif ($ok -and $recovered.Count -gt 0) { $summary = "repaired (recovered_pending_transaction): $($recovered[0].message)" }
+    elseif ($ok -and $restored.Count -gt 0) { $summary = "repaired (bundle_config_restored): $($restored[0].message)" }
+    elseif ($ok -and $repairChanges.Count -gt 0) {
+        $problemCode = if ($null -ne $specificProblem) { [string]$specificProblem.code } else { 'drift' }
+        $summary = "repaired ($problemCode): $($repairChanges -join ', ')"
+    }
+    elseif ($ok -and $noop) { $summary = 'no repair needed after verify' }
+    elseif ($ok) { $summary = 'ensure completed' }
     else {
-        $summary = "still failing ($codes)"
-        $first = @($document.errors) | Select-Object -First 1
+        $problemCode = if ($null -ne $specificProblem) { [string]$specificProblem.code } else { $codes }
+        $summary = "still failing ($problemCode)"
+        $first = if ($null -ne $specificProblem) { $specificProblem } elseif ($errors.Count -gt 0) { $errors[0] } else { $null }
         if ($null -ne $first -and $first.message) { $summary += ": $($first.message)" }
-        $cliRestore = @($document.errors) | Where-Object { $null -ne $_ -and $_.code -eq 'startup_mode_restore_failed' } | Select-Object -First 1
-        if ($null -ne $cliRestore -and $cliRestore.message) {
-            $summary += "; startup-mode restore failed: $($cliRestore.message)"
+        if ($repairChanges.Count -gt 0) { $summary += "; attempted repair: $($repairChanges -join ', ')" }
+        $cliRestore = @($errors | Where-Object { $null -ne $_ -and $_.code -eq 'startup_mode_restore_failed' } | Select-Object -First 1)
+        if ($cliRestore.Count -gt 0 -and $cliRestore[0].message) {
+            $summary += "; startup-mode restore failed: $($cliRestore[0].message)"
         }
         # A DefenseClaw binary went missing (an antivirus quarantine): the
         # installed CLI has no payload to restore it from, so say what does

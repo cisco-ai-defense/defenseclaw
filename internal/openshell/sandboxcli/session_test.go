@@ -2021,11 +2021,12 @@ func TestLaunchOptionsKeepOptionsNotPrompts(t *testing.T) {
 	}
 }
 
-// An option followed by a word with a space ends the record: a later session
-// passes the harness the option without the word and none of the options
-// after it, which is what `sandbox run` warns about. The word may have been
-// a prompt instead (the case named for it), and nothing available here tells
-// the two apart.
+// An option the harness's option table does not know, followed by a word
+// with a space, ends the record: a later session passes the harness the
+// option without the word and none of the options after it, which is what
+// `sandbox run` warns about. The word may have been a prompt instead (the
+// case named for it), and nothing available here tells the two apart. An
+// option the table knows keeps its value, or keeps no word (#1074).
 func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 	claude, codex := harnessSpec(t, "claudecode"), harnessSpec(t, "codex")
 	for _, c := range []struct {
@@ -2037,18 +2038,20 @@ func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 		wantLater  []string
 	}{
 		{"a spaced value", claude, []string{"--append-system-prompt", "be brief"},
-			[]string{"--append-system-prompt"}, "--append-system-prompt", nil},
+			[]string{"--append-system-prompt", "be brief"}, "", nil},
 		{"the value attached", claude, []string{"--append-system-prompt=be brief"},
 			[]string{"--append-system-prompt=be brief"}, "", nil},
 		{"a one-word value", claude, []string{"--model", "sonnet"},
 			[]string{"--model", "sonnet"}, "", nil},
 		{"a spaced value before more options", claude, []string{"--append-system-prompt", "be brief", "--model", "sonnet", "--effort=high"},
-			[]string{"--append-system-prompt"}, "--append-system-prompt", []string{"--model", "--effort"}},
-		{"a prompt after a switch, which keeps the option too", claude, []string{"--verbose", "fix the failing tests"},
-			[]string{"--verbose"}, "--verbose", nil},
+			[]string{"--append-system-prompt", "be brief", "--model", "sonnet", "--effort=high"}, "", nil},
+		{"a prompt after a switch, which keeps the option alone", claude, []string{"--verbose", "fix the failing tests"},
+			[]string{"--verbose"}, "", nil},
 		{"print mode records nothing", claude, []string{"-p", "fix it", "--model", "sonnet"}, nil, "", nil},
 		{"a spaced codex value", codex, []string{"-m", "glm 5.3"},
-			[]string{"-m"}, "-m", nil},
+			[]string{"-m", "glm 5.3"}, "", nil},
+		{"an option the table does not know", claude, []string{"--some-new-option", "be brief", "--model", "sonnet"},
+			[]string{"--some-new-option"}, "--some-new-option", []string{"--model"}},
 	} {
 		kept, unkept, later := launchOptionsSplit(c.spec, c.args)
 		if !slices.Equal(kept, c.wantKept) || unkept != c.wantUnkept || !slices.Equal(later, c.wantLater) {
@@ -2064,12 +2067,19 @@ func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 func TestWarnUnkeptOptionValueNotesATrailingPrompt(t *testing.T) {
 	claude := harnessSpec(t, "claudecode")
 	ta := newTestApp(t, "")
-	ta.warnUnkeptOptionValue(claude, []string{"--verbose", "fix the tests"})
-	has(t, ta.output(), "passes --verbose without the last word")
+	ta.warnUnkeptOptionValue(claude, []string{"--some-new-switch", "fix the tests"})
+	has(t, ta.output(), "passes --some-new-switch without the last word")
 	lacks(t, ta.output(), "⚠", "fail to start")
 	ta = newTestApp(t, "")
-	ta.warnUnkeptOptionValue(claude, []string{"--verbose", "fix the tests", "--model", "haiku"})
+	ta.warnUnkeptOptionValue(claude, []string{"--some-new-switch", "fix the tests", "--model", "haiku"})
 	has(t, ta.output(), "⚠", "leaves out --model")
+	// An option the table knows says nothing: its value is recorded, or a
+	// switch is recorded without the prompt after it (#1074).
+	for _, args := range [][]string{{"--verbose", "fix the tests", "--model", "haiku"}, {"--append-system-prompt", "be brief", "--model", "haiku"}} {
+		ta = newTestApp(t, "")
+		ta.warnUnkeptOptionValue(claude, args)
+		lacks(t, ta.output(), "without the last word", "leaves out")
+	}
 }
 
 // Certification OG-M1: a first word that is not an option is a prompt or a

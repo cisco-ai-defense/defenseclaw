@@ -1952,6 +1952,14 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
+	// The last known good copy of an agent config holds the account's
+	// settings and is of no use once DefenseClaw no longer manages the file
+	// (GAP-0564).
+	if spec, ok := agentConfigSpecFor(c.name); ok && len(errs) == 0 {
+		if err := spec.removeCopies(opts.DataDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the copy of %s: %v", path, err))
+		}
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s teardown: %s", c.name, strings.Join(errs, "; "))
@@ -2524,6 +2532,12 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
 	logicalName := c.managedBackupLogicalName()
+	// Devin's config.json is the account's own settings file: one that went
+	// missing after DefenseClaw managed it gets them back before the hooks
+	// go in (GAP-0564).
+	if err := seedMissingAgentConfig(c.name, opts.DataDir, path); err != nil {
+		return err
+	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, logicalName, path); err != nil {
 		return err
 	}
@@ -2551,7 +2565,11 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	if err != nil {
 		return err
 	}
-	return updateManagedFileBackupPostHash(opts.DataDir, c.name, logicalName, path)
+	if err := updateManagedFileBackupPostHash(opts.DataDir, c.name, logicalName, path); err != nil {
+		return err
+	}
+	recordAgentConfigCopy(c.name, opts.DataDir, path)
+	return nil
 }
 
 // copilotHookEvents are the Copilot events Setup registers for opts: the
@@ -3695,6 +3713,15 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 		}
 	}()
 
+	// A config.yaml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in, not the hooks key
+	// alone (GAP-0564). A rollback removes the file put back.
+	if err = seedMissingAgentConfig("hermes", opts.DataDir, configPath); err != nil {
+		return err
+	}
+	if err = byPath[configPath].markOwned(); err != nil {
+		return err
+	}
 	if err = captureManagedFileBackup(opts.DataDir, "hermes", "config.yaml", configPath); err != nil {
 		return err
 	}
@@ -3755,6 +3782,9 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 			return err
 		}
 	}
+	// The file as it is now is the last known good copy. Best effort: the
+	// guardian's next verify that passes keeps it too.
+	recordAgentConfigCopy("hermes", opts.DataDir, configPath)
 	return nil
 }
 

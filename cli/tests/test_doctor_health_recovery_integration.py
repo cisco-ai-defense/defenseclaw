@@ -769,7 +769,12 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     assert store["status"] == "pass"
     assert notice["status"] == "warn" and notice["reason_code"] == "audit-db-moved-aside"
     assert f"Older audit records stay in {moved}" in notice["detail"]
-    assert f"sqlite3 {moved} .recover" in notice["detail"]
+    # GAP-0575: recovery works on a copy of the whole archive set, never on the archive itself.
+    assert "Copy the archive together with its -wal, -shm and any -journal files to a new folder" in notice["detail"]
+    assert "sqlite3 <copy> .recover" in notice["detail"]
+    assert f"sqlite3 {moved} .recover" not in notice["detail"]
+    assert "any -journal files to a new folder" in notice["remediation"]
+    assert f"sqlite3 {moved} .recover" not in notice["remediation"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
 
@@ -806,6 +811,8 @@ def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
     assert notice["status"] == "pass" and notice["reason_code"] == "audit-db-0x-archive"
     assert f"kept as an archive in {moved}" in notice["detail"] and "config.yaml" in notice["detail"]
     assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
+    assert "Copy the archive together with its -wal, -shm and any -journal files to a new folder" in notice["detail"]
+    assert "sqlite3 <copy> .recover" in notice["detail"] and f"sqlite3 {moved} .recover" not in notice["detail"]
 
 
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:

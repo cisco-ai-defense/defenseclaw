@@ -758,7 +758,7 @@ enum ConfigEditorCatalog {
                       hint: "Inline Cisco key."),
                 .init(label: "API Key Env", key: "cisco_ai_defense.api_key_env", hint: "Env var NAME holding the Cisco key."),
                 .init(label: "Timeout (ms)", key: "cisco_ai_defense.timeout_ms", kind: .int, hint: "HTTP timeout for probes."),
-                .init(label: "Enabled Rules", key: "cisco_ai_defense.enabled_rules", hint: "CSV cloud rules."),
+                .init(label: "Enabled Rules", key: "cisco_ai_defense.enabled_rules", hint: "Comma-separated; blank uses the connection policy (API-key inspection)."),
             ]
         ))
 

@@ -95,6 +95,12 @@ type identityCache[T any] struct {
 	// that the account does not exist.
 	gone        func(error) bool
 	confirmGone bool
+	// trustedUntil, when set, is when the inputs of a lookup of key started
+	// at now stop being trusted (zero: no bound beyond maxAge): the
+	// guardian's identity record, trusted identitySpoolMaxAge from when it
+	// was written. Facts built from it are not served past that, also inside
+	// the TTL (GAP-1268).
+	trustedUntil func(key string, now time.Time) time.Time
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -119,6 +125,9 @@ type identityCacheEntry[T any] struct {
 	lastFailedAt time.Time
 	// gone is set when the last failure said the account does not exist.
 	gone bool
+	// trustedUntil is when the inputs of the served facts stop being
+	// trusted (identityCache.trustedUntil); zero for no bound.
+	trustedUntil time.Time
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
@@ -126,10 +135,25 @@ func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts
 	cache.maxAge = identityDirectoryMaxAge
 	cache.gone = definitiveMissingAccount
 	cache.confirmGone = reliableMissingAccountConfirmation()
+	cache.trustedUntil = identitySpoolTrustedUntil
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
 	return cache
+}
+
+// identitySpoolTrustedUntil is when the guardian's current identity record
+// of key stops being trusted: identitySpoolMaxAge after it was written.
+// Facts merged from a record read at minute 59 were cached for the full TTL,
+// so its UPN and groups applied until minute 74 (GAP-1268). Zero without a
+// current record. It is read before the lookup, so a record the guardian
+// rewrites during the lookup only makes the bound earlier.
+func identitySpoolTrustedUntil(key string, now time.Time) time.Time {
+	record, ok := readIdentitySpoolFacts(key, now)
+	if !ok {
+		return time.Time{}
+	}
+	return record.UpdatedAt.Add(identitySpoolMaxAge)
 }
 
 func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] {
@@ -220,13 +244,24 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
-// dropAgedLocked stops serving entry's facts once they are maxAge old.
+// dropAgedLocked stops serving entry's facts once they are maxAge old, or
+// once the inputs they were built from are no longer trusted
+// (entry.trustedUntil); the next request then looks the account up again.
 func (c *identityCache[T]) dropAgedLocked(key string, entry *identityCacheEntry[T], now time.Time) {
-	age := now.Sub(entry.fetchedAt)
-	if !entry.ok || c.maxAge <= 0 || age < c.maxAge {
+	if !entry.ok {
 		return
 	}
 	var none T
+	if !entry.trustedUntil.IsZero() && !now.Before(entry.trustedUntil) {
+		entry.facts, entry.ok, entry.trustedUntil = none, false, time.Time{}
+		// Look again at once: the facts did not fail, their record aged out.
+		entry.nextAttempt = time.Time{}
+		return
+	}
+	age := now.Sub(entry.fetchedAt)
+	if c.maxAge <= 0 || age < c.maxAge {
+		return
+	}
 	entry.facts, entry.ok = none, false
 	if c.logf != nil {
 		c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
@@ -406,7 +441,11 @@ func (c *identityCache[T]) failing(key string) (since time.Time, reason string, 
 }
 
 // peek returns key's cached facts and when they were fetched, without
-// starting a lookup or waiting for one.
+// starting a lookup or waiting for one. Facts a request would no longer be
+// served (past maxAge, or built from a guardian record no longer trusted)
+// are dropped first, as get drops them: explain served them by name during
+// an outage while the hooks of the account had moved to
+// default_lookup_failed (GAP-0529).
 func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	var zero T
 	if c == nil {
@@ -415,7 +454,11 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry := c.entries[key]
-	if entry == nil || !entry.ok {
+	if entry == nil {
+		return zero, time.Time{}, false
+	}
+	c.dropAgedLocked(key, entry, c.now())
+	if !entry.ok {
 		return zero, time.Time{}, false
 	}
 	return entry.facts, entry.fetchedAt, true
@@ -475,14 +518,20 @@ func (c *identityCache[T]) forgetAll() {
 func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T]) {
 	done := make(chan struct{})
 	entry.inflight = done
+	trustedUntil := c.trustedUntil
+	started := c.now()
 	go func() {
+		var until time.Time
+		if trustedUntil != nil {
+			until = trustedUntil(key, started)
+		}
 		facts, err := c.resolve(key)
 		c.mu.Lock()
 		now := c.now()
 		var unconfirmed *identityFactsUnconfirmedError
 		switch {
 		case err == nil:
-			entry.facts, entry.ok, entry.fetchedAt = facts, true, now
+			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
 		case entry.ok && errors.As(err, &unconfirmed):
 			var none T
 			entry.facts, entry.ok = none, false

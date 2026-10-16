@@ -46,6 +46,7 @@ type SandboxManagedTelemetry interface {
 	RecordSandboxForeignSandbox(context.Context, SandboxForeignSandboxEvent) error
 	RecordSandboxForeignContainer(context.Context, SandboxForeignContainerEvent) error
 	RecordSandboxSettingsDrift(context.Context, SandboxSettingsDriftEvent) error
+	RecordSandboxRegistrationWithoutGuest(context.Context, SandboxRegistrationWithoutGuestEvent) error
 }
 
 var _ SandboxManagedTelemetry = (*SandboxRecorder)(nil)
@@ -71,11 +72,13 @@ const (
 	SandboxRematchLookupResolved = "lookup_resolved"
 
 	// defenseclaw.sandbox.managed.action.
-	SandboxManagedRefuse = "refuse"
-	SandboxManagedAllow  = "allow"
-	SandboxManagedStop   = "stop"
-	SandboxManagedAlert  = "alert"
-	SandboxManagedRemove = "remove"
+	SandboxManagedRefuse            = "refuse"
+	SandboxManagedAllow             = "allow"
+	SandboxManagedStop              = "stop"
+	SandboxManagedAlert             = "alert"
+	SandboxManagedRemove            = "remove"
+	SandboxGuestRelayWithoutGuest   = "relay_without_guest"
+	SandboxGuestRunningWithoutGuest = "running_without_guest"
 )
 
 // Bounds of the managed attributes, as the registry declares them.
@@ -1119,6 +1122,69 @@ func (recorder *SandboxRecorder) RecordSandboxSettingsDrift(ctx context.Context,
 				DefenseClawOpenshellSettingsField: input.Field,
 				DefenseClawSandboxManagedAction:   observability.Present(SandboxManagedRefuse),
 				MandatoryEnforcedOutcome:          true,
+			})
+		},
+	}
+	return recorder.emit(ctx, log, nil)
+}
+
+// SandboxRegistrationWithoutGuestEvent is a watched registration used or
+// reported running after grace without an accepted guest record since bind.
+// It is an alert only.
+type SandboxRegistrationWithoutGuestEvent struct {
+	Sandbox   SandboxIdentity
+	Subject   SandboxManagedSubject
+	Reason    string
+	Timestamp time.Time
+}
+
+// RecordSandboxRegistrationWithoutGuest emits one managed alert family.
+func (recorder *SandboxRecorder) RecordSandboxRegistrationWithoutGuest(ctx context.Context, input SandboxRegistrationWithoutGuestEvent) error {
+	if err := recorder.ready(); err != nil {
+		return err
+	}
+	identity := input.Sandbox
+	if err := identity.validateManaged(true); err != nil {
+		return err
+	}
+	if identity.Managed.RegistrationID == "" {
+		return fmt.Errorf("audit: sandbox registration without guest requires a registration id")
+	}
+	switch input.Reason {
+	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest:
+	default:
+		return fmt.Errorf("audit: sandbox registration without guest reason %q is not registered", input.Reason)
+	}
+	if identity.Phase != SandboxPhaseReady && identity.Phase != SandboxPhaseStopped {
+		return fmt.Errorf("audit: sandbox registration without guest requires a running state")
+	}
+	fields := sandboxV8FieldsFor(identity)
+	person := sandboxManagedPersonFor(input.Subject)
+	event := recorder.newEvent(ctx, ActionSandboxManaged, identity, identity.Name, "MEDIUM", input.Timestamp)
+	policyDigest, policyGeneration := livePolicyStamp()
+	log := sandboxV8Log{
+		action: ActionSandboxManaged, event: event, bucket: observability.BucketComplianceActivity,
+		eventName: observability.TelemetryEventSandboxRegistrationWithoutGuest, phase: "watch",
+		build: func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput,
+			severity observability.Optional[observability.Severity], logLevel observability.Optional[observability.LogLevel],
+		) (observability.Record, error) {
+			return builder.BuildLogSandboxRegistrationWithoutGuest(observability.LogSandboxRegistrationWithoutGuestInput{
+				Envelope: envelope, Severity: severity, LogLevel: logLevel,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
+				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name, DefenseClawSandboxRuntime: fields.runtime,
+				DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
+				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
+				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxBindingID: fields.bindingID, DefenseClawSandboxRegistrationID: fields.registrationID,
+				DefenseClawSandboxPolicyDigest: fields.policyDigest, DefenseClawSandboxPolicyGeneration: fields.policyGeneration,
+				DefenseClawSandboxPolicyProvisional: fields.provisional, DefenseClawOpenshellVersion: fields.openshellVersion,
+				DefenseClawOpenshellInstallMode: fields.installMode, DefenseClawSubjectKey: fields.subjectKey,
+				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
+				UserID: person.id, DefenseClawUserIDKind: person.kind, DefenseClawUserName: person.name,
+				DefenseClawUserPrincipal:        person.principal,
+				DefenseClawSandboxManagedReason: input.Reason, DefenseClawSandboxManagedAction: SandboxManagedAlert,
 			})
 		},
 	}

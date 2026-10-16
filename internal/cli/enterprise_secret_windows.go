@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -163,10 +164,17 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	case "remove":
 		// The restart below would start the gateway on a config it cannot
 		// compile without this credential, or run the judge without its key
-		// (GAP-0674).
-		if raw, err := os.ReadFile(layout.ConfigPath); err == nil {
-			if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, opts.name); at != "" {
-				return withExitCode(fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at), windowsSecretExitFailure)
+		// (GAP-0674). A config that exists but cannot be read may still
+		// reference it, so nothing is removed (GAP-1507).
+		if strings.TrimSpace(layout.ConfigPath) != "" {
+			raw, err := os.ReadFile(layout.ConfigPath)
+			switch {
+			case err == nil:
+				if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, opts.name); at != "" {
+					return withExitCode(fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at), windowsSecretExitFailure)
+				}
+			case !errors.Is(err, os.ErrNotExist):
+				return withExitCode(fmt.Errorf("cannot read the installed config %s to check that it no longer references credential %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, opts.name, err), windowsSecretExitFailure)
 			}
 		}
 		if err := os.Remove(filepath.Join(layout.SecretsDir, opts.name)); err != nil && !errors.Is(err, os.ErrNotExist) {

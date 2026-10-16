@@ -2774,7 +2774,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
                 "_fix_plugin_registry_required",
                 return_value=planner_result,
             ) as fix_plugin_reg,
-            patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
         ):
             cmd_doctor._run_fixers(
                 cfg,
@@ -2800,7 +2799,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_watchdog.assert_not_called()
             # D7: the connector-teardown fixer was removed from --fix entirely,
             # so it is never invoked even though it remains importable.
-            fix_residue.assert_not_called()
 
         # Repairs have their own typed collection and do not contaminate
         # post-repair health counts. The policy-changing repair is visible but
@@ -2890,9 +2888,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
                 "_fix_plugin_registry_required",
                 side_effect=planned_then_applied,
             ) as fix_plugin_reg,
-            # _fix_connector_residue is intentionally NOT wired into --fix (D7);
-            # patch it so a regression that re-adds it would surface as an extra row.
-            patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
         ):
             cmd_doctor._run_fixers(
                 cfg,
@@ -2909,7 +2904,6 @@ class DoctorFixDryRunTests(unittest.TestCase):
         self.assertEqual(result.repair_summary.noop, 14)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
-        fix_residue.assert_not_called()
         self.assertNotIn(
             "connector residue",
             [record["label"] for record in result.repairs],

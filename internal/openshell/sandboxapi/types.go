@@ -17,12 +17,14 @@
 package sandboxapi
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
@@ -108,6 +110,9 @@ type ManagedStatus struct {
 	// organization's floor alone) and Description its description.
 	Profile     string `json:"profile"`
 	Description string `json:"description,omitempty"`
+	// HostRunGate, when present, is the caller's gateway decision carried
+	// from a managed explain into a launch banner.
+	HostRunGate string `json:"host_run_gate,omitempty"`
 	// Provisional says the directory could not be reached and the default
 	// profile applies until it can.
 	Provisional bool `json:"provisional,omitempty"`
@@ -1088,10 +1093,20 @@ type ManagedExplain struct {
 	Provisional  bool             `json:"provisional,omitempty"`
 	// Allowed is false when the caller may run no sandbox.
 	Allowed bool `json:"allowed"`
-	// RequiredFor lists the connectors that run only in a sandbox on this
-	// computer; WhenUnavailable is refuse or alert.
+	// RequiredFor lists the connectors the organization's floor requires.
+	// HostRunGate says whether that floor refuses this caller's host runs.
+	// WhenUnavailable is refuse or alert.
 	RequiredFor     []string `json:"required_for,omitempty"`
 	WhenUnavailable string   `json:"when_unavailable,omitempty"`
+	// HostRunGate is the managed gateway's require-sandbox gate for this
+	// caller's required agents: "refused" or "exempt". The gateway derives
+	// it with requireSandboxHostGate, the same rule used for hook calls.
+	HostRunGate string `json:"host_run_gate,omitempty"`
+	// EnrollmentExempt says the caller is in enterprise.enrollment.exempt_users:
+	// the managed gateway's require-sandbox gate allows its host runs, so
+	// RequiredFor doesn't apply to it (HostRunRefused). Set only with a
+	// RequiredFor (GAP-0555).
+	EnrollmentExempt bool `json:"enrollment_exempt,omitempty"`
 	// AllowedHarnesses and AllowedCredentials are unset when they
 	// constrain nothing; AllowedCredentials [none] allows no credentials.
 	AllowedHarnesses   []string `json:"allowed_harnesses,omitempty"`
@@ -1141,6 +1156,18 @@ type ManagedExplain struct {
 	// administrator's packs, and a posture it resolved itself would leave
 	// out the required pack and the profile minimum (GAP-0179, GAP-0438).
 	Posture *ManagedPosture `json:"posture,omitempty"`
+}
+
+// HostRunRefused reports the gateway's host-run answer for connector. An
+// older explain with no gate uses its exemption field; without either field,
+// a listed connector is treated as refused so a wrapper offers no bypass.
+func (m *ManagedExplain) HostRunRefused(connector string) bool {
+	if m == nil {
+		return false
+	}
+	connector = config.NormalizeConnectorName(connector)
+	return slices.ContainsFunc(m.RequiredFor, func(c string) bool { return config.NormalizeConnectorName(c) == connector }) &&
+		m.HostRunGate != "exempt" && (m.HostRunGate != "" || !m.EnrollmentExempt)
 }
 
 // ManagedPosture is the caller's own resolved sandbox posture as the

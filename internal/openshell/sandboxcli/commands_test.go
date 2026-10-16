@@ -400,9 +400,19 @@ func TestUnblock(t *testing.T) {
 	// GAP-0609: --sandbox with --always names the sandbox whose policy
 	// checks it (a managed computer's spelling).
 	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "files.example", Sandbox: "box", Always: true}))
-	has(t, ta.output(), "unblocked webhook.site in box", "unblocked paste.example for every sandbox", "unblocked files.example for every sandbox")
+	has(t, ta.output(), "unblocked webhook.site for sandbox box", "unblocked paste.example for every sandbox (saved to openshell.egress.unblocked)",
+		"unblocked files.example for every sandbox")
 	if n := strings.Count(ta.output(), "\n"); n != 3 {
 		t.Fatalf("output (one line each):\n%s", ta.output())
+	}
+	// #1205: on a managed computer the daemon's answer says where the
+	// unblock is kept; the CLI no longer adds a configuration key the person
+	// cannot edit.
+	managed := newTestApp(t, "")
+	managed.daemon.managed = true
+	managed.ok(t, managed.Unblock(bg, UnblockOptions{Host: "files.example", Sandbox: "box", Always: true}))
+	if out := managed.output(); !strings.Contains(out, "kept by your organization's DefenseClaw gateway") || strings.Contains(out, "openshell.egress.unblocked") {
+		t.Fatalf("managed unblock output:\n%s", out)
 	}
 	ta.daemon.errors["POST "+sandboxapi.PathEgressUnblock] = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
 		Violation: &sandboxapi.Violation{Key: "egress.unblock", Admin: true}}

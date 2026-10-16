@@ -19,6 +19,7 @@ package openshell
 import (
 	"context"
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -89,6 +90,19 @@ func (r *doctorRun) gatewayProcess(ctx context.Context) *process {
 	return findProcess(r.processes(ctx), GatewayBinary, 0)
 }
 
+// homebrewKegPrefix is the Homebrew prefix whose openshell formula keg
+// holds path (<prefix>/opt/openshell/... or
+// <prefix>/Cellar/openshell/<version>/...), "" when path is in none.
+func homebrewKegPrefix(path string) string {
+	name := pathpkg.Base(GatewayFormula)
+	for d := filepath.Dir(filepath.Clean(path)); d != filepath.Dir(d); d = filepath.Dir(d) {
+		if parent := filepath.Dir(d); filepath.Base(d) == name && (filepath.Base(parent) == "opt" || filepath.Base(parent) == "Cellar") {
+			return filepath.Dir(parent)
+		}
+	}
+	return ""
+}
+
 // launchdLabel is the label of the launchd job, in this user's domain,
 // whose process is pid ("" when none is: a process started from a shell,
 // even one launchd adopted after the shell went).
@@ -119,7 +133,9 @@ func (r *doctorRun) launchdLabel(ctx context.Context, pid int) string {
 // setup stops there. Either way the fix is unmanagedFix, the user's.
 func (r *doctorRun) unmanagedService(ctx context.Context) {
 	c := r.report.Get(CheckIDGatewayService)
-	if c == nil || r.service == nil || r.service.Installed {
+	// Another account's gateway on the port (checkService) is not one this
+	// account runs another way: the check keeps that refusal (GAP-0390).
+	if c == nil || r.service == nil || r.service.Installed || r.portOther {
 		return
 	}
 	healthy := r.gateway != nil && r.gateway.Healthy
@@ -147,6 +163,16 @@ func (r *doctorRun) unmanagedService(ctx context.Context) {
 	gw := r.gatewayProcess(ctx)
 	if gw == nil {
 		c.Detail = "the gateway answers, but " + notBrew + " runs it (DefenseClaw could not tell what does), so DefenseClaw cannot restart it"
+		return
+	}
+	if keg := homebrewKegPrefix(gw.path); keg != "" && keg != filepath.Clean(r.brewPrefix()) {
+		// The formula of another Homebrew runs it, one of your own that
+		// HOMEBREW_PREFIX and PATH do not name (an ssh session without
+		// its shellenv): its service is not "by hand" (GAP-0391).
+		brew := filepath.Join(keg, "bin", "brew")
+		c.Detail = fmt.Sprintf("%s (process %d) is the %s formula of the Homebrew at %s, but DefenseClaw uses the Homebrew at %s "+
+			"(HOMEBREW_PREFIX, else the brew first on PATH), so it cannot see or restart that service", gw.path, gw.pid, GatewayFormula, keg, r.brewPrefix())
+		c.Fix = &Fix{Summary: "put the Homebrew at " + keg + " first on PATH (or HOMEBREW_PREFIX), then run the command again", Command: "eval \"$(" + brew + " shellenv)\""}
 		return
 	}
 	if label := r.launchdLabel(ctx, gw.pid); label != "" {

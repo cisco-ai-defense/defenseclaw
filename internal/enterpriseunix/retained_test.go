@@ -157,3 +157,55 @@ func TestLeftoversWarningNamesTheNextStep(t *testing.T) {
 		}
 	})
 }
+
+// A kept folder recorded as root's (uninstall removed the service account)
+// is recognized when it now belongs to the current service account, which
+// is what a package reinstall's tmpfiles.d entry does to it (GAP-0598). Any
+// other owner, a folder recorded as another account's, or a missing marker
+// is still refused.
+func TestRetainedOwnerAcceptsOnlyTheServiceAccountForARootRecord(t *testing.T) {
+	const service = 977
+	for name, tc := range map[string]struct {
+		recorded   uint32
+		current    int
+		account    bool
+		dropMarker bool
+		want       bool
+	}{
+		"unchanged root":                     {recorded: 0, current: 0, want: true},
+		"root re-owned to the service":       {recorded: 0, current: service, account: true, want: true},
+		"root re-owned, no service account":  {recorded: 0, current: service},
+		"root re-owned to another account":   {recorded: 0, current: 4242, account: true},
+		"service record re-owned to another": {recorded: 4242, current: service, account: true},
+		"root re-owned, marker missing":      {recorded: 0, current: service, account: true, dropMarker: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			dir := h.env.Layout.DataDir
+			if err := os.MkdirAll(h.env.P(dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			want, ok := h.env.directoryIdentity(h.env.P(dir))
+			if !ok {
+				t.Fatal("no identity for the data folder")
+			}
+			marker, err := h.env.writeRetainedMarker(h.env.P(dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want.Path, want.UID, want.MarkerSHA256 = dir, tc.recorded, marker
+			if tc.account {
+				h.accounts.accounts[h.env.Layout.ServiceUser] = Account{Name: h.env.Layout.ServiceUser, UID: service, GID: service}
+			}
+			if tc.dropMarker {
+				if err := os.Remove(retainedMarkerPath(h.env.P(dir))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.owners[h.env.P(dir)] = [2]int{tc.current, tc.current}
+			if got := h.env.retainedByLifecycle(dir, map[string]retainedDir{dir: want}); got != tc.want {
+				t.Fatalf("retainedByLifecycle = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

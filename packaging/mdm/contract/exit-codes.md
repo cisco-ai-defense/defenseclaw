@@ -82,6 +82,8 @@ evaluated". Run the `status` action to inspect the host.
 | `mdm_tar_missing` | unix | — / `1` | A base config came with a signed bundle and `tar`, which the comparison needs, is not installed. Nothing was installed. |
 | `mdm_anchor_install_failed` | unix | — / `1` | The wrapper could not write the bundle trust anchor file (`--trust-anchor-file`), or its folder is not root-only. Nothing was applied. |
 | `mdm_staging_noexec` | unix | — / `1` | Linux: the payload's gateway cannot run from the staging folder (a `noexec` mount, named in the message). Use `--staging-dir` or a deb/rpm source. |
+| `mdm_staging_full` | unix | — / `1` | The staging filesystem filled while extracting a payload archive. Choose a staging folder with more space and retry. |
+| `mdm_cancelled` | unix | — / `1` | The MDM stopped the wrapper; it stopped the lifecycle child and reported failure. Inspect the deployment before retrying. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | Windows | `1603` / — | Host refusals of the PowerShell 7 wrapper. The lifecycle applies the same checks itself. |
 
 Every other code (for example `config_invalid`, `lifecycle_busy`,

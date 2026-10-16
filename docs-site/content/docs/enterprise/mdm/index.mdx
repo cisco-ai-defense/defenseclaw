@@ -135,7 +135,9 @@ it too ([Policy in the config](/docs/enterprise/configuration#policy-in-the-conf
 Its content is described in [Configuration](/docs/enterprise/configuration#settings-reference);
 start with [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 A `config_version: 8` file is accepted and migrated to 9 when the lifecycle
-applies it. The lifecycle installs it at a fixed path:
+applies it. The Intune Win32 packager requires a supplied `config_version: 9`
+file, because migration would change the config hash in its detection rule.
+The lifecycle installs it at a fixed path:
 
 | OS | Installed config |
 | --- | --- |
@@ -422,6 +424,8 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_untrusted_input` | `1603` / `1` | A config, key or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned. |
 | `mdm_untrusted_install` | `1603` / — | `uninstall.ps1` only: the installed CLI or one of its folders is not administrator-only. The wrapper reports the same condition as `mdm_lifecycle_launch_failed`, and `detect.ps1` as not detected. |
 | `mdm_input_too_large` | `1639` / `2` | Config over 1 MiB or key over 16 KiB. |
+| `mdm_staging_full` | — / `1` | The staging filesystem filled while extracting a payload. Choose a staging folder with more space and retry. |
+| `mdm_cancelled` | — / `1` | The MDM stopped a Unix wrapper and its lifecycle child. Inspect the deployment before a fresh run. |
 | `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture`, `mdm_version_mismatch` | — / `1` | The archive or package is not a DefenseClaw enterprise artifact for this host, or not the version you pinned. |
 | `mdm_package_manager_busy` | — / `75` | dpkg, rpm or the macOS installer held its lock. Retry. |
 | `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | — / `1` | The package manager failed or is absent. |
@@ -664,14 +668,16 @@ a no-op result and exit `0`.
 
 | OS | Command | Removes |
 | --- | --- | --- |
-| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), the machine state (config, credentials, state and logs) and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries. |
-| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, including the binaries, and the lifecycle forgets the pkg receipt. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries. |
+| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Without `--purge`, if an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` can stay. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
+| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), binaries, config, credentials, most state and logs, and the `_defenseclaw` service account; the lifecycle forgets the pkg receipt. Without `--purge`, if an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` can stay. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
 | Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. |
 
-So every removal script deletes the config and the AI Defense key. On Linux
-and macOS, to keep the machine state for a later reinstall, run the lifecycle's
-own `uninstall` with `--keep-state` instead; see [Uninstall](/docs/enterprise/lifecycle#uninstall)
-for that and for what each account keeps.
+Every removal script deletes the config and the AI Defense key. On Linux and
+macOS, the kept `sandbox` store and `redaction-correlation.key` are root-owned
+while the service account is gone; the next `ensure` adopts them. Use
+`--purge` for a clean image. To keep the other machine state for a later
+reinstall, run the lifecycle's own `uninstall` with `--keep-state` instead;
+see [Uninstall](/docs/enterprise/lifecycle#uninstall) for what each account keeps.
 
 ## Simulate your MDM
 

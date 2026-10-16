@@ -136,15 +136,17 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		r.AddWarning(codeDriverFallback, fmt.Sprintf("the docker fallback cannot run for users on this host (%s): %s; %s; users without KVM get no sandbox until it is fixed",
 			check.Name, check.Detail, check.Fix))
 	}
-	if rows := env.groupRows(ctx, settings); rows != nil {
-		for _, group := range rows {
-			if group.OK {
-				row(group.Name, "ok: "+group.Detail)
-				continue
-			}
-			row(group.Name, "missing: "+group.Detail)
-			r.AddWarning(codeSandboxGroups, fmt.Sprintf("%s; %s", group.Detail, group.Fix))
+	groups, dockerMembers := env.groupRows(ctx, settings)
+	for _, group := range groups {
+		if group.OK {
+			row(group.Name, "ok: "+group.Detail)
+			continue
 		}
+		row(group.Name, "missing: "+group.Detail)
+		r.AddWarning(codeSandboxGroups, fmt.Sprintf("%s; %s", group.Detail, group.Fix))
+	}
+	if dockerMembers != "" {
+		r.AddWarning(codeDockerGroupMembers, dockerMembers)
 	}
 	if settings.Install == config.EnterpriseOpenShellInstallSetup {
 		for _, line := range env.userInstalls(ctx) {
@@ -154,6 +156,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	for _, entry := range state.sortedPending() {
 		l.describePending(entry)
 	}
+	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
@@ -222,6 +225,11 @@ func (l *lifecycle) describePending(entry pending) {
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
 	})
+	if entry.Kind == "launchd" {
+		l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending launchd for user %s since %s (%s): %s; a root ensure, repair or reconcile run applies the LaunchAgent reload after this account's sandboxes stop. The first sandbox started after the running ones stop also reloads the job itself. If that reload fails, the start reports it and names `sudo %s`",
+			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
+		return
+	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
@@ -420,8 +428,7 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 		if dir != "" {
 			driver = filepath.Join(dir, "openshell-driver-vm")
 		}
-		part("microvm driver", "openshell-driver-vm", "", driver, refused, "install NVIDIA's openshell-driver-vm for the MicroVM driver root-owned into "+e.systemDriverDirs()[0]+
-			" (the openshell rpm does not carry it; chown -R root after extracting the tarball), or use enterprise.openshell.install: setup")
+		part("microvm driver", "openshell-driver-vm", "", driver, refused, adminVMDriverFixText(e.GOOS))
 	}
 	if len(parts) > 1 {
 		var named []string
@@ -439,6 +446,18 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	}
 	rows = append(rows, e.checkDriver(ctx, s)...)
 	return rows
+}
+
+// adminVMDriverFixText is the microvm driver row's fix: the shared
+// openshell.AdminVMDriverFix the managed user's doctor names too, with its
+// pinned-digest command (GAP-0481).
+func adminVMDriverFixText(goos string) string {
+	fix := openshell.AdminVMDriverFix(goos, sandboxHostArch)
+	text := fix.Summary
+	if fix.Command != "" {
+		text += ": " + fix.Command
+	}
+	return text + "; or use enterprise.openshell.install: setup"
 }
 
 // checkDriver checks what the compute driver needs from the host.
@@ -498,27 +517,53 @@ func (e *Env) checkE2fsprogs(ctx context.Context, s openshellSettings) []prereqR
 		}
 		return []prereqRow{{Name: "e2fsprogs", Detail: "mke2fs is not installed", Fix: "install e2fsprogs 1.43 or newer"}}
 	}
-	if s.E2fsprogsDir == "" {
-		return []prereqRow{{Name: "e2fsprogs", Detail: "enterprise.openshell.e2fsprogs_dir is not set, so only an e2fsprogs each user builds in ~/.local/opt/e2fsprogs is found",
-			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to it"}}
+	result := e.CheckE2fsprogsDir(s.E2fsprogsDir)
+	if result.ToolDir != "" {
+		return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: result.ToolDir}}
 	}
-	if err := e.Trust(e.P(s.E2fsprogsDir), TrustRulePack); err != nil {
-		return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", s.E2fsprogsDir, err),
-			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}}
+	return []prereqRow{{Name: "e2fsprogs", Detail: result.Problem, Fix: result.Fix}}
+}
+
+// E2fsprogsCheckResult is the administrator's macOS prerequisite verdict.
+// ToolDir is the exact folder the managed gateway uses; when empty, Problem
+// and Fix explain the refusal. The cross-component regression test checks
+// this verdict against the real gateway plan and managed doctor row.
+type E2fsprogsCheckResult struct {
+	ToolDir, Problem, Fix string
+}
+
+// CheckE2fsprogsDir is checkE2fsprogs's macOS directory decision.
+func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
+	if dir == "" {
+		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build",
+			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to its install prefix or the folder that holds both mke2fs and debugfs"}
 	}
-	for _, tool := range []string{"mke2fs", "debugfs"} {
-		found := false
-		for _, sub := range []string{"sbin", "bin", ""} {
-			if exists(e.P(filepath.Join(s.E2fsprogsDir, sub, tool))) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s has no %s", s.E2fsprogsDir, tool), Fix: "install e2fsprogs 1.43 or newer there"}}
-		}
+	trust := e.Trust
+	if trust == nil {
+		trust = defaultTrust
 	}
-	return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: s.E2fsprogsDir}}
+	if err := trust(e.P(dir), TrustRulePack); err != nil {
+		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", dir, err),
+			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}
+	}
+	if problem := openshell.AdminE2fsprogsCandidateAccessProblem(dir, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
+		return E2fsprogsCheckResult{Problem: problem,
+			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable by sandbox accounts (chmod o+x)"}
+	}
+	// The folder the gateway's exec shim puts first on the driver's PATH,
+	// found by the same rule (GAP-0506): ensure used to accept the tools in
+	// any of sbin, bin or the folder itself while the shim took only sbin,
+	// so an accepted e2fsprogs_dir could leave the gateway unable to start.
+	tools := openshell.AdminE2fsprogsToolDir(dir, func(p string) bool { return openshell.RegularFile(e.P(p)) })
+	if tools == "" {
+		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s holds no mke2fs and debugfs side by side, in it or in its sbin or bin", dir),
+			Fix: "install e2fsprogs 1.43 or newer there, or set enterprise.openshell.e2fsprogs_dir to its install prefix or to the folder that holds both mke2fs and debugfs"}
+	}
+	if problem := openshell.E2fsprogsAccessProblem(tools, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
+		return E2fsprogsCheckResult{Problem: problem,
+			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x)"}
+	}
+	return E2fsprogsCheckResult{ToolDir: tools}
 }
 
 // kvmDevice is the device a MicroVM needs.
@@ -557,32 +602,44 @@ func (e *Env) checkDocker() prereqRow {
 // their own in the home), never every enrolled one: administrators and
 // service accounts that never run a sandbox do not belong in the
 // root-equivalent docker group (GAP-0454). Each row is one summary line with
-// one generic fix.
-func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
+// one generic fix. advisory is the docker_group_members warning over every
+// enrolled account ("" when none is in the group, GAP-0498).
+func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereqRow, advisory string) {
 	vm := s.wantsVM()
 	if e.GOOS != "linux" || (s.Driver != config.EnterpriseOpenShellDriverDocker && !vm) {
-		return nil
+		return nil, ""
 	}
 	kvm, kvmErr := os.Stat(e.P(kvmDevice))
 	needKVM := vm && kvmErr == nil && kvm.Mode().Perm()&0o006 != 0o006
 	ops := e.sandboxOps()
 	var accounts []SandboxAccount
+	var enrolled, members int
+	groupsOf := map[int][]string{}
 	for _, a := range ops.Accounts(ctx) {
+		groups, err := ops.Groups(ctx, a)
+		if err == nil {
+			groupsOf[a.UID] = groups
+			enrolled++
+			if contains(groups, "docker") {
+				members++
+			}
+		}
 		if e.hasHomeSandboxState(a) {
 			accounts = append(accounts, a)
 		}
 	}
+	advisory = e.dockerGroupAdvisory(members, enrolled)
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
 			need = "kvm and docker"
 		}
-		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}
+		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}, advisory
 	}
 	var noKVM, noDocker []string
 	for _, a := range accounts {
-		groups, err := ops.Groups(ctx, a)
-		if err != nil {
+		groups, ok := groupsOf[a.UID]
+		if !ok {
 			continue
 		}
 		if needKVM && !contains(groups, "kvm") {
@@ -593,7 +650,6 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
 		}
 	}
 	n := len(accounts)
-	var rows []prereqRow
 	if needKVM {
 		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) is in the kvm group", n)}
 		if len(noKVM) > 0 {
@@ -615,7 +671,30 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
 		rows = append(rows, prereqRow{Name: "groups docker", Fix: groupFix("docker"),
 			Detail: fmt.Sprintf("%d of %d accounts that used sandboxes are not in the docker group (%s), %s", len(noDocker), n, strings.Join(noDocker, ", "), why)})
 	}
-	return rows
+	return rows, advisory
+}
+
+// codeDockerGroupMembers is the advisory that enrolled accounts are in the
+// docker group (GAP-0498).
+const codeDockerGroupMembers = "docker_group_members"
+
+// dockerGroupAdvisory says how many of the enrolled accounts are in the
+// docker group and what that means for policy privacy: membership is
+// root-equivalent, so a member can read and change what root can, the
+// administrator policy, the protected credentials and the services'
+// environment included, and the rule that each person sees only their own
+// effective policy does not hold for them. References do not help against a
+// member, so the only mitigation is a small group. It counts and never names
+// the accounts. "" when none is a member.
+func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
+	if members == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
+		"change what root can, including the administrator policy (%s), the protected credentials and the services' environment, so the "+
+		"rule that each person sees only their own effective policy does not hold for them, and references keep secrets out of the policy "+
+		"file but do not protect them from a member; sandboxes on Linux need the group, so the only mitigation is to add only the accounts "+
+		"that run sandboxes", members, enrolled, e.Layout.ConfigPath)
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per

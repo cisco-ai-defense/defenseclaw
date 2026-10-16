@@ -213,6 +213,9 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 On Linux and macOS the output names the credential:
 `- removed credential ai-defense-api-key`, or
 `- credential ai-defense-api-key was not stored; nothing to remove`.
+On Windows, removal first reads the installed config to check for references.
+If it cannot read that config, it refuses and leaves the credential in place;
+restore config access, then run the command again.
 
 Set `enabled: false` in the config as well. Otherwise the gateway keeps
 logging that the credential is missing, while the local engine decides

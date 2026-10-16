@@ -75,6 +75,20 @@ func (e *Env) renderGatewayFiles(op *openshellPlan) error {
 		}
 		op.files = append(op.files, desiredFile{Path: e.renderedFallbackTOMLPath(), Data: fbData, SHA: sha256Bytes(fbData), Mode: 0o644, Owner: root, Kind: "openshell-gateway-toml"})
 	}
+	if op.defaultNamespaceBridge {
+		// The docker configuration as 1.0.1 rendered it (no sandbox_label),
+		// which the exec shim starts an account's docker gateway on while
+		// the account keeps a sandbox in OpenShell's default namespace
+		// (dockerBridgeHolds, GAP-0587). 1.0.1 upgrade bridge, remove when
+		// 1.0.1 is out of support.
+		bridge := op.settings.fallbackSettings().rendered("")
+		bridge.DefaultDockerNamespaceBridge = true
+		brData, err := bridge.TOML()
+		if err != nil {
+			return fmt.Errorf("render the OpenShell docker configuration of the 1.0.1 upgrade bridge: %w", err)
+		}
+		op.files = append(op.files, desiredFile{Path: e.renderedBridgeTOMLPath(), Data: brData, SHA: sha256Bytes(brData), Mode: 0o644, Owner: root, Kind: "openshell-gateway-toml"})
+	}
 	if envData != nil {
 		op.files = append(op.files, desiredFile{Path: e.renderedEnvPath(), Data: envData, SHA: sha256Bytes(envData), Mode: 0o644, Owner: root, Kind: "openshell-gateway-env"})
 	}

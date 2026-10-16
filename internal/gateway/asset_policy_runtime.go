@@ -831,11 +831,30 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	for _, plugin := range a.claudeCodeToolPlugins(ctx, req) {
+	owners, guesses := a.claudeCodeToolPlugins(ctx, req)
+	for _, plugin := range owners {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
 		}
 		if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
+			return decision, true
+		}
+	}
+	// A plugin server whose owner the plugin registry could not prove may
+	// belong to any plugin its name starts with. Only an explicit deny or
+	// block of one of them refuses it: registry and default-deny rules need
+	// the plugin proven (GAP-1198).
+	for _, plugin := range guesses {
+		probe := skillRuntimeProbe{
+			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
+		}
+		decision, matched := a.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		if !matched {
+			continue
+		}
+		switch decision.Source {
+		case "admin-deny", "install-block", "runtime-disable":
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, "claudecode", req.HookEventName, probe)
 			return decision, true
 		}
 	}
@@ -844,8 +863,10 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 
 // claudeCodeToolPlugins obtains MCP plugin ownership from the configured
 // server. An underscore split is only usable when it has one boundary;
-// otherwise plugin and server names cannot be distinguished from the hook.
-func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) []string {
+// otherwise plugin and server names cannot be distinguished from the hook,
+// and every plugin name the server name could start with is returned in
+// guesses instead (GAP-1198).
+func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) (owners, guesses []string) {
 	var out []string
 	add := func(name string) {
 		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
@@ -872,6 +893,17 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 		if !resolved && strings.Count(rest, "_") == 1 {
 			plugin, _, _ := strings.Cut(rest, "_")
 			add(plugin)
+		} else if !resolved {
+			for i := strings.Index(rest, "_"); i > 0; {
+				if name := rest[:i]; validNativeSkillSelectionName(name) && !slices.Contains(guesses, name) {
+					guesses = append(guesses, name)
+				}
+				next := strings.Index(rest[i+1:], "_")
+				if next < 0 {
+					break
+				}
+				i += next + 1
+			}
 		}
 	}
 	key := ""
@@ -886,7 +918,7 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 			add(plugin)
 		}
 	}
-	return out
+	return out, guesses
 }
 
 // pluginJournalBlockDecision refuses a plugin whose journal entry, under

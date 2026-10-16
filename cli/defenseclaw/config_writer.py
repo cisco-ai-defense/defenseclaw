@@ -93,9 +93,11 @@ MANAGED_NOT_INITIALIZED = (
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent,
 # routing and plugin_dir, read once at start; the guardrail listener and
-# enablement; the hook self-heal settings). "*" matches one segment.
-# Everything else is hot, the connector set (guardrail.connectors.<c>.enabled)
-# too. Mirrors internal/config/configwrite restartKeys.
+# enablement; the hook self-heal settings; the enterprise sandbox runtime,
+# enterprise.openshell). "*" matches one segment. Everything else is hot, the
+# connector set (guardrail.connectors.<c>.enabled) too. Mirrors
+# internal/config/configwrite restartKeys, in the same order (a test compares
+# them).
 RESTART_KEYS = (
     "data_dir",
     "observability.local.path",
@@ -116,6 +118,7 @@ RESTART_KEYS = (
     "deployment_mode",
     "enterprise.profile",
     "enterprise.network",
+    "enterprise.openshell",
     "environment",
     "tenant_id",
     "workspace_id",

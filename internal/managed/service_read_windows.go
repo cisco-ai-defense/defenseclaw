@@ -65,7 +65,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
 					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or move the rule pack out of %s to a folder whose parents it can read",
-				label, root, serviceAccount, parent, parent, serviceAccount, parent)
+				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), parent)
 		}
 	}
 	entries := 0
@@ -89,8 +89,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		// folder, then let everything in it inherit again.
 		return fmt.Errorf(
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute on the folder and let everything in it inherit that, "+
-				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)RX\" and then icacls \"%s\\*\" /reset /T /C",
-			label, root, serviceAccount, path, root, serviceAccount, root)
+				"for example: icacls \"%s\" /grant \"%s\" and then icacls \"%s\\*\" /reset /T /C",
+			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), root)
 	})
 }
 
@@ -140,6 +140,19 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	if err != nil {
 		return err
 	}
+	// The checks below count a DACL this process cannot read or decode as
+	// access, which proves nothing: Setup accepted a destination the
+	// service then could not open (GAP-1492).
+	unreadable := func(target string) error {
+		if _, err := serviceReadDACL(target); err != nil {
+			return fmt.Errorf("cannot read the permissions of %s, so it is not known whether the gateway service account %s can write the JSONL destination %s: %v",
+				target, serviceAccount, path, err)
+		}
+		return nil
+	}
+	if err := unreadable(folder); err != nil {
+		return err
+	}
 	// What the service creates inherits the folder entries for CREATOR
 	// OWNER with the service, its owner, in their place (GAP-1431).
 	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
@@ -164,7 +177,7 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 		if !serviceDACLGrants(folder, creators, want, windows.CONTAINER_INHERIT_ACE, skip) {
 			return fmt.Errorf("the gateway service account %s can create a folder in %s, but the folders it creates there "+
 				"would not let it create the rest of %s; grant it Modify on %s for its subfolders too, "+
-				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceAccount)
+				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceGrantPrincipal(serviceAccount))
 		}
 		return nil
 	}
@@ -173,6 +186,11 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	}
 	info, statErr := os.Lstat(path)
 	existing := statErr == nil && info.Mode().IsRegular()
+	if existing {
+		if err := unreadable(path); err != nil {
+			return err
+		}
+	}
 	// Rotation renames the active file and pruning removes old backups:
 	// Windows permits both with FILE_DELETE_CHILD on the folder or DELETE on
 	// the file. The documented grant, Modify with (OI)(CI), gives DELETE on
@@ -270,6 +288,20 @@ var serviceFileGenericMapping = [...]struct{ generic, specific windows.ACCESS_MA
 	{windows.GENERIC_ALL, 0x1f01ff},
 }
 
+// serviceReadDACL returns the DACL of path, nil when it has none (which
+// grants everyone access); tests replace it.
+var serviceReadDACL = func(path string) (*windows.ACL, error) {
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	dacl, _, err := descriptor.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+		return nil, nil
+	}
+	return dacl, err
+}
+
 // serviceHasAccess reports whether the DACL of path grants every right in
 // want to one of sids, evaluating allow and deny entries in order as
 // Windows does.
@@ -281,11 +313,7 @@ func serviceHasAccess(path string, sids []*windows.SID, want windows.ACCESS_MASK
 // that carry every flag in require and none in skip: skip INHERIT_ONLY_ACE
 // for path itself, require OBJECT_INHERIT_ACE for a file created in it.
 func serviceDACLGrants(path string, sids []*windows.SID, want windows.ACCESS_MASK, require, skip uint8) bool {
-	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return true
-	}
-	dacl, _, err := descriptor.DACL()
+	dacl, err := serviceReadDACL(path)
 	if err != nil {
 		return true
 	}

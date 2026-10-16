@@ -3554,5 +3554,27 @@ class TestScanTargetIdsEnumerateOnce(unittest.TestCase):
         self.assertEqual(host_plugins.call_count, 2)
 
 
+class TestPluginBareUnblockConfigScopes(PluginCommandTestBase):
+    """GAP-1307: a bare unblock fans out to connector rules in config.yaml alone."""
+
+    def test_bare_unblock_clears_a_config_only_connector_block(self):
+        from defenseclaw.enforce import asset_lists
+
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.block_for_connector("plugin", "loaded-three", "claudecode", "scoped")
+        self.assertTrue(
+            asset_lists.has_entry(self.app.cfg, self.app.store, "plugin", "loaded-three", "claudecode", "block")
+        )
+
+        result = self.invoke(["unblock", "loaded-three"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[plugin] Unblocked 'loaded-three' (claudecode).", result.output)
+        self.assertFalse(
+            asset_lists.has_entry(self.app.cfg, self.app.store, "plugin", "loaded-three", "claudecode", "block")
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

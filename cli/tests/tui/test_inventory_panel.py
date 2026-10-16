@@ -138,6 +138,34 @@ def _inventory() -> InventorySnapshot:
     return InventorySnapshot.from_mapping(_inventory_payload())
 
 
+@pytest.mark.parametrize(
+    ("host_agents", "identities", "connector_filter", "expected"),
+    [
+        ([], [{"agent_id": "agt-1", "connector": "codex"}], "", 1),
+        ([{"id": "default", "source": "codex"}], [], "", 1),
+        ([], [{"agent_id": "agt-1", "connector": "amp"}], "codex", 0),
+    ],
+)
+def test_inventory_summary_agents_matches_subtab(
+    host_agents: list[dict[str, str]],
+    identities: list[dict[str, str]],
+    connector_filter: str,
+    expected: int,
+) -> None:
+    panel = InventoryPanelModel()
+    panel.apply_json(json.dumps({
+        "connector": "codex",
+        "agents": host_agents,
+        "summary": {"agents": {"count": len(host_agents)}},
+    }))
+    panel.apply_agent_identities(json.dumps({"identities": identities}))
+    panel.set_connector_filter(connector_filter)
+
+    summary_count = dict(panel.summary_table_rows())["Agents"]
+    badge_count = next(info.count for info in panel.subtab_info() if info.subtab == "agents")
+    assert summary_count == str(badge_count) == str(expected)
+
+
 def test_inventory_load_args_scope_and_only_flag_format() -> None:
     panel = InventoryPanelModel()
     assert panel.load_args() == ("aibom", "scan", "--json")

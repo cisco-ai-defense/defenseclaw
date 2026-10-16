@@ -214,7 +214,8 @@ func cpuHasVirtualization(cpuinfo []byte) bool {
 
 // UserVMDriverDirs are where a user's OpenShell gateway finds
 // openshell-driver-vm: dir (the rendered driver_dir) first when set, then
-// the user's own ~/.local/libexec/openshell and the system directories.
+// the user's own ~/.local/libexec/openshell and the system directories
+// (AdminVMDriverDirs; the VM probe runs on Linux only).
 func UserVMDriverDirs(home, dir string) []string {
 	var dirs []string
 	if dir != "" {
@@ -223,7 +224,7 @@ func UserVMDriverDirs(home, dir string) []string {
 	if home != "" {
 		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
 	}
-	return append(dirs, "/usr/libexec/openshell", "/usr/lib/openshell", "/usr/local/libexec/openshell")
+	return append(dirs, AdminVMDriverDirs("linux")...)
 }
 
 // FindVMDriverIn is the first executable openshell-driver-vm in dirs, "".

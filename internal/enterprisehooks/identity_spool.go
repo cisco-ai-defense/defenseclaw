@@ -48,6 +48,15 @@ const IdentitySpoolRecordVersion = 1
 // record of an account it no longer lists.
 const IdentitySpoolMaxAge = time.Hour
 
+// IdentitySpoolKeptUPNMaxAge is how long the guardian keeps a UPN that SSSD
+// InfoPipe stopped reporting (KeepVerifiedInfoPipeUPN). Kept without a
+// bound, a UPN removed in the directory selected that account's UPN
+// profile indefinitely (GAP-1235); a day gives the administrator the status
+// and verify warnings of an [ifp] section that lost userPrincipalName
+// (GAP-1114) before the accounts fall to the profile their other facts
+// select.
+const IdentitySpoolKeptUPNMaxAge = 24 * time.Hour
+
 // maxIdentitySpoolRecordBytes bounds one record.
 const maxIdentitySpoolRecordBytes = 256 << 10
 
@@ -75,6 +84,10 @@ type IdentitySpoolRecord struct {
 	// from: infopipe, identity_store, translate_name, or derived (the
 	// sAMAccountName@REALM fallback; Facts.UPN is then empty).
 	UPNSource string `json:"upn_source,omitempty"`
+	// UPNKeptSince is when the guardian first kept an InfoPipe UPN that
+	// InfoPipe no longer reported (UPNSource infopipe_kept): the UPN goes
+	// once it is IdentitySpoolKeptUPNMaxAge old.
+	UPNKeptSince time.Time `json:"upn_kept_since,omitzero"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -230,7 +243,11 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 // the file). Rewriting the record as derived sent every account a users
 // assignment selects by UPN to the default profile within one guardian pass
 // (GAP-1114). It keeps the UPN only for the same account in the same SSSD
-// domain, and marks it infopipe_kept so status and verify can say why.
+// domain, and marks it infopipe_kept so status and verify can say why. It
+// keeps it for IdentitySpoolKeptUPNMaxAge from the first pass that kept it
+// (UPNKeptSince): a UPN removed in the directory stayed trusted for as long
+// as the guardian ran (GAP-1235). A kept record an older build wrote
+// without UPNKeptSince starts the bound at this pass.
 func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoolRecord, bool) {
 	if record.Facts.UPN != "" || previous.Facts.UPN == "" ||
 		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
@@ -238,10 +255,18 @@ func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoo
 		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) {
 		return record, false
 	}
+	since := previous.UPNKeptSince
+	if previous.UPNSource != UPNSourceInfoPipeKept || since.IsZero() || since.After(record.UpdatedAt) {
+		since = record.UpdatedAt
+	}
+	if record.UpdatedAt.Sub(since) >= IdentitySpoolKeptUPNMaxAge {
+		return record, false
+	}
 	record.Facts.UPN = previous.Facts.UPN
 	record.Facts.Principal = previous.Facts.UPN
 	record.Facts.Source = previous.Facts.Source
 	record.UPNSource = UPNSourceInfoPipeKept
+	record.UPNKeptSince = since
 	return record, true
 }
 

@@ -83,6 +83,51 @@ func (a *App) explain(ctx context.Context, o PolicyOptions) (*sandboxapi.Explain
 	return ex, nil
 }
 
+// managedExplainAssumption says what a managed `policy show|explain`
+// without --sandbox or --harness explained: a new run of the default agent,
+// whose profile can differ from the one a running sandbox of another agent
+// matched (an engineering profile for Claude Code next to a Codex-only
+// profile; es-demo:GAP-0013). It names the running sandboxes to ask about
+// instead. "" when a flag chose what to explain.
+func (a *App) managedExplainAssumption(ctx context.Context, o PolicyOptions) string {
+	if o.Sandbox != "" || o.Harness != "" {
+		return ""
+	}
+	note := "this is the policy of a new run of the default agent; for another agent add --harness NAME"
+	api, err := a.api()
+	if err != nil {
+		return note
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return note
+	}
+	var running []string
+	for _, sb := range list {
+		if sandboxMayRunPhase(sb.Phase) {
+			running = append(running, sb.Name+" ("+firstNonEmpty(sb.Harness, "agent")+")")
+		}
+	}
+	if len(running) == 0 {
+		return note
+	}
+	sort.Strings(running)
+	shown := strings.Join(running[:min(len(running), 4)], ", ")
+	if more := len(running) - 4; more > 0 {
+		shown += fmt.Sprintf(" and %d more", more)
+	}
+	return note + "; a running sandbox can match another profile: " + CommandName + " policy explain --sandbox NAME (running: " + shown + ")"
+}
+
+// sandboxMayRunPhase reports a phase of a sandbox that may be running.
+func sandboxMayRunPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "ready", "running", "provisioning", "starting":
+		return true
+	}
+	return false
+}
+
 // folderRepoPolicyNote is parentRepoPolicyNote for `policy show` and
 // `policy explain` of a run in this folder (no --sandbox).
 func (a *App) folderRepoPolicyNote(o PolicyOptions, ex *sandboxapi.Explain) string {
@@ -110,6 +155,9 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 		// policy as the managed gateway resolved it; the local configuration
 		// is not the user's to read.
 		a.printManagedExplainFor(ex.Managed, ex, o.Harness, false)
+		if note := a.managedExplainAssumption(ctx, o); note != "" {
+			a.note(note)
+		}
 		for _, v := range ex.Violations {
 			a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 		}
@@ -307,6 +355,9 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	managedHost := ex.Managed != nil
 	if managedHost {
 		a.printManagedExplainFor(ex.Managed, ex, o.Harness, o.Sources)
+		if note := a.managedExplainAssumption(ctx, o); note != "" {
+			a.note(note)
+		}
 		a.println()
 	}
 	head := "pack " + ex.Pack + " " + ex.PackDigest + " from "

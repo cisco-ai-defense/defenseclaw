@@ -289,7 +289,7 @@ def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path,
     # GAP-0352: an upgrade restarted the daemon under a running sandbox, whose
     # hooks failed closed meanwhile; the user learned it from the end summary.
     text = INSTALL_SH.read_text(encoding="utf-8")
-    assert 'warn_running_sandboxes\n    ask_yes_no "${question}"' in text
+    assert 'warn_running_sandboxes "${stranded}"\n    ask_yes_no "${question}"' in text
     assert 'warn_running_sandboxes\nif [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]' in text
     start = text.index("warn_running_sandboxes() {")
     func = text[start : text.index("\n}\n", start) + 3]
@@ -796,7 +796,46 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
-    assert not calls.exists()
+    # Only the GAP-0009 check of which gateway can prune hook entries; neither fake can.
+    made = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    assert [line for line in made if not line.endswith("connector prune-orphans --help")] == []
+
+
+def test_a_rollback_to_0_x_names_only_the_installer_command_to_return(tmp_path: Path) -> None:
+    # GAP-0585: a 0.x release has no rollback command to return to 1.x.
+    for name, current, back_to in (("legacy", "1.0.1", "0.8.10"), ("current", "1.0.2", "1.0.1")):
+        case = tmp_path / name
+        home = case / "home"
+        dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+        (dc_home / "previous" / "bin").mkdir(parents=True)
+        bin_dir.mkdir(parents=True)
+        for folder, version in ((bin_dir, current), (dc_home / "previous" / "bin", back_to)):
+            gateway = folder / "defenseclaw-gateway"
+            gateway.write_text(
+                f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; '
+                "start) exit 0 ;; esac\n",
+                encoding="utf-8",
+            )
+            gateway.chmod(0o755)
+        (dc_home / "previous" / "VERSION").write_text(f"{back_to}\n", encoding="utf-8")
+        if back_to == "1.0.1":
+            (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+        script = _stamped(case, current)
+
+        back = _run([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
+        out = back.stdout + back.stderr
+
+        assert back.returncode == 0, out
+        if back_to == "0.8.10":
+            command = f"bash {dc_home}/previous/installer/install.sh --rollback"
+            assert f"To return to 1.0.1, run: {command}" in out, out
+            assert f"kept in {dc_home}/previous; '{command}' again brings it back" in out, out
+            assert "defenseclaw rollback" not in out, out
+        else:
+            assert "Starting the gateway" in out, out
+            assert "Run 'defenseclaw rollback' again to return to 1.0.2." in out, out
+            assert "'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in out, out
+            assert "installer/install.sh --rollback" not in out, out
 
 
 def _damaged_audit_db(path: Path) -> bytes:
@@ -1333,7 +1372,9 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: str) -> tuple[Path, Path]:
+def _legacy_0_8_home(
+    home: Path, receipt_age: int, cache_age: int, cache_wheel: str, sigstore_age: int = 5
+) -> tuple[Path, Path]:
     """Lay out a 0.8.10 install that ran uv's installer and a temporary Cosign, without a marker."""
     bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
     bin_dir.mkdir(parents=True)
@@ -1359,7 +1400,7 @@ def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: 
     (tuf / "root.json").write_text("{}", encoding="utf-8")
     venv_t = 1_700_000_000
     for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
-        os.utime(path, (venv_t - 5, venv_t - 5))
+        os.utime(path, (venv_t - sigstore_age, venv_t - sigstore_age))
     (cache / "CACHEDIR.TAG").touch()
     os.utime(cache / "CACHEDIR.TAG", (venv_t - 1, venv_t - 1))
     for path in (*cache.glob("archive-v0/*/*"), *cache.glob("archive-v0/*"), cache / "archive-v0", cache):
@@ -1384,9 +1425,27 @@ def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
     # GAP-0908: the 0.8.10 installer ran uv's installer and kept no marker,
     # and it also reused a uv the user already had. The upgrade records the
     # uv (the digests install_uv writes) and its cache only on evidence that
-    # user's own uv cannot meet.
+    # user's own uv cannot meet, and ~/.sigstore only with that uv (GAP-1262).
     home = tmp_path / "home"
     bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=cache_age, cache_wheel=cache_wheel)
+
+    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
+    record = bin_dir / "defenseclaw-uv.sha256"
+    leftovers = dc_home / "legacy-install-leftovers"
+    if not claimed:
+        assert not record.exists()
+        assert not leftovers.exists()
+        return
+    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
+    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
+    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
+    assert leftovers.read_text(encoding="utf-8") == "uv-cache\nsigstore\n"
+
+
+def _legacy_leftovers_script(tmp_path: Path, home: Path, bin_dir: Path, dc_home: Path) -> Path:
     text = INSTALL_SH.read_text(encoding="utf-8")
     script = tmp_path / "legacy.sh"
     script.write_text(
@@ -1398,21 +1457,7 @@ def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
         + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
         encoding="utf-8",
     )
-
-    proc = _run([str(script)], tmp_path)
-
-    assert proc.returncode == 0, proc.stderr
-    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
-    record = bin_dir / "defenseclaw-uv.sha256"
-    leftovers = (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8")
-    if not claimed:
-        assert not record.exists()
-        assert leftovers == "sigstore\n"
-        return
-    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
-    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
-    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
-    assert leftovers == "uv-cache\nsigstore\n"
+    return script
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
@@ -1802,3 +1847,255 @@ def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path, rep
     urls = curl_log.read_text(encoding="utf-8").splitlines()
     assert all("/releases/latest" not in url for url in urls)
     assert f"{base}/releases/download/1.0.0/install.sh" in urls
+
+
+# ── 1.0.2 (FG-01) ───────────────────────────────────────────────────────────
+
+
+def _fake_gateway(path: Path, help_usage: str, calls: Path) -> Path:
+    path.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in *--help*) printf "Usage:\\n  %s\\n" "' + help_usage + '";; esac\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configured(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0009: a connector set up after the upgrade kept its
+    # DefenseClaw hook entries after the rollback, which restored a data dir
+    # without its hook script: Claude Code blocked every prompt. The newer
+    # gateway of the two removes them; an older one prints the connector help.
+    calls = tmp_path / "calls"
+    older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
+    newer = _fake_gateway(tmp_path / "newer", "defenseclaw-gateway connector prune-orphans [flags]", calls)
+    home = tmp_path / "dc"
+    script = tmp_path / "prune.sh"
+    script.write_text(
+        'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("prune_orphaned_hooks")
+        + f'DEFENSECLAW_HOME="{home}" LOG="{tmp_path / "log"}"\n'
+        + f'prune_orphaned_hooks "{tmp_path / "missing"}" "{older}" "{newer}"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "connector prune-orphans --help",
+        "connector prune-orphans --help",
+        f"connector prune-orphans --data-dir {home}",
+    ]
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') : text.index("# ── Stage: nothing live changes")]
+    # Run after the swap, for a 1.x install; a 0.x one gets its own teardown first.
+    assert rollback.index("swap_with_previous || swapped=$?") < rollback.index(
+        'if ! version_lt "${back_to}" 1.0.0; then\n        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
+    )
+    swap = text[text.index("swap_in() {") : text.index("swap_app() {")]
+    assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
+
+
+def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:
+    # rel-1-0-1:GAP-0008: the rollback said the data comes back "if you roll
+    # forward", but 'defenseclaw upgrade' after it parks that data in backups/.
+    # The end-to-end rollback test pins the rendered 1.x command.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert "comes back if you roll forward" not in text
+    assert "'${forward}' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in text
+    assert "keep_rolled_back_data" in text[text.index("finish_swap() {") :][:600]
+
+
+def test_an_empty_local_value_is_a_usage_error(tmp_path: Path) -> None:
+    # #1096/GAP-1336: an empty --local= ran with the current folder as the assets.
+    proc = _run([str(_stamped(tmp_path)), "--local="], tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--local needs a directory; nothing was changed" in proc.stderr
+
+
+def test_a_sigstore_cache_older_than_the_0_8_uv_is_the_users(tmp_path: Path) -> None:
+    # #1096/GAP-1262: a ~/.sigstore the user made five minutes before the
+    # 0.8.x venv fell inside the ten-minute window and was recorded for
+    # deletion. The 0.8.x installer ran its temporary Cosign after uv.
+    home = tmp_path / "home"
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=-5, cache_wheel="litellm-1.91.5", sigstore_age=300)
+    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "uv-cache\n"
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
+def test_a_second_restore_keeps_the_installer_the_first_one_put_back(tmp_path: Path) -> None:
+    # #1096/GAP-0922: a restore that stopped part-way kept its snapshot, and
+    # the next run deleted the installer the first had already put back.
+    dc_home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = dc_home / "previous.new"
+    for root in (dc_home, snap / "data"):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    for root, body in ((snap / "installer", "previous installer"), (dc_home / "installer", "failed installer")):
+        root.mkdir(parents=True)
+        (root / "install.sh").write_text(body, encoding="utf-8")
+    (snap / "bin").mkdir()
+    (snap / "bin" / "defenseclaw-gateway").write_text("1.0.1\n", encoding="utf-8")
+    (snap / "COMPLETE").touch()
+    bin_dir.mkdir()
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { :; }\nwarn() { :; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + f'DEFENSECLAW_HOME="{dc_home}" SNAP="{snap}" VENV="{dc_home}/.venv" BIN_DIR="{bin_dir}"\n'
+        + f'INSTALLER_DIR="{dc_home}/installer" APP_PATH="" VERSION=1.0.2 PREV_VERSION=1.0.1\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+    bin_dir.chmod(0o555)
+    try:
+        first = _run([str(script)], tmp_path)
+    finally:
+        bin_dir.chmod(0o755)
+    assert "back completely" in first.stdout and snap.is_dir(), first
+    assert (dc_home / "installer" / "install.sh").read_text(encoding="utf-8") == "previous installer"
+
+    _run([str(script)], tmp_path)
+
+    assert not snap.exists()
+    assert (dc_home / "installer" / "install.sh").read_text(encoding="utf-8") == "previous installer"
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "1.0.1\n"
+
+
+@pytest.mark.parametrize("failing", ["audit.db", "audit.db-wal"])
+def test_a_failed_audit_quarantine_keeps_the_store_with_its_wal(tmp_path: Path, failing: str) -> None:
+    # #1096/GAP-1397: the WAL moved aside before the store, and a store that
+    # then did not move stayed behind without it.
+    home = tmp_path / "dc"
+    home.mkdir()
+    (home / "audit.db").write_text("db", encoding="utf-8")
+    (home / "audit.db-wal").write_text("wal", encoding="utf-8")
+    script = tmp_path / "quarantine.sh"
+    script.write_text(
+        "set -euo pipefail\nwarn() { :; }\n"
+        + f'mv() {{ [[ "$1" == "{home / failing}" ]] && return 1; command mv "$@"; }}\n'
+        + _install_sh_functions("move_audit_store", "quarantine_rolled_back_audit")
+        + f'DEFENSECLAW_HOME="{home}" back_to=0.8.10 QUARANTINED=""\n'
+        + 'quarantine_rolled_back_audit && echo moved || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out
+    assert (home / "audit.db").read_text(encoding="utf-8") == "db"
+    assert (home / "audit.db-wal").read_text(encoding="utf-8") == "wal"
+    assert not list(home.glob("audit.db.corrupt-*"))
+
+
+def test_an_undone_rollback_puts_the_saved_audit_store_back_over_a_new_one(tmp_path: Path) -> None:
+    # #1096/GAP-1398: the failed start of the restored 0.x gateway made a new,
+    # empty audit.db, so the store the rollback had moved aside stayed aside
+    # and the next rollback used the empty one without a word.
+    home = tmp_path / "dc"
+    data = home / "previous" / "data"
+    data.mkdir(parents=True)
+    quarantined = "audit.db.corrupt-20261013T000000Z"
+    (data / quarantined).write_text("0.x history", encoding="utf-8")
+    (data / f"{quarantined}-wal").write_text("0.x wal", encoding="utf-8")
+    (data / "audit.db").write_text("new", encoding="utf-8")
+    script = tmp_path / "undo.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + _install_sh_functions("move_audit_store", "undo_rollback")
+        + "info() { :; }\nwarn() { :; }\nerr() { :; }\nok() { :; }\n"
+        + "stop_gateway() { :; }\nswap_with_previous() { return 0; }\nstart_gateway() { return 0; }\nwarn_not_started() { :; }\n"
+        + f'DEFENSECLAW_HOME="{home}" PREVIOUS="{home / "previous"}" BIN_DIR="{tmp_path / "bin"}" LOG=/dev/null\n'
+        + f'current=1.0.2 back_to=0.8.10 saved_was_running=false QUARANTINED="{home / quarantined}"\n'
+        + 'undo_rollback "The gateway of DefenseClaw 0.8.10 did not start"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert (data / "audit.db").read_text(encoding="utf-8") == "0.x history"
+    assert (data / "audit.db-wal").read_text(encoding="utf-8") == "0.x wal"
+    aside = list(data.glob("audit.db.failed-start-*"))
+    assert [path.read_text(encoding="utf-8") for path in aside] == ["new"]
+
+
+@pytest.mark.parametrize(
+    "failing",
+    ["", "audit.db", "audit.db-wal", "audit.db.corrupt-fixture", "audit.db.corrupt-fixture-wal", "audit.db.corrupt-fixture-shm"],
+)
+def test_an_undone_rollback_moves_each_audit_store_as_one_unit(tmp_path: Path, failing: str) -> None:
+    # rel-1-0-2:GAP-0492 (the install.sh side of GAP-1398): each file moved on
+    # its own (|| true), so a move that failed midway left the saved store at
+    # audit.db without its WAL, or with the new store's WAL.
+    home = tmp_path / "dc"
+    data = home / "previous" / "data"
+    data.mkdir(parents=True)
+    kept = data / "audit.db.corrupt-fixture"
+    saved = {"": "0.x history", "-wal": "0.x wal", "-shm": "0.x shm"}
+    for suffix, body in saved.items():
+        Path(f"{kept}{suffix}").write_text(body, encoding="utf-8")
+    new = {"": "new", "-wal": "new wal"}
+    for suffix, body in new.items():
+        Path(f"{data / 'audit.db'}{suffix}").write_text(body, encoding="utf-8")
+    script = tmp_path / "undo.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + _install_sh_functions("move_audit_store", "undo_rollback")
+        + 'info() { :; }\nwarn() { echo "warn: $*"; }\nerr() { :; }\nok() { :; }\n'
+        + "stop_gateway() { :; }\nswap_with_previous() { return 0; }\nstart_gateway() { return 0; }\nwarn_not_started() { :; }\n"
+        + f'mv() {{ [[ "$1" == "{data / failing if failing else "none"}" ]] && return 1; command mv "$@"; }}\n'
+        + f'DEFENSECLAW_HOME="{home}" PREVIOUS="{home / "previous"}" BIN_DIR="{tmp_path / "bin"}" LOG=/dev/null\n'
+        + f'current=1.0.2 back_to=0.8.10 saved_was_running=false QUARANTINED="{home / kept.name}"\n'
+        + 'undo_rollback "The gateway of DefenseClaw 0.8.10 did not start"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    def store_at(path: Path, store: dict[str, str]) -> bool:
+        return all(Path(f"{path}{suffix}").read_text(encoding="utf-8") == body for suffix, body in store.items())
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    fresh = [p for p in data.glob("audit.db.failed-start-*") if not p.name.endswith(("-wal", "-shm"))]
+    if not failing:
+        assert store_at(data / "audit.db", saved) and len(fresh) == 1 and store_at(fresh[0], new)
+        assert not list(data.glob("audit.db.corrupt-*")) and "is still" not in proc.stdout
+        return
+    assert store_at(kept, saved), sorted(p.name for p in data.iterdir())
+    assert f"warn: The saved 0.8.10 audit store is still {kept}" in proc.stdout
+    if failing.startswith("audit.db.corrupt-"):
+        assert not any(Path(f"{data / 'audit.db'}{suffix}").exists() for suffix in ("", "-wal", "-shm"))
+        assert len(fresh) == 1 and store_at(fresh[0], new)
+    else:
+        assert store_at(data / "audit.db", new) and fresh == []
+
+
+def test_a_failed_audit_quarantine_never_replaces_a_file(tmp_path: Path) -> None:
+    # rel-1-0-2:GAP-0491: mv replaces an existing target, so a left-over
+    # <moved>-wal would have been overwritten by the store's WAL.
+    home = tmp_path / "dc"
+    home.mkdir()
+    for suffix, body in {"": "db", "-wal": "wal", "-shm": "shm"}.items():
+        Path(f"{home / 'audit.db'}{suffix}").write_text(body, encoding="utf-8")
+    (home / "aside-shm").write_text("other", encoding="utf-8")
+    script = tmp_path / "move.sh"
+    script.write_text(
+        'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("move_audit_store")
+        + f'move_audit_store "{home / "audit.db"}" "{home / "aside"}" && echo moved || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out
+    assert [Path(f"{home / 'audit.db'}{s}").read_text(encoding="utf-8") for s in ("", "-wal", "-shm")] == ["db", "wal", "shm"]
+    assert sorted(p.name for p in home.iterdir()) == ["aside-shm", "audit.db", "audit.db-shm", "audit.db-wal"]

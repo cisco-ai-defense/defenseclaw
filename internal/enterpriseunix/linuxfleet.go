@@ -20,7 +20,7 @@ func (e *Env) checkLinuxFleetPython() error {
 		check = fleetpolicy.CheckManagedLinuxPython
 	}
 	if _, err := check(); err != nil {
-		return fmt.Errorf("Fleet on managed Linux requires protected /usr/bin/python3 with PyYAML; provision the distribution's python3 and Python YAML packages before enabling fleet.enabled: %w", err)
+		return fmt.Errorf("managed Linux: Fleet requires protected /usr/bin/python3 with PyYAML; provision the distribution's python3 and Python YAML packages before enabling fleet.enabled: %w", err)
 	}
 	return nil
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // This file is the user-facing side of the managed sandbox policy (plan
@@ -88,6 +89,9 @@ func managedPolicyLine(m *sandboxapi.ManagedStatus) string {
 	if !strings.HasSuffix(text, ".") {
 		text += "."
 	}
+	if m.HostRunGate == "exempt" {
+		text += " Your account is exempt from enrollment; required_for does not apply and a host run is allowed."
+	}
 	return text + " Details: defenseclaw sandbox policy explain"
 }
 
@@ -127,7 +131,7 @@ func managedStatusOfExplain(m *sandboxapi.ManagedExplain) *sandboxapi.ManagedSta
 	if m == nil {
 		return nil
 	}
-	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, Provisional: m.Provisional,
+	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
 		EffectiveDigest: m.PolicyDigest, UpdatedAt: m.UpdatedAt, RequestAccess: m.RequestAccess,
 		Driver: m.Driver, DriverReason: m.DriverReason, DriverFallback: m.DriverFallback}
 }
@@ -311,6 +315,16 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	switch {
 	case !m.Allowed:
 		add("Sandboxes", "your organization doesn't allow sandboxes for you", "allowed")
+		if len(m.RequiredFor) > 0 && m.HostRunGate == "exempt" {
+			add("Required", "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "+
+				andList(commandNames(m.RequiredFor))+" may run on this computer outside a sandbox, where their calls are still inspected and logged", "required_for")
+		}
+	case len(m.RequiredFor) > 0 && m.HostRunGate == "exempt":
+		// The managed gateway's host-run gate allows this account's runs;
+		// required_for alone would give a false protected status (GAP-0555).
+		add("Required", "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "+
+			andList(commandNames(m.RequiredFor))+" may also run on this computer outside a sandbox, where their calls are still inspected and logged",
+			"required_for")
 	case len(m.RequiredFor) > 0:
 		text := andList(commandNames(m.RequiredFor)) + " run only in a sandbox on this computer"
 		keys := []string{"required_for"}
@@ -365,11 +379,15 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	}
 	add("Egress", strings.Join(egress, "; "), egressKeys...)
 
+	// What the managed gateway's check of each answer allows
+	// (sandboxreg.CheckApprovals): under allow_unblock: false an answer is
+	// kept for this session only, and `approve --always` is refused; the
+	// row said "for good" there (#1200).
 	var approvals string
-	switch m.UserApprovals {
-	case "none":
+	switch {
+	case m.UserApprovals == "none":
 		approvals = "you can't approve asks; they are refused"
-	case "session":
+	case m.UserApprovals == "session" || !m.AllowUnblock:
 		approvals = "you may approve asks for this session only"
 	default:
 		approvals = "you may approve asks for a session or for good"
@@ -904,6 +922,12 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	}
 	c.Detail = firstNonEmpty(strings.Join(parts, ", "), "managed by your organization")
 	switch {
+	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
+		// The organization's switch of the setup is under way: it clears
+		// by itself, and is nothing to ask IT about (#1203).
+		c.Status = openshell.StatusWarn
+		c.Detail = m.Unavailable
+		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":
 		c.Status = openshell.StatusFail
 		c.Detail = sandboxapi.DisplayText(m.Unavailable)
@@ -934,6 +958,118 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 			"virtualization on); nothing to do unless you need them. " + sandboxapi.AccessContact(m.RequestAccess)}
 	}
 	return &c
+}
+
+// managedAdminVMDriver finds the administrator's MicroVM driver with the
+// check `enterprise verify` runs (openshell.AdminVMDriver); a seam for tests.
+var managedAdminVMDriver = func(goos string) (found string, refused []string) {
+	return openshell.AdminVMDriver(goos, func(p string) bool {
+		return openshell.ExecutableVMDriver(p)
+	}, func(p string) error { return managed.ValidateTrustedFilePath(p, "managed file") })
+}
+
+var managedRenderedVMDriver = func(goos, dir string) (string, string) {
+	return openshell.RenderedAdminVMDriver(goos, dir, openshell.ExecutableVMDriver,
+		func(p string) error { return managed.ValidateTrustedFilePath(p, "OpenShell MicroVM driver") })
+}
+
+var managedRenderedVMConfigTrust = managed.ValidateTrustedFilePath
+
+// managedVMDriverGoarch is the CPU architecture the driver fix names; a seam
+// for tests.
+var managedVMDriverGoarch = runtime.GOARCH
+
+// withAdminVMDriver checks, for the doctor's Sandbox driver row c, the
+// administrator's openshell-driver-vm where the account's sandboxes need it
+// (prerequisite install, the MicroVM driver), live and with the check the
+// administrator's `enterprise verify` runs: the daemon's view of the driver
+// is the lifecycle's last record, so a driver removed since read ready
+// (GAP-0481). A missing or untrusted driver fails the row (warns on Linux
+// with the docker fallback, which then runs the sandboxes), naming the path
+// and the administrator's pinned-digest install. c is nil when the daemon
+// named no driver.
+func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus) *openshell.Check {
+	goos := a.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	wantsVM := m.Driver == config.EnterpriseOpenShellDriverVM || m.Driver == config.EnterpriseOpenShellDriverAuto
+	if (goos != "linux" && goos != "darwin") || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
+		!wantsVM || openshell.IsFallbackReason(m.DriverReason) {
+		return c
+	}
+	found, refused := managedAdminVMDriver(goos)
+	if found != "" {
+		return c
+	}
+	if c == nil {
+		c = &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Detail: managedDriverText(m.Driver, m.DriverReason, m.DriverFallback)}
+	}
+	why := "the MicroVM driver openshell-driver-vm is not installed (looked in " + strings.Join(openshell.AdminVMDriverDirs(goos), ", ") + ")"
+	if len(refused) > 0 {
+		why = "the MicroVM driver openshell-driver-vm is installed only where an account other than root can change it: " + strings.Join(refused, "; ") +
+			"; sandboxes do not use it"
+	}
+	if c.Detail != "" {
+		why = c.Detail + "; but " + why
+	}
+	c.Detail = why
+	c.Status = openshell.StatusFail
+	if goos == "linux" && m.DriverFallback == config.EnterpriseOpenShellFallbackDocker {
+		c.Status = openshell.StatusWarn
+		c.Detail += ", so your sandboxes run on docker with your organization's policy unchanged"
+	} else {
+		c.Detail += ", so no sandbox can start for you on this computer"
+	}
+	fix := openshell.AdminVMDriverFix(goos, managedVMDriverGoarch)
+	contact := sandboxapi.RequestAccessText(m.RequestAccess)
+	if contact != sandboxapi.RequestAccessFallback {
+		contact = "contact " + contact
+	}
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; an administrator step (" + contact + "): " + fix.Summary,
+		Command: fix.Command, Sudo: true}
+	return c
+}
+
+// withRenderedVMDriver checks the path OpenShell will actually search. The
+// administrator's shared search can find a later driver after the rendered
+// driver_dir has gone stale; the gateway cannot use that later driver until
+// enterprise ensure refreshes the render (GAP-0573).
+func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus, paths *openshell.RenderedPaths) *openshell.Check {
+	if c == nil || c.Status != openshell.StatusPass || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
+		(m.Driver != config.EnterpriseOpenShellDriverVM && m.Driver != config.EnterpriseOpenShellDriverAuto) || openshell.IsFallbackReason(m.DriverReason) {
+		return c
+	}
+	goos := a.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos != "linux" && goos != "darwin" {
+		return c
+	}
+	problem := ""
+	if paths == nil || paths.TOML == "" {
+		problem = "the administrator's rendered gateway configuration is unavailable"
+	} else if err := managedRenderedVMConfigTrust(paths.TOML, "OpenShell gateway configuration"); err != nil {
+		problem = fmt.Sprintf("the administrator's rendered gateway configuration %s is not trusted: %v", paths.TOML, err)
+	} else if data, err := os.ReadFile(paths.TOML); err != nil {
+		problem = fmt.Sprintf("cannot read the administrator's rendered gateway configuration %s: %v", paths.TOML, err)
+	} else if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil {
+		problem = err.Error()
+	} else if err := rendered.Validate(); err != nil {
+		problem = err.Error()
+	} else if rendered.ComputeDriver != openshell.DriverVM {
+		problem = "the administrator's rendered gateway configuration does not select the MicroVM driver"
+	} else {
+		_, problem = managedRenderedVMDriver(goos, rendered.DriverDir)
+	}
+	if problem == "" {
+		return c
+	}
+	c.Status = openshell.StatusFail
+	c.Detail += "; but " + problem + ", so no MicroVM sandbox can start for you on this computer"
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + openshell.EnterprisePlatformName(goos) + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
+	return c
 }
 
 // managedDockerCheck is the doctor's Docker row on a managed Mac. The

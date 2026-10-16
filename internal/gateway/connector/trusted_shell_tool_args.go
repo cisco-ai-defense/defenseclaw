@@ -211,8 +211,7 @@ var shellCommandKeys = map[string]map[string]string{
 // An argument they do not list, or a listed one with another value, stays
 // next to the command, and the parse is only partial: no command rule can
 // close its trusted-action proof, and a CRITICAL command finding is an
-// allowed candidate. For a sandbox, whose hooks are the only gate on its
-// tool calls, the gateway also judges the command alone (see
+// allowed candidate. The gateway also judges the command alone (see
 // inspectSandboxShellToolPolicyCtx), so one extra argument cannot turn a
 // block into an allow. The reduced shape is only ever used to add a
 // verdict, never to lift one: the arguments it drops may change how the
@@ -220,8 +219,12 @@ var shellCommandKeys = map[string]map[string]string{
 //
 // The command is a non-blank string, or a non-empty list of strings (an
 // argv). When the key repeats, the last value is the command, as JSON
-// decoders in the harnesses read it. Refused (ok false) for any other tool,
-// or unless the arguments are a JSON object with such a command.
+// decoders in the harnesses read it. A key that differs from the command
+// key only in letter case (Command next to command) stays next to the
+// command with its value: it names the same argument to a reader that folds
+// case, so the gateway judges the call as conflicting arguments (GAP-0678,
+// GAP-0686). Refused (ok false) for any other tool, or unless the arguments
+// are a JSON object with such a command under the exact command key.
 func ShellCommandArgs(connectorName, toolName string, args json.RawMessage) (json.RawMessage, bool) {
 	key := shellCommandKeys[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)]
 	if key == "" {
@@ -264,10 +267,16 @@ func shellCommandOnly(key string, args json.RawMessage) (json.RawMessage, bool) 
 	default:
 		return nil, false
 	}
+	reduced := map[string]interface{}{key: command}
+	for name, raw := range fields {
+		if name != key && strings.EqualFold(name, key) {
+			reduced[name] = raw
+		}
+	}
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(map[string]interface{}{key: command}); err != nil {
+	if err := enc.Encode(reduced); err != nil {
 		return nil, false
 	}
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), true

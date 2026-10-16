@@ -2890,8 +2890,11 @@ OpenShell gateway: an unlabelled or unregistered one is stopped or alerted per
 and an agent in a container DefenseClaw did not create is only alerted on. The
 require-sandbox gate (`internal/gateway/require_sandbox.go`, called from
 `agent_hook.go` before evaluation) refuses a host run of a `required_for`
-connector with the message builders in `sandboxapi/refusals.go`, and skips only
-requests whose context was rebuilt from a live registration.
+connector with the message builders in `sandboxapi/refusals.go`. An account in
+`enterprise.enrollment.exempt_users` is not refused. When sandboxes are
+unavailable to the account and the effective `when_unavailable` setting is
+`alert`, the gate alerts instead of refusing. A request whose context was
+rebuilt from a live registration skips the host-run gate.
 
 ### OpenShell under management
 

@@ -15,31 +15,31 @@ import (
 func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, int, error) {
 	var settings map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
-		return nil, 0, fmt.Errorf("Claude settings must be a JSON object: %v", err)
+		return nil, 0, fmt.Errorf("the Claude settings must be a JSON object: %v", err)
 	}
 	var events map[string]json.RawMessage
 	if err := json.Unmarshal(settings["hooks"], &events); err != nil {
 		if len(settings["hooks"]) == 0 {
 			return raw, 0, nil
 		}
-		return nil, 0, fmt.Errorf("Claude hooks must be a JSON object: %w", err)
+		return nil, 0, fmt.Errorf("the Claude hooks must be a JSON object: %w", err)
 	}
 	removed := 0
 	for event, value := range events {
 		eventRemoved := 0
 		var groups []json.RawMessage
 		if err := json.Unmarshal(value, &groups); err != nil {
-			return nil, 0, fmt.Errorf("Claude hooks.%s must be an array: %w", event, err)
+			return nil, 0, fmt.Errorf("the Claude hooks.%s must be an array: %w", event, err)
 		}
 		keptGroups := make([]json.RawMessage, 0, len(groups))
 		for _, group := range groups {
 			var entry map[string]json.RawMessage
 			if err := json.Unmarshal(group, &entry); err != nil || entry == nil {
-				return nil, 0, fmt.Errorf("Claude hooks.%s contains an invalid matcher", event)
+				return nil, 0, fmt.Errorf("the Claude hooks.%s contains an invalid matcher", event)
 			}
 			var handlers []json.RawMessage
 			if err := json.Unmarshal(entry["hooks"], &handlers); err != nil {
-				return nil, 0, fmt.Errorf("Claude hooks.%s contains invalid handlers: %w", event, err)
+				return nil, 0, fmt.Errorf("the Claude hooks.%s contains invalid handlers: %w", event, err)
 			}
 			kept := make([]json.RawMessage, 0, len(handlers))
 			for _, handler := range handlers {
@@ -47,7 +47,7 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 					Command string `json:"command"`
 				}
 				if err := json.Unmarshal(handler, &hook); err != nil {
-					return nil, 0, fmt.Errorf("Claude hooks.%s contains an invalid handler: %w", event, err)
+					return nil, 0, fmt.Errorf("the Claude hooks.%s contains an invalid handler: %w", event, err)
 				}
 				if windowsManagedHookCommandIs(hook.Command, executable) {
 					removed++

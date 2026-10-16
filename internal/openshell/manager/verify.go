@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -401,17 +402,22 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	const outcome = "DefenseClaw stopped it again (its work is kept)"
 	if rec.Verify == nil {
 		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
-		m.stopUnverified(ctx, gw, b)
-		return &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
+		refusal := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
 			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
 			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
+		if m.stopUnverified(ctx, gw, b) != nil {
+			return stillRunning(rec.Name, refusal, outcome)
+		}
+		return refusal
 	}
 	m.mu.Lock()
 	eff := b.eff
 	m.mu.Unlock()
 	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome)
 	if err != nil {
-		m.stopUnverified(ctx, gw, b)
+		if m.stopUnverified(ctx, gw, b) != nil {
+			return stillRunning(rec.Name, err, outcome)
+		}
 		return err
 	}
 	m.mu.Lock()
@@ -428,11 +434,14 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	return nil
 }
 
-// stopUnverified stops a sandbox that failed the workload check after a
-// start, flushing its disk first where the driver's stop does not (the
-// last session's work stays for pull), and records the phase OpenShell
-// reports then.
-func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) {
+// stopUnverified stops again a sandbox a start must not leave running (it
+// failed the workload check, or still has a rule of its last session),
+// flushing its disk first where the driver's stop does not (the last
+// session's work stays for pull), and records the phase OpenShell reports
+// then. It returns why the stop failed: the sandbox then still runs, and
+// the start's refusal must say so rather than that it was stopped
+// (GAP-0014).
+func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) error {
 	ctx, cancel := detached(ctx, rollbackTimeout)
 	defer cancel()
 	m.mu.Lock()
@@ -446,8 +455,24 @@ func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) {
 		_, err = gw.Client.WaitStopped(ctx, name)
 	}
 	if err != nil {
-		m.logf("%s: sandbox %s failed its check after the start, and stopping it failed too: %v",
+		m.logf("%s: sandbox %s must not keep running after its start, and stopping it again failed: %v",
 			gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
 	}
 	m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+	return err
+}
+
+// stillRunning is the refusal err of a start whose sandbox DefenseClaw
+// could not stop again (stopUnverified failed): the sandbox still runs, so
+// the refusal drops stopped, the outcome it ends with when the stop works,
+// and says how to stop it. The stop's own error is in the log.
+func stillRunning(name string, err error, stopped string) error {
+	out := sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: err.Error()}
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) {
+		out = *apiErr
+	}
+	out.Message = strings.TrimSuffix(strings.TrimSuffix(out.Message, stopped), "; ") +
+		"; DefenseClaw could not stop the sandbox again, so it is still running: stop it with `defenseclaw sandbox stop " + name + "`"
+	return &out
 }

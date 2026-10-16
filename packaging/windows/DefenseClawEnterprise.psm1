@@ -5036,7 +5036,29 @@ function Install-DefenseClawFileAtomic {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
                 throw "atomic replacement backup path unexpectedly exists: $backup"
             }
-            [IO.File]::Replace($temporary, $Destination, $backup, $true)
+            try {
+                [IO.File]::Replace($temporary, $Destination, $backup, $true)
+            }
+            catch {
+                # GAP-0852: a program that holds the file open without delete
+                # sharing (an antivirus scan, an editor) failed the upgrade
+                # with a raw sharing violation. Name the file and the retry.
+                $replaceFailure = $_.Exception
+                while ($replaceFailure -is [Management.Automation.MethodInvocationException] -and
+                    $null -ne $replaceFailure.InnerException) {
+                    $replaceFailure = $replaceFailure.InnerException
+                }
+                if (-not (Test-DefenseClawStandaloneProfile) -or
+                    -not ($replaceFailure -is [IO.IOException] -or
+                        $replaceFailure -is [UnauthorizedAccessException])) {
+                    throw
+                }
+                throw (
+                    "another program holds $Destination open, so Setup could not replace it (" +
+                    (ConvertTo-DefenseClawBoundedDiagnostic -Value $replaceFailure.Message -MaxLength 256) +
+                    '). Close the program that has the file open (for example an antivirus scan or an editor), then run Setup again'
+                )
+            }
         }
         else {
             [IO.File]::Move($temporary, $Destination)
@@ -19570,48 +19592,6 @@ function Assert-DefenseClawInstalledConfig {
         -Arguments $arguments)
 }
 
-function Assert-DefenseClawSecureClientFleetSourcePreflight {
-    param(
-        [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][hashtable]$Sources
-    )
-    if (Test-DefenseClawStandaloneProfile) {
-        return
-    }
-    # Use exactly the config this install-like transaction will publish. A
-    # Repair/Upgrade that keeps config.yaml checks the protected installed
-    # copy. The source descriptors authenticate both files before execution.
-    $configSource = if ($Sources.ContainsKey('config')) {
-        [hashtable]$Sources['config']
-    }
-    elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
-        Get-DefenseClawSourceDescriptor `
-            -Path $Layout.ConfigPath `
-            -Label 'installed managed config'
-    }
-    else {
-        return
-    }
-    # This gate uses the gateway from the new release. A Repair with no new
-    # gateway can service an older installed release whose binary does not
-    # have this helper; its own config validation remains transactional.
-    $gatewaySource = [hashtable]$Sources['gateway']
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
-    $probe = Invoke-DefenseClawProcess `
-        -File ([string]$gatewaySource.path) `
-        -Arguments @(
-            'enterprise', 'windows', 'preflight-secure-client-fleet',
-            '--config', ([string]$configSource.path)
-        )
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
-    if ([int]$probe.exit_code -ne 0) {
-        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
-        throw "Secure Client config preflight failed before service changes: $detail"
-    }
-}
-
 function Test-DefenseClawStandaloneFleetSourceEnabled {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -20403,6 +20383,13 @@ function Get-DefenseClawStandaloneManifestAdoption {
     $excused = & $count $report 'removed_account_failures'
     if ($excused -lt 0) {
         $excused = [int64]0
+    }
+    # So do the rows an earlier release protected that wait for their
+    # signed-out account's next sign-in, when the guardian repairs them
+    # (GAP-0644): status reports them as pending, not protected.
+    $awaitingSignIn = & $count $report 'awaiting_sign_in_failures'
+    if ($awaitingSignIn -gt 0) {
+        $excused += $awaitingSignIn
     }
     # A reconcile that fails only because each failed target's account is
     # signed out stays failed until that account signs in, so a retry cannot
@@ -22232,6 +22219,92 @@ function Test-DefenseClawGuardianCoverageReport {
     }
 }
 
+# GAP-0401: the first reconcile of a standalone guardian reads every signed-in
+# target and can outlast the usual coverage wait on a busy device. Past that
+# wait Setup keeps waiting, in steps and up to the hard limit, only while the
+# guardian process it started is still the service process and its startup
+# record shows that reconcile running and moving.
+$script:GuardianFirstReconcileTimeoutSeconds = 600
+$script:GuardianFirstReconcileStallSeconds = 180
+$script:GuardianFirstReconcileCheckSeconds = 5
+
+function Get-DefenseClawGuardianStartupProgress {
+    <#
+        The startup record of the standalone LocalSystem guardian
+        (<RuntimeDirectory>\hook_guardian_startup.json): how far the first
+        reconcile of guardian process ProcessId, started after StartedAfter,
+        has come. $null when there is no such record (Secure Client, a release
+        that does not write it, another process, or a record that cannot be
+        read): the coverage wait then keeps its usual limit.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][uint32]$ProcessId,
+        [Parameter(Mandatory)][DateTime]$StartedAfter
+    )
+    if ($ProcessId -eq 0 -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    try {
+        $path = Microsoft.PowerShell.Management\Join-Path `
+            $Layout.RuntimeDirectory `
+            'hook_guardian_startup.json'
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $null
+        }
+        [void](Assert-DefenseClawDescendant `
+            -Path $path `
+            -Root $Layout.StateRoot `
+            -Label 'hook guardian startup record')
+        Assert-DefenseClawNoReparsePath -Path $path
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
+        if ($item.Length -gt 4096) {
+            return $null
+        }
+        $record = [IO.File]::ReadAllText($path) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        foreach ($name in @(
+                'version', 'pid', 'state', 'started_at', 'updated_at',
+                'targets_done', 'targets_total'
+            )) {
+            if ($null -eq $record.PSObject.Properties[$name]) {
+                return $null
+            }
+        }
+        if ([int64]$record.version -ne 1 -or
+            [int64]$record.pid -ne [int64]$ProcessId -or
+            @('reconciling', 'finished') -cnotcontains [string]$record.state) {
+            return $null
+        }
+        $times = @(foreach ($value in @($record.started_at, $record.updated_at)) {
+                # PowerShell 7 may materialize ISO JSON strings as DateTime.
+                if ($value -is [DateTime]) {
+                    ([DateTime]$value).ToUniversalTime()
+                }
+                else {
+                    [DateTime]::Parse(
+                        [string]$value,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    ).ToUniversalTime()
+                }
+            })
+        if ($times[0] -lt $StartedAfter.ToUniversalTime()) {
+            return $null
+        }
+        return [pscustomobject][ordered]@{
+            state = [string]$record.state
+            started_at = $times[0]
+            updated_at = $times[1]
+            targets_done = [int64]$record.targets_done
+            targets_total = [int64]$record.targets_total
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22257,9 +22330,30 @@ function Wait-DefenseClawFreshGuardianReconcile {
     Stop-DefenseClawService -Name $GuardianServiceName
     Start-DefenseClawService -Name $GuardianServiceName
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $begin = [DateTime]::UtcNow
+    $guardianProcess = {
+        try {
+            return [uint32](Get-DefenseClawServiceProcessId -Name $GuardianServiceName)
+        }
+        catch {
+            return [uint32]0
+        }
+    }
+    $guardianProcessId = [uint32]0
+    if (Test-DefenseClawStandaloneProfile) {
+        $guardianProcessId = & $guardianProcess
+    }
+    $deadline = $begin.AddSeconds($TimeoutSeconds)
+    $limit = $begin.AddSeconds([Math]::Max(
+            $TimeoutSeconds,
+            $script:GuardianFirstReconcileTimeoutSeconds
+        ))
+    $extended = $false
+    $finishedRead = $false
+    $progress = $null
+    $guardianGone = ''
     $lastStatus = 'guardian status report unavailable'
-    do {
+    while ($true) {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
@@ -22279,8 +22373,67 @@ function Wait-DefenseClawFreshGuardianReconcile {
         }
         $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic `
             -Value $coverage.reason
+        $now = [DateTime]::UtcNow
+        if ($now -ge $deadline) {
+            if ($guardianProcessId -eq 0 -or $now -ge $limit) {
+                break
+            }
+            $current = & $guardianProcess
+            if ($current -ne $guardianProcessId) {
+                $guardianGone = if ($current -eq 0) {
+                    'is no longer running'
+                }
+                else {
+                    "was replaced by process $current"
+                }
+                break
+            }
+            # A record the guardian is replacing right now cannot be read;
+            # the last one read stands until the stall limit.
+            $read = Get-DefenseClawGuardianStartupProgress `
+                -Layout $Layout `
+                -ProcessId $guardianProcessId `
+                -StartedAfter $startedAfter
+            if ($null -ne $read) {
+                $progress = $read
+            }
+            if ($null -eq $progress) {
+                break
+            }
+            if ($progress.state -cne 'reconciling') {
+                # The first reconcile finished after the status above was
+                # read: read the records it published once more.
+                if ($finishedRead) {
+                    break
+                }
+                $finishedRead = $true
+                $deadline = $now.AddSeconds(2)
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+                continue
+            }
+            if (($now - $progress.updated_at).TotalSeconds -gt $script:GuardianFirstReconcileStallSeconds) {
+                break
+            }
+            $extended = $true
+            $deadline = $now.AddSeconds($script:GuardianFirstReconcileCheckSeconds)
+            if ($deadline -gt $limit) {
+                $deadline = $limit
+            }
+        }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
+    }
+    $waited = [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds)
+    $guardianLog = "the guardian log is $([string]$Layout.GuardianLogPath)"
+    if (-not [string]::IsNullOrEmpty($guardianGone)) {
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus"
+    }
+    if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
+        $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+    }
+    if ($extended -or $guardianProcessId -ne 0) {
+        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
+    }
     throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
 
@@ -28250,6 +28403,8 @@ function Invoke-DefenseClawForcedUninstallPreparation {
     $preparation = [pscustomobject]@{
         state_root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
         moved_state_root = ''
+        install_rollback_intent = ''
+        moved_install_rollback_intent = ''
         services = $prior.ToArray()
         restored = $false
     }
@@ -28292,6 +28447,17 @@ function Restore-DefenseClawForcedUninstallPreparation {
     }
     $Preparation.restored = $true
     $notRestored = [Collections.Generic.List[string]]::new()
+    $movedIntentProperty = $Preparation.PSObject.Properties['moved_install_rollback_intent']
+    $movedIntent = if ($null -ne $movedIntentProperty) { [string]$movedIntentProperty.Value } else { '' }
+    if (-not [string]::IsNullOrEmpty($movedIntent)) {
+        try {
+            [IO.File]::Move($movedIntent, [string]$Preparation.install_rollback_intent)
+            $Preparation.moved_install_rollback_intent = ''
+        }
+        catch {
+            $notRestored.Add('install receipt ' + [string]$Preparation.install_rollback_intent + ' (still at ' + $movedIntent + '): ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+        }
+    }
     $moved = [string]$Preparation.moved_state_root
     if (-not [string]::IsNullOrEmpty($moved)) {
         try {
@@ -28319,6 +28485,53 @@ function Restore-DefenseClawForcedUninstallPreparation {
     return [string[]]$notRestored.ToArray()
 }
 
+function Move-DefenseClawForcedUninstallInstallReceipt {
+    <#
+        A failed initial install leaves its fresh-install rollback receipt
+        beside the lifecycle lock, bound to the pending transaction in
+        StateRoot. The forced uninstall preparation moves StateRoot aside, so
+        the pre-layout recovery refused the receipt ("bound install
+        preparation lost its protected pending transaction") and every forced
+        retry failed the same way (GAP-1365). A forced uninstall reads nothing
+        of the transaction: the receipt moves aside too, and the state-absent
+        exact-scope purge removes what the install created. A receipt of a
+        committed install stays, for the recovery to complete. When the
+        forced uninstall is refused, Restore-DefenseClawForcedUninstallPreparation
+        puts it back; when it completes, Complete-DefenseClawForcedUninstall
+        removes it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Preparation
+    )
+    $path = [string]$Layout.InstallRollbackIntentPath
+    if ([string]::IsNullOrWhiteSpace($path) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $phase = ''
+    try {
+        $receipt = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $phaseProperty = $receipt.PSObject.Properties['phase']
+        if ($null -ne $phaseProperty) {
+            $phase = [string]$phaseProperty.Value
+        }
+    }
+    catch {
+        # An unreadable receipt cannot be completed either; move it aside.
+        $phase = ''
+    }
+    if ($phase -ceq 'committed') {
+        return
+    }
+    $moved = $path + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    [IO.File]::Move($path, $moved)
+    $Preparation.install_rollback_intent = $path
+    $Preparation.moved_install_rollback_intent = $moved
+}
+
 function Invoke-DefenseClawForcedUninstall {
     <#
         Standalone Setup /uninstall FORCE=1: the preparation, then the
@@ -28344,6 +28557,9 @@ function Invoke-DefenseClawForcedUninstall {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     try {
+        Move-DefenseClawForcedUninstallInstallReceipt `
+            -Layout $Layout `
+            -Preparation $preparation
         $recovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action Uninstall `
             -Layout $Layout `
@@ -28368,7 +28584,8 @@ function Invoke-DefenseClawForcedUninstall {
     }
     return Complete-DefenseClawForcedUninstall `
         -Result $recovery.result `
-        -MovedStateRoot $preparation.moved_state_root
+        -MovedStateRoot $preparation.moved_state_root `
+        -MovedInstallReceipt $preparation.moved_install_rollback_intent
 }
 
 function Complete-DefenseClawForcedUninstall {
@@ -28379,9 +28596,19 @@ function Complete-DefenseClawForcedUninstall {
     #>
     param(
         [Parameter(Mandatory)]$Result,
-        [AllowEmptyString()][string]$MovedStateRoot
+        [AllowEmptyString()][string]$MovedStateRoot,
+        [AllowEmptyString()][string]$MovedInstallReceipt
     )
     $kept = ''
+    if (-not [string]::IsNullOrWhiteSpace($MovedInstallReceipt)) {
+        try {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $MovedInstallReceipt -Force -ErrorAction Stop
+        }
+        catch {
+            $Result |
+                Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced_install_receipt_kept -Value ("${MovedInstallReceipt}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)) -Force
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
         try {
             Remove-DefenseClawManagedTree `
@@ -29905,11 +30132,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 }
             }
         }
-        else {
-            Assert-DefenseClawSecureClientFleetSourcePreflight `
-                -Layout $layout `
-                -Sources $sources
-        }
+        # Secure Client keeps its 1.0.1 lifecycle with no Fleet step: the
+        # gateway refuses a Secure Client config with fleet.enabled when it
+        # loads it (resolveEnterpriseConfig).
     }
     Initialize-DefenseClawManagedRoot `
         -Path $layout.LifecycleLockDirectory `

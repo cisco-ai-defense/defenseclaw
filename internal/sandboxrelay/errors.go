@@ -66,6 +66,18 @@ const (
 	ReasonDecisionRefused       = "sandbox_decision_refused"
 )
 
+// UnavailableSetupChanging is DaemonSettings.Unavailable while the
+// organization's change of this computer's sandbox setup (its compute
+// driver or OpenShell install mode) is not applied yet: the lifecycle's
+// prerequisite record still names the earlier setup (#1203). It is a
+// notice that clears by itself, not a refusal to take to IT;
+// DetailSetupChanging is the reason code a refusal of it carries.
+const (
+	UnavailableSetupChanging = "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; " +
+		"try again in a few minutes"
+	DetailSetupChanging = "openshell_setup_changing"
+)
+
 // ReasonStatus is the HTTP status each refusal reason answers with; 0 for
 // a reason this package does not define.
 func ReasonStatus(reason string) int {

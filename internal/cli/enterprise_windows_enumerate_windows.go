@@ -247,6 +247,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
 	var excluded []enterprisehooks.ManifestTarget
+	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	// The profiles the last cycle enrolled, so the gateway's read access
 	// can be taken from those this cycle drops.
 	previous, previousErr := enterprisehooks.Manifest{}, errors.New("not loaded")
@@ -267,6 +268,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		enumerateOpts.ReportExcluded = func(target enterprisehooks.ManifestTarget) {
 			excluded = append(excluded, target)
 		}
+		// A running agent no row enrolls is recorded too (GAP-0226), and so is
+		// one whose account resolves to no SID.
+		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
@@ -293,6 +297,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
 		publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
+		unprotected = append(unprotected, ownerUnknown...)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}

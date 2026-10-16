@@ -624,3 +624,38 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }
+
+// TestWithoutPolicyCompilerKeepsTheRestOfThePayload pins DAMAGE-678 A1: an
+// untrusted outer Setup image loses only the Fleet compiler.
+func TestWithoutPolicyCompilerKeepsTheRestOfThePayload(t *testing.T) {
+	files := map[string]enterprisePayloadManifestFile{}
+	for _, name := range standalonePayloadFiles {
+		files[name] = enterprisePayloadManifestFile{Name: name, SHA256: strings.Repeat("a", 64), Size: 1}
+	}
+	payload := enterprisePayload{
+		Manifest: enterprisePayloadManifest{DistributionFlavor: standaloneFlavor},
+		Files:    files,
+		Required: append([]string{}, standalonePayloadFiles...),
+	}
+	if !payload.CarriesPolicyCompiler() {
+		t.Fatal("standalone payload does not carry the Fleet compiler")
+	}
+	withheld := payload.withoutPolicyCompiler()
+	if withheld.CarriesPolicyCompiler() {
+		t.Fatal("withheld payload still offers the Fleet compiler")
+	}
+	if !payload.CarriesPolicyCompiler() || len(payload.Required) != len(standalonePayloadFiles) {
+		t.Fatal("withholding the compiler changed the original payload")
+	}
+	if len(withheld.Required) != len(standalonePayloadFiles)-1 || len(withheld.Files) != len(standalonePayloadFiles)-1 {
+		t.Fatalf("withheld payload = %d required, %d files; want every other file", len(withheld.Required), len(withheld.Files))
+	}
+	for _, name := range withheld.Required {
+		if name == policyCompilerPayloadName {
+			t.Fatal("withheld payload still stages the Fleet compiler")
+		}
+		if _, ok := withheld.Files[name]; !ok {
+			t.Fatalf("withheld payload lost %s", name)
+		}
+	}
+}
