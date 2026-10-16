@@ -64,8 +64,8 @@ type windowsAgentPackageJSON struct {
 //
 // The macOS analogue is `discover_agent_version` in
 // `packaging/macos/lib/installer_lib.sh`, which returns empty for
-// the same reasons. The enumerator caller drops any user × connector
-// with empty discovery — mirroring macOS's silently-skip behaviour.
+// the same reasons. The enumerator can still emit an unversioned target when
+// windowsAgentPresence finds independent per-user installation evidence.
 //
 // No process is ever spawned; all reads are static filesystem
 // inspection of well-known JSON manifests. This keeps the probe
@@ -90,6 +90,50 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 		}
 	}
 	return ""
+}
+
+// windowsAgentPresence separates installation evidence from version metadata.
+// It never executes profile-owned code or follows reparse points. Hook config
+// files are deliberately excluded: DefenseClaw itself can create those.
+func windowsAgentPresence(profileHome, connectorName string) bool {
+	if !filepath.IsAbs(profileHome) {
+		return false
+	}
+	home := filepath.Clean(profileHome)
+	paths := windowsAgentVersionCandidatePaths(home, connectorName)
+	var runtimeDirectory string
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "claudecode":
+		runtimeDirectory = filepath.Join(home, ".claude", "projects")
+		paths = append(paths, filepath.Join(home, ".local", "bin", "claude.exe"),
+			filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "history.jsonl"),
+			filepath.Join(home, ".claude", "projects"))
+	case "codex":
+		runtimeDirectory = filepath.Join(home, ".codex", "sessions")
+		paths = append(paths, filepath.Join(home, ".local", "bin", "codex.exe"),
+			filepath.Join(home, ".codex", "auth.json"), filepath.Join(home, ".codex", "history.jsonl"),
+			filepath.Join(home, ".codex", "sessions"))
+	case "cursor":
+		// Cursor's user extensions stay in the profile even when the native
+		// executable is installed outside the known application roots. Do not
+		// use hooks.json: DefenseClaw itself can create that activation file.
+		runtimeDirectory = filepath.Join(home, ".cursor", "extensions")
+		paths = append(paths, filepath.Join(home, "AppData", "Local", "Programs", "cursor", "Cursor.exe"),
+			runtimeDirectory)
+	default:
+		return false
+	}
+	for _, path := range paths {
+		if winpath.RejectReparseChain(path) != nil {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&os.ModeSymlink == 0 &&
+			((path != runtimeDirectory && info.Mode().IsRegular()) || (path == runtimeDirectory && info.IsDir())) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsMachineScopedCursorPackageJSON points at Cursor's per-machine

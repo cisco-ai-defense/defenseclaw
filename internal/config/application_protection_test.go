@@ -126,7 +126,9 @@ observability: {}
 }
 
 func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
-	cfg := &Config{DeploymentMode: "managed_enterprise"}
+	// A managed install outside Secure Client: the native Codex and Claude
+	// Code hooks stay fail-closed whatever the source config says.
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.HookFailMode = "open"
 	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{
@@ -288,5 +290,94 @@ func TestStandaloneDevinHookFailModeIsClosed(t *testing.T) {
 				t.Fatalf("devin hook fail mode = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// TestSecureClientHookFailModesHonorPolicy keeps #1163 scoped to Secure
+// Client: there an explicit policy wins for every connector (codex,
+// claudecode and cursor included) and an unset policy resolves to open.
+func TestSecureClientHookFailModesHonorPolicy(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{
+		"codex":      {HookFailMode: "open"},
+		"claudecode": {HookFailMode: "open"},
+		"cursor":     {HookFailMode: "open"},
+	}
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("test config does not resolve to Secure Client")
+	}
+	for _, connector := range []string{"codex", "claudecode", "cursor"} {
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "open" {
+			t.Errorf("secure client %s fail mode = %q, want open", connector, got)
+		}
+		cfg.Guardrail.Connectors[connector] = PerConnectorGuardrailConfig{HookFailMode: "closed"}
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
+			t.Errorf("explicit secure client %s fail mode = %q, want closed", connector, got)
+		}
+		cfg.Guardrail.Connectors[connector] = PerConnectorGuardrailConfig{HookFailMode: "open"}
+	}
+}
+
+// TestUnsetHookFailModeIsOpenOnlyUnderSecureClient is the owner rule: an
+// unset hook fail mode is open under Secure Client and closed for OSS,
+// standalone enterprise and every other managed install (Cursor outside
+// Secure Client keeps its action->closed / observe->open rule). Explicit
+// closed always wins.
+func TestUnsetHookFailModeIsOpenOnlyUnderSecureClient(t *testing.T) {
+	profiles := []struct {
+		name, deploymentMode, profile string
+		secureClient                  bool
+	}{
+		{"oss", "", "", false},
+		{"unmanaged", "unmanaged_byod", "", false},
+		{"standalone", "managed_enterprise", "standalone", false},
+		{"secure_client", "managed_enterprise", "secure_client", true},
+	}
+	for _, p := range profiles {
+		for _, connector := range []string{"codex", "claudecode", "amp", "devin"} {
+			cfg := &Config{DeploymentMode: p.deploymentMode, Enterprise: EnterpriseConfig{Profile: p.profile}}
+			cfg.Guardrail.Mode = "action"
+			want := "closed"
+			if p.secureClient {
+				want = "open"
+			}
+			if got := cfg.EffectiveHookFailModeForConnector(connector); got != want {
+				t.Errorf("%s/%s unset fail mode = %q, want %q", p.name, connector, got, want)
+			}
+			cfg.Guardrail.HookFailMode = "closed"
+			if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
+				t.Errorf("%s/%s explicit closed fail mode = %q, want closed", p.name, connector, got)
+			}
+		}
+	}
+
+	// Secure Client resolves unset to open in observe mode too, and a
+	// case-variant "Open" is open.
+	sc := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}}
+	for _, mode := range []string{"observe", "action"} {
+		sc.Guardrail.Mode = mode
+		sc.Guardrail.HookFailMode = ""
+		if got := sc.EffectiveHookFailModeForConnector("cursor"); got != "open" {
+			t.Errorf("secure client %s cursor unset fail mode = %q, want open", mode, got)
+		}
+		sc.Guardrail.HookFailMode = " Open "
+		if got := sc.EffectiveHookFailModeForConnector("codex"); got != "open" {
+			t.Errorf("secure client %s codex \"Open\" fail mode = %q, want open", mode, got)
+		}
+		sc.Guardrail.HookFailMode = "invalid"
+		if got := sc.EffectiveHookFailModeForConnector("codex"); got != "closed" {
+			t.Errorf("secure client %s codex invalid fail mode = %q, want closed", mode, got)
+		}
+	}
+
+	// Outside Secure Client, Cursor in action mode is closed even with an
+	// explicit open (main's rule).
+	standalone := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+	standalone.Guardrail.Mode = "action"
+	standalone.Guardrail.HookFailMode = "open"
+	if got := standalone.EffectiveHookFailModeForConnector("cursor"); got != "closed" {
+		t.Errorf("standalone action cursor fail mode = %q, want closed", got)
 	}
 }

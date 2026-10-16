@@ -217,7 +217,7 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.84.0")
+    assert Version(locked["litellm"]) >= Version("1.91.5")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 

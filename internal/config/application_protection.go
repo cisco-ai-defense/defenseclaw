@@ -380,6 +380,9 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 	if c == nil {
 		return "closed"
 	}
+	if c.SecureClientIntegration() {
+		return c.secureClientHookFailModeForConnector(connector)
+	}
 	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
 		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
 			return "closed"
@@ -420,6 +423,38 @@ func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configure
 		return "closed"
 	}
 	if strings.EqualFold(strings.TrimSpace(configured), "open") {
+		return "open"
+	}
+	return "closed"
+}
+
+// secureClientHookFailModeForConnector is the Secure Client delivery
+// contract (#1163): availability does not change policy verdicts, so an
+// unset hook fail mode resolves to open for every connector. An explicit
+// value always wins, and anything but "open" (any case) is closed. Only the
+// Secure Client profile uses this; OSS, standalone enterprise and every other
+// managed install keep the fail-closed rules above.
+func (c *Config) secureClientHookFailModeForConnector(connector string) string {
+	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
+		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
+			return explicitHookFailMode(mode)
+		}
+	}
+	if pc, ok := c.Guardrail.connectorOverride(connector); ok {
+		if mode := strings.TrimSpace(pc.HookFailMode); mode != "" {
+			return explicitHookFailMode(mode)
+		}
+	}
+	if mode := strings.TrimSpace(c.Guardrail.HookFailMode); mode != "" {
+		return explicitHookFailMode(mode)
+	}
+	return "open"
+}
+
+// explicitHookFailMode canonicalizes a non-empty configured fail mode: the
+// "open" sentinel (any case) is open and every other value is closed.
+func explicitHookFailMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"

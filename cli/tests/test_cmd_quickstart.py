@@ -481,6 +481,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         # call open the default.
         text = " ".join(result.output.split())
         self.assertNotIn("'open' (default)", text)
+        self.assertNotIn("'open' (the default", text)
         self.assertIn("'closed' (the default on a new install)", text)
 
     def test_fail_mode_closed_persists_to_config(self):

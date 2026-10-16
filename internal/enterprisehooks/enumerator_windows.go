@@ -533,7 +533,31 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if _, statErr := os.Lstat(path); statErr == nil {
 		destinationExists = true
 		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
-			return false, fmt.Errorf("enterprise hooks: validate existing hook guardian manifest: %w", err)
+			// Bulldoze: an existing manifest with a non-canonical owner or
+			// DACL (left behind by a prior unsigned certification install
+			// whose scoped guardian wrote it under a different token) must
+			// be re-protected before the reconcile cycle gives up. Call
+			// the authenticated protect helper (which has SeTakeOwnership /
+			// SeRestore privilege from the LocalSystem guardian token) to
+			// transfer ownership to Administrators and stamp the exact
+			// AdminFile DACL. If the second validate still fails after
+			// repair, propagate the original error.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] hook guardian manifest %s failed canonical "+
+					"validation (%v); re-stamping before replace\n",
+				path, err)
+			if protectErr := windowsTargetsManifestProtect(path, false); protectErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (repair also failed: %v)",
+					err, protectErr,
+				)
+			}
+			if revalidateErr := validateWindowsTargetsManifestObject(path, false); revalidateErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (after repair: %v)",
+					err, revalidateErr,
+				)
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
@@ -729,8 +753,15 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
+	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
 	if prev, ok := previous[key]; ok {
+		// Secure Client preserves authorization, not stale compatibility
+		// evidence (#1163). Every other profile keeps the recorded version,
+		// so a version change goes through the install's contract gate.
 		row.AgentVersion = prev.AgentVersion
+		if secureClientHookDelivery() {
+			row.AgentVersion = version
+		}
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
@@ -738,8 +769,10 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.GID = prev.GID
 		return true
 	}
-	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
-	if version == "" {
+	// Secure Client admits an unversioned row on static presence evidence and
+	// installs best-effort hooks for it (#1163); every other profile skips a
+	// user × connector without version evidence.
+	if version == "" && !(secureClientHookDelivery() && windowsAgentPresence(row.UserHome, row.Connector)) {
 		logfSafely(
 			logf,
 			row.SID,
@@ -755,13 +788,17 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	row.AgentVersion = version
 	row.Enabled = &enabled
 	row.Deferred = false
+	versionEvidence := version
+	if versionEvidence == "" {
+		versionEvidence = "unverified (static presence detected; best-effort hooks)"
+	}
 	logfSafely(
 		logf,
 		row.SID,
 		fmt.Sprintf(
 			"newly-discovered (SID, %s) row auto-authorized at version %s",
 			row.Connector,
-			version,
+			versionEvidence,
 		),
 	)
 	return true

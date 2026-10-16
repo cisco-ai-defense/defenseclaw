@@ -246,7 +246,7 @@ func resolveWindowsCodexRequirementsLayout(
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		HookContractID: connector.WindowsCodexStandaloneHookContract(
+		HookContractID: connector.WindowsCodexManagedHookContract(
 			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
 		),
 	}

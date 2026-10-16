@@ -48,6 +48,8 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 		t.Skip("strict managed runtime artifacts are native Windows-only")
 	}
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	// Outside Secure Client the contract gate is validateHookContract.
+	setStandaloneProfileForTest(t, true)
 	const oversizedManagedArtifact = int64(4<<20 + 1)
 	conn := connector.NewClaudeCodeConnector()
 	newOpts := func(dataDir string) connector.SetupOpts {
@@ -112,6 +114,451 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 			t.Fatalf("unmanaged runtime validation changed: %v", err)
 		}
 	})
+}
+
+// TestPrepareHookContractUsesManagedLockAndRuntimeReadersUnderSecureClient is
+// the Secure Client half (#1163): the bounded managed readers still apply,
+// and an incompatible contract installs in open delivery instead of refusing.
+func TestPrepareHookContractUsesManagedLockAndRuntimeReadersUnderSecureClient(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("strict managed runtime artifacts are native Windows-only")
+	}
+	// Managed contract comparison hashes the current runtime and binds it to
+	// the authenticated gateway service, including observe/drift-override cases.
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
+	setStandaloneProfileForTest(t, false)
+	const oversizedManagedArtifact = int64(4<<20 + 1)
+	conn := connector.NewClaudeCodeConnector()
+	newOpts := func(dataDir string) connector.SetupOpts {
+		return connector.SetupOpts{
+			DataDir:           dataDir,
+			AgentVersion:      "2.1.154",
+			HookFailMode:      "closed",
+			ManagedEnterprise: true,
+		}
+	}
+	writeSparse := func(t *testing.T, path string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(oversizedManagedArtifact); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, override := range []struct {
+		name                  string
+		value                 string
+		wantUnmanagedFailMode string
+	}{
+		{name: "without drift override", wantUnmanagedFailMode: "open"},
+		{name: "with drift override", value: "1", wantUnmanagedFailMode: "closed"},
+	} {
+		t.Run(override.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", override.value)
+			for _, guardrailMode := range []string{"action", "observe"} {
+				t.Run("contract lock "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
+
+					err := prepareHookContractErr(guardrailMode, conn, opts)
+					if err == nil ||
+						!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
+						!strings.Contains(err.Error(), "byte limit") {
+						t.Fatalf("managed lock validation error = %v, want bounded load context", err)
+					}
+					opts.ManagedEnterprise = false
+					if err := prepareHookContractErr(guardrailMode, conn, opts); err != nil {
+						t.Fatalf("unmanaged lock validation changed: %v", err)
+					}
+				})
+
+				t.Run("hook runtime "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					unmanagedOpts := opts
+					unmanagedOpts.ManagedEnterprise = false
+					entry := connector.NewHookContractLockEntry(unmanagedOpts, conn, "test-build")
+					if err := connector.SaveHookContractLockEntry(opts.DataDir, entry); err != nil {
+						t.Fatalf("seed contract lock: %v", err)
+					}
+					hookDir := filepath.Join(opts.DataDir, "hooks")
+					if err := os.MkdirAll(hookDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
+
+					err := prepareHookContractErr(guardrailMode, conn, opts)
+					if err == nil ||
+						!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
+						!strings.Contains(err.Error(), "byte limit") {
+						t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
+					}
+					if err := prepareHookContractErr(guardrailMode, conn, unmanagedOpts); err != nil {
+						t.Fatalf("unmanaged runtime validation changed: %v", err)
+					}
+				})
+
+				t.Run("contract drift "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					if err := connector.SaveHookContractLockEntry(opts.DataDir, connector.HookContractLockEntry{
+						Connector:           conn.Name(),
+						ContractID:          "claudecode-hooks-incompatible",
+						CompatibilityStatus: connector.HookCompatibilityKnown,
+					}); err != nil {
+						t.Fatalf("seed incompatible contract lock: %v", err)
+					}
+
+					managedPrepared, err := prepareHookContract(guardrailMode, conn, opts)
+					if err != nil || managedPrepared.HookFailMode != "open" {
+						t.Fatalf("managed contract preparation = %+v, err=%v, want open fallback", managedPrepared, err)
+					}
+					opts.ManagedEnterprise = false
+					prepared, err := prepareHookContract(guardrailMode, conn, opts)
+					if err != nil {
+						t.Fatalf("unmanaged contract preparation changed: %v", err)
+					}
+					if prepared.HookFailMode != override.wantUnmanagedFailMode {
+						t.Fatalf("unmanaged HookFailMode = %q, want %q", prepared.HookFailMode, override.wantUnmanagedFailMode)
+					}
+				})
+			}
+		})
+	}
+}
+
+// prepareHookContractErr is prepareHookContract for callers that only need
+// its error.
+func prepareHookContractErr(guardrailMode string, conn connector.Connector, opts connector.SetupOpts) error {
+	_, err := prepareHookContract(guardrailMode, conn, opts)
+	return err
+}
+
+func TestPrepareHookContractUsesFailOpenOnlyForUnverifiedOrIncompatibleContracts(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	conn := connector.NewCodexConnector()
+
+	for _, tc := range []struct {
+		name         string
+		agentVersion string
+		wantContract string
+		wantFailMode string
+	}{
+		{name: "unversioned", wantContract: "codex-hooks-v4", wantFailMode: "open"},
+		{name: "unnormalized", agentVersion: "codex nightly", wantContract: "codex-hooks-v4", wantFailMode: "open"},
+		{name: "unsupported", agentVersion: "codex 0.123.0", wantContract: "codex-hooks-v4", wantFailMode: "open"},
+		{name: "known", agentVersion: "codex 0.142.0", wantContract: "codex-hooks-v3-generic", wantFailMode: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := prepareHookContract("action", conn, connector.SetupOpts{
+				DataDir:      t.TempDir(),
+				AgentVersion: tc.agentVersion,
+				HookFailMode: "closed",
+			})
+			if err != nil {
+				t.Fatalf("prepareHookContract: %v", err)
+			}
+			if opts.HookContractID != tc.wantContract {
+				t.Fatalf("HookContractID=%q want %q", opts.HookContractID, tc.wantContract)
+			}
+			if opts.HookFailMode != tc.wantFailMode {
+				t.Fatalf("HookFailMode=%q want %q", opts.HookFailMode, tc.wantFailMode)
+			}
+		})
+	}
+}
+
+func TestPrepareHookContractDistinguishesVersionDriftFromContractDrift(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	conn := connector.NewCodexConnector()
+
+	for _, tc := range []struct {
+		name            string
+		previousVersion string
+		previousID      string
+		currentVersion  string
+		wantFailMode    string
+	}{
+		{
+			name:            "same contract remains closed",
+			previousVersion: "codex 0.136.0",
+			previousID:      "codex-hooks-v3-generic",
+			currentVersion:  "codex 0.142.0",
+			wantFailMode:    "closed",
+		},
+		{
+			name:            "changed contract falls open",
+			previousVersion: "codex 0.142.0",
+			previousID:      "codex-hooks-v3-generic",
+			currentVersion:  "codex 0.146.0",
+			wantFailMode:    "open",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			previousResolution := connector.ResolveHookContract("codex", tc.previousVersion)
+			if err := connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+				Connector:              "codex",
+				RawAgentVersion:        tc.previousVersion,
+				NormalizedAgentVersion: previousResolution.NormalizedVersion,
+				ContractID:             tc.previousID,
+				CompatibilityStatus:    connector.HookCompatibilityKnown,
+			}); err != nil {
+				t.Fatalf("seed hook contract lock: %v", err)
+			}
+
+			opts, err := prepareHookContract("action", conn, connector.SetupOpts{
+				DataDir:      dataDir,
+				AgentVersion: tc.currentVersion,
+				HookFailMode: "closed",
+			})
+			if err != nil {
+				t.Fatalf("prepareHookContract: %v", err)
+			}
+			if opts.HookFailMode != tc.wantFailMode {
+				t.Fatalf("HookFailMode=%q want %q", opts.HookFailMode, tc.wantFailMode)
+			}
+		})
+	}
+}
+
+func TestPrepareClaudeCodePatchVersionDriftRetainsConfiguredMode(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	dataDir := t.TempDir()
+	// Both versions resolve to this branch's claudecode-hooks-v2 contract
+	// (2.1.219 and newer); release-26.8.4 pinned them to v1.
+	if err := connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+		Connector:              "claudecode",
+		RawAgentVersion:        "2.1.272 (Claude Code)",
+		NormalizedAgentVersion: "2.1.272",
+		ContractID:             "claudecode-hooks-v2",
+		CompatibilityStatus:    connector.HookCompatibilityKnown,
+	}); err != nil {
+		t.Fatalf("seed hook contract lock: %v", err)
+	}
+	opts, err := prepareHookContract("action", connector.NewClaudeCodeConnector(), connector.SetupOpts{
+		DataDir:      dataDir,
+		AgentVersion: "2.1.293 (Claude Code)",
+		HookFailMode: "closed",
+	})
+	if err != nil {
+		t.Fatalf("prepareHookContract: %v", err)
+	}
+	if opts.HookContractID != "claudecode-hooks-v2" || opts.HookFailMode != "closed" {
+		t.Fatalf("Claude patch drift policy=%+v, want v2/closed", opts)
+	}
+}
+
+func TestPrepareHookContractDriftOverridePreservesConfiguredMode(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+	opts, err := prepareHookContract("action", connector.NewCodexConnector(), connector.SetupOpts{
+		DataDir:      t.TempDir(),
+		AgentVersion: "codex nightly",
+		HookFailMode: "closed",
+	})
+	if err != nil {
+		t.Fatalf("prepareHookContract: %v", err)
+	}
+	if opts.HookContractID != "codex-hooks-v4" || opts.HookFailMode != "closed" {
+		t.Fatalf("override policy=%+v, want v4/closed", opts)
+	}
+}
+
+func TestInstallUnversionedCodexUsesBestEffortFailOpenContract(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	home := newTestHome(t)
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install unversioned Codex: %v", err)
+	}
+	if result.HookContractID != "codex-hooks-v4" {
+		t.Fatalf("HookContractID=%q want codex-hooks-v4", result.HookContractID)
+	}
+	lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "codex")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned {
+		t.Fatalf("CompatibilityStatus=%q want unversioned", lock.CompatibilityStatus)
+	}
+	if lock.HookFailMode != "open" {
+		t.Fatalf("HookFailMode=%q want open", lock.HookFailMode)
+	}
+	if _, err := Verify(context.Background(), InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	}); err != nil {
+		t.Fatalf("Verify unversioned Codex: %v", err)
+	}
+}
+
+func TestInstallUnversionedClaudeCodeUsesBestEffortFailOpenContract(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	home := newTestHome(t)
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "claudecode",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "claude-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install unversioned Claude Code: %v", err)
+	}
+	if result.HookContractID != "claudecode-hooks-v1" {
+		t.Fatalf("HookContractID=%q want claudecode-hooks-v1", result.HookContractID)
+	}
+	lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "claudecode")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned {
+		t.Fatalf("CompatibilityStatus=%q want unversioned", lock.CompatibilityStatus)
+	}
+	if lock.HookFailMode != "open" {
+		t.Fatalf("HookFailMode=%q want open", lock.HookFailMode)
+	}
+	settings, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code settings: %v", err)
+	}
+	if !strings.Contains(string(settings), "claude-code-hook.sh") {
+		t.Fatalf("Claude Code settings do not contain DefenseClaw hook: %s", settings)
+	}
+}
+
+func TestInstallUnversionedCursorUsesBestEffortFailOpenContract(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	home := newTestHome(t)
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "cursor",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "cursor-test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install unversioned Cursor: %v", err)
+	}
+	if result.HookContractID != "cursor-hooks-v1" {
+		t.Fatalf("HookContractID=%q want cursor-hooks-v1", result.HookContractID)
+	}
+	lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "cursor")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned {
+		t.Fatalf("CompatibilityStatus=%q want unversioned", lock.CompatibilityStatus)
+	}
+	if lock.HookFailMode != "open" {
+		t.Fatalf("HookFailMode=%q want open", lock.HookFailMode)
+	}
+	hooks, err := os.ReadFile(filepath.Join(home, ".cursor", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Cursor hooks: %v", err)
+	}
+	if !strings.Contains(string(hooks), "cursor-hook.sh") {
+		t.Fatalf("Cursor hooks do not contain DefenseClaw hook: %s", hooks)
+	}
+}
+
+func TestInstallContractDriftFallsOpenThenPromotesAfterVerification(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	// Secure Client only (#1163).
+	setStandaloneProfileForTest(t, false)
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	home := newTestHome(t)
+	base := InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+
+	base.AgentVersion = "codex 0.142.0"
+	if _, err := Install(context.Background(), base); err != nil {
+		t.Fatalf("install initial contract: %v", err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if lock := connector.LoadHookContractLockEntry(dataDir, "codex"); lock.ContractID != "codex-hooks-v3-generic" || lock.HookFailMode != "closed" {
+		t.Fatalf("initial lock=%+v, want v3-generic/closed", lock)
+	}
+
+	base.AgentVersion = "codex 0.146.0"
+	base.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), base); err != nil {
+		t.Fatalf("install changed contract: %v", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "codex"); lock.ContractID != "codex-hooks-v4" || lock.HookFailMode != "open" {
+		t.Fatalf("drift lock=%+v, want v4/open", lock)
+	}
+	if _, err := Verify(context.Background(), base); err == nil {
+		t.Fatal("Verify accepted fail-open fallback as configured fail-closed state")
+	}
+
+	if _, err := Install(context.Background(), base); err != nil {
+		t.Fatalf("promote verified contract: %v", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "codex"); lock.HookFailMode != "closed" {
+		t.Fatalf("promoted HookFailMode=%q want closed", lock.HookFailMode)
+	}
+	if _, err := Verify(context.Background(), base); err != nil {
+		t.Fatalf("Verify promoted contract: %v", err)
+	}
 }
 
 func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
@@ -1858,8 +2305,8 @@ func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T
 // covers the standalone version re-check: once an enrolled user's agent
 // moves to another version, the standalone guardian re-renders the hooks
 // when that version has a known, verified hook contract, refuses a version
-// without one (reported as hook_contract_unverified), and the Secure Client
-// profile keeps refusing every change.
+// without one (reported as hook_contract_unverified). The Secure Client
+// profile installs a changed version in open delivery instead (#1163).
 func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *testing.T) {
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	// On Windows, strictManagedRuntime (opts.ManagedEnterprise) requires
@@ -1880,10 +2327,29 @@ func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *te
 		return connector.SetupOpts{DataDir: dataDir, AgentVersion: version, ManagedEnterprise: true}
 	}
 
+	// Secure Client (#1163) does not refuse: a change within the installed
+	// contract keeps the configured delivery policy; a change to another
+	// contract, or to a version without a verified contract, installs the
+	// selected contract in open delivery until a later reconciliation
+	// establishes it.
 	setStandaloneProfileForTest(t, false)
-	if err := validateHookContract("action", conn, withVersion("2.1.230")); err == nil ||
-		!strings.Contains(err.Error(), "hook contract drift detected") {
-		t.Fatalf("Secure Client version change = %v, want the drift refusal", err)
+	for _, tc := range []struct {
+		version      string
+		wantFailMode string
+	}{
+		{version: "2.1.200", wantFailMode: "closed"},
+		{version: "2.1.230", wantFailMode: "open"},
+		{version: "2.1.100", wantFailMode: "open"},
+	} {
+		opts := withVersion(tc.version)
+		opts.HookFailMode = "closed"
+		prepared, err := prepareHookContract("action", conn, opts)
+		if err != nil {
+			t.Fatalf("Secure Client change to %s = %v, want no refusal", tc.version, err)
+		}
+		if prepared.HookFailMode != tc.wantFailMode {
+			t.Fatalf("Secure Client change to %s fail mode = %q, want %q", tc.version, prepared.HookFailMode, tc.wantFailMode)
+		}
 	}
 
 	setStandaloneProfileForTest(t, true)
@@ -1968,5 +2434,64 @@ func TestHookConfigTheAccountOwnsIsTightened(t *testing.T) {
 	}
 	if info, _ := os.Stat(outside); info.Mode().Perm() != 0o666 {
 		t.Fatalf("the symlink target was changed to %v", info.Mode().Perm())
+	}
+}
+
+// TestPrepareHookContractRefusesUnverifiedOutsideSecureClient keeps
+// origin/main's contract gate for every profile but Secure Client: in action
+// mode an unverified agent version is refused, observe mode installs, and
+// the configured delivery mode is never relaxed to open.
+func TestPrepareHookContractRefusesUnverifiedOutsideSecureClient(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	setStandaloneProfileForTest(t, true)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	conn := connector.NewCodexConnector()
+	for _, tc := range []struct {
+		name, agentVersion string
+		refused            bool
+	}{
+		{name: "unversioned", refused: true},
+		{name: "unnormalized", agentVersion: "codex nightly", refused: true},
+		{name: "unsupported", agentVersion: "codex 0.123.0", refused: true},
+		{name: "known", agentVersion: "codex 0.142.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := connector.SetupOpts{DataDir: t.TempDir(), AgentVersion: tc.agentVersion, HookFailMode: "closed"}
+			prepared, err := prepareHookContract("action", conn, opts)
+			if tc.refused {
+				if err == nil || !strings.Contains(err.Error(), "is not verified against a known hook contract") {
+					t.Fatalf("action prepare = %+v, %v; want the hook_contract_unverified refusal", prepared, err)
+				}
+			} else if err != nil || prepared.HookFailMode != "closed" {
+				t.Fatalf("action prepare = %+v, %v; want closed", prepared, err)
+			}
+			prepared, err = prepareHookContract("observe", conn, opts)
+			if err != nil || prepared.HookFailMode != "closed" {
+				t.Fatalf("observe prepare = %+v, %v; want closed and no refusal", prepared, err)
+			}
+		})
+	}
+}
+
+// TestCanonicalHookFailModeUnsetIsOpenOnlyUnderSecureClient: an unset
+// delivery policy is open only under Secure Client (#1163).
+func TestCanonicalHookFailModeUnsetIsOpenOnlyUnderSecureClient(t *testing.T) {
+	for _, tc := range []struct {
+		standalone bool
+		want       string
+	}{
+		{standalone: false, want: "open"},
+		{standalone: true, want: "closed"},
+	} {
+		setStandaloneProfileForTest(t, tc.standalone)
+		if got := canonicalHookFailMode(""); got != tc.want {
+			t.Fatalf("standalone=%t canonicalHookFailMode(\"\") = %q, want %q", tc.standalone, got, tc.want)
+		}
+		if got := canonicalHookFailMode(" Open "); got != "open" {
+			t.Fatalf("standalone=%t explicit open = %q", tc.standalone, got)
+		}
+		if got := canonicalHookFailMode("closed"); got != "closed" {
+			t.Fatalf("standalone=%t explicit closed = %q", tc.standalone, got)
+		}
 	}
 }

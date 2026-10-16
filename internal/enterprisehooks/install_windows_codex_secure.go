@@ -59,7 +59,7 @@ func installWindowsCodexManagedResult(
 			target.conn.Name(),
 		)
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -136,6 +136,7 @@ func installWindowsCodexManagedResult(
 				target.setup.APIAddr,
 				"codex",
 				target.setup.HookAPIToken,
+				target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write Codex managed runtime: %w", err))
 			}
@@ -151,7 +152,7 @@ func installWindowsCodexManagedResult(
 					err,
 				))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = target.setup.HookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{
 				HookConfigPaths: []string{requirementsPath},
@@ -199,6 +200,7 @@ func installWindowsCodexManagedResult(
 				lockEntry.ContractID,
 				lockUpdatedAt,
 				entryUpdatedAt,
+				target.setup.HookFailMode,
 			)
 			if err != nil {
 				return fail(fmt.Errorf(
@@ -298,7 +300,7 @@ func verifyWindowsCodexManagedResult(
 	if err != nil {
 		return InstallResult{}, err
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -352,6 +354,7 @@ func verifyWindowsCodexManagedResult(
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		target.setup.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -416,6 +419,7 @@ func verifyWindowsCodexUserRuntime(
 		target.dataDir,
 		target.setup.APIAddr,
 		"codex",
+		target.setup.HookFailMode,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: Codex managed runtime is invalid: %w", err)
 	}
@@ -455,7 +459,7 @@ func verifyWindowsCodexUserRuntime(
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		lock.HookFailMode != target.setup.HookFailMode {
 		return errors.New("enterprise hooks: Codex managed hook contract does not identify only machine requirements")
 	}
 	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
@@ -540,7 +544,7 @@ func defaultWindowsCodexRequirementsOptions(
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
 		CodexTargetEnabled:              true,
-		HookContractID:                  connector.WindowsCodexStandaloneHookContract(hookExecutable),
+		HookContractID:                  connector.WindowsCodexManagedHookContract(hookExecutable),
 	}
 	return opts, nil
 }

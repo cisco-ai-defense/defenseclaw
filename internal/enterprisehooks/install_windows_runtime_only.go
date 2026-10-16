@@ -238,7 +238,7 @@ func installWindowsRuntimeOnlyManagedResult(
 				return fail(fmt.Errorf("enterprise hooks: create %s managed runtime: %w", name, createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
-				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken,
+				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken, "closed",
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write %s managed runtime: %w", name, err))
 			}
@@ -356,7 +356,7 @@ func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, pol
 	if err := verifyWindowsUserRuntime(windowsRuntimeOnlyPaths(target.dataDir, name), target.sid); err != nil {
 		return err
 	}
-	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name); err != nil {
+	if err := connector.ValidateManagedNativeHookRuntime(target.dataDir, target.setup.APIAddr, name, "closed"); err != nil {
 		return fmt.Errorf("enterprise hooks: %s managed runtime is invalid: %w", name, err)
 	}
 	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), name)

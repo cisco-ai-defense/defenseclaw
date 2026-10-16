@@ -179,6 +179,11 @@ func enterpriseManagedHookRuntimeForceClosed() bool {
 	return standaloneHookRuntime.prepared && standaloneHookRuntime.reason != ""
 }
 
+// enterpriseManagedHookRuntimeFailMode: only the Windows authenticated
+// runtime generation carries a delivery policy that may relax managed
+// delivery; the unix `--enterprise-managed` runtime stays closed (#1163).
+func enterpriseManagedHookRuntimeFailMode() string { return "closed" }
+
 func enterpriseManagedHookRuntimeFailureReason() string {
 	standaloneHookRuntime.Lock()
 	defer standaloneHookRuntime.Unlock()
@@ -240,6 +245,11 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket
+	// The standalone `--enterprise-managed` runtime keeps its fail-closed,
+	// strict-availability contract; only the Windows authenticated runtime
+	// generation may relax managed delivery (#1163).
+	opts.FailMode = "closed"
+	opts.StrictAvailability = true
 	// An inherited generic gateway token never authenticates a managed hook.
 	opts.Token = ""
 	if opts.MaxBody <= 0 || opts.MaxBody > 1<<20 {

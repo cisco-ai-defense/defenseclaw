@@ -49,7 +49,7 @@ try {
             return $null
         }
         function Assert-DefenseClawCanonicalPathAcl {
-            param($Path, $Expected)
+            param($Path, $Expected, [switch]$AllowSelfHeal)
         }
         $script:TestAclWrites = [Collections.Generic.List[string]]::new()
         function Set-DefenseClawPathAcl {

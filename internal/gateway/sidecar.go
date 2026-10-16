@@ -4558,53 +4558,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// SetCredentials() again with the same values (idempotent restore).
 	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	conn.SetCredentials(apiToken, masterKey)
-	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
+	// Initial single-connector setup shares the same effective policy and
+	// credential wiring as multi-connector setup and subsequent self-heal.
+	setupOpts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 	if err != nil {
 		return fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
 	}
-	configHome, err := s.connectorLifecycleConfigHome(conn)
-	if err != nil {
-		return fmt.Errorf("connector %s lifecycle config home: %w", conn.Name(), err)
-	}
-
-	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
-	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
-	// F9: a sandbox-only layout has no host agent to probe, but it does have a
-	// hook-fire verified harness image. Accept that evidence here, only when
-	// discovery found no agent binary and no executable is recorded; a host
-	// agent, with or without a readable version, still decides (see
-	// hook_contract_sandbox_evidence.go).
-	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, agentExecutable, contractResolution)
-	setupOpts := connector.SetupOpts{
-		DataDir:              s.currentConfig().DataDir,
-		CodexOtelEnvironment: s.currentConfig().Environment,
-		ConfigHome:           configHome,
-		ProxyAddr:            proxyAddr,
-		APIAddr:              apiAddr,
-		// Bake the gateway token into hook scripts so claude-code-hook.sh
-		// and codex-hook.sh can authenticate against the API server's
-		// auth middleware. ResolvedToken checks env vars first, then
-		// config — same source the proxy uses for credential wiring
-		// below, so the baked value and the value accepted by the API
-		// middleware stay in lockstep.
-		APIToken:           setupTokens.connectorToken,
-		HookAPIToken:       setupTokens.hookToken,
-		HookAPITokenScoped: setupTokens.hookTokenScoped,
-		WorkspaceDir:       workspaceDir,
-		// HookFailMode controls delivery, authentication, and invalid-response
-		// failures for generated hooks. Use the same connector-aware effective
-		// posture as multi-connector setup so Cursor receives failClosed only
-		// for an explicit action+closed combination.
-		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		GuardrailMode:    s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
-		HILTEnabled:      s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
-		InstallCodeGuard: false,
-		AgentVersion:     agentVersion,
-		AgentExecutable:  agentExecutable,
-		HookContractID:   contractResolution.Contract.ContractID,
-	}
+	// F9: the same harness-evidence substitution connectorSetupOptsChecked
+	// applied to setupOpts, so the gate below sees the sandbox contract.
+	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, setupOpts.AgentExecutable, contractResolution)
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
@@ -6528,12 +6492,14 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		GuardrailMode:        s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
-		HILTEnabled:          s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
-		InstallCodeGuard:     false,
-		AgentVersion:         agentVersion,
-		AgentExecutable:      agentExecutable,
-		HookContractID:       contractResolution.Contract.ContractID,
+		// Secure Client renders the resolved mode as is (#1163).
+		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
+		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
+		InstallCodeGuard:         false,
+		AgentVersion:             agentVersion,
+		AgentExecutable:          agentExecutable,
+		HookContractID:           contractResolution.Contract.ContractID,
 	}, nil
 }
 

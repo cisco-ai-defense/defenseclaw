@@ -33,6 +33,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) (WindowsManagedRuntimeGenerationPublication, error) {
 	if targetSID == nil {
 		return WindowsManagedRuntimeGenerationPublication{}, errors.New(
@@ -54,6 +55,7 @@ func prepareWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
@@ -91,6 +93,7 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 	hookContractID,
 	hookContractLockUpdatedAt,
 	hookContractEntryUpdatedAt string,
+	failMode ...string,
 ) error {
 	if targetSID == nil {
 		return errors.New("enterprise hooks: managed runtime generation target SID is unavailable")
@@ -107,10 +110,24 @@ func verifyWindowsManagedRuntimeGenerationForInstall(
 			HookExecutable:             hookExecutable,
 			GatewayAddr:                gatewayAddr,
 			GatewayServiceName:         serviceName,
+			FailMode:                   windowsManagedGenerationFailMode(failMode),
 			ScopedToken:                scopedToken,
 			HookContractID:             hookContractID,
 			HookContractLockUpdatedAt:  hookContractLockUpdatedAt,
 			HookContractEntryUpdatedAt: hookContractEntryUpdatedAt,
 		},
 	)
+}
+
+// windowsManagedGenerationFailMode is the delivery mode an authenticated
+// runtime generation records. Only Secure Client may record open (#1163);
+// every other profile's generation stays closed, as on origin/main.
+func windowsManagedGenerationFailMode(modes []string) string {
+	if !secureClientHookDelivery() {
+		return "closed"
+	}
+	if len(modes) == 0 {
+		return "open"
+	}
+	return canonicalHookFailMode(modes[0])
 }

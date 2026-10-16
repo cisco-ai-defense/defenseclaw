@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v8
+# defenseclaw-managed-hook v9
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -56,6 +56,16 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        defenseclaw_harden_env also drops inherited variables named like the
 #        hooks' private values (API_TOKEN, PAYLOAD, ...), so neither the
 #        bearer nor the payload reaches a child process's environment.
+#   v9 — adds explicit delivery-outcome logging (OUTCOME argument of
+#        defenseclaw_log_hook_failure) and the delivery failure wrapper
+#        (defenseclaw_log_hook_delivery_failure /
+#        defenseclaw_hook_delivery_outcome) used by Codex, Claude Code and
+#        Cursor. Under Secure Client managed status alone no longer forces
+#        closed delivery; every other managed hook still fails closed on an
+#        unreachable gateway or a missing token.
+#        (Release 26.8.4 shipped these helpers as its v7; this line carries
+#        them above main's v8 so an older writer cannot remove a helper used
+#        by newer hook scripts.)
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -726,7 +736,9 @@ else:
 # never fail the hook.
 #
 # Usage:
-#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE
+#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE [OUTCOME]
+# OUTCOME records the actual delivery decision, not merely configured policy.
+# Legacy diagnostic-only callers default to unknown rather than guessing.
 #
 # CATEGORY is one of: "transport" (gateway unreachable / 5xx) or
 # "response" (4xx / parse error). The category lets operators tell the
@@ -738,6 +750,16 @@ defenseclaw_log_hook_failure() {
   local reason="${3:-unknown}"
   local category="${4:-response}"
   local fail_mode="${5:-${FAIL_MODE:-open}}"
+  local outcome="${6:-unknown}"
+  case "$outcome" in
+    fail_open|fail_closed) : ;;
+    *) outcome=unknown ;;
+  esac
+  if [ "$outcome" = "fail_open" ]; then
+    printf 'defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %s\n' \
+      "$(defenseclaw_json_escape "$connector")" "$(defenseclaw_json_escape "$hook_name")" \
+      "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
+  fi
   local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"
   mkdir -p "$log_dir" 2>/dev/null || return 0
   chmod 700 "$log_dir" 2>/dev/null || true
@@ -754,11 +776,31 @@ defenseclaw_log_hook_failure() {
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s"}\n' \
-    "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s"}\n' \
+    "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
+}
+
+# Only use this wrapper for delivery failure branches that honor FAIL_MODE and
+# apply strict availability to transport failures. Diagnostic-only records and
+# payload reader fallbacks must not claim that inspection was bypassed.
+defenseclaw_log_hook_delivery_failure() {
+  local outcome
+  outcome="$(defenseclaw_hook_delivery_outcome "$4" "$5")"
+  defenseclaw_log_hook_failure "$1" "$2" "$3" "$4" "$5" "$outcome"
+}
+
+defenseclaw_hook_delivery_outcome() {
+  local outcome=fail_closed
+  if [ "${2:-${FAIL_MODE:-open}}" = "open" ]; then
+    outcome=fail_open
+    if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
+      outcome=fail_closed
+    fi
+  fi
+  printf '%s' "$outcome"
 }
 
 # defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
@@ -962,15 +1004,17 @@ defenseclaw_response_failure_reason() {
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed, for guardian-installed managed
-# hooks, or when strict availability is enabled. Fail mode therefore has one
-# consistent meaning across malformed responses, auth failures, and transport
-# failures instead of silently opening only the latter class.
+# hooks outside Secure Client, or when strict availability is enabled. Under
+# Secure Client managed status alone does not select availability policy: the
+# baked FAIL_MODE does (#1163). Fail mode therefore has one consistent meaning
+# across malformed responses, auth failures, and transport failures instead of
+# silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
   case "${FAIL_MODE:-open}" in
     closed) return 0 ;;
   esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 0 ;;
+    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -1125,7 +1169,7 @@ defenseclaw_handle_missing_token() {
   local token_file="${4:-}"
   local reason="missing gateway token file"
   [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
-  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
+  defenseclaw_log_hook_delivery_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2
     exit 2
@@ -1176,6 +1220,9 @@ defenseclaw_missing_token_next_step() {
 # hook still functions on minimal containers, logging it as a
 # transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
+  # Caller supplies its actual oversized-payload outcome. Legacy callers and
+  # reader/tooling diagnostics remain unknown, not presumed fail-open.
+  local overflow_outcome="${1:-unknown}"
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
   local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
   local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
@@ -1210,7 +1257,7 @@ sys.stdout.buffer.write(data)')"
     _dc_rc=$?
     if [ "$_dc_rc" -eq 3 ]; then
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
-        "stdin body exceeded ${cap} byte cap" transport "${FAIL_MODE:-open}"
+        "stdin body exceeded ${cap} byte cap" transport "${FAIL_MODE:-open}" "$overflow_outcome"
       echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
       return 1
     fi
@@ -1232,7 +1279,7 @@ sys.stdout.buffer.write(data)')"
     if [ "${#body}" -gt "$cap" ]; then
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "stdin body exceeded ${cap} byte cap" \
-        transport "${FAIL_MODE:-open}"
+        transport "${FAIL_MODE:-open}" "$overflow_outcome"
       echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
       return 1
     fi

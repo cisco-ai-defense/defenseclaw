@@ -172,11 +172,13 @@ def test_hash_pinned_manifest_contract_is_shared() -> None:
     assert '"schema_version": 1, "files": files' in setup
 
 
-def test_standalone_fresh_install_rollback_removes_its_sensor_helper() -> None:
+def test_fresh_install_rollback_removes_its_sensor_helper_on_every_profile() -> None:
     # Transaction snapshots do not record the sensor helper, which a fresh
-    # install registers first. A failed standalone first install must remove
-    # that owned service before the service-absence gate, or root cleanup
-    # refuses and every later ensure/uninstall is wedged.
+    # install registers first on both profiles. A failed first install must
+    # remove that owned service before the service-absence gate, or root
+    # cleanup refuses ("rollback also failed and pending recovery was
+    # retained") and every later ensure/uninstall is wedged. Secure Client
+    # registers it too, so the removal is not gated on the standalone profile.
     module = _text(MODULE)
     body = module[
         module.index("function Publish-DefenseClawInstallRollbackIntent") : module.index(
@@ -184,18 +186,22 @@ def test_standalone_fresh_install_rollback_removes_its_sensor_helper() -> None:
         )
     ]
     no_authority = body.index("if (-not $createdAny -and $null -eq $existing)")
-    gate = body.index("if (Test-DefenseClawStandaloneProfile) {", no_authority)
-    owned = body.index("Assert-DefenseClawStandaloneSensorHelperOwned `", gate)
+    helper = body.index("$sensorHelperName = Get-DefenseClawSensorHelperServiceName `", no_authority)
+    owned = body.index("Assert-DefenseClawStandaloneSensorHelperOwned `", helper)
     remove = body.index("Remove-DefenseClawService -Name $sensorHelperName", owned)
     absence = body.index("Get-DefenseClawManagedServiceNames `", remove)
-    assert no_authority < gate < owned < remove < absence
+    assert no_authority < helper < owned < remove < absence
+    assert "Test-DefenseClawStandaloneProfile" not in body[no_authority:helper]
 
 
-def test_standalone_rollback_quiesces_the_sensor_helper_before_restoring_files() -> None:
+def test_rollback_quiesces_the_sensor_helper_before_restoring_files_on_every_profile() -> None:
     module = _text(MODULE)
     start = module.index("function Restore-DefenseClawTransaction {")
     body = module[start : module.index("\nfunction ", start + 10)]
-    gate = body.index("if (Test-DefenseClawStandaloneProfile) {")
+    # Both profiles register the sensor helper, so the quiesce is not gated on
+    # the standalone profile (a Secure Client rollback found it running).
+    gate = body.index("$standaloneSensorHelper = Get-DefenseClawSensorHelperServiceName `")
+    assert "Test-DefenseClawStandaloneProfile" not in body[:gate]
     owned = body.index("Assert-DefenseClawStandaloneSensorHelperOwned `", gate)
     disabled = body.index("Set-DefenseClawServiceStartMode -Name $standaloneSensorHelper -StartMode 4", owned)
     # The standalone gateway depends on the sensor helper, and Stop-Service

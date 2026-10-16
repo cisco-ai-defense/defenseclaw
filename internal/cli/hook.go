@@ -520,8 +520,14 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
+		// Only an authenticated Secure Client runtime generation can select
+		// open delivery (#1163). Every other managed runtime, and any runtime
+		// failure, keeps the fail-closed, strict-availability contract.
+		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
+		if managedRuntimeFailure != "" || opts.FailMode != "open" {
+			opts.FailMode = "closed"
+			opts.StrictAvailability = true
+		}
 	}
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {

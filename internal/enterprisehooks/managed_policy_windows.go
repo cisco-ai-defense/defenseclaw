@@ -157,7 +157,60 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 			return nil
 		}
 		if err := validateWindowsClaudeManagedPolicyTeardownState(parsed, opts, expected); err != nil {
-			return err
+			// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+			// preserves refuse-on-drift. A hardened deployment must NOT
+			// silently delete identity-drifted policy + state because
+			// that masks the exact tamper signal operators configure
+			// strict mode to catch.
+			if managed.TrustStrictAncestors() {
+				return err
+			}
+			// Bulldoze: the on-disk Claude managed policy state authenticated
+			// as OURS (ownership + SHA256 check above passed) but its scoped
+			// identity does not match the current install (common cause: a
+			// prior unsigned certification run with a different scoped
+			// GatewayServiceName). Reclaim the orphan pair the same way
+			// reclaimOrphanClaudeManagedPolicy handles policy-without-state
+			// orphans: delete both files and let the capture return the
+			// "nothing existed" result so install proceeds with a fresh
+			// policy/state write and rollback has no stale snapshot to
+			// restore.
+			//
+			// The strict identity check is still used by Teardown/Restore
+			// callers where recovery MUST authenticate the
+			// exact prior deployment; this bulldoze path is only in Capture.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming identity-drifted Claude managed "+
+					"policy at %s and state at %s (prior scoped install's "+
+					"identity does not match current scope): %v\n",
+				path, statePath, err)
+			// Remove the state sidecar first. If the policy removal then
+			// fails, the leftover is policy-without-state, which
+			// reclaimOrphanClaudeManagedPolicy recovers on the next run;
+			// the reverse order would strand state-without-policy.
+			if removeErr := os.Remove(statePath); removeErr != nil &&
+				!errors.Is(removeErr, os.ErrNotExist) {
+				return fmt.Errorf(
+					"enterprise hooks: reclaim identity-drifted Claude managed state %s: %w",
+					statePath, removeErr,
+				)
+			}
+			if removeErr := os.Remove(path); removeErr != nil &&
+				!errors.Is(removeErr, os.ErrNotExist) {
+				return fmt.Errorf(
+					"enterprise hooks: reclaim identity-drifted Claude managed policy %s: %w",
+					path, removeErr,
+				)
+			}
+			// With the stale pair removed, the current install is now
+			// in the "no prior policy" branch above - return the empty
+			// snapshot result and let install proceed to write a fresh
+			// pair. Rollback has no snapshot to restore (symmetric with
+			// the policy-absent branch above). The behaviour is the
+			// same whether or not opts.Targets specified an expected
+			// identity: the drift reclaim already removed the stale
+			// files, so there is nothing to restore.
+			return nil
 		}
 		result = WindowsClaudeManagedPolicyTeardownSnapshot{
 			PolicyExisted: true,
@@ -950,6 +1003,7 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 		target.dataDir,
 		target.gatewayAddr,
 		"claudecode",
+		windowsManagedRuntimeExpectedFailModes()...,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed Claude runtime sidecars are invalid: %w", err)
 	}
@@ -2425,4 +2479,15 @@ func windowsManagedPolicyDigest(data []byte) string {
 func windowsPathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// windowsManagedRuntimeExpectedFailModes is the delivery mode a managed
+// runtime sidecar must record when the caller has no rendered setup to
+// compare with: closed outside Secure Client (origin/main), either supported
+// mode under Secure Client, whose policy may select open (#1163).
+func windowsManagedRuntimeExpectedFailModes() []string {
+	if secureClientHookDelivery() {
+		return nil
+	}
+	return []string{"closed"}
 }

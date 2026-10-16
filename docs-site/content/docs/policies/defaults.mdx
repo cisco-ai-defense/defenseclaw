@@ -219,7 +219,7 @@ documented setup/guardrail command when it exposes the knob; otherwise edit
 | Knob | Default | Why fixed |
 | --- | --- | --- |
 | `observability.local` SQLite history | always present | Mandatory local durability for collected logs and the compliance floor |
-| `guardrail.hook_fail_mode` | `closed` on new installs | Delivery, authentication, and invalid-response failures fail closed where the connector can block; upgrades from the pre-change default are migrated to `open` for compatibility |
+| `guardrail.hook_fail_mode` | `closed` on new installs (`open` when unset under Secure Client) | Delivery, authentication, and invalid-response failures fail closed where the connector can block; upgrades from the pre-change default are migrated to `open` for compatibility. Secure Client deployments default to `open` and keep an explicit `closed` ([fail modes](/docs/reference/fail-modes#secure-client)) |
 | `guardrail.judge.timeout` | `30s` | Hot-path latency budget for the judge |
 | `guardrail.judge.adjudication_timeout` | `5s` | Per-prompt adjudication budget |
 | `guardrail.detection_strategy` | `regex_judge` | Regex first, then the judge for MEDIUM and higher findings. Until you turn the judge on it runs as `regex_only`, which is what `defenseclaw guardrail status` shows on a new install |

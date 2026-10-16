@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,87 @@ import (
 )
 
 const guardTestDebounce = 40 * time.Millisecond
+
+// Exercise the real rendered Amp artifact and the live policy resolver, not a
+// mock that can conceal installation/repair policy drift. Both boot paths use
+// connectorSetupOptsChecked; repair must reproduce those same bytes. This is
+// an OSS install: an unset policy is closed in action mode and an
+// unoverridden observe connector keeps the historical fail-open behavior.
+func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
+	for _, mode := range []string{"observe", "action"} {
+		for _, tc := range []struct {
+			name, global, override, wantObserve, wantAction string
+		}{
+			{"default", "", "", "open", "closed"},
+			{"explicit-open", "open", "", "open", "open"},
+			{"global-closed", "closed", "", "open", "closed"},
+			{"override-open", "closed", "open", "open", "open"},
+			{"override-closed", "open", "closed", "closed", "closed"},
+		} {
+			want := tc.wantAction
+			if mode == "observe" {
+				want = tc.wantObserve
+			}
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				pluginPath := filepath.Join(root, "amp", "plugins", "defenseclaw.ts")
+				previous := connector.AMPPluginPathOverride
+				connector.AMPPluginPathOverride = pluginPath
+				t.Cleanup(func() { connector.AMPPluginPathOverride = previous })
+				cfg := config.DefaultConfig()
+				cfg.DataDir = testenv.PrivateTempDir(t)
+				cfg.Guardrail.Mode = mode
+				cfg.Guardrail.HookFailMode = tc.global
+				cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+					"amp": {HookFailMode: tc.override},
+				}
+				s := &Sidecar{cfg: cfg}
+				conn := connector.NewAMPConnector()
+				opts := mustConnectorSetupOpts(t, s, conn, "", "127.0.0.1:4000", "127.0.0.1:18970")
+				if opts.HookFailMode != want {
+					t.Fatalf("initial delivery mode = %q, want %q", opts.HookFailMode, want)
+				}
+				// Native Windows Amp setup admits only a protected,
+				// setup-selected executable; seed that evidence (no-op elsewhere).
+				pluginPath = admitAmpSelfHealSetup(t, cfg.DataDir, &opts)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := conn.Setup(ctx, opts); err != nil {
+					t.Fatalf("initial Amp setup: %v", err)
+				}
+				original, err := os.ReadFile(pluginPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(original, []byte(fmt.Sprintf(`const DC_FAIL_MODE: string = "%s"`, want))) {
+					t.Fatal("initial plugin does not contain the selected delivery mode")
+				}
+				guard := NewHookConfigGuard(nil, nil, time.Hour)
+				s.bindHookRuntimePolicyResolver(guard)
+				if !guard.Start(ctx, conn, opts) {
+					t.Fatal("guard did not start")
+				}
+				defer guard.Stop()
+				if err := os.Remove(pluginPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := guard.EnsurePresent(ctx, "amp", cfg.DataDir, "test plugin deletion"); err != nil {
+					t.Fatalf("Amp self-heal: %v", err)
+				}
+				restored, err := os.ReadFile(pluginPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(original, restored) {
+					t.Fatal("self-heal changed the managed Amp artifact")
+				}
+				if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || !present {
+					t.Fatalf("restored plugin contract: present=%t err=%v", present, err)
+				}
+			})
+		}
+	}
+}
 
 type runtimePolicyCaptureConnector struct {
 	stubConnector
@@ -1014,6 +1096,7 @@ func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *
 	// The notifier is the completion barrier for Setup and its effective-policy
 	// verification. Polling OwnedHooksPresent while Setup atomically replaces the
 	// file races the repair on Windows.
+	// Allow extra Windows CI scheduling and protected-file publication headroom.
 	repairNotified := false
 	select {
 	case paths := <-healed:
@@ -1021,7 +1104,7 @@ func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *
 		if len(paths) != 1 || paths[0] != "periodic effective-policy audit" {
 			t.Fatalf("heal notifier paths = %v, want periodic effective-policy audit", paths)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		// Join an in-flight serialized repair before diagnosing a missing
 		// notification. The notifier runs before repairMu is released, so this
 		// waits for actual completion without changing the audit-start deadline.

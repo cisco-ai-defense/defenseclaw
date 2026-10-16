@@ -163,6 +163,16 @@ func enableWindowsThreadPrivilege(token windows.Token, name string) error {
 // opened with FILE_OPEN_REPARSE_POINT and must be owned by the manifest SID.
 // An attacker therefore cannot redirect LocalSystem DACL repair through a
 // junction to an object outside the profile.
+//
+// The walker (repairWindowsTargetOwnedPathDACLNoFollowWithACL) runs under two
+// identities: directly under the impersonated target token (this wrapper and
+// the managed-plugin repair), and on the dedicated LocalSystem thread of
+// runWindowsEnterpriseGuardianDACLRepairWithACL with SeBackupPrivilege and
+// SeRestorePrivilege enabled (reached through repairWindowsTargetOwnedPathDACL
+// and the managed-plugin service repair).
+// Neither path transfers ownership: every element's owner must already be the
+// target SID (or, for the profile root, a profile-anchor owner) under both
+// identities, and only the DACL is rewritten.
 func repairWindowsTargetOwnedPathDACLNoFollow(
 	home string,
 	path string,
@@ -256,6 +266,13 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 	if err != nil {
 		return err
 	}
+	// DACL-only repair. The final handle was opened with WRITE_DAC +
+	// FILE_READ_ATTRIBUTES and no WRITE_OWNER, so this write MUST NOT pass
+	// OWNER_SECURITY_INFORMATION; setWindowsObjectDACLNoPropagation writes
+	// the DACL alone. validateWindowsGuardianACLHandle has already required
+	// the final element to be target-owned, whether this walker runs under
+	// the target token or on the LocalSystem guardian thread. No code path
+	// transfers ownership of an admin-owned element.
 	if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
 		return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
 	}
@@ -573,6 +590,11 @@ func openWindowsGuardianACLChild(
 			windows.FILE_OPEN_FOR_BACKUP_INTENT,
 	)
 	if final {
+		// DACL-only access. Callers run under the target token or on the
+		// LocalSystem guardian thread (SeBackupPrivilege +
+		// SeRestorePrivilege); in both cases the final element must
+		// already be target-owned and only its DACL is rewritten, so
+		// WRITE_OWNER is never requested.
 		access |= windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
@@ -614,6 +636,16 @@ func validateWindowsGuardianACLHandle(
 		ownerOK = windowsEnterpriseProfileAnchorOwner(owner, target)
 	}
 	if !ownerOK {
+		// No admin reclaim here, under any caller identity. This
+		// validator runs under the target token (the no-follow walker's
+		// direct callers, target-directory and runtime-setup checks) and
+		// under LocalSystem (the guardian DACL repair thread of
+		// runWindowsEnterpriseGuardianDACLRepairWithACL, and
+		// recoverWindowsSetupRelaxedHookDirectoryPrivileged). Even with
+		// backup/restore privileges no caller transfers ownership, so
+		// accepting an admin-owned element would only hide drift. Keep
+		// the check strict: any owner that is not the exact target SID
+		// (or, for the profile root, the profile-anchor set) is fatal.
 		return fmt.Errorf(
 			"owner SID %s is not trusted for target SID %s",
 			windowsSIDString(owner),

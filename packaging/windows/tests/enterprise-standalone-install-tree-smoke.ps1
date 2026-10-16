@@ -101,6 +101,23 @@ try {
                     }
                 }
             }
+            function Test-SecureClientTreeDrift([string]$Label, [hashtable]$Layout, [string]$Pattern) {
+                $prior = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                try {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                    Test-Refused "$Label (strict)" { Assert-DefenseClawManagedInstallTree -Layout $Layout } $Pattern
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $null, 'Process')
+                    try {
+                        Assert-DefenseClawManagedInstallTree -Layout $Layout 3>$null
+                    }
+                    catch {
+                        $failures.Add("${Label}: bulldoze posture refused: $($_.Exception.Message)")
+                    }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $prior, 'Process')
+                }
+            }
             function Test-Accepted([string]$Label, [hashtable]$Layout) {
                 try {
                     Assert-DefenseClawManagedInstallTree -Layout $Layout
@@ -351,15 +368,79 @@ try {
             Test-Accepted 'Secure Client empty ipc directory' $secureClient
             $secureClientStray = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'stray.txt')
             [IO.File]::WriteAllText($secureClientStray, 'x')
-            Test-Refused 'Secure Client allow-list (ipc content)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected file'
+            # Release 26.8.4 (#1068) bulldozes Secure Client install-tree
+            # drift: an unexpected item is reported and removed with the tree
+            # unless the strict trust pin is set, which restores the refusal.
+            Test-SecureClientTreeDrift 'Secure Client allow-list (ipc content)' $secureClient 'unexpected file'
             [IO.File]::Delete($secureClientStray)
             Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $secureClient
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
                 $failures.Add('Secure Client ipc directory was removed by the standalone helper')
             }
+            # A Secure Client layout with the sensor helper admits its exact
+            # socket leaf. Uninstall removes only that leaf after the service
+            # is gone and leaves the ipc directory for the tree removal; a
+            # link at the socket path is still refused.
+            $secureClient = New-TestLayout 'scsock'
+            $secureClient.SensorHelperPath = [IO.Path]::Combine($secureClient.BinDirectory, 'defenseclaw-sensor-helper.exe')
+            [IO.File]::WriteAllText($secureClient.SensorHelperPath, 'stand-in')
+            [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
+            $sensorSocket = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'sensor-helper.sock')
+            if ($BindSocket) {
+                $socket = [Net.Sockets.Socket]::new(
+                    [Net.Sockets.AddressFamily]::Unix,
+                    [Net.Sockets.SocketType]::Stream,
+                    [Net.Sockets.ProtocolType]::Unspecified
+                )
+                $openSockets.Add($socket)
+                $socket.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new($sensorSocket))
+            }
+            else {
+                # Windows PowerShell 5.1, which Setup runs, has no AF_UNIX
+                # endpoint. A PowerShell 7 child binds the socket and exits
+                # without closing it, leaving the reparse file a crashed
+                # service leaves; without pwsh a plain file stands in.
+                $pwsh = Microsoft.PowerShell.Core\Get-Command pwsh -ErrorAction SilentlyContinue
+                if ($null -ne $pwsh) {
+                    & $pwsh.Source -NoProfile -NonInteractive -Command (
+                        "`$s=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Unspecified); " +
+                        "`$s.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new('$sensorSocket')); [Environment]::Exit(0)"
+                    )
+                }
+                if (-not [IO.File]::Exists($sensorSocket)) {
+                    [IO.File]::WriteAllText($sensorSocket, '')
+                }
+            }
+            Test-Accepted 'Secure Client tree with the sensor helper socket' $secureClient
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            if ([IO.File]::Exists($sensorSocket)) {
+                $failures.Add('Secure Client sensor helper socket survived removal')
+            }
+            if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
+                $failures.Add('Secure Client ipc directory was removed with the sensor helper socket')
+            }
+            # Removal with no socket is a no-op.
+            Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+            $socketTarget = [IO.Path]::Combine($Root, 'outside-socket.txt')
+            [IO.File]::WriteAllText($socketTarget, 'outside')
+            if (New-TestLink $sensorSocket $socketTarget) {
+                Test-Refused 'Secure Client sensor helper socket link' {
+                    Assert-DefenseClawManagedInstallTree -Layout $secureClient
+                } 'reparse point'
+                Test-Refused 'Secure Client sensor helper socket link removal' {
+                    Remove-DefenseClawSecureClientSensorHelperSocket -Layout $secureClient
+                } 'unexpected managed IPC content'
+                if (-not [IO.File]::Exists($socketTarget)) {
+                    $failures.Add('Secure Client socket link removal touched its target')
+                }
+                [IO.File]::Delete($sensorSocket)
+            }
+            if (@(Get-DefenseClawSecureClientSensorHelperSocketLeaves -Layout (New-TestLayout 'scnosock')).Count -ne 0) {
+                $failures.Add('Secure Client layout without the sensor helper reported a socket leaf')
+            }
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
-            Test-Refused 'Secure Client allow-list (share)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            Test-SecureClientTreeDrift 'Secure Client allow-list (share)' $secureClient 'unexpected directory'
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $secureClient
             if (-not [IO.File]::Exists($secureClientPlugin)) {
                 $failures.Add('Secure Client share content was removed by the standalone helper')

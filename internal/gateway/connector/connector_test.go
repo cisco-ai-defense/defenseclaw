@@ -1708,8 +1708,8 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 			}
 		}
 	}
-	if managedCount != len(hookGroups) {
-		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); managedCount != want {
+		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, want)
 	}
 	if thirdPartyCount != 1 {
 		t.Fatalf("third-party hook count=%d, want 1", thirdPartyCount)
@@ -2077,9 +2077,22 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 			}
 		}
 	}
-	if oldCount != 0 || newCount != len(hookGroups) || foreignCount != 1 {
-		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); oldCount != 0 || newCount != want || foreignCount != 1 {
+		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, want)
 	}
+}
+
+// claudeCodeSetupHookGroupCount is the number of events Setup wires for opts.
+// An unversioned Setup selects the best-effort contract (the default plus the
+// events of every contract it may stand in for), so the expected managed-hook
+// count is the setup-selected matrix rather than a fixed list.
+func claudeCodeSetupHookGroupCount(t *testing.T, opts SetupOpts) int {
+	t.Helper()
+	groups, err := claudeCodeHookGroupsForSetup(opts)
+	if err != nil {
+		t.Fatalf("claudeCodeHookGroupsForSetup: %v", err)
+	}
+	return len(groups)
 }
 
 func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
@@ -2370,8 +2383,8 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 	if !repoFound {
 		t.Fatal("untracked source-tree command was claimed without exact migration evidence")
 	}
-	if managedCount != len(hookGroups) {
-		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
+	if want := claudeCodeSetupHookGroupCount(t, opts); managedCount != want {
+		t.Fatalf("managed hook count=%d, want %d", managedCount, want)
 	}
 	if !foreignFound {
 		t.Fatal("third-party hook was removed")
@@ -2640,7 +2653,10 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 	ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
 
-	if err := NewClaudeCodeConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+	// An unversioned setup wires the best-effort contract, so verify against
+	// the same setup-selected matrix.
+	setupOpts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := NewClaudeCodeConnector().Setup(context.Background(), setupOpts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	raw, err := os.ReadFile(settingsPath)
@@ -2692,7 +2708,7 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 				t.Fatalf("clone baseline hooks: %v", err)
 			}
 			candidate["UnexpectedEvent"] = tc.value
-			err := verifyClaudeCodeHookMatrix(candidate, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			err := verifyClaudeCodeHookMatrixForSetup(candidate, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), setupOpts)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("verification error = %v, want %q", err, tc.want)
 			}

@@ -451,7 +451,7 @@ Usage: sudo $0 [options]
 Gateway options:
   --mode {observe|action}   Guardrail + asset_policy mode (default: ${DEFAULT_MODE})
   --connector LIST          Hook connector(s), comma-separated (default: ${DEFAULT_CONNECTOR})
-                            Supported: amp, codex, claudecode, cursor
+                            Supported: amp, codex, claudecode, cursor, opencode
                             Examples: --connector amp
                                       --connector amp,cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
@@ -551,7 +551,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor|opencode); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 
@@ -1437,7 +1437,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
     case "${ZERO_TARGET_REASON}" in
       all-unsupported)
-        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor; got connectors=${CONNECTOR})"
+        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor|opencode; got connectors=${CONNECTOR})"
         warn "  proceeding anyway — the hook-enumerator's tick will NOT fix this on its own; rerun the installer with --connector picking a supported entry"
         ;;
       *)

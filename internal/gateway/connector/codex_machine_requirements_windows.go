@@ -137,45 +137,111 @@ func ReconcileWindowsCodexMachineRequirements(
 		report.ManagedStateExisted = managedState.existed
 
 		var state windowsCodexMachineOwnership
+		ownershipAdopted := !ownership.existed
+		// discarded is the parseable record of another layout that the
+		// identity-drift branch below adopts over; nil when there is none.
+		var discarded *windowsCodexMachineOwnership
 		if ownership.existed {
 			state, err = parseWindowsCodexMachineOwnership(ownership.data)
 			if err != nil {
-				return fmt.Errorf("parse Codex requirements ownership: %w", err)
-			}
-			if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
-				return err
-			}
-		} else {
-			contains, markerErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
-			if markerErr != nil {
-				return fmt.Errorf("inspect unowned Codex requirements: %w", markerErr)
-			}
-			preimage, preimageExisted := requirements.data, requirements.existed
-			if contains {
-				adopted, existed, err := adoptWindowsCodexOrphanedRequirements(requirements.data, opts)
-				if err != nil {
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// refuses to silently seed fresh ownership on top of an
+				// unparseable record. The parse failure is the same
+				// forensic tamper signal operators configure strict mode
+				// to catch (prior install wrote a corrupted record or an
+				// external process tampered with the JSON).
+				if managed.TrustStrictAncestors() {
+					return fmt.Errorf("enterprise hooks: parse Codex machine ownership: %w", err)
+				}
+				// Bulldoze: ownership JSON is on disk but unparseable (prior
+				// install wrote a partial file, or disk corruption). Treat
+				// as adoptable and seed fresh ownership from the current
+				// wire shape. Same posture as the ownership-absent branch
+				// below.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming unparseable Codex ownership at %s: %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				state = windowsCodexMachineOwnership{}
+			} else if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// preserves refuse-on-drift: a hardened deployment must
+				// NOT silently adopt a mismatched ownership record,
+				// because that masks exactly the tamper signal operators
+				// configure strict mode to catch (a prior install's
+				// scoped layout surviving into a new scope).
+				if managed.TrustStrictAncestors() {
 					return err
 				}
-				preimage, preimageExisted = adopted, existed
-			} else if managedState.existed {
-				return errors.New("Codex managed runtime state exists without protected requirements ownership")
+				// Bulldoze: ownership metadata is a valid DefenseClaw record
+				// but belongs to a prior install with a different ManagedDir
+				// / HookBinary / RequirementsPath (common cause: an unsigned
+				// certification install at a scoped path that was
+				// uninstalled, leaving C:\ProgramData\OpenAI\Codex\* with
+				// the old bin path baked in). Refusing here strands the
+				// current install's reconcile. Treat the ownership as
+				// adoptable: discard the mismatched record and fall through
+				// to the fresh-ownership seed path below, which also
+				// surgically removes any orphan managed-hook entries from
+				// the preimage.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming identity-drifted Codex "+
+						"ownership at %s (prior install's layout does not "+
+						"match current scope): %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				previous := state
+				discarded = &previous
+				state = windowsCodexMachineOwnership{}
 			}
+		}
+		requirementsBase := requirements.data
+		if ownershipAdopted {
+			// Managed-mode trust posture: the ownership JSON being absent while
+			// a DefenseClaw hook or managed-state file is present is the signature
+			// of a prior failed install/uninstall that got partway through writing
+			// the pre-reconcile side (requirements.toml) and never finished writing
+			// the post-reconcile side (ownership + managed runtime state). Refusing
+			// here strands the user: install can't adopt what it finds, and
+			// uninstall can't clean what install won't adopt. The product
+			// invariant is "canonical state after install, not refuse-on-drift" —
+			// treat the orphan hook / state as adoptable and seed fresh ownership
+			// metadata from the current wire shape. The reconcile pass below
+			// writes the canonical ACL (via Set-DefenseClawPathAcl's own self-heal
+			// chain) so the resulting trio is internally consistent.
+			//
+			// Strip DefenseClaw's own changes from the preimage we persist.
+			// Otherwise an eventual uninstall would restore the preimage, see
+			// the canonical hook still present, and refuse to commit ("exact
+			// DefenseClaw Codex managed hooks would remain after removal"), or
+			// restore a stale prior-install layout. On identity drift the
+			// discarded record names the prior layout: its hook groups and
+			// windows_managed_dir are stripped from both the live base and the
+			// preimage, and the shared isolation controls stay in the preimage
+			// only when that record's trustworthy preimage shows they predate
+			// DefenseClaw (see windowsCodexAdoptRequirements).
+			adoption, adoptErr := windowsCodexAdoptRequirements(requirements.data, requirements.existed, discarded, opts)
+			if adoptErr != nil {
+				return fmt.Errorf("prepare adopted Codex requirements preimage: %w", adoptErr)
+			}
+			requirementsBase = adoption.base
 			state = windowsCodexMachineOwnership{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
 				RequirementsPath: opts.RequirementsPath,
 				ManagedDir:       opts.ManagedDir,
 				HookBinary:       opts.HookBinary,
-				PreimageExisted:  preimageExisted,
-				Preimage:         append([]byte(nil), preimage...),
-				PreimageSHA256:   windowsCodexMachineHash(preimage),
+				PreimageExisted:  adoption.preimageExisted,
+				Preimage:         adoption.preimage,
+				PreimageSHA256:   windowsCodexMachineHash(adoption.preimage),
 			}
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
 
-		rendered, requirementsChanged, err := reconcileWindowsCodexRequirements(requirements.data, opts)
+		rendered, _, err := reconcileWindowsCodexRequirements(requirementsBase, opts)
 		if err != nil {
 			return err
 		}
+		requirementsChanged := !bytes.Equal(requirements.data, rendered)
 		postHash := windowsCodexMachineHash(rendered)
 		report.PostimageSHA256 = postHash
 
@@ -842,7 +908,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		HookBinary:         hookExecutable,
 		ManagedStatePath:   statePath,
 		CodexTargetEnabled: true,
-		HookContractID:     WindowsCodexStandaloneHookContract(hookExecutable),
+		HookContractID:     WindowsCodexManagedHookContract(hookExecutable),
 	}
 	if !stateExists {
 		contains, markerErr := windowsCodexRequirementsContainExactManagedHook(
@@ -1768,10 +1834,9 @@ func validateWindowsCodexMachineVolume(path string) error {
 // WindowsCodexStandaloneHookContract is the hook contract the standalone
 // profile binds into every Codex machine-requirements command when
 // hookBinary is the standalone install's hook launcher, and "" for any
-// other launcher: the Secure Client profile keeps its certified unbound
-// command. The standalone launcher path derives from the protected HKLM
-// Program Files registration, never the caller's environment, so the hook
-// process (which runs with the agent's environment) and the SYSTEM
+// other launcher. The standalone launcher path derives from the protected
+// HKLM Program Files registration, never the caller's environment, so the
+// hook process (which runs with the agent's environment) and the SYSTEM
 // lifecycle render and verify the same commands.
 func WindowsCodexStandaloneHookContract(hookBinary string) string {
 	layout, err := managed.StandaloneWindowsLayout()
@@ -1779,4 +1844,19 @@ func WindowsCodexStandaloneHookContract(hookBinary string) string {
 		return ""
 	}
 	return windowsCodexStandaloneHookContractFor(layout, hookBinary)
+}
+
+// WindowsCodexManagedHookContract is the hook contract every Windows Codex
+// machine-requirements command binds, for both profiles: the standalone
+// launcher's contract, else the default Codex contract, which registers
+// every event of the published group matrix. A bound command names its
+// event and contract and waits for the GUI-subsystem launcher. The Secure
+// Client profile used to keep the pre-1.0 call-operator command instead; the
+// hook refuses it (it names no event or contract) and the call operator does
+// not wait for the launcher, so its exit code (2 blocks) never reached Codex.
+func WindowsCodexManagedHookContract(hookBinary string) string {
+	if contract := WindowsCodexStandaloneHookContract(hookBinary); contract != "" {
+		return contract
+	}
+	return ResolveHookContract("codex", "").Contract.ContractID
 }

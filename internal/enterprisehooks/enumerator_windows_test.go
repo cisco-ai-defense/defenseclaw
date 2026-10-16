@@ -517,7 +517,42 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 // cycles. A NEW row is auto-authorized at the per-user CLI's
 // discovered version (macOS parity) — or dropped entirely if no
 // per-user CLI is present.
-func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
+func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
+	// Secure Client follows the discovered version (#1163).
+	setStandaloneProfileForTest(t, false)
+	enabled := true
+	previous := map[string]ManifestTarget{
+		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			Connector:    "codex",
+			AgentVersion: "0.145.0",
+			Enabled:      &enabled,
+			Deferred:     true,
+		},
+	}
+
+	// Match: preserve AgentVersion + Enabled + Deferred.
+	matched := ManifestTarget{
+		SID:       "s-1-5-21-1000-2000-3000-1001", // deliberate case
+		Connector: "codex",
+	}
+	if !applyPreviousRowState(&matched, previous, nil) {
+		t.Fatal("existing-row emission signal: want true, got false")
+	}
+	if matched.AgentVersion != "" {
+		t.Fatalf("stale version survived unavailable discovery: %q", matched.AgentVersion)
+	}
+	if matched.Enabled == nil || !*matched.Enabled {
+		t.Fatal("existing-row Enabled=true not preserved")
+	}
+	if !matched.Deferred {
+		t.Fatal("existing-row Deferred=true not preserved")
+	}
+}
+
+func TestApplyPreviousRowStatePreservesAgentVersionOutsideSecureClient(t *testing.T) {
+	// Outside Secure Client the recorded version is kept (origin/main).
+	setStandaloneProfileForTest(t, true)
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -575,6 +610,62 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 	}
 	if fresh.Deferred {
 		t.Fatal("new row Deferred: want false")
+	}
+}
+
+func TestApplyPreviousRowStateCursorHomeStateWithoutVersion(t *testing.T) {
+	// Presence-only admission is the Secure Client fallback (#1163).
+	setStandaloneProfileForTest(t, false)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The executable is outside all known installation roots. Home state is
+	// sufficient to discover a target, but must not invent a version.
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if !applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatal("Cursor home-state target was dropped without version metadata")
+	}
+	if fresh.AgentVersion != "" || !fresh.IsEnabled() || fresh.Deferred {
+		t.Fatalf("unexpected target disposition: version=%q enabled=%t deferred=%t", fresh.AgentVersion, fresh.IsEnabled(), fresh.Deferred)
+	}
+
+	disabled := false
+	previous := map[string]ManifestTarget{
+		previousManifestKey(fresh.SID, fresh.Connector): {
+			SID: fresh.SID, Connector: fresh.Connector,
+			AgentVersion: "3.21.16", Enabled: &disabled, Deferred: true,
+		},
+	}
+	if !applyPreviousRowState(&fresh, previous, nil) {
+		t.Fatal("existing Cursor target was dropped")
+	}
+	if fresh.AgentVersion != "" || fresh.IsEnabled() || !fresh.Deferred {
+		t.Fatal("home-state discovery changed prior authorization or retained stale version evidence")
+	}
+}
+
+// Outside Secure Client a newly discovered target without version evidence
+// is dropped even when the profile shows the agent is present.
+func TestApplyPreviousRowStateDropsCursorHomeStateWithoutVersionOutsideSecureClient(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	isolateWindowsCursorMachineVersion(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "cursor",
+	}
+	if applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatalf("unversioned Cursor target was admitted outside Secure Client: %+v", fresh)
 	}
 }
 

@@ -18,7 +18,7 @@ and invalid-response failures.
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Can be overridden per connector. See [Which value applies](#which-value-applies). |
+| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
@@ -51,6 +51,17 @@ Each connector's effective fail mode resolves in this order:
 When rule 2 keeps a connector open although the global value is `closed`,
 `defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
 `fail-mode=open`, so it does not read as drift.
+
+### Secure Client
+
+Under the Secure Client integration only, the hook delivery default of
+[spec 007](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/specs/007-hook-delivery-default/README.md)
+applies: an unset `guardrail.hook_fail_mode` resolves to `open`, independent
+of the guardrail mode, and an explicit `closed` (global or per connector) is
+always kept. The administrator owns that config, and the gateway resolves its
+default. Every other install, including OSS, the standalone enterprise profile
+and its managed Codex, Claude Code and Devin hooks, keeps the fail-closed rules
+above.
 
 Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
 their generated hooks stay open even when the effective mode is `closed`. See

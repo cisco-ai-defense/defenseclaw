@@ -7,6 +7,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -21,12 +22,9 @@ import (
 // account's own Windows session can install, so the target waits for that
 // account's next sign-in instead of failing the whole upgrade (GAP-0644).
 // A lock that cannot be read, or one this release wrote, is not from
-// another release; such a failure stays a failure. Standalone only: the
-// Secure Client profile is unchanged.
+// another release; such a failure stays a failure. Both profiles: a Secure
+// Client upgrade with a signed-out enrolled account failed the same way.
 func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, error) {
-	if !windowsEnterpriseStandaloneProcess() {
-		return "", false, nil
-	}
 	home, _, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
 	if err != nil {
 		return "", false, err
@@ -46,4 +44,17 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 		return "", false, nil
 	}
 	return written, true, nil
+}
+
+// WindowsSecureClientProfileProcess reports whether this guardian serves the
+// Secure Client profile rather than the standalone one.
+func WindowsSecureClientProfileProcess() bool {
+	return !windowsEnterpriseStandaloneProcess()
+}
+
+// IsWindowsEnterpriseNotLocalSystem reports the refusal of a session or
+// mutation check run outside LocalSystem, such as Setup's own verify as the
+// elevated administrator, which cannot query another account's session.
+func IsWindowsEnterpriseNotLocalSystem(err error) bool {
+	return errors.Is(err, errWindowsEnterpriseNotLocalSystem)
 }

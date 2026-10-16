@@ -3278,6 +3278,25 @@ class TestInitFailModeFlag(unittest.TestCase):
         raw = cfg["guardrail"].get("hook_fail_mode", "")
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
+    def test_omitting_flag_preserves_existing_setting(self):
+        # A re-run without --fail-mode keeps the saved value rather than
+        # resetting it to the closed new-install default.
+        args = [
+            "--non-interactive", "--yes", "--connector", "codex",
+            "--profile", "observe", "--scanner-mode", "local",
+            "--skip-install", "--no-start-gateway", "--no-verify", "--json-summary",
+        ]
+        first = self._invoke([*args, "--fail-mode", "open"])
+        self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
+        second = self._invoke(args)
+        self.assertEqual(second.exit_code, 0, second.output + (second.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        from defenseclaw.config import _normalize_hook_fail_mode
+        self.assertEqual(_normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")), "open")
+
 
 class TestInitHITLFlags(unittest.TestCase):
     """Pin --human-approval / --hilt-min-severity wiring through cmd_init.

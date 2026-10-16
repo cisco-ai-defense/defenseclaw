@@ -476,3 +476,25 @@ func TestResolversArePure(t *testing.T) {
 		t.Errorf("resolver call mutated GuardrailConfig: before=%+v after=%+v", before, *g)
 	}
 }
+
+// TestEffectiveHookFailMode_GlobalOpenIgnoresCase keeps the global resolver in
+// step with the per-connector branch and the Python resolver: the "open"
+// sentinel is matched case-insensitively after trimming, so a hand-edited
+// "Open" does not silently flip delivery to closed. Unset stays closed.
+func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
+	for _, raw := range []string{"Open", "OPEN", " open ", "\topEN\n"} {
+		g := &GuardrailConfig{Mode: "action", HookFailMode: raw}
+		if got := g.EffectiveHookFailMode(); got != "open" {
+			t.Errorf("EffectiveHookFailMode(%q) = %q, want open", raw, got)
+		}
+		if got := g.EffectiveHookFailModeFor("codex"); got != "open" {
+			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want open", raw, got)
+		}
+	}
+	for _, raw := range []string{"", "Closed", "opn", "open-ish"} {
+		g := &GuardrailConfig{HookFailMode: raw}
+		if got := g.EffectiveHookFailMode(); got != "closed" {
+			t.Errorf("EffectiveHookFailMode(%q) = %q, want closed", raw, got)
+		}
+	}
+}

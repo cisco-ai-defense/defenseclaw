@@ -310,7 +310,7 @@ func (c *OmnigentConnector) renderPolicyModule(opts SetupOpts) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := setupHookFailMode(opts)
 	// A managed standalone install on a unix host sends the bridge through
 	// the gateway's peer-authorized hook socket, like every other per-user
 	// hook there; everywhere else the socket is empty and TCP is kept.

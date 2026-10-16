@@ -703,14 +703,15 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 }
 
-func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
+func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
+	// Secure Client (#1163).
+	setStandaloneProfileForTest(t, false)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,
 	})
 	opts := windowsManagedInstallOptions(fixture)
-	// Observe-mode and legacy protected configurations may resolve to open.
-	// Windows enterprise native hooks must still publish and verify one
-	// authoritative fail-closed contract.
+	// Windows enterprise native hooks must publish and verify the configured
+	// open-mode contract as authoritative, including the protected lock record.
 	opts.HookFailMode = "open"
 	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatalf("Install with configured fail-open mode: %v", err)
@@ -719,8 +720,8 @@ func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
 		filepath.Join(fixture.home, ".defenseclaw"),
 		"claudecode",
 	)
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("managed Claude lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("managed Claude lock fail mode = %q, want open", lock.HookFailMode)
 	}
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify with the same configured fail-open input: %v", err)
@@ -1419,7 +1420,9 @@ func TestWindowsGenericCodexInstallVerifyAndUninstallLifecycle(t *testing.T) {
 	}
 }
 
-func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *testing.T) {
+func TestInstallWindowsGenericUsesUnionInsteadOfUserVersionCache(t *testing.T) {
+	// Secure Client (#1163).
+	setStandaloneProfileForTest(t, false)
 	fixture := newWindowsGenericCodexFixture(t)
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -1438,9 +1441,18 @@ func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *te
 	}
 	opts := fixture.opts
 	opts.AgentVersion = " \t "
-	_, err := Install(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
-		t.Fatalf("Install error = %v, want explicit version refusal before user cache fallback", err)
+	// This fixture models the generic per-user runtime, not Codex's protected
+	// machine requirements. Use the same entry point as its lifecycle test.
+	_, err := installWindowsGenericManagedResult(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Install error = %v, want unversioned union fallback", err)
+	}
+	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned || lock.HookFailMode != "open" {
+		t.Fatalf("fallback lock = %+v, want unversioned/open without user cache promotion", lock)
+	}
+	if _, err := verifyWindowsGenericManagedResult(context.Background(), opts); err != nil {
+		t.Fatalf("Verify unversioned union fallback: %v", err)
 	}
 }
 
@@ -2993,7 +3005,46 @@ func removeExactWindowsManagedRuntimeGenerationSnapshot(
 	}
 }
 
+// TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite is the
+// Secure Client contract (#1163): no agent-version gate.
+func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testing.T) {
+	setStandaloneProfileForTest(t, false)
+	for _, tc := range []struct {
+		name      string
+		connector string
+		version   string
+		wantErr   bool
+	}{
+		{name: "codex below", connector: "codex", version: "0.130.0"},
+		{name: "codex minimum", connector: "codex", version: "0.131.0"},
+		{name: "codex malformed", connector: "codex", version: "not-a-version"},
+		{name: "codex missing", connector: "codex"},
+		{name: "claude missing", connector: "claudecode"},
+		{name: "cursor missing", connector: "cursor"},
+		{name: "claude below", connector: "claudecode", version: "2.1.151"},
+		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
+		{name: "cursor below", connector: "cursor", version: "1.6.9"},
+		{name: "cursor minimum", connector: "cursor", version: "1.7.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireWindowsEnterpriseManagedAgentVersion(tc.connector, tc.version)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf(
+					"requireWindowsEnterpriseManagedAgentVersion(%q, %q) error = %v, wantErr=%t",
+					tc.connector,
+					tc.version,
+					err,
+					tc.wantErr,
+				)
+			}
+		})
+	}
+}
+
+// TestWindowsEnterpriseManagedAgentVersionMinimums keeps origin/main's
+// version gate for every profile but Secure Client.
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
 	for _, tc := range []struct {
 		name      string
 		connector string
@@ -3003,6 +3054,7 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 		{name: "codex below", connector: "codex", version: "0.130.0", wantErr: true},
 		{name: "codex minimum", connector: "codex", version: "0.131.0"},
 		{name: "codex malformed", connector: "codex", version: "not-a-version", wantErr: true},
+		{name: "codex missing", connector: "codex", wantErr: true},
 		{name: "claude below", connector: "claudecode", version: "2.1.151", wantErr: true},
 		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
 		{name: "cursor below", connector: "cursor", version: "1.6.9", wantErr: true},
@@ -3020,6 +3072,32 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 				)
 			}
 		})
+	}
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(" \t "); err == nil ||
+		!strings.Contains(err.Error(), "requires explicit agent_version") {
+		t.Fatalf("empty agent_version outside Secure Client = %v, want the explicit version refusal", err)
+	}
+}
+
+// TestWindowsEnterpriseHookFailModeIsClosedOutsideSecureClient keeps
+// origin/main's rule: outside Secure Client the managed Codex, Claude Code
+// and Cursor hooks never inherit a fail-open setting, and the standalone
+// per-user connectors always fail closed. Under Secure Client (#1163) the
+// configured policy wins and an unset policy is open.
+func TestWindowsEnterpriseHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
+	for _, connectorName := range []string{"codex", "claudecode", "cursor"} {
+		setStandaloneProfileForTest(t, true)
+		for _, configured := range []string{"", "open", "Open", "closed"} {
+			if got := windowsEnterpriseHookFailMode(connectorName, configured); got != "closed" {
+				t.Fatalf("standalone %s configured %q = %q, want closed", connectorName, configured, got)
+			}
+		}
+		setStandaloneProfileForTest(t, false)
+		for configured, want := range map[string]string{"": "open", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
+			if got := windowsEnterpriseHookFailMode(connectorName, configured); got != want {
+				t.Fatalf("secure client %s configured %q = %q, want %q", connectorName, configured, got, want)
+			}
+		}
 	}
 }
 

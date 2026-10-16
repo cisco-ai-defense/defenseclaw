@@ -103,6 +103,11 @@ type templateData struct {
 	SandboxMaxTime           int
 	SandboxRetryMaxTime      int
 	SandboxSessionEndMaxTime int
+
+	// CursorTargetModesJSON64 is the canonical, token-free protected
+	// SID-to-delivery-mode map baked into the managed Windows Cursor adapter;
+	// empty for every other render.
+	CursorTargetModesJSON64 string
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -115,8 +120,14 @@ type templateData struct {
 // accept an observability gap than a hard block during a DefenseClaw
 // outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
 // runtime, or through the per-connector setup flow (which also
-// persists to guardrail.hook_fail_mode in config.yaml).
+// persists to guardrail.hook_fail_mode in config.yaml). Secure Client is the
+// one profile whose unset mode renders open (secureClientHookFailMode, #1163).
 const defaultHookFailMode = "closed"
+
+// secureClientHookFailMode is the unset delivery mode under the Secure Client
+// profile (#1163): availability failures are logged and the event allowed;
+// valid policy denials still block.
+const secureClientHookFailMode = "open"
 
 // windowsHookAdapterTimeoutMS matches the existing 10-second connector request
 // budget for adapters that do not have a larger documented host contract.
@@ -144,16 +155,26 @@ const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "open" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "closed" so a typo never accidentally puts
-// the agent into fail-OPEN mode at the hook failure boundary
-// (CodeGuard rule codeguard-0-authorization-access-control: deny by
-// default).
+// "open" (matched case-insensitively after trimming, like the config
+// resolver) collapses to "closed", so an empty value or a typo never
+// accidentally puts the agent into fail-OPEN mode at the hook failure
+// boundary (CodeGuard rule codeguard-0-authorization-access-control: deny
+// by default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "open" {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"
+}
+
+// setupHookFailMode is the delivery mode a render takes from opts without a
+// connector-specific rule: an explicit value normalized, and an unset value
+// open under Secure Client (#1163) and closed everywhere else.
+func setupHookFailMode(opts SetupOpts) string {
+	if strings.TrimSpace(opts.HookFailMode) == "" && opts.SecureClientHookDelivery {
+		return secureClientHookFailMode
+	}
+	return normalizeHookFailMode(opts.HookFailMode)
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -814,7 +835,12 @@ func managedNativeHookRuntimeConnector(name string) bool {
 // Other platforms retain the existing private atomic writer.
 func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
+	failMode ...string,
 ) error {
+	mode := defaultHookFailMode
+	if len(failMode) > 0 {
+		mode = normalizeHookFailMode(failMode[0])
+	}
 	name := normalizeConnectorName(connectorName)
 	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
@@ -831,16 +857,17 @@ func ReconcileManagedNativeHookRuntime(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		mode,
 		true,
 		writeFile,
 	)
 }
 
 // ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
-// endpoint agreement, connector closed mode, flat record, and scoped token.
+// endpoint agreement, canonical delivery mode, flat record, and scoped token.
 func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
+	expectedFailMode ...string,
 ) error {
 	name := normalizeConnectorName(connectorName)
 	if !managedNativeHookRuntimeConnector(name) {
@@ -873,12 +900,14 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	mode := state.FailModes[name]
+	if (mode != "closed" && mode != "open") ||
+		(len(expectedFailMode) > 0 && mode != normalizeHookFailMode(expectedFailMode[0])) {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			strings.Join(expectedFailMode, ","),
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -892,8 +921,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != mode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, mode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -1463,8 +1492,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  1. Cursor observe mode always resolves to "open"; host failClosed and
-//     adapter transport failures must not enforce outside action mode.
+//  1. Outside Secure Client, Cursor observe mode always resolves to "open"
+//     and action mode to "closed"; host failClosed and adapter transport
+//     failures must not enforce outside action mode.
 //  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
 //     "open" or "closed" — wins. The operator answered
 //     `defenseclaw setup guardrail`'s fail-mode prompt (or used
@@ -1472,9 +1502,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  3. EMPTY/unset opts.HookFailMode uses the connector default. Cursor uses
-//     "open" to match the vendor's documented command-hook default; other
-//     connectors use defaultHookFailMode ("closed").
+//  3. EMPTY/unset opts.HookFailMode uses the connector default:
+//     defaultHookFailMode ("closed"), upgraded from the codex/claudecode
+//     enforcement flags. Under Secure Client (opts.SecureClientHookDelivery,
+//     #1163) an unset mode is "open" for every connector, Cursor included.
 //  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -1545,12 +1576,20 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
 // given the operator's setup opts and the connector identity.
-// The explicit string in opts.HookFailMode normally wins; Cursor first applies
-// its observe/action boundary because observe is never allowed to block.
-// An empty value falls back to the connector-default and is upgraded to
-// "closed" when the operator has set the matching enforcement flag for
-// codex / claudecode (avarice F-0681).
+//
+// Under Secure Client (opts.SecureClientHookDelivery, #1163) the explicit
+// string in opts.HookFailMode always wins and an empty value is open:
+// guardrail mode and enforcement flags do not change availability policy.
+//
+// Everywhere else the explicit string in opts.HookFailMode normally wins;
+// Cursor first applies its observe/action boundary because observe is never
+// allowed to block. An empty value falls back to the connector-default and is
+// upgraded to "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if opts.SecureClientHookDelivery {
+		return setupHookFailMode(opts)
+	}
 	if c != nil && c.Name() == "cursor" {
 		// Cursor mode owns its availability posture: action registrations are
 		// fail-closed and observe registrations are fail-open. This prevents a

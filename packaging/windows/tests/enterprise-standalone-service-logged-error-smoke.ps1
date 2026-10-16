@@ -62,7 +62,7 @@ try {
 
             # GAP-0946: a standalone stop that the service process does not
             # answer ends that process after the stop budget and continues;
-            # Secure Client keeps the plain Stop-Service failure.
+            # Secure Client keeps the plain Stop-Service path (see below).
             # Windows PowerShell 5.1 loads System.ServiceProcess on first use.
             [void](Microsoft.PowerShell.Management\Get-Service -Name 'EventLog' -ErrorAction SilentlyContinue)
             $script:ServiceStopTimeoutSeconds = 1
@@ -127,16 +127,40 @@ try {
             $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Force -Value { }
             $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Running
             $script:SmokeEnded = @()
+            # Secure Client keeps the release-branch bulldoze posture: a failed
+            # Stop-Service is an advisory warning and the caller proceeds to
+            # delete; only DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 makes it
+            # refuse. It never ends the service process itself.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
-            $secureClientFailed = $false
+            $strictEnv = $script:TrustStrictAncestorsEnv
+            $originalStrict = [Environment]::GetEnvironmentVariable($strictEnv, 'Process')
             try {
-                Stop-DefenseClawService -Name $hung
+                [Environment]::SetEnvironmentVariable($strictEnv, $null, 'Process')
+                $secureClientWarnings = @()
+                try {
+                    Stop-DefenseClawService -Name $hung -WarningVariable +secureClientWarnings -WarningAction SilentlyContinue
+                }
+                catch {
+                    $failures.Add("a Secure Client stop failure was not advisory: $($_.Exception.Message)")
+                }
+                if (@($secureClientWarnings).Count -lt 1 -or @($script:SmokeEnded).Count -ne 0) {
+                    $failures.Add('Secure Client stop behaviour changed: no advisory warning, or the process was ended')
+                }
+
+                [Environment]::SetEnvironmentVariable($strictEnv, '1', 'Process')
+                $secureClientFailed = $false
+                try {
+                    Stop-DefenseClawService -Name $hung -WarningAction SilentlyContinue
+                }
+                catch {
+                    $secureClientFailed = $true
+                }
+                if (-not $secureClientFailed -or @($script:SmokeEnded).Count -ne 0) {
+                    $failures.Add('Secure Client strict stop behaviour changed: the stop failure did not refuse')
+                }
             }
-            catch {
-                $secureClientFailed = $true
-            }
-            if (-not $secureClientFailed -or @($script:SmokeEnded).Count -ne 0) {
-                $failures.Add('Secure Client stop behaviour changed')
+            finally {
+                [Environment]::SetEnvironmentVariable($strictEnv, $originalStrict, 'Process')
             }
         }
         finally {

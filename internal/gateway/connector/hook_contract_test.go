@@ -538,6 +538,40 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 	}
 }
 
+func TestBestEffortHookContractUsesDefaultUnionWithoutClaimingCompatibility(t *testing.T) {
+	resolution := ResolveHookContract("codex", "codex nightly")
+	if resolution.Status != HookCompatibilityUnknown {
+		t.Fatalf("Status=%q want %q", resolution.Status, HookCompatibilityUnknown)
+	}
+	fallback := BestEffortHookContract(resolution)
+	if fallback.ContractID != "codex-hooks-v4" || !fallback.DefaultForUnversioned {
+		t.Fatalf("fallback=%+v, want reviewed Codex default", fallback)
+	}
+
+	events := make(map[string]struct{}, len(fallback.Events))
+	for _, event := range fallback.Events {
+		events[event] = struct{}{}
+	}
+	for _, contract := range KnownHookContracts("codex") {
+		for _, event := range contract.Events {
+			if _, ok := events[event]; !ok {
+				t.Fatalf("best-effort contract omitted %s from %s", event, contract.ContractID)
+			}
+		}
+	}
+
+	profile := NewCodexConnector().HookProfile(SetupOpts{
+		AgentVersion:   "codex nightly",
+		HookContractID: fallback.ContractID,
+	})
+	if profile.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("fallback profile compatibility=%q, want unknown", profile.CompatibilityStatus)
+	}
+	if profile.ContractID != fallback.ContractID {
+		t.Fatalf("fallback profile contract=%q want %q", profile.ContractID, fallback.ContractID)
+	}
+}
+
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
 	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
@@ -1576,6 +1610,7 @@ func TestManagedHookContractLockRecoveryReproducesProtectedBytes(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"scoped-test-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -3427,5 +3462,29 @@ func TestHookContractGitBuildVersion(t *testing.T) {
 	}
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.5+4977"); got.UntestedVersion || got.NormalizedVersion != "0.21.5" {
 		t.Fatalf("hermes release = %+v", got)
+	}
+}
+
+// The best-effort union keeps the default's ContractID, so it must not pull in
+// events of a contract gated above the default's range: an unversioned Claude
+// Code setup renders exactly the v1 matrix a pin of claudecode-hooks-v1
+// verifies (no v2-only DirectoryAdded).
+func TestBestEffortHookContractExcludesNewerGatedContracts(t *testing.T) {
+	fallback := BestEffortHookContract(ResolveHookContract("claudecode", ""))
+	pinned, ok := hookContractByID("claudecode", fallback.ContractID)
+	if !ok || fallback.ContractID != "claudecode-hooks-v1" {
+		t.Fatalf("fallback=%s registered=%t, want claudecode-hooks-v1", fallback.ContractID, ok)
+	}
+	if strings.Join(fallback.Events, ",") != strings.Join(pinned.Events, ",") {
+		t.Fatalf("unversioned events=%v, want the pinned v1 events %v", fallback.Events, pinned.Events)
+	}
+	for _, event := range fallback.Events {
+		if event == "DirectoryAdded" {
+			t.Fatal("unversioned Claude Code contract includes v2-only DirectoryAdded")
+		}
+	}
+	groups, err := claudeCodeHookGroupsForSetup(SetupOpts{})
+	if err != nil || len(groups) != len(hookGroups) {
+		t.Fatalf("unversioned setup groups=%d err=%v, want %d", len(groups), err, len(hookGroups))
 	}
 }

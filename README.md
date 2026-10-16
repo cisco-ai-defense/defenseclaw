@@ -1,3 +1,4 @@
+<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 <div align="center">
 
 <pre>
@@ -27,6 +28,12 @@ DefenseClaw combines a Python operator CLI, a Go gateway, connector hooks, polic
 scanners, and observability exporters. It is an enforcement and evidence layer;
 it does not prove that an agent, model interaction, or third-party capability is
 risk-free.
+
+Hooks fail closed by default. Only Cisco Secure Client deployments default
+hook delivery to fail-open when no policy is specified; there an explicit
+fail-closed setting and valid policy denials remain effective. See the
+[hook delivery contract](docs/specs/007-hook-delivery-default/README.md) for
+its Secure Client scope and verification.
 
 ## Get started
 

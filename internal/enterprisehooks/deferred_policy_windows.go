@@ -26,6 +26,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	manifest Manifest,
 	pending []ManifestTarget,
 	apiAddr string,
+	hookFailMode ...string,
 ) error {
 	if len(pending) == 0 {
 		return nil
@@ -170,12 +171,14 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			return rollback(err)
 		}
 		setup := connector.SetupOpts{
-			APIAddr:           apiAddr,
-			HookFailMode:      "closed",
-			ManagedEnterprise: true,
-			HookExecutable:    hookExecutable,
-			DataDir:           target.dataDir,
-			AgentVersion:      strings.TrimSpace(target.manifest.AgentVersion),
+			APIAddr: apiAddr,
+			// Closed outside Secure Client; open under Secure Client (#1163).
+			HookFailMode:             canonicalHookFailMode(""),
+			SecureClientHookDelivery: secureClientHookDelivery(),
+			ManagedEnterprise:        true,
+			HookExecutable:           hookExecutable,
+			DataDir:                  target.dataDir,
+			AgentVersion:             strings.TrimSpace(target.manifest.AgentVersion),
 		}
 		switch name {
 		case "claudecode":
@@ -214,6 +217,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			rollbacks = append(rollbacks, undo)
 			existingClaude[strings.ToUpper(target.sid)] = struct{}{}
 		case "cursor":
+			setup.HookFailMode = deferredWindowsCursorFailMode(target.manifest.AgentVersion, hookFailMode...)
 			if currentDataDir, alreadyStaged := existingCursor[strings.ToUpper(target.sid)]; alreadyStaged {
 				if !sameWindowsEnterprisePath(currentDataDir, target.dataDir) {
 					return rollback(errors.New("enterprise hooks: existing deferred Cursor target has a different data directory"))
@@ -257,6 +261,24 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		}
 	}
 	return nil
+}
+
+// deferredWindowsCursorFailMode is a pending Cursor row's delivery mode.
+// Outside Secure Client it is always closed (origin/main). Under Secure
+// Client (#1163) an unverified version selects open delivery, otherwise the
+// configured policy applies (unset is open).
+func deferredWindowsCursorFailMode(version string, configured ...string) string {
+	if !secureClientHookDelivery() {
+		return "closed"
+	}
+	mode := ""
+	if len(configured) > 0 {
+		mode = configured[0]
+	}
+	if connector.HookContractNeedsActionOverride(connector.ResolveHookContract("cursor", version)) {
+		return "open"
+	}
+	return canonicalHookFailMode(mode)
 }
 
 func windowsDeferredPolicyManifestKey(target ManifestTarget) string {

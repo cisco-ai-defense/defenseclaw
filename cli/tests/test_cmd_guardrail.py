@@ -984,6 +984,15 @@ class PerConnectorFailModeTests(unittest.TestCase):
         patcher = patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Transaction snapshots include agent config. Never snapshot or restore
+        # a developer's real ~/.codex or ~/.claude during rollback tests.
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        environment = patch.dict(os.environ, {"HOME": directory.name, "USERPROFILE": directory.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()

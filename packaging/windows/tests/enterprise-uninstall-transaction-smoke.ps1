@@ -9,6 +9,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# This smoke exercises the refuse-on-drift validator contract (e.g. the
+# "managed DACL is not protected after exact ACL replacement" throw and
+# strict identity verdicts). The non-strict managed_enterprise bulldoze
+# path intentionally relaxes some of those checks via Write-DefenseClaw-
+# AclSelfHealAdvisory. Pin strict mode for the duration of this smoke so
+# the validator continues to fail the specific drift scenarios the test
+# cases inject. Production deployments default to non-strict; strict is
+# an operator opt-in and the posture these tests certify.
+$env:DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS = '1'
+
 $modulePath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )
@@ -1410,6 +1420,25 @@ targets:
             $script:HarnessState.events.Add("owned:$Name")
             $script:HarnessState.owned_checks++
         }
+        function script:Assert-DefenseClawStandaloneSensorHelperOwned {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][hashtable]$Layout
+            )
+            # Services in this harness exist only in HarnessState, not HKLM.
+            # Keep the sensor-helper check on that same simulated SCM boundary
+            # and preserve the ownership event and foreign-service refusal.
+            if ($Name -cne [string]$Layout.SensorHelperServiceName) {
+                throw "sensor-helper ownership check crossed the fixture scope: $Name"
+            }
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $Name `
+                -ExpectedGatewayPath $Layout.GatewayPath `
+                -ExpectedSensorHelperImage (
+                    '"{0}" --managed-enterprise' -f $Layout.SensorHelperPath
+                ) `
+                -SensorHelper
+        }
         function script:Assert-DefenseClawManagedServiceConfigurations {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -1961,7 +1990,8 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$Purge
+                [switch]$Purge,
+                [switch]$NativeSealed
             )
             return Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
@@ -2267,6 +2297,11 @@ targets:
                                 -GatewayServiceSID 'S-1-5-80-1-2-3-4-5' `
                                 -TransactionCreatedServicePresent)
                         }
+                        if ($name -eq 'DefenseClawSensorHelper') {
+                            Assert-DefenseClawStandaloneSensorHelperOwned `
+                                -Name $name `
+                                -Layout $Layout
+                        }
                         $script:HarnessState.events.Add(
                             "remove-service:$name"
                         )
@@ -2388,7 +2423,9 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 $ManagedHooksActivation,
                 [bool]$DeferredConfigPending = $false,
-                [bool]$Installed = $true
+                [bool]$Installed = $true,
+                [string]$InstallRootIdentity = '',
+                [string]$StateRootIdentity = ''
             )
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
@@ -2411,7 +2448,8 @@ targets:
         function script:Set-DefenseClawPreservedStateAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
-                [Parameter(Mandatory)][string]$GatewayServiceSID
+                [Parameter(Mandatory)][string]$GatewayServiceSID,
+                [switch]$Purge
             )
             if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
                 throw 'preserved-state ACL restoration lost its gateway SID'
@@ -4347,6 +4385,18 @@ targets:
                             'fresh install rollback retired authenticated ' +
                             'authority before exact target/IPC cleanup'
                         )
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.events.IndexOf(
+                                'owned:DefenseClawSensorHelper'
+                            ) -ge 0 -and
+                            $script:HarnessState.events.IndexOf(
+                                'owned:DefenseClawSensorHelper'
+                            ) -lt $script:HarnessState.events.IndexOf(
+                                'remove-service:DefenseClawSensorHelper'
+                            )
+                        ) `
+                        -Message 'fresh install rollback removed its sensor helper without an ownership check'
                     Assert-Harness `
                         -Condition (
                             -not [bool]$script:HarnessState.service_exists[

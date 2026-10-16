@@ -311,3 +311,78 @@ func TestWindowsAgentVersionExplainRejectsControlCharsInVersion(t *testing.T) {
 		}
 	}
 }
+
+func isolateWindowsCursorMachineVersion(t *testing.T) {
+	t.Helper()
+	previous := windowsMachineScopedCursorPackageJSON
+	windowsMachineScopedCursorPackageJSON = filepath.Join(t.TempDir(), "absent-package.json")
+	t.Cleanup(func() { windowsMachineScopedCursorPackageJSON = previous })
+}
+
+func TestWindowsAgentPresenceFromHomeState(t *testing.T) {
+	isolateWindowsCursorMachineVersion(t)
+	cases := []struct {
+		name      string
+		connector string
+		path      string
+		dir       bool
+		want      bool
+	}{
+		{"Cursor extensions directory", "cursor", filepath.Join(".cursor", "extensions"), true, true},
+		{"Cursor extensions is a regular file", "cursor", filepath.Join(".cursor", "extensions"), false, false},
+		{"empty Cursor directory", "cursor", ".cursor", true, false},
+		{"DefenseClaw hook config only", "cursor", filepath.Join(".cursor", "hooks.json"), false, false},
+		{"known Cursor executable", "cursor", filepath.Join("AppData", "Local", "Programs", "cursor", "Cursor.exe"), false, true},
+		{"Claude projects directory", "claudecode", filepath.Join(".claude", "projects"), true, true},
+		{"Claude projects is a regular file", "claudecode", filepath.Join(".claude", "projects"), false, false},
+		{"Codex sessions directory", "codex", filepath.Join(".codex", "sessions"), true, true},
+		{"Codex sessions is a regular file", "codex", filepath.Join(".codex", "sessions"), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, tc.path)
+			if tc.dir {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := discoverWindowsAgentVersion(home, tc.connector); got != "" {
+				t.Fatalf("fixture unexpectedly provided version evidence: %q", got)
+			}
+			if got := windowsAgentPresence(home, tc.connector); got != tc.want {
+				t.Fatalf("presence = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsCursorPresenceRejectsReparseHomeState(t *testing.T) {
+	isolateWindowsCursorMachineVersion(t)
+	for _, leaf := range []string{".cursor", filepath.Join(".cursor", "extensions")} {
+		t.Run(leaf, func(t *testing.T) {
+			home, destination := t.TempDir(), t.TempDir()
+			link := filepath.Join(home, leaf)
+			if leaf == ".cursor" {
+				if err := os.Mkdir(filepath.Join(destination, "extensions"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(destination, link); err != nil {
+				t.Skipf("directory symlink creation is unavailable: %v", err)
+			}
+			if windowsAgentPresence(home, "cursor") {
+				t.Fatal("reparse-backed Cursor state was accepted as presence")
+			}
+		})
+	}
+}

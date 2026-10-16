@@ -37,7 +37,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
+	if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
@@ -79,20 +79,21 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}
 
 	setup := connector.SetupOpts{
-		ProxyAddr:          strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:            strings.TrimSpace(opts.APIAddr),
-		APIToken:           strings.TrimSpace(opts.APIToken),
-		HookAPIToken:       strings.TrimSpace(opts.APIToken),
-		HookAPITokenScoped: true,
-		OTLPPathToken:      strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:        false,
-		ManagedEnterprise:  true,
-		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       windowsEnterpriseHookFailMode("claudecode", opts.HookFailMode),
-		HILTEnabled:        opts.HILTEnabled,
-		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
-		HookContractID:     strings.TrimSpace(opts.HookContractID),
-		HookExecutable:     hookExecutable,
+		ProxyAddr:                strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                  strings.TrimSpace(opts.APIAddr),
+		APIToken:                 strings.TrimSpace(opts.APIToken),
+		HookAPIToken:             strings.TrimSpace(opts.APIToken),
+		HookAPITokenScoped:       true,
+		OTLPPathToken:            strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:              false,
+		ManagedEnterprise:        true,
+		WorkspaceDir:             strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:             windowsEnterpriseHookFailMode("claudecode", opts.HookFailMode),
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HILTEnabled:              opts.HILTEnabled,
+		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
+		HookContractID:           strings.TrimSpace(opts.HookContractID),
+		HookExecutable:           hookExecutable,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return InstallResult{}, err
@@ -139,14 +140,11 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		); err != nil {
 			return err
 		}
-		if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
+		if err := requireWindowsEnterpriseAgentVersionOutsideSecureClient(setup.AgentVersion); err != nil {
 			return err
 		}
-		if setup.HookContractID == "" {
-			resolution := resolveHookContract(conn.Name(), setup.AgentVersion)
-			setup.HookContractID = resolution.Contract.ContractID
-		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+		setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+		if err != nil {
 			return err
 		}
 		// A standalone deployment renders the one machine-wide body from the
@@ -267,6 +265,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			setup.DataDir,
 			setup.APIAddr,
 			conn.Name(),
+			setup.HookFailMode,
 		); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err))
 		}
@@ -295,6 +294,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			lockEntry.ContractID,
 			lockUpdatedAt,
 			entryUpdatedAt,
+			setup.HookFailMode,
 		)
 		if err != nil {
 			return fail(fmt.Errorf(
@@ -495,6 +495,7 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		dataDir,
 		setup.APIAddr,
 		conn.Name(),
+		setup.HookFailMode,
 	); err != nil {
 		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
 	}

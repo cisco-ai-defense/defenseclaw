@@ -6777,14 +6777,36 @@ function Assert-AmpPluginPrivateACL([string]$PluginPath) {
     Write-Result 'amp:private-plugin' pass 'regular protected owner-and-SYSTEM-only plugin plus structured backup authority verified'
 }
 
+function Test-AmpPluginSelfHealReadRetry([Exception]$Exception) {
+    $cause = $Exception.GetBaseException()
+    # ReadAllBytes can race the protected publication handle after the name
+    # becomes visible, or a replacement between Test-Path and the read.
+    # Do not retry permission, malformed-path or unrelated I/O failures.
+    return ($cause -is [IO.IOException] -and
+        ($cause.HResult -band 0xFFFF) -in @(2, 32, 33))
+}
+
 function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     if ($Connector -ne 'amp') { return }
     Remove-Item -LiteralPath $PluginPath -Force -ErrorAction Stop
     $restored = $false
+    $lastState = 'missing'
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 250
-        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) { continue }
-        $actual = [IO.File]::ReadAllBytes($PluginPath)
+        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) {
+            $lastState = 'missing'
+            continue
+        }
+        try {
+            $actual = [IO.File]::ReadAllBytes($PluginPath)
+        } catch {
+            if (Test-AmpPluginSelfHealReadRetry $_.Exception) {
+                $lastState = 'transient-read-error'
+                continue
+            }
+            throw
+        }
+        $lastState = 'content-mismatch'
         if ([Convert]::ToBase64String($ExpectedBytes) -ceq
             [Convert]::ToBase64String($actual)) {
             $restored = $true
@@ -6792,7 +6814,8 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
         }
     }
     if (-not $restored) {
-        throw 'Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds'
+        # Report only the restoration state, never plugin contents or credentials.
+        throw "Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds (last state: $lastState)"
     }
     Assert-AmpPluginPrivateACL $PluginPath
     Write-Result 'amp:self-heal' pass 'live connector guard restored the deleted plugin byte-for-byte'
@@ -6846,6 +6869,7 @@ function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
 }
 
 function Assert-DoctorWindowsHookRegistration {
+    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'closed')
     if ($Connector -eq 'opencode') {
         Assert-OpenCodePluginContract
         return
@@ -6893,7 +6917,7 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
-            'const DC_FAIL_MODE: string = "closed"',
+            ('const DC_FAIL_MODE: string = "' + $ExpectedFailMode + '"'),
             'const DC_TIMEOUT_MS = 10000',
             'new AbortController()',
             'ctx.ui.confirm',
@@ -9451,6 +9475,32 @@ function Invoke-ContractRun {
     Set-IsolatedGatewayPort
     Invoke-Setup observe
     Assert-DoctorHookRegistration
+    if ($Connector -eq 'amp') {
+        # Observe keeps a plugin without a connector override open outside
+        # Secure Client, even when the global delivery policy is closed.
+        # Round-trip the global policy and restore closed for the action phase,
+        # where the Windows registration assertion below verifies it takes effect.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        # A failed restore must not mask the open-mode failure that caused
+        # it: keep the primary error, warn about the restore, rethrow primary.
+        $ampFailModeError = $null
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+            Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        } catch {
+            $ampFailModeError = $_
+        }
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+        } catch {
+            if ($null -eq $ampFailModeError) { throw }
+            Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
+        }
+        if ($null -ne $ampFailModeError) { throw $ampFailModeError }
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+    }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
     Invoke-Hook $blockEvent $blockFixture allow $true
@@ -9464,7 +9514,10 @@ function Invoke-ContractRun {
     } finally {
         Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     }
-    Assert-DoctorWindowsHookRegistration
+    Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+    if ($Connector -eq 'amp') {
+        Write-Result 'amp:delivery-mode-contract' pass 'global policy updates preserve observe compatibility; restored closed policy renders in action mode'
+    }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }
     if (Test-Path -LiteralPath $session) { Invoke-Hook $sessionEvent $session allow }

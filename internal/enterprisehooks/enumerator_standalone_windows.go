@@ -180,7 +180,13 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		// A disabled row is an administrator decision the guardian never
 		// installs; keep it so rediscovery cannot re-enable it.
 		if !prev.IsEnabled() {
-			return applyPreviousRowState(row, previous, logf)
+			emit := applyPreviousRowState(row, previous, logf)
+			// The standalone profile keeps the whole prior row, version
+			// included. applyPreviousRowState follows the discovered version
+			// for Secure Client known rows (#1163); a disabled standalone
+			// row is never installed, so there is no newer evidence to take.
+			row.AgentVersion = prev.AgentVersion
+			return emit
 		}
 		version := prev.AgentVersion
 		// notFollowed is an installed version the row does not take, and

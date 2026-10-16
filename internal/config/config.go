@@ -1749,6 +1749,10 @@ type GuardrailConfig struct {
 	//     the connector/event exposes a blocking response. Migrated legacy
 	//     configs can retain an explicit "open".
 	//
+	// Secure Client is the one exception: when this key is unset, Secure
+	// Client resolves it to "open" (#1163); an explicit "closed" still wins.
+	// See Config.EffectiveHookFailModeForConnector.
+	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See
 	// internal/gateway/connector/hooks/_hardening.sh for the runtime contract.
@@ -2231,7 +2235,7 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
 		return "closed"
 	}
-	if g.HookFailMode == "open" {
+	if strings.EqualFold(strings.TrimSpace(g.HookFailMode), "open") {
 		return "open"
 	}
 	return "closed"
@@ -3643,7 +3647,9 @@ func normalizeDeploymentMode(mode string) string {
 }
 
 // applySecureClientScannerDefaults preserves the v8 scanner defaults when
-// Secure Client omits these keys. Explicit settings still win.
+// Secure Client omits these keys, and leaves an omitted
+// guardrail.hook_fail_mode unset so Secure Client resolves it to open.
+// Explicit settings still win.
 func applySecureClientScannerDefaults(cfg *Config) {
 	if !cfg.SecureClientIntegration() {
 		return
@@ -3653,6 +3659,12 @@ func applySecureClientScannerDefaults(cfg *Config) {
 	}
 	if !viper.InConfig("scanners.skill_scanner.policy") {
 		cfg.Scanners.SkillScanner.Policy = "permissive"
+	}
+	// Secure Client hooks fail open when hook_fail_mode is unset (#1163).
+	// Drop the platform default ("closed") so the resolver sees the key as
+	// unset; an explicit value in the source still wins.
+	if !viper.InConfig("guardrail.hook_fail_mode") {
+		cfg.Guardrail.HookFailMode = ""
 	}
 }
 

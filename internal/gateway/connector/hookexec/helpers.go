@@ -18,6 +18,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -105,7 +106,14 @@ func isTracestateChar(c byte) bool {
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
 // mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
 // a read-only home or full disk never changes the hook's decision.
-func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
+func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	outcome := "fail_closed"
+	if !blocked {
+		outcome = "fail_open"
+		// Quote diagnostics so an unexpected transport error cannot forge lines.
+		// Never include request/response bodies or authentication credentials.
+		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+	}
 	if opts.Home == "" {
 		return
 	}
@@ -120,6 +128,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 		Reason    string `json:"reason"`
 		Category  string `json:"category"`
 		FailMode  string `json:"fail_mode"`
+		Outcome   string `json:"outcome"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
@@ -127,6 +136,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,
+		Outcome:   outcome,
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {

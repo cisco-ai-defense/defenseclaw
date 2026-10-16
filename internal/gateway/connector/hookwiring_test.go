@@ -322,6 +322,7 @@ func seedManagedHookRuntimeForValidation(
 		"127.0.0.1:18970",
 		connectorName,
 		"scoped-test-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}

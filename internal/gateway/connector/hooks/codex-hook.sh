@@ -79,7 +79,9 @@ defenseclaw_harden_env
 # 429, an unversioned placeholder a relay 500), so no failed, refused or
 # unparseable reply may ever turn into an allow.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
+# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains
@@ -89,7 +91,7 @@ BOUND_CONTRACT=
 
 fail_binding() {
   local reason="$1"
-  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook binding error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -140,7 +142,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
   defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -185,7 +187,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Codex shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
   case "$PAYLOAD_EVENT" in
@@ -213,7 +215,7 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

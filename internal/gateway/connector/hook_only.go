@@ -1559,7 +1559,7 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := setupHookFailMode(opts)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}

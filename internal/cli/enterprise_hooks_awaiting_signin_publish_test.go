@@ -64,6 +64,9 @@ func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	stubEnterpriseHookTokenSources(t)
 	awaitingSignInTestPlatformSetup(t)
+	previousSecureClient := enterpriseHookReconcileSecureClient
+	t.Cleanup(func() { enterpriseHookReconcileSecureClient = previousSecureClient })
+	enterpriseHookReconcileSecureClient = func() bool { return false }
 	previousManifest, previousAPI, previousProxy := enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr
 	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
 	previousSession, previousCleanup := enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup

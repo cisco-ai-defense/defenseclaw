@@ -1192,7 +1192,7 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
-			Contract:          defaultHookContract(contracts),
+			Contract:          bestEffortHookContract(contracts),
 		}
 	}
 	if gitBuildVersionRE.MatchString(raw) {
@@ -1382,6 +1382,19 @@ func exactAgentVersionMatch(raw string, expected []string) bool {
 	return false
 }
 
+// BestEffortHookContract returns the reviewed contract DefenseClaw may wire
+// when version evidence is unavailable or unsupported. Runtime and response
+// semantics come from the connector's default_for_unversioned contract, while
+// its event list is the stable union of every registered contract.
+// The compatibility status remains unchanged: callers must not describe this
+// fallback as version-verified.
+func BestEffortHookContract(resolution HookContractResolution) HookContract {
+	if resolution.Status == HookCompatibilityKnown && resolution.Contract.ContractID != "" {
+		return resolution.Contract
+	}
+	return bestEffortHookContract(KnownHookContracts(resolution.Connector))
+}
+
 func defaultHookContract(contracts []HookContract) HookContract {
 	for _, contract := range contracts {
 		if contract.DefaultForUnversioned {
@@ -1389,6 +1402,64 @@ func defaultHookContract(contracts []HookContract) HookContract {
 		}
 	}
 	return contracts[0]
+}
+
+func bestEffortHookContract(contracts []HookContract) HookContract {
+	if len(contracts) == 0 {
+		return HookContract{}
+	}
+	fallback := defaultHookContract(contracts)
+	// Union only contracts the default may stand in for: those not gated
+	// entirely above the default's tested range. A newer contract's events
+	// (Claude Code v2's DirectoryAdded) are unknown to the agents the default
+	// describes, and the union keeps the default's ContractID, so including
+	// them would render a matrix that a pin of that ID rejects (the managed
+	// policy runtime verifier and the v1 guardian expect the v1 event set).
+	eligible := make([]HookContract, 0, len(contracts))
+	for _, contract := range contracts {
+		if !hookContractGatedAbove(contract, fallback) {
+			eligible = append(eligible, contract)
+		}
+	}
+	fallback.Events = unionHookContractStrings(fallback.Events, eligible, func(contract HookContract) []string {
+		return contract.Events
+	})
+	return fallback
+}
+
+// hookContractGatedAbove reports whether contract applies only to agent
+// versions at or above base's exclusive upper bound.
+func hookContractGatedAbove(contract, base HookContract) bool {
+	upper := strings.TrimSpace(base.MaxAgentVersion)
+	lower := strings.TrimSpace(contract.MinAgentVersion)
+	return upper != "" && lower != "" && compareVersion(lower, upper) >= 0
+}
+
+func unionHookContractStrings(
+	preferred []string,
+	contracts []HookContract,
+	values func(HookContract) []string,
+) []string {
+	out := make([]string, 0, len(preferred))
+	seen := make(map[string]struct{}, len(preferred))
+	appendUnique := func(items []string) {
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	appendUnique(preferred)
+	for _, contract := range contracts {
+		appendUnique(values(contract))
+	}
+	return out
 }
 
 func NormalizeAgentVersion(_ string, raw string) string {
@@ -1440,6 +1511,9 @@ func resolveHookContractForOptions(
 		default:
 			resolution.Contract = pinned
 		}
+	}
+	if resolution.Status != HookCompatibilityKnown && resolution.Contract.DefaultForUnversioned {
+		resolution.Contract = BestEffortHookContract(resolution)
 	}
 	return resolution
 }
