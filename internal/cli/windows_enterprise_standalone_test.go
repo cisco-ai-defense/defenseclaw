@@ -1117,6 +1117,30 @@ func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.
 	}
 }
 
+// A bundle refusal that a retry of the same delivery cannot get past exits
+// 1603 even with the bundle_apply_failed after it; a transient cause keeps
+// 1618, so the MDM retries only what can still succeed.
+func TestWindowsBundleApplyFailureExitFollowsItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		cause string
+		want  int
+	}{
+		{"fleet_setup_required", enterprisestatus.WindowsExitFailure},
+		{"bundle_config_validation_failed", enterprisestatus.WindowsExitFailure},
+		{"bundle_install_options_changed", enterprisestatus.WindowsExitFailure},
+		{"bundle_hot_apply_unavailable", enterprisestatus.WindowsExitBusy},
+		{"bundle_policy_not_adopted", enterprisestatus.WindowsExitBusy},
+		{"lifecycle_busy", enterprisestatus.WindowsExitBusy},
+	} {
+		result := &enterprisestatus.Result{}
+		result.AddError(tc.cause, "cause")
+		result.AddError("bundle_apply_failed", "the policy bundle apply did not complete")
+		if got := windowsEnterpriseFailureCodeFor(result); got != tc.want {
+			t.Errorf("%s then bundle_apply_failed exits %d, want %d", tc.cause, got, tc.want)
+		}
+	}
+}
+
 // A pending-transaction repair that ends with a report, even a failed one,
 // made its own decision about the services: a recovery that could not
 // reactivate the restored release leaves it stopped and disabled on purpose.

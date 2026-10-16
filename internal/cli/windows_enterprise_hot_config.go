@@ -158,6 +158,12 @@ func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions
 		strings.TrimSpace(opts.gatewayServiceName) == "" && strings.TrimSpace(opts.guardianServiceName) == ""
 }
 
+// windowsEnterpriseInstallOptionsChanged is the hot-path refusal of a run
+// that also changes the install options. A bundle has no transaction
+// fallback, and a retry of the same delivery is refused the same way, so it
+// has its own code that exits 1603, not 1618.
+const windowsEnterpriseInstallOptionsChanged = "the run also changes the install options (manifest, mode, connector, roots or service names)"
+
 // windowsEnterpriseHotConfigUnavailable names the candidate condition a
 // bundle delivery failed: the hot path needs an elevated, healthy, idle
 // deployment.
@@ -170,7 +176,7 @@ func windowsEnterpriseHotConfigUnavailable(status *windowsEnterpriseInstallerRep
 	case !windowsEnterpriseVerifyAcceptable(status):
 		return "the installed deployment did not verify healthy and idle: " + windowsEnterpriseVerifyFailureDetail(status, "")
 	}
-	return "the run also changes the install options (manifest, mode, connector, roots or service names)"
+	return windowsEnterpriseInstallOptionsChanged
 }
 
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
@@ -200,7 +206,12 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	if !windowsEnterpriseHotConfigCandidate(opts, status) {
-		return unavailable(windowsEnterpriseHotConfigUnavailable(status))
+		reason := windowsEnterpriseHotConfigUnavailable(status)
+		if reason == windowsEnterpriseInstallOptionsChanged {
+			failBundle("bundle_install_options_changed", "the policy bundle could not be applied to the running deployment: "+reason+"; deliver the bundle without the install option change")
+			return false, nil
+		}
+		return unavailable(reason)
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
@@ -245,8 +256,8 @@ func windowsEnterpriseHotConfigApply(
 	}
 	previousFleet, previousFleetErr := config.FleetEnabledFromSource(layout.ConfigPath, previous)
 	nextFleet, nextFleetErr := config.FleetEnabledFromSource(opts.configPath, next)
-	if previousFleetErr != nil || nextFleetErr != nil {
-		return false, nil
+	if err := errors.Join(previousFleetErr, nextFleetErr); err != nil {
+		return unavailable("cannot read the Fleet setting of the staged or installed config: " + err.Error())
 	}
 	if previousFleet != nextFleet {
 		// Fleet enablement changes the installed compiler as well as the

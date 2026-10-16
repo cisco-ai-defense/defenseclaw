@@ -98,7 +98,12 @@ but did not finish applying to the running deployment exits `1618` too:
 `bundle_apply_failed`, after the error that names the cause (for example
 `bundle_hot_apply_unavailable` with the verify detail, or
 `bundle_policy_not_adopted`). Its receipt fails, the last good bundle or the
-base config keeps enforcing, and the MDM's retry delivers it again. A repeated delivery of the bundle in
+base config keeps enforcing, and the MDM's retry delivers it again. A cause
+that a retry cannot get past exits `1603` instead, with the same
+`bundle_apply_failed` after it: `fleet_setup_required` (the bundle turns
+Fleet on or off, which needs signed Setup), `bundle_config_validation_failed`
+and `bundle_install_options_changed` (the run also changes the install
+options). A repeated delivery of the bundle in
 force is a success (`already_applied`). The bundle codes are defined in
 `internal/enterprisebundle/errors.go`; a public page that explains each one
 ships with the sync service.

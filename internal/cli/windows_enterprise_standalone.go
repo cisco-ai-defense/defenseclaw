@@ -2059,7 +2059,22 @@ var windowsEnterpriseKnownCodes = []string{
 	"root_squatted",
 }
 
+// windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
+// same delivery cannot get past: they exit 1603 even with the
+// bundle_apply_failed that follows them, so the MDM does not spend its
+// 1618 retries on them.
+var windowsEnterpriseBundleRefusalCodes = []string{
+	"fleet_setup_required",
+	"bundle_config_validation_failed",
+	"bundle_install_options_changed",
+}
+
 func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
+	for _, message := range result.Errors {
+		if containsString(windowsEnterpriseBundleRefusalCodes, message.Code) {
+			return enterprisestatus.WindowsExitFailure
+		}
+	}
 	for _, message := range result.Errors {
 		switch message.Code {
 		case "lifecycle_busy":
