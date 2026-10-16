@@ -260,6 +260,18 @@ Intune's custom compliance cannot run `detect.sh`: Microsoft runs Linux
 discovery scripts in the signed-in user's context, and DefenseClaw's status
 is readable only by root.
 
+A failed platform script does not make a Linux device noncompliant. In the
+test tenant, the install script and a bundle-aware `detect.sh` both exited `1`
+after the device refused a bundle with a bad signature (`signature_invalid`).
+Graph and the admin center still showed the device as **Compliant**. So do not
+use the compliance state, or a Conditional Access rule built on it, to tell
+whether the signed bundle applied. Read each script's per-device status
+instead: open the script's configuration profile and select **Device
+status**, or collect those results through Graph into your monitoring. On the
+device,
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle status --json`
+names the refused bundle and its error code under `last_refusal`.
+
 On the device, the package database answers inventory for the deb and rpm
 channels:
 
