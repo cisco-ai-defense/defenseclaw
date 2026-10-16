@@ -321,15 +321,16 @@ Run it before the config and pkg steps. In `config.yaml`, set
 ## Remove DefenseClaw
 
 First remove the Macs from the install script's assignment. The Intune agent
-for macOS keeps running a cached recurring script after its assignment is
-removed. In the test tenant, Graph confirmed that the install script had no
-assignments, yet the Mac ran it 4 seconds later. It ran it again 16 minutes
-later, after a full 15-minute check-in. So waiting one check-in is not enough,
-and a cached install run after the uninstall reinstalls the pkg. Before you
-assign uninstall:
+for macOS keeps running a cached recurring install script after its
+assignment is removed. In the test tenant, Graph confirmed that the install
+script had no assignments, yet the Mac ran it 4 seconds later. It ran it
+again 16 minutes later, after a full 15-minute check-in. So waiting one
+check-in is not enough, and a cached install run after the uninstall
+reinstalls the pkg. Before you assign uninstall:
 
 1. Check the Intune agent log on each Mac (`/Library/Logs/Microsoft/Intune`)
-   and wait until the install script's policy ID has stopped appearing.
+   and wait until each Mac has checked in and the install script's policy ID
+   has stopped appearing.
 2. Assign the uninstall script as a **new** script object. A run-once
    script that already ran on a Mac does not run again when you reassign it.
 3. After the uninstall, check again at the next check-ins that
