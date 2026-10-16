@@ -140,6 +140,17 @@ The installed contract observes the current documented events:
 `beforeTabFileRead`, `afterTabFileEdit`, `beforeSubmitPrompt`, `preCompact`,
 `stop`, `afterAgentResponse`, `afterAgentThought`, and `workspaceOpen`.
 
+The Windows enterprise machine policy (`C:\ProgramData\Cursor\hooks.json`)
+registers the same roster except `afterAgentThought`. The Cursor Agent CLI
+fires that event once per streamed reasoning chunk and waits for each command
+hook, and each machine hook is a Windows PowerShell process (about 1.2 s), so
+the CLI stalls its model stream until the server drops it ("Connection lost
+... WritableIterable is closed"). The event is observe-only and
+`afterAgentResponse` already carries the model output. The next install,
+repair or guardian reconcile removes an earlier release's `afterAgentThought`
+entry; teardown removes it too. The user-level `~/.cursor/hooks.json` keeps
+the full roster.
+
 Important limitations:
 
 - Ask is enforceable only for shell and MCP pre-execution events.

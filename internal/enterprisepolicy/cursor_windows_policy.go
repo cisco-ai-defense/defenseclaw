@@ -71,8 +71,12 @@ func windowsCursorReconcile(opts Options) (State, error) {
 			state.finish()
 			return state, nil
 		}
-		exact := exists && connector.VerifyWindowsCursorEnterpriseHooks(current, adapterPath, "closed") == nil
-		changed, err := publishWithRecord(opts, cursorConnector, hooksPath, current, exists, merged, exact, windowsCursorHooksStrip(adapterPath), &state)
+		// Owned entries count as present when they are current or are the
+		// previous release's roster with the retired afterAgentThought entry:
+		// Merge above already removed that entry, so the publish rewrites the
+		// file instead of reporting an outside removal.
+		owned := exists && connector.VerifyWindowsCursorEnterpriseHooksRegistered(current, adapterPath, "closed") == nil
+		changed, err := publishWithRecord(opts, cursorConnector, hooksPath, current, exists, merged, owned, windowsCursorHooksStrip(adapterPath), &state)
 		if err != nil {
 			return state, err
 		}

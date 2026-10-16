@@ -106,7 +106,10 @@ func cursorPresent(opts Options) (bool, error) {
 		if err != nil || !exists {
 			return false, err
 		}
-		return connector.VerifyWindowsCursorEnterpriseHooks(current, adapterPath, "closed") == nil, nil
+		// A pre-upgrade policy that still registers a retired event
+		// (afterAgentThought) is DefenseClaw's installed registration until
+		// the next reconcile rewrites it.
+		return connector.VerifyWindowsCursorEnterpriseHooksRegistered(current, adapterPath, "closed") == nil, nil
 	}
 	path, err := CursorEnterpriseHooksPath(opts)
 	if err != nil {

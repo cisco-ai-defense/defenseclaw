@@ -46,7 +46,7 @@ func TestWindowsCursorEnterpriseMigratesPreviousEncodedCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 		hooks := cfg["hooks"].(map[string]interface{})
-		for _, event := range cursorHookEvents {
+		for _, event := range cursorEnterpriseHookEvents {
 			entry := hooks[event].([]interface{})[0].(map[string]interface{})
 			entry["command"] = previous
 		}

@@ -52,6 +52,46 @@ var cursorHookEvents = []string{
 	"workspaceOpen",
 }
 
+// cursorEnterpriseRetiredHookEvents are events earlier releases registered in
+// the Windows machine policy (C:\ProgramData\Cursor\hooks.json) and this
+// release no longer does. The Cursor Agent CLI fires afterAgentThought once
+// per streamed reasoning chunk and awaits each command hook before it reads
+// the next chunk. A machine hook is a Windows PowerShell process (about 1.2 s
+// per call), so the CLI stalls its model stream until the server drops it
+// ("Connection lost ... WritableIterable is closed"). The event is
+// observe-only for DefenseClaw and afterAgentResponse already carries the
+// model output, so the machine policy omits it. The gateway still decodes an
+// incoming afterAgentThought, and the user-level (OSS) hooks.json keeps the
+// full cursorHookEvents roster.
+//
+// Merge removes DefenseClaw's entry from a retired event (and drops the event
+// key when nothing else remains), migration verification accepts one exact
+// entry there so a pre-upgrade policy stays callable until it is repaired, and
+// strict verification rejects it so reconcile always rewrites the file.
+var cursorEnterpriseRetiredHookEvents = []string{"afterAgentThought"}
+
+// cursorEnterpriseHookEvents is the roster the Windows machine policy
+// registers: cursorHookEvents minus cursorEnterpriseRetiredHookEvents, in the
+// same order.
+var cursorEnterpriseHookEvents = cursorHookEventsExcept(cursorEnterpriseRetiredHookEvents)
+
+func cursorHookEventsExcept(retired []string) []string {
+	out := make([]string, 0, len(cursorHookEvents))
+	for _, event := range cursorHookEvents {
+		keep := true
+		for _, candidate := range retired {
+			if event == candidate {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, event)
+		}
+	}
+	return out
+}
+
 const (
 	windowsCursorEnterpriseHookTimeoutSeconds = 30
 	windowsCursorEnterpriseHooksJSONMax       = 4 << 20
@@ -174,7 +214,9 @@ func renderWindowsCursorAdapterWithTargets(hookBinary, failMode string, managed 
 }
 
 // MergeWindowsCursorEnterpriseHooks returns a Cursor hooks.json containing
-// exactly one DefenseClaw entry for every supported event. Existing unrelated
+// exactly one DefenseClaw entry for every machine-policy event
+// (cursorEnterpriseHookEvents) and none on any other event, including a
+// retired one an earlier release registered. Existing unrelated
 // top-level fields, hook events, and hook entries retain their JSON semantics
 // and order. Delivery policy controls Cursor's failClosed flag.
 func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
@@ -207,12 +249,20 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 			continue
 		}
 		filtered := removeCursorHookCommands(entries, command, legacyCommand, previousEncodedCommand)
-		if len(filtered) != len(entries) {
-			hooks[event] = filtered
+		if len(filtered) == len(entries) {
+			continue
 		}
+		if len(filtered) == 0 && !cursorHookEventManaged(event) {
+			// An event this release no longer registers (afterAgentThought)
+			// held only DefenseClaw's entry: drop the key, as removal does,
+			// so teardown restores the pre-install document exactly.
+			delete(hooks, event)
+			continue
+		}
+		hooks[event] = filtered
 	}
 
-	for _, event := range cursorHookEvents {
+	for _, event := range cursorEnterpriseHookEvents {
 		entries, ok := cursorHookEntryList(hooks[event])
 		if !ok {
 			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
@@ -224,18 +274,30 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 
 // VerifyWindowsCursorEnterpriseHooks validates exact writer/reader parity for
 // the protected machine configuration while allowing unrelated hook entries.
+// A DefenseClaw entry on a retired event (afterAgentThought) fails it, so a
+// reconcile treats a pre-upgrade policy as needing a rewrite.
 func VerifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) error {
-	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false)
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false, false)
 }
 
 // VerifyWindowsCursorEnterpriseHooksForMigration accepts the exact encoded
-// command written by the immediately preceding release while reading a
-// protected policy before upgrade. New policies use strict verification.
+// command written by the immediately preceding release, and one exact
+// DefenseClaw entry on an event this release retired, while reading a
+// protected policy before upgrade or restoring a journaled one. New policies
+// use strict verification.
 func VerifyWindowsCursorEnterpriseHooksForMigration(existing []byte, adapterPath, failMode string) error {
-	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, true)
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, true, true)
 }
 
-func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string, allowPrevious bool) error {
+// VerifyWindowsCursorEnterpriseHooksRegistered reports whether the current
+// command is registered on every machine-policy event, accepting a
+// not-yet-repaired DefenseClaw entry on a retired event. Presence checks use
+// it: a pre-upgrade policy is still DefenseClaw's installed registration.
+func VerifyWindowsCursorEnterpriseHooksRegistered(existing []byte, adapterPath, failMode string) error {
+	return verifyWindowsCursorEnterpriseHooks(existing, adapterPath, failMode, false, true)
+}
+
+func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string, allowPrevious, allowRetired bool) error {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return err
@@ -254,38 +316,62 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 	}
 
 	selectedCommand := ""
-	for _, event := range cursorHookEvents {
-		entries, ok := cursorHookEntryList(hooks[event])
-		if !ok {
-			return fmt.Errorf("Cursor hooks event %q must be an array", event)
-		}
+	countOwned := func(event string, entries []interface{}) (int, error) {
 		owned := 0
 		for _, raw := range entries {
 			entryCommand := cursorHookCommand(raw)
 			if entryCommand == legacyCommand {
-				return fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
+				return 0, fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
 			}
 			if entryCommand == previousEncodedCommand && !allowPrevious {
-				return fmt.Errorf("cursor hooks event %q still has the previous encoded DefenseClaw command", event)
+				return 0, fmt.Errorf("cursor hooks event %q still has the previous encoded DefenseClaw command", event)
 			}
 			if entryCommand != command && (!allowPrevious || entryCommand != previousEncodedCommand) {
 				continue
 			}
 			owned++
 			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode) {
-				return fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
+				return 0, fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
 			if selectedCommand != "" && selectedCommand != entryCommand {
-				return fmt.Errorf("cursor hooks event %q mixes DefenseClaw command versions", event)
+				return 0, fmt.Errorf("cursor hooks event %q mixes DefenseClaw command versions", event)
 			}
 			selectedCommand = entryCommand
+		}
+		return owned, nil
+	}
+	for _, event := range cursorEnterpriseHookEvents {
+		entries, ok := cursorHookEntryList(hooks[event])
+		if !ok {
+			return fmt.Errorf("Cursor hooks event %q must be an array", event)
+		}
+		owned, err := countOwned(event, entries)
+		if err != nil {
+			return err
 		}
 		if owned != 1 {
 			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned)
 		}
 	}
+	if allowRetired {
+		// A policy written before the event was retired carries one exact
+		// entry there; the next merge removes it.
+		for _, event := range cursorEnterpriseRetiredHookEvents {
+			entries, ok := cursorHookEntryList(hooks[event])
+			if !ok {
+				continue // foreign shape; the unexpected-entry scan below skips it too
+			}
+			owned, err := countOwned(event, entries)
+			if err != nil {
+				return err
+			}
+			if owned > 1 {
+				return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want at most 1", event, owned)
+			}
+		}
+	}
 	for event, raw := range hooks {
-		if cursorHookEventManaged(event) {
+		if cursorHookEventManaged(event) || (allowRetired && cursorEnterpriseHookEventRetired(event)) {
 			continue
 		}
 		entries, ok := cursorHookEntryList(raw)
@@ -295,6 +381,9 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		for _, entry := range entries {
 			entryCommand := cursorHookCommand(entry)
 			if entryCommand == command || entryCommand == legacyCommand || entryCommand == previousEncodedCommand {
+				if cursorEnterpriseHookEventRetired(event) {
+					return fmt.Errorf("Cursor hooks event %q still has the DefenseClaw entry an earlier release registered; this release no longer registers it and the next publish removes it", event)
+				}
 				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
 			}
 		}
@@ -401,6 +490,9 @@ func normalizeCursorOwnedRemainder(config map[string]interface{}) bool {
 	if !ok {
 		return false
 	}
+	// cursorHookEvents is the superset of the machine-policy roster and the
+	// retired events, so empty scaffolding an earlier release created for
+	// afterAgentThought is ignored too.
 	for _, event := range cursorHookEvents {
 		entries, exists := hooks[event]
 		if !exists {
@@ -749,8 +841,19 @@ func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string, fa
 	return err == nil && typeName == "command" && validFailMode && failClosed == (mode == "closed") && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
 }
 
+// cursorHookEventManaged reports whether the Windows machine policy registers
+// event.
 func cursorHookEventManaged(event string) bool {
-	for _, candidate := range cursorHookEvents {
+	for _, candidate := range cursorEnterpriseHookEvents {
+		if event == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func cursorEnterpriseHookEventRetired(event string) bool {
+	for _, candidate := range cursorEnterpriseRetiredHookEvents {
 		if event == candidate {
 			return true
 		}

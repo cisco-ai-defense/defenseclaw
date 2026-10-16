@@ -89,8 +89,14 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 		}
 		return out, nil
 	case "cursor":
-		out := make([]ManagedHookGroup, 0, len(cursorHookEvents))
-		for _, event := range cursorHookEvents {
+		// The Windows machine policy omits the events listed in
+		// cursorEnterpriseRetiredHookEvents (afterAgentThought); see there.
+		events := cursorHookEvents
+		if goos == "windows" {
+			events = cursorEnterpriseHookEvents
+		}
+		out := make([]ManagedHookGroup, 0, len(events))
+		for _, event := range events {
 			out = append(out, ManagedHookGroup{Event: event, Timeout: windowsCursorEnterpriseHookTimeoutSeconds})
 		}
 		return out, nil
