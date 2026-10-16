@@ -1271,21 +1271,6 @@ func checkStandaloneNotGatedFloor(
 	return nil
 }
 
-// compareHookContractLock loads and hashes compatibility evidence with strict
-// bounded managed readers when requested. Ordinary Unix targets deliberately
-// retain the permissive legacy reader and digest behavior.
-func compareHookContractLock(
-	conn connector.Connector,
-	opts connector.SetupOpts,
-	strictManagedRuntime bool,
-) (bool, error) {
-	previous, current, err := loadHookContractLockPair(conn, opts, strictManagedRuntime)
-	if err != nil {
-		return false, err
-	}
-	return hookContractsIncompatible(previous, current), nil
-}
-
 // loadHookContractLockPair returns the recorded contract lock and, when one
 // exists, the lock entry the current setup would record.
 func loadHookContractLockPair(

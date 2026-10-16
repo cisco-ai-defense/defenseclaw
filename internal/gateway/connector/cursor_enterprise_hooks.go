@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -101,11 +102,11 @@ func RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary string, modes map
 		return nil, err
 	}
 	if len(modes) == 0 || len(modes) > 1024 {
-		return nil, fmt.Errorf("Cursor adapter requires a bounded target mode map")
+		return nil, errors.New("cursor adapter requires a bounded target mode map")
 	}
 	for sid, mode := range modes {
 		if len(sid) > 184 || !windowsCursorAdapterSIDPattern.MatchString(sid) || (mode != "open" && mode != "closed") {
-			return nil, fmt.Errorf("Cursor adapter has an invalid target mode")
+			return nil, errors.New("cursor adapter has an invalid target mode")
 		}
 	}
 	body, err := json.Marshal(modes)
@@ -114,7 +115,7 @@ func RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary string, modes map
 	}
 	encoded := base64.StdEncoding.EncodeToString(body)
 	if len(encoded) > windowsCursorTargetModesJSON64Max {
-		return nil, fmt.Errorf("Cursor target mode map exceeds size limit")
+		return nil, errors.New("cursor target mode map exceeds size limit")
 	}
 	return renderWindowsCursorAdapterWithTargets(hookBinary, "closed", true, cursorAdapterTimeoutMS, encoded)
 }
@@ -127,11 +128,11 @@ var windowsCursorAdapterModesPattern = regexp.MustCompile(`(?m)^        \$target
 // its protected state file exists; it does not accept arbitrary script bodies.
 func WindowsCursorEnterpriseAdapterTargetModes(adapter []byte, hookBinary string) (map[string]string, error) {
 	if len(adapter) > 1<<20 {
-		return nil, fmt.Errorf("Cursor adapter exceeds size limit")
+		return nil, errors.New("cursor adapter exceeds size limit")
 	}
 	match := windowsCursorAdapterModesPattern.FindSubmatch(adapter)
 	if len(match) != 2 || len(match[1]) > windowsCursorTargetModesJSON64Max {
-		return nil, fmt.Errorf("Cursor adapter has no bounded target mode map")
+		return nil, errors.New("cursor adapter has no bounded target mode map")
 	}
 	body, err := base64.StdEncoding.DecodeString(string(match[1]))
 	if err != nil {
@@ -143,7 +144,7 @@ func WindowsCursorEnterpriseAdapterTargetModes(adapter []byte, hookBinary string
 	}
 	expected, err := RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary, modes)
 	if err != nil || !bytes.Equal(expected, adapter) {
-		return nil, fmt.Errorf("Cursor mapped adapter identity changed")
+		return nil, errors.New("cursor mapped adapter identity changed")
 	}
 	return modes, nil
 }
@@ -265,17 +266,17 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				return fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
 			}
 			if entryCommand == previousEncodedCommand && !allowPrevious {
-				return fmt.Errorf("Cursor hooks event %q still has the previous encoded DefenseClaw command", event)
+				return fmt.Errorf("cursor hooks event %q still has the previous encoded DefenseClaw command", event)
 			}
-			if entryCommand != command && !(allowPrevious && entryCommand == previousEncodedCommand) {
+			if entryCommand != command && (!allowPrevious || entryCommand != previousEncodedCommand) {
 				continue
 			}
 			owned++
 			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode) {
-				return fmt.Errorf("Cursor hooks event %q has a drifted DefenseClaw entry", event)
+				return fmt.Errorf("cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
 			if selectedCommand != "" && selectedCommand != entryCommand {
-				return fmt.Errorf("Cursor hooks event %q mixes DefenseClaw command versions", event)
+				return fmt.Errorf("cursor hooks event %q mixes DefenseClaw command versions", event)
 			}
 			selectedCommand = entryCommand
 		}
