@@ -208,6 +208,24 @@ $stream.Dispose()
             Stop-TestReader $reader
             Test-Accepted 'purge after the reader closed' { Invoke-Preflight $layout }
 
+            # A Restart Manager query that fails refuses the purge before it
+            # changes anything: the check did not run, and the purge must not
+            # start blind.
+            if (-not ('DcsfFailingRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'public static class DcsfFailingRestartManager { public static object[] GetFileHolders(string[] paths) { throw new System.ComponentModel.Win32Exception(5, "Restart Manager session start failed"); } }'
+            }
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfFailingRestartManager] }
+                Test-Refused 'purge whose Restart Manager query fails' { Invoke-Preflight $layout } (
+                    '^uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files \(.*Restart Manager session start failed.*\); ' +
+                    'nothing was changed; run the uninstall again$')
+                Test-StateIntact 'purge refused after a failed Restart Manager query' $layout
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
+
             # The Secure Client profile has no data-file check.
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

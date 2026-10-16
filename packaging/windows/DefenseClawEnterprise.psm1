@@ -5377,14 +5377,17 @@ function Get-DefenseClawStateFileHolders {
         by process id and start time (a reused id is another program),
         without the processes in Excluded, the services in ServiceNames and
         programs run from the install folder, which the install-folder check
-        names. Restart Manager itself failing returns no holder: the purge
-        then retries the deletion and names what still holds the file.
+        names. Restart Manager itself failing returns no holder, so the
+        deletion after the services stopped retries and names what still
+        holds the file; with FailOnQueryError it refuses instead, for the
+        preflight that must not let the purge start blind (GAP-0136).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths,
         [Parameter(Mandatory)]$Excluded,
-        [AllowEmptyCollection()][string[]]$ServiceNames = @()
+        [AllowEmptyCollection()][string[]]$ServiceNames = @(),
+        [switch]$FailOnQueryError
     )
     $holders = @{}
     if ($Paths.Count -eq 0) {
@@ -5398,6 +5401,12 @@ function Get-DefenseClawStateFileHolders {
             }
         }
         catch {
+            if ($FailOnQueryError) {
+                throw (
+                    'uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files (' +
+                    $_.Exception.Message + '); nothing was changed; run the uninstall again'
+                )
+            }
             Microsoft.PowerShell.Utility\Write-Verbose "Restart Manager could not list the programs that hold DefenseClaw data files: $($_.Exception.Message)"
         })
     if ($found.Count -eq 0) {
@@ -5503,7 +5512,8 @@ function Assert-DefenseClawStandaloneStateFilesNotInUse {
         binaries and the Claude Code hook wiring before it failed 1603 on
         that file, leaving the computer half removed (GAP-0136). A holder
         seen only once (an anti-virus scan or a detection script) does not
-        block.
+        block. A Restart Manager query that fails refuses too: the check did
+        not run, and the purge must not start without it.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -5531,7 +5541,8 @@ function Assert-DefenseClawStandaloneStateFilesNotInUse {
             -Layout $Layout `
             -Paths $paths `
             -Excluded $excluded `
-            -ServiceNames $services
+            -ServiceNames $services `
+            -FailOnQueryError
         if ($null -eq $first) {
             $first = $seen
             if ($first.Count -eq 0) {
