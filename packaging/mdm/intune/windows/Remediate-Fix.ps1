@@ -493,6 +493,7 @@ try {
 }
 if ($null -eq $run -and -not $ensureFailure) { $ensureFailure = 'native ensure returned no result' }
 $restoreFailure = ''
+$ensureDocument = $null
 $committed = $false
 if ($null -ne $run -and $run.ExitCode -notin @(3010, 1618)) {
     try {
@@ -500,7 +501,12 @@ if ($null -ne $run -and $run.ExitCode -notin @(3010, 1618)) {
         $committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending
     } catch { $null = $_ }
 }
-if (-not $committed -and ($ensureFailure -or
+# Restore only when the native ensure itself ended without a report (it
+# could not run, or was stopped at the deadline). A report is the
+# lifecycle's own decision: it restores after a killed installer child, and
+# a failed recovery may leave a release it could not reactivate disabled on
+# purpose.
+if (-not $committed -and $null -eq $ensureDocument -and ($ensureFailure -or
         ($null -ne $run -and $run.ExitCode -notin @(0, 3010, 1618)))) {
     try { $restoreFailure = [string](Restore-DefenseClawRemediationStartModes -PriorModes $priorModes) }
     catch { $restoreFailure = $_.Exception.Message }

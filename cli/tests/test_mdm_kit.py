@@ -2036,6 +2036,9 @@ def test_remediation_bounds_ensure_and_restores_start_modes_on_failure() -> None
     assert "if ([int]$PriorModes[$name] -notin @(2, 3)) { continue }" in script
     assert "if ($current -ne 4) { continue }" in script
     assert "$committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending" in script
+    # A parsed ensure report is the lifecycle's decision: only an ensure that
+    # ended without one has its startup modes put back.
+    assert "if (-not $committed -and $null -eq $ensureDocument -and ($ensureFailure -or" in script
     assert "$run.ExitCode -notin @(0, 3010, 1618)" in script
     assert "4 { 'disabled' }" not in script
     assert "-TimeoutSeconds 840 -ArgumentList @(" in script
