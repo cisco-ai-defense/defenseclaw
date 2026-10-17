@@ -44,6 +44,9 @@ var managedHostDescriptorPath = func() string {
 // the agents' hooks. The managed services themselves carry the
 // managed_enterprise deployment pin and pass.
 func refusePerUserGatewayOnManagedHost() error {
+	if err := refusePerUserGatewayBesideEnterprise(); err != nil {
+		return err
+	}
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return nil
 	}

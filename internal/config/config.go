@@ -1651,6 +1651,39 @@ type CiscoAIDefenseConfig struct {
 	// pricing per-call matters and the operator already gets
 	// per-tool coverage from the bundled regex rule pack).
 	ScanHookSurface *bool `mapstructure:"scan_hook_surface" yaml:"scan_hook_surface,omitempty"`
+
+	// UnavailableAction selects what managed_enterprise does with a request
+	// Cisco AI Defense should have inspected but could not: no credential
+	// provider, no token, no inspector, or no verdict (transport failure,
+	// timeout, non-2xx). "allow" (the default, also used when the field is
+	// empty) lets the request through and reports it as a fail-open;
+	// "block" returns a block verdict that the connector enforces when its
+	// guardrail mode is "action". Requests with nothing to inspect, and hook
+	// traffic excluded by scan_hook_surface=false, are allowed either way.
+	// Only consulted in managed_enterprise, where AI Defense is the sole
+	// decision-maker.
+	UnavailableAction string `mapstructure:"unavailable_action" yaml:"unavailable_action,omitempty"`
+}
+
+// Values accepted by cisco_ai_defense.unavailable_action.
+const (
+	AIDUnavailableActionAllow = "allow"
+	AIDUnavailableActionBlock = "block"
+)
+
+// EffectiveUnavailableAction normalizes UnavailableAction to "allow" or
+// "block". Anything other than "block" (case-insensitive) keeps the
+// historical allow posture; the v8 schema rejects other spellings at load.
+func (c *CiscoAIDefenseConfig) EffectiveUnavailableAction() string {
+	if c != nil && strings.EqualFold(strings.TrimSpace(c.UnavailableAction), AIDUnavailableActionBlock) {
+		return AIDUnavailableActionBlock
+	}
+	return AIDUnavailableActionAllow
+}
+
+// BlocksWhenUnavailable reports whether managed inspection fails closed.
+func (c *CiscoAIDefenseConfig) BlocksWhenUnavailable() bool {
+	return c.EffectiveUnavailableAction() == AIDUnavailableActionBlock
 }
 
 // HookSurfaceEnabled reports whether the AID lane should fire on the
@@ -3299,53 +3332,12 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 }
 
 // validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
-// managed_enterprise config on Windows that carries non-empty
-// AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
-// only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
-// credentials give the AF_UNIX IPC surface a real accept-time codesign
-// check. On Windows the AF_UNIX kernel implementation exposes no peer
-// credential API, so the values are silently discarded by
-// newCodesignValidatingListener (peerauth_windows.go, deferred_windows
-// posture). Accepting them from config and dropping them at start-time
-// is a config-honesty gap: an operator setting an allowlist expecting
-// hardening ends up with an AF_UNIX socket whose only access boundary
-// is the file DACL. Refusing to load makes that gap loud instead of
-// silent; the deferred Windows peer-auth mechanism belongs to parity
-// plan §4.4 and is not something operators can enable from config.
-//
-// Non-managed builds keep operator config verbatim per the existing
-// unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
-// all outside dev rigs), so this validator is scoped to
-// managed_enterprise on Windows.
+// managed_enterprise config whose IPC peer-auth allowlists belong to a
+// different platform than the one running, or whose Windows entries
+// are malformed. See validateManagedIPCPeerAuthKnobs in managed.go.
+// The name is kept for the load-error telemetry label that reports it.
 func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
-	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return nil
-	}
-	if runtime.GOOS != "windows" {
-		return nil
-	}
-	var offending []string
-	if len(cfg.Managed.AllowedTeamIDs) != 0 {
-		offending = append(offending, "managed.allowed_team_ids")
-	}
-	if len(cfg.Managed.AllowedSigningIDs) != 0 {
-		offending = append(offending, "managed.allowed_signing_ids")
-	}
-	if len(cfg.Managed.AllowedBundleIDs) != 0 {
-		offending = append(offending, "managed.allowed_bundle_ids")
-	}
-	if len(offending) == 0 {
-		return nil
-	}
-	return fmt.Errorf(
-		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
-			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
-			"credential API on Windows, so any allowlist here would be silently "+
-			"discarded. Remove these keys from config.yaml; the socket DACL is "+
-			"the enforcement boundary until parity plan §4.4 lands the Windows "+
-			"peer-auth mechanism.",
-		strings.Join(offending, ", "),
-	)
+	return validateManagedIPCPeerAuthKnobs(cfg, runtime.GOOS)
 }
 
 func isLoopbackListenerHost(host string) bool {
