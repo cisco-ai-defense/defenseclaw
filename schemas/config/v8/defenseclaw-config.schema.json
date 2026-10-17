@@ -539,6 +539,15 @@
         "scan_hook_surface": {
           "type": "boolean",
           "default": true
+        },
+        "unavailable_action": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "block"
+          ],
+          "default": "allow",
+          "description": "managed_enterprise only: what to do with a request Cisco AI Defense should have inspected but could not. allow lets it through (fail-open); block returns a block verdict that action-mode connectors enforce."
         }
       }
     },
@@ -1693,6 +1702,22 @@
           }
         },
         "allowed_bundle_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "allowed_windows_signers": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "allowed_windows_images": {
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,

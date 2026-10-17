@@ -424,6 +424,40 @@ The default managed layout is:
 | Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v3 application-control and Claude-precedence evidence. |
 | Service definitions | SCM registry and security descriptors | Administrators/LocalSystem only. |
 
+In the Secure Client profile, AI Defense makes the inspection decision. If
+Cloud Management is offline, the identity library is unavailable, or the
+service does not answer, requests that need inspection are allowed by default.
+`/health` reports `managed_inspection.available: false`, and the Secure Client
+GUI reports `DEGRADED`. Set `cisco_ai_defense.unavailable_action: block` in the
+administrator-owned `config.yaml` to deny those requests for active connectors
+in action mode. Observe mode records a would-block result and lets the request
+run uninspected; if no enabled connector (including one enabled through
+`connector_hooks` or application protection) is in action mode, the GUI reports
+`inspection_unavailable_allowing`. Requests with nothing to inspect remain
+allowed. Inspection counts as available only while AI Defense returns
+verdicts: a valid token does not clear a failed inspection, but the next
+inspection with a verdict does. A guardrail startup error also reports
+`DEGRADED`; a build without managed-cloud support blocks hook requests that
+need inspection regardless of `unavailable_action`.
+
+The Secure Client UI socket check identifies the executable a connecting
+process was started from, at the time it connects. The kernel's image name for
+that process must equal an allowed path exactly (ASCII letters in either case;
+every other character must match), and the file at that path must carry an
+allowed embedded Authenticode signature. Two limits follow from this design:
+
+- The check does not prove which code runs inside the process. Windows does not
+  isolate the processes of one signed-in user from each other, so a process of
+  the same user can start `csc_ui.exe` and control it, or reuse a connection the
+  GUI already opened, and read the same stream. On macOS the hardened runtime
+  prevents this; Windows has no equivalent for the Secure Client GUI. The stream
+  is read-only (health, statistics, and notifications), notification text
+  carries no credentials, raw prompts, or policy bodies, and every signed-in
+  user's GUI already receives the same machine-wide stream.
+- Start the GUI through its full path. A launch through an 8.3 short path such
+  as `C:\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe` is refused, and the gateway log
+  shows the short path and says so in the refusal reason.
+
 The installer rejects install/state roots outside exact mount-manager drive
 roots on fixed local NTFS volumes, path escapes, unsafe owners or DACLs, and
 reparse points in managed path chains. It requires the effective drive, global
@@ -556,6 +590,28 @@ reparse-free on a fixed non-substituted NTFS volume, owners and replacement
 rights must be administrator-controlled, the module leaf must have no
 untrusted write-like ACE, and Authenticode must be valid unless a disposable
 test run explicitly uses `-AllowUnsigned`.
+
+A valid signature is not sufficient on its own. The module, the installer, and
+every payload executable and library must be signed by a certificate whose
+subject has exactly one common name (CN), and that common name is exactly
+`Cisco Systems, Inc.`. The CN attribute itself is compared, not the Windows
+display name, which shows the OU or O instead when a certificate has no CN.
+An organization that re-signs the payload with its own code-signing
+certificate names that certificate with
+`-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
+`--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
+that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
+the SHA-256 of the DER-encoded signing certificate, for example
+`(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
+thumbprint is rejected, and the parameter cannot be combined with
+`-AllowUnsigned`.
+
+When the CMID broker adopts `cmidapi.dll`, it verifies the embedded
+Authenticode signature and requires exactly one subject common name,
+`Cisco Systems, Inc.`. The broker keeps the verified file open without write
+or delete sharing until the first refresh loads it. A missing or rejected
+library leaves the broker running and managed inspection unavailable; later
+requests retry discovery after Cloud Management is installed or repaired.
 
 The unsigned exception is itself fail-closed before module import. It is valid
 only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`,
@@ -1129,6 +1185,17 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
 
 Running the installed CLI is still valid for a broker/gateway/hook-only upgrade when
 `--cli-binary` is omitted.
+
+Upgrade moves forward only. Do not run an earlier release's installer against a
+deployment this release installed or attested. The application-control
+evidence this release writes uses schema 3 and the Claude 2.1.154 client
+floor, which earlier releases such as 26.8.4 do not accept, so every lifecycle
+action of such a release, Uninstall included, stops before doing any work.
+Such a release also cannot remove the owned `DisableSelfUpdate` machine
+policy. To
+return to an earlier release, run `Uninstall` with this release's installer,
+then `Install` the earlier release and repeat its live Claude proof and
+attestations.
 
 Only an administrator can remove the service registration:
 

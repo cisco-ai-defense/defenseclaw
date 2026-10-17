@@ -407,6 +407,10 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
 	}
+	// Refuse before any state change; uninstall stays available.
+	if err := refuseSetupBesideEnterprise(); err != nil {
+		return 1, err
+	}
 	maintenancePath, err := defaultMaintenancePath()
 	if err != nil {
 		return 1, err
