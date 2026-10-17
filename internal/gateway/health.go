@@ -173,6 +173,11 @@ type HealthSnapshot struct {
 	// existing on-disk targets.yaml still drives reconciles, but new
 	// users won't appear until the enumerator recovers).
 	Enumerator *SubsystemHealth `json:"enumerator,omitempty"`
+	// ManagedInspection reports whether managed_enterprise inspection can
+	// currently reach Cisco AI Defense and what happens to requests while
+	// it cannot. Omitted until managed inspection has reported once, so
+	// every other deployment mode leaves it out.
+	ManagedInspection *ManagedInspectionHealth `json:"managed_inspection,omitempty"`
 	// Connector is the primary/active connector, retained for back-compat
 	// with single-connector clients. Connectors lists every active
 	// connector with its own live counters (multi-connector view).
@@ -226,6 +231,9 @@ type SidecarHealth struct {
 	// the snapshot, which is the correct behaviour for every
 	// deployment mode other than managed_enterprise on Windows.
 	enumerator *SubsystemHealth
+	// managedInspection is nil until SetManagedInspection is called; see
+	// HealthSnapshot.ManagedInspection.
+	managedInspection *ManagedInspectionHealth
 
 	// configuration is the collapsed daemon+guardian state (spec 003).
 	// Nil until SetDaemonConfigLoaded is called at least once — a
@@ -1348,6 +1356,28 @@ func (h *SidecarHealth) HasConnectorSource(name, source string) bool {
 	return s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource)
 }
 
+// ConnectorsWithSource lists the running connectors registered with source
+// (for example "automatic"), sorted.
+func (h *SidecarHealth) ConnectorsWithSource(source string) []string {
+	if h == nil {
+		return nil
+	}
+	wantSource := strings.ToLower(strings.TrimSpace(source))
+	if wantSource == "" {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var names []string
+	for key, s := range h.connStats {
+		if s != nil && s.state == StateRunning && strings.EqualFold(strings.TrimSpace(s.source), wantSource) {
+			names = append(names, key)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // statsFor returns the counter bucket for a connector, lazily creating it so
 // counts are never lost if a hook fires before the connector is registered.
 // An empty name routes to the primary connector (back-compat).
@@ -1449,6 +1479,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	if h.configuration != nil {
 		cfg := *h.configuration
 		snap.Configuration = &cfg
+	}
+	if h.managedInspection != nil {
+		inspection := *h.managedInspection
+		snap.ManagedInspection = &inspection
 	}
 	source := h.observabilityV8Source
 	failures := make(map[string]observabilityV8FailureObservation, len(h.observabilityV8Failures))

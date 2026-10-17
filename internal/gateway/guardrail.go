@@ -199,7 +199,11 @@ type GuardrailInspector struct {
 	// *CiscoInspectClient for opensource / BYO-key installs, or
 	// *CiscoDefenseClawInspectClient for managed_enterprise installs.
 	// See internal/gateway/inspector.go for the interface contract,
-	// and the picker in sidecar.go for the selection logic.
+	// and the picker in sidecar.go for the selection logic. In
+	// managed_enterprise a reload or the managed inspection upkeep can
+	// replace it while requests are inspected, so it is written under
+	// ciscoMu and read through remoteInspector.
+	ciscoMu     sync.RWMutex
 	ciscoClient Inspector
 	// managedMode is true when the process is running under
 	// deployment_mode = managed_enterprise. It switches the merge
@@ -217,6 +221,12 @@ type GuardrailInspector struct {
 	strategyComplete  string
 	strategyToolCall  string
 	judgeSweep        bool
+
+	// managedUnavailableBlock mirrors cisco_ai_defense.unavailable_action
+	// for the managed proxy lane: when set, a request AI Defense could not
+	// inspect is blocked instead of allowed. See
+	// SetManagedUnavailableAction.
+	managedUnavailableBlock atomic.Bool
 
 	// hiltMu guards hilt — set by SetHILTConfig() at proxy boot and on
 	// every guardrail-config reload, read by finalize() under load. The
@@ -315,7 +325,22 @@ func (g *GuardrailInspector) SetCiscoInspector(i Inspector) {
 	if g == nil {
 		return
 	}
+	g.ciscoMu.Lock()
 	g.ciscoClient = i
+	g.ciscoMu.Unlock()
+}
+
+// remoteInspector returns the remote AI Defense inspector, or nil when the
+// remote lane is disabled. Each inspection reads it once, so a replacement
+// that lands mid-inspection cannot pass the nil check and then be called
+// as nil.
+func (g *GuardrailInspector) remoteInspector() Inspector {
+	if g == nil {
+		return nil
+	}
+	g.ciscoMu.RLock()
+	defer g.ciscoMu.RUnlock()
+	return g.ciscoClient
 }
 
 // SetManagedMode toggles the managed-vs-opensource merge dispatch.
@@ -682,8 +707,10 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // inspector is unwired (ciscoClient == nil), or AID returns no verdict
 // (transport error, timeout, token failure), the request is ALLOWED rather
 // than blocked. Operators still see the failure via EmitCiscoError on the
-// client side, but traffic is never held hostage to AID availability in
-// managed mode.
+// client side. An administrator who prefers enforcement over availability
+// sets cisco_ai_defense.unavailable_action=block, which turns the unwired
+// and no-verdict branches into a block verdict; the no-content branch stays
+// an allow.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
 	if !managedAIDMessagesHaveInspectableContent(messages) {
 		// Nothing AID can inspect (for example, Inspect rewrites every empty
@@ -694,17 +721,21 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
 		return allowVerdict("ai-defense")
 	}
-	if g.ciscoClient == nil {
+	cisco := g.remoteInspector()
+	if cisco == nil {
 		// Managed mode with no wired inspector = no decision-maker at all.
 		// Fail open, but surface it loudly so operators can alert on a
 		// misconfigured managed install rather than silently running with
 		// no enforcement.
+		if blocked := g.managedAIDUnavailableVerdict(aidFailOpenUnwired, direction); blocked != nil {
+			return blocked
+		}
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
 		return allowVerdict("ai-defense")
 	}
 	t0 := time.Now()
 	ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-	v := g.ciscoClient.Inspect(ciscoCtx, messages)
+	v := cisco.Inspect(ciscoCtx, messages)
 	duration := time.Since(t0)
 	elapsed := float64(duration) / float64(time.Millisecond)
 	endCisco(phaseAction(v), phaseSeverity(v), duration)
@@ -713,6 +744,9 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		// already emitted EmitCiscoError for the underlying transport
 		// failure; this records the decision-level fail-open so operators
 		// can alert on sustained AID unavailability driving allow decisions.
+		if blocked := g.managedAIDUnavailableVerdict(aidFailOpenUnavailable, direction); blocked != nil {
+			return blocked
+		}
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnavailable, direction)
 		return allowVerdict("ai-defense")
 	}
@@ -933,10 +967,10 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
 	}
 
-	if (sm == "remote" || sm == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	if cisco := g.remoteInspector(); (sm == "remote" || sm == "both") && cisco != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = cisco.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -994,11 +1028,12 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 
 	var ciscoResult *ScanVerdict
 	var ciscoElapsedMs float64
+	cisco := g.remoteInspector()
 
 	runCisco := func() {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = cisco.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1012,7 +1047,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			verdict = mergeVerdicts(verdict, ruleVerdict)
 		}
 
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && cisco != nil && len(messages) > 0 {
 			runCisco()
 			verdict = g.mergeVerdict(verdict, ciscoResult)
 			verdict.CiscoElapsedMs = ciscoElapsedMs
@@ -1023,7 +1058,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// If the rule engine found HIGH+ severity, return immediately (covers
 	// sensitive paths, dangerous commands, C2, etc. that triage doesn't have).
 	if ruleVerdict != nil && severityRank[ruleVerdict.Severity] >= severityRank["HIGH"] {
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && cisco != nil && len(messages) > 0 {
 			runCisco()
 			ruleVerdict = g.mergeVerdict(ruleVerdict, ciscoResult)
 			ruleVerdict.CiscoElapsedMs = ciscoElapsedMs
@@ -1059,7 +1094,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	}
 
 	// Cisco AI Defense (if configured).
-	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	if (g.scannerMode == "remote" || g.scannerMode == "both") && cisco != nil && len(messages) > 0 {
 		runCisco()
 	}
 
@@ -1166,10 +1201,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
 		// Also run Cisco remote on fallback for full parity with regex_only path.
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		if cisco := g.remoteInspector(); (g.scannerMode == "remote" || g.scannerMode == "both") && cisco != nil && len(messages) > 0 {
 			t0 := time.Now()
 			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoResult = cisco.Inspect(ciscoCtx, messages)
 			ciscoElapsed := time.Since(t0)
 			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1219,10 +1254,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	// Cisco AI Defense (if configured).
-	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	if cisco := g.remoteInspector(); (g.scannerMode == "remote" || g.scannerMode == "both") && cisco != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = cisco.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)

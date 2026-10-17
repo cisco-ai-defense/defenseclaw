@@ -505,6 +505,7 @@ targets:
                 CursorTargetEnabled = $false
                 AgentApplicationControlAttested = $true
                 ClaudeEffectivePolicyVerified = $true
+                ClaudeEffectivePolicyStaleReason = ''
                 CoreHardeningCertification = $false
                 CertificationCodexHome = ''
             }
@@ -2149,6 +2150,7 @@ targets:
             return [pscustomobject]@{
                 agent_application_control_enforced = $true
                 claude_effective_policy_verified = $true
+                claude_effective_policy_stale_reason = ''
             }
         }
         function script:Set-DefenseClawManagedServices {

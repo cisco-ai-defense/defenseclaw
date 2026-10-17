@@ -272,7 +272,10 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		}()
 	}
 
-	runErr := sc.Run(ctx)
+	// A per-user gateway that was already running when an enterprise
+	// deployment was installed stops itself, so the enterprise service can
+	// take the hook port without waiting for this user to log off.
+	runErr := runWithEnterpriseCoexistenceWatch(ctx, cancel, cfg.DeploymentMode, sc.Run)
 	if diag {
 		fmt.Fprintf(os.Stderr,
 			"[sidecar][diag] sc.Run returned: err=%v ctxErr=%v at %s pid=%d\n",

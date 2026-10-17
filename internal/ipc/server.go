@@ -48,9 +48,8 @@ type ServerOptions struct {
 // posture — do not rename without coordinating with the release
 // monitoring path referenced in spec 004 REQ-09.
 const (
-	codesignStateDisabled        = "disabled"
-	codesignStateEnabled         = "enabled"
-	codesignStateDeferredWindows = "deferred_windows"
+	codesignStateDisabled = "disabled"
+	codesignStateEnabled  = "enabled"
 )
 
 // codesignStateLabel picks the codesign_peer_auth log-field value
@@ -58,17 +57,15 @@ const (
 // non-empty allowlist / require flag configured. Split from Run so
 // unit tests can drive every combination without booting a server.
 //
-//   - Windows managed_enterprise ⇒ "deferred_windows" regardless of
-//     allowlist state. The accept-time codesign validator is a
-//     Windows-side no-op today (peerauth_windows.go returns
-//     KindUnixPeerUnauthenticated unconditionally); reporting
-//     "enabled" would be a lie. Spec 004 REQ-09.
+//   - Windows ⇒ "enabled" regardless of allowlist state. The Windows
+//     accept path always authenticates the peer's executable and
+//     Authenticode signer (winpeer_auth.go); it has no disabled mode.
 //   - Any non-empty require-flag OR allowlist on linux/darwin
 //     ⇒ "enabled".
 //   - Otherwise ⇒ "disabled" (dev / unmanaged path).
 func codesignStateLabel(goos string, requireUnixPeer, requireSigningMetadata bool, allowlistTotal int) string {
 	if goos == "windows" {
-		return codesignStateDeferredWindows
+		return codesignStateEnabled
 	}
 	if requireUnixPeer || requireSigningMetadata || allowlistTotal > 0 {
 		return codesignStateEnabled
@@ -106,6 +103,14 @@ type Server struct {
 	allowedBundleIDs       []string
 	requireUnixPeer        bool
 	requireSigningMetadata bool
+
+	// Windows peer-auth policy: Authenticode signer names and GUI
+	// executables relative to the Secure Client install directory.
+	// Seeded from DefaultSecureClientPolicy() whenever the operator
+	// left a list empty, on every deployment mode, because the Windows
+	// accept path always enforces them. Unused on linux/darwin.
+	allowedWindowsSigners []string
+	allowedWindowsImages  []string
 }
 
 // NewServer prepares the IPC server. It does not touch the filesystem
@@ -177,6 +182,15 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		requireUnixPeer = true
 		requireSigningMetadata = true
 	}
+	defaultPolicy := config.DefaultSecureClientPolicy()
+	allowedWindowsSigners := opts.Config.Managed.AllowedWindowsSigners
+	if len(allowedWindowsSigners) == 0 {
+		allowedWindowsSigners = defaultPolicy.AllowedWindowsSigners
+	}
+	allowedWindowsImages := opts.Config.Managed.AllowedWindowsImages
+	if len(allowedWindowsImages) == 0 {
+		allowedWindowsImages = defaultPolicy.AllowedWindowsImages
+	}
 
 	bcast := newBroadcast()
 	svc := &service{
@@ -214,6 +228,8 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		allowedBundleIDs:       allowedBundleIDs,
 		requireUnixPeer:        requireUnixPeer,
 		requireSigningMetadata: requireSigningMetadata,
+		allowedWindowsSigners:  allowedWindowsSigners,
+		allowedWindowsImages:   allowedWindowsImages,
 	}, nil
 }
 
@@ -235,13 +251,17 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	lis := newCodesignValidatingListener(inner,
-		s.allowedTeamIDs,
-		s.allowedSigningIDs,
-		s.allowedBundleIDs,
-		s.requireUnixPeer,
-		s.requireSigningMetadata,
-		s.logReject)
+	// Wrap it with the per-OS accept-time peer authentication:
+	// codesign on darwin, Authenticode signer + image on Windows.
+	lis, err := s.wrapPeerAuthListener(inner)
+	if err != nil {
+		_ = inner.Close()
+		if s.socketPath != "" {
+			_ = os.Remove(s.socketPath)
+		}
+		s.setHealth(gateway.StateError, err.Error())
+		return err
+	}
 
 	s.grpcSrv = grpc.NewServer()
 	pb.RegisterDefenseClawSecureClientServiceServer(s.grpcSrv, s.svc)
@@ -252,30 +272,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.requireSigningMetadata,
 		len(s.allowedTeamIDs)+len(s.allowedSigningIDs)+len(s.allowedBundleIDs),
 	)
-	// Spec 004 REQ-08: emit the deferred-auth warning line ONCE at
-	// startup, BEFORE the "listening on ..." line, so any log
-	// aggregator has a clear ordering signal for the beta posture.
-	// The warning fires on EVERY Windows build (managed or
-	// unmanaged) because codesignStateLabel returns
-	// `deferred_windows` unconditionally on GOOS=="windows" — the
-	// Windows accept-time codesign validator is a no-op regardless
-	// of deploy mode, so calling it anything else would be a lie.
-	// On non-managed Windows builds the IPC server itself never
-	// starts (ManagedIPCEnabled() gates the sidecar bootstrap in
-	// internal/cli/sidecar.go), so we never actually reach this
-	// branch on non-managed hosts — but the label + warning are
-	// wired identically for defense-in-depth. See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzz.
-	if codesignState == codesignStateDeferredWindows {
-		s.opts.Logf("windows: peer-auth is deferred; UDS is DACL-permissive to Authenticated Users")
-	}
-	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s team_ids=%v signing_ids=%v bundle_ids=%v require_unix_peer=%v require_signing_metadata=%v version=%s)",
+	s.opts.Logf("listening on %s (mode=%#o codesign_peer_auth=%s %s version=%s)",
 		s.socketPath, s.socketMode, codesignState,
-		s.allowedTeamIDs,
-		s.allowedSigningIDs,
-		s.allowedBundleIDs,
-		s.requireUnixPeer,
-		s.requireSigningMetadata,
+		s.peerAuthPolicyLogFields(runtime.GOOS),
 		s.opts.Version)
 	s.setHealth(gateway.StateRunning, "")
 
@@ -358,6 +357,24 @@ func (s *Server) setHealth(state gateway.SubsystemState, lastErr string) {
 		return
 	}
 	s.opts.Health.SetManaged(state, lastErr, nil)
+}
+
+// peerAuthPolicyLogFields renders the effective peer-auth policy for
+// the startup log line. The darwin/linux field set and order are the
+// historical ones, kept stable for log-aggregation rules; Windows
+// reports its own identity model and always requires both a live
+// AF_UNIX peer and verified signing metadata.
+func (s *Server) peerAuthPolicyLogFields(goos string) string {
+	if goos == "windows" {
+		return fmt.Sprintf("windows_signers=%q windows_images=%q require_unix_peer=true require_signing_metadata=true",
+			s.allowedWindowsSigners, s.allowedWindowsImages)
+	}
+	return fmt.Sprintf("team_ids=%v signing_ids=%v bundle_ids=%v require_unix_peer=%v require_signing_metadata=%v",
+		s.allowedTeamIDs,
+		s.allowedSigningIDs,
+		s.allowedBundleIDs,
+		s.requireUnixPeer,
+		s.requireSigningMetadata)
 }
 
 // logReject formats a peer-auth rejection for stderr. UID/PID are

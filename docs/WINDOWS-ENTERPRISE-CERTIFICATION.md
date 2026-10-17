@@ -28,14 +28,14 @@ evidence:
 | Managed-root provenance | Default install, state, staging, and work roots come from Windows known folders. Poisoned process `ProgramFiles` or `ProgramData` variables cannot redirect them and no poisoned path is created. |
 | Trusted release input | The installer, module, broker, gateway, hook, CLI, config, manifest, and required separately version-stamped upgrade binaries are copied byte-stably into an administrator/System-only staging tree before full lifecycle execution. The Cisco provider DLL remains at its trusted Secure Client path and must match the public CLI resolver selection with an exact Cisco signer and pinned digest. `-AllowUnsigned` is accepted before module import only for `Install`/`Upgrade`/`Repair` with the exact same-id certification service names, roots, and required certification CODEX_HOME scope marker; production defaults and near misses fail closed. It does not weaken either source-path trust boundary. |
 | Drive-namespace integrity | Every enterprise source, managed root, certification home, and target profile uses an exact mount-manager drive root on fixed NTFS. Effective-drive, global-drive, and volume-GUID DOS-device targets are single, well-formed, and identical. A medium user raw `DefineDosDevice` alias that still reports `Fixed`/`NTFS` is rejected by the CLI, bootstrap, module, Codex machine-policy path, and target-profile path before mutation. |
-| Service control | The gateway runs as `NT SERVICE\<gateway-name>`; the credential broker and guardian run as LocalSystem. All three start automatically, and a standard user cannot stop, disable, reconfigure, delete, or obtain `PROCESS_TERMINATE` access to any of those three services. Direct `taskkill` fails and their PIDs remain unchanged. The derived LocalSystem Enumerator is covered in this run only by exact-name collision refusal and uninstall/fallback-cleanup absence checks; this broker-focused matrix does not claim its full token/recovery behavior. |
-| Process/token object isolation | A standard user may obtain query-limited process access, but cannot terminate, suspend, inject into, create threads in, duplicate handles from, change quota/information/DACL/owner on, or obtain all-access to the broker, gateway, or guardian process. It also cannot obtain any duplicate/impersonate/assign-primary/adjust/DACL/owner token handle. Those three original PIDs remain responsive after every probe. |
+| Service control | The gateway runs as `NT SERVICE\<gateway-name>`; the credential broker, sensor helper, and guardian run as LocalSystem. All four start automatically, and a standard user cannot stop, disable, reconfigure, delete, or obtain `PROCESS_TERMINATE` access to any of those four services. Direct `taskkill` fails and their PIDs remain unchanged. The derived LocalSystem Enumerator is covered in this run only by exact-name collision refusal and uninstall/fallback-cleanup absence checks; this broker-focused matrix does not claim its full token/recovery behavior. |
+| Process/token object isolation | A standard user may obtain query-limited process access, but cannot terminate, suspend, inject into, create threads in, duplicate handles from, change quota/information/DACL/owner on, or obtain all-access to the broker, gateway, sensor helper, or guardian process. It also cannot obtain any duplicate/impersonate/assign-primary/adjust/DACL/owner token handle. Those four original PIDs remain responsive after every probe. |
 | Actual service tokens | A read-only C#/PInvoke probe records the broker, gateway, and guardian live PIDs' TokenUser, integrity, privileges, groups, and restricted SIDs. The gateway is the exact virtual service SID with a restricted high-integrity token and only ChangeNotify. The LocalSystem broker is unrestricted with only ChangeNotify. The LocalSystem guardian has exactly Tcb/Impersonate/ChangeNotify/Backup/Restore; Backup and Restore must be present-but-disabled at idle and enabled only on the dedicated bounded DACL-repair thread. TakeOwnership is never retained. |
 | Recovery semantics | The broker, gateway, and guardian each have only restart actions at 5s/15s/60s, with the final 60s action repeated indefinitely and no terminal NONE. Controlled unexpected failures 1-4 replace each of those PIDs every time. Servicing persists intent, disables and stops all managed services, and the certification observes the three-service set through a fresh 65-second queued-restart drain before guardian-first activation. `-NoStart` keeps those three disabled/stopped until a complete public `Repair`; raw SCM start is rejected as an activation path. |
 | Shared Codex prerequisite | Explicit enterprise lifecycle securely creates missing `C:\ProgramData\OpenAI\Codex` parents with System/Administrators full control and Users read/traverse. Status and normal mode do not create them; unsafe preexisting owners/DACLs/reparse points fail without takeover; rollback removes only transaction-created empty directories; preexisting legitimate directories survive failure and purge. |
 | Codex machine policy | `%ProgramData%\OpenAI\Codex\requirements.toml` contains exactly ten managed hook groups and points only to the protected installed hook. Its protected enrollment state, ownership record, and ACL preimage are non-user-writable and guardian-repaired after deletion, event removal, or DACL drift. Managed enterprise never reads, writes, or patches `<profile>\.codex`. |
 | Codex policy serialization | `%ProgramData%\OpenAI\Codex\.defenseclaw-managed-hooks.lock` is Administrators-owned, protected, no-reparse, and single-link. Acquisition is bounded. The retired predictable Global mutex name is ignored even when a user pre-creates it; a user-held read lock may deny availability only until the bounded failure and later reconcile. |
-| Agent application control | Protected schema-v2 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. |
+| Agent application control | Protected schema-v3 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. |
 | Codex effective enforcement | The protected machine requirements point approved Codex directly to the shared `defenseclaw-hook.exe`; certification invokes the real client and requires managed hook contact or a blocked operation. |
 | Claude effective enforcement | The real approved Claude client must exercise the installed machine policy against a local no-auth Messages stub. Hostile user and project `disableAllHooks` settings cannot yield a green result unless a managed hook is observed or the client operation is blocked. A protected `90-defenseclaw.json` file alone is not acceptance evidence. |
 | Hook server identity | Scoped-token authentication is necessary but not sufficient. The connected loopback server PID must equal the exact live SCM gateway PID. A standard-user fake listener on the exact API port, including a gateway-restart bind race, cannot obtain an authenticated request or return a trusted allow verdict. |
@@ -154,7 +154,8 @@ Every run generates a new ten-character identifier and confines machine
 mutations to:
 
 - `DefenseClawCertGateway_<id>`, `DefenseClawCertBroker_<id>`,
-  `DefenseClawCertGuardian_<id>`, and `DefenseClawCertEnumerator_<id>`;
+  `DefenseClawSensorHelper_<id>`, `DefenseClawCertGuardian_<id>`, and
+  `DefenseClawCertEnumerator_<id>`;
 - one `DCEH<id-prefix>` local non-admin denial user;
 - short-lived, Administrators-owned `DefenseClawCert_<id>_*` scheduled tasks
   with an exact protected three-ACE DACL; `RunEx` binds them to the exact
@@ -251,7 +252,9 @@ and prints JSON, but creates no user, service, directory, or policy:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -276,7 +279,9 @@ From an elevated 64-bit PowerShell 7 window:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -298,7 +303,9 @@ supplying credentials:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -348,9 +355,21 @@ The full harness is deliberately two-phase. Initial `Install` may report
 `claude_effective_policy_verified=false` and `security_complete=false`.
 The harness then runs the real approved Claude client with hostile user and
 project precedence. Only after that succeeds does it run `Repair` with
-`-AttestClaudeEffectivePolicy`; the protected schema-v2 evidence binds that
-proof to the current manifest hash. Only that second transaction may make
-aggregate `security_complete=true`.
+`-AttestClaudeEffectivePolicy`; the protected schema-v3 evidence binds that
+proof to the Claude policy identity it exercised: the SHA-256 of the
+DefenseClaw `90-defenseclaw.json` machine policy (which must match its
+DefenseClaw ownership sidecar) and of the installed `defenseclaw-hook.exe`.
+Those digests are captured before the Repair stages anything. An attested
+Upgrade or Repair whose hook binary differs from the installed one is refused
+before its transaction opens, and one whose staging changes the policy or hook
+is refused and rolled back, so the evidence never names bytes the proof did
+not run.
+Only that second transaction may make aggregate `security_complete=true`.
+Enrollment changes that only rewrite `targets.yaml` keep the evidence current.
+A different policy fragment or hook binary, or schema-v2 evidence from an
+older release, reports `claude_effective_policy_verified=false` with
+`claude_effective_policy_stale_reason` instead of failing the lifecycle; the
+next Install, Upgrade, or Repair retires it until the proof is repeated.
 
 The public signed CLI maps one-to-one to those installer parameters. For the
 first transaction, use `defenseclaw enterprise windows install` with
@@ -362,7 +381,7 @@ use `defenseclaw enterprise windows repair` with the same protected release
 inputs, repeat that optional application-control attestation if used, and add
 `--attest-claude-effective-policy`. Then require both
 `enterprise windows status --json` and `enterprise windows verify --json` to
-report the manifest-bound effective-policy field and aggregate security true.
+report the policy-bound effective-policy field and aggregate security true.
 The CLI delegates to the same protected PowerShell transaction; it does not
 weaken elevation, signature, source-path, or action restrictions.
 Certification drives the clean first transaction through the protected staged
@@ -409,7 +428,9 @@ second build:
   -BrokerBinary .\v1\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\v1\defenseclaw-gateway.exe `
+  -ACPBinary .\v1\defenseclaw-acp.exe `
   -HookBinary .\v1\defenseclaw-hook.exe `
+  -SensorHelperBinary .\v1\defenseclaw-sensor-helper.exe `
   -CLIBinary .\v1\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -419,7 +440,9 @@ second build:
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeACPBinary .\v2\defenseclaw-acp.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `

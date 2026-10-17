@@ -457,6 +457,19 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
+// managedInspectorUnwired reports whether the proxy's GuardrailInspector has
+// no Cisco AI Defense inspector, as SetManagedInspection leaves it when the
+// managed inspector could not be built. The sidecar asks only about the proxy
+// it serves in managed_enterprise. A proxy without a GuardrailInspector (a
+// test double) has no such lane and reports false.
+func (p *GuardrailProxy) managedInspectorUnwired() bool {
+	if p == nil {
+		return false
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	return ok && g.remoteInspector() == nil
+}
+
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
 // the live proxy without rereading any side files.
 func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {

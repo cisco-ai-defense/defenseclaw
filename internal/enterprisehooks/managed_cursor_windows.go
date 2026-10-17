@@ -52,6 +52,10 @@ type windowsCursorManagedPolicyState struct {
 	AdapterSHA256      string                              `json:"adapter_sha256"`
 	ReceiptSHA256      string                              `json:"receipt_sha256"`
 	Targets            []WindowsCursorManagedRuntimeTarget `json:"targets"`
+	// ApprovedForeignHookSHA256 is the administrator allowlist read by the
+	// managed Cursor hook's foreign-hook guard. Omitted when empty so the
+	// default state stays byte-compatible with earlier releases.
+	ApprovedForeignHookSHA256 []string `json:"approved_foreign_hook_sha256,omitempty"`
 }
 
 // windowsCursorManagedPolicyReceipt is administrator-only rollback material.
@@ -125,6 +129,7 @@ type windowsCursorManagedPolicyTarget struct {
 	targetSID          *windows.SID
 	registered         bool
 	active             bool
+	approvedForeign    []string
 }
 
 func defaultWindowsCursorManagedRoot() (string, error) {
@@ -627,6 +632,9 @@ func validateWindowsCursorManagedStateIdentity(
 		return artifacts, errors.New("enterprise hooks: invalid Cursor managed target set")
 	}
 	state.Targets = targets
+	if err := validateWindowsCursorApprovedForeignHooks(state.ApprovedForeignHookSHA256); err != nil {
+		return artifacts, err
+	}
 	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
 	if err != nil {
 		return artifacts, err
@@ -854,6 +862,13 @@ func installWindowsCursorManagedPolicy(
 		state.GatewayAddr = gateway
 		state.GatewayServiceName = service
 		state.AdapterSHA256 = windowsManagedPolicyDigest(adapterBody)
+		if opts.CursorApprovedForeignHooks != nil {
+			approved, err := canonicalWindowsCursorApprovedForeignHooks(opts.CursorApprovedForeignHooks)
+			if err != nil {
+				return err
+			}
+			state.ApprovedForeignHookSHA256 = approved
+		}
 		next := append([]WindowsCursorManagedRuntimeTarget(nil), state.Targets...)
 		for _, target := range targets {
 			filtered := next[:0]
@@ -1206,6 +1221,7 @@ func resolveWindowsCursorManagedPolicyTarget() (windowsCursorManagedPolicyTarget
 	result.hookExecutable = artifacts.parsed.HookExecutable
 	result.gatewayAddr = artifacts.parsed.GatewayAddr
 	result.gatewayServiceName = artifacts.parsed.GatewayServiceName
+	result.approvedForeign = append([]string(nil), artifacts.parsed.ApprovedForeignHookSHA256...)
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
 		return result, errors.New("enterprise hooks: current Cursor hook token has no user SID")
