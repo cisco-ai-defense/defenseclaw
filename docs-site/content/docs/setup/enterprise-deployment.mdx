@@ -1378,8 +1378,13 @@ exact per-user DefenseClaw registrations it recognizes in that target user's
 `.cursor/hooks.json`. It keeps a backup and logs the removals. It leaves other
 hooks and unrelated file content in place, and skips a file it cannot edit
 safely; the managed hook still denies any unsafe entry left behind. Uninstall
-does not restore these per-user registrations. The related Claude Code
-settings cleanup is tracked in #918.
+does not restore these per-user registrations. The same install or repair also
+removes exact DefenseClaw per-user Claude Code hook handlers from that user's
+`.claude/settings.json`, preserving unrelated handlers and settings. It backs
+up the previous file as `settings.json.defenseclaw-backup` and leaves files it
+cannot safely edit unchanged with a warning. It does not edit
+`settings.local.json` or a folder set with `CLAUDE_CONFIG_DIR`. Uninstall does
+not restore those handlers.
 
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
