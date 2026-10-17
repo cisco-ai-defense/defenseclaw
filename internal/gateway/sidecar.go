@@ -183,24 +183,60 @@ type Sidecar struct {
 	judgeBodiesReadyPending bool
 	judgeBodiesReadyDetails string
 
-	// cmidProviderMu guards cmidProviderInst AND cmidBuildLastLog.
-	// The provider is lazily constructed on first request via
-	// ensureCMIDProvider and reused for the sidecar's lifetime.
-	// Managed-mode wiring only.
-	cmidProviderMu    sync.Mutex
-	cmidProviderInst  cloudreg.Provider
-	cmidBuildLastLog  time.Time
-	cmidBuildLastKind string
+	// cmidProviderMu guards cmidProviderInst, the cmidBuild* log state
+	// and managedInspectorFailure. The provider is lazily constructed on
+	// first request via ensureCMIDProvider and reused for the sidecar's
+	// lifetime. Managed-mode wiring only.
+	cmidProviderMu      sync.Mutex
+	cmidProviderInst    cloudreg.Provider
+	cmidBuildLastLog    time.Time
+	cmidBuildLastKind   string
+	cmidBuildLastDetail string
+	// cmidBuildQuiet is set while ensureCMIDProviderQuietly runs a quiet
+	// provider build.
+	cmidBuildQuiet bool
+	// managedInspectorFailure is the cause of the last failed managed
+	// inspector build, "" after a success (buildManagedInspector).
+	managedInspectorFailure string
 
 	// Last outcome of building the managed cloud auth provider, so
 	// /health can report whether inspection is reachable.
-	inspectionMu        sync.RWMutex
-	inspectionAvailable bool
-	inspectionDetail    string
+	inspectionMu             sync.RWMutex
+	inspectionAvailable      bool
+	inspectionVerdictFailure bool // last unavailability came from an inspection without a verdict
+	inspectionDetail         string
 	// inspectionEpoch advances on every setInspectionAvailability, so an
 	// observer bound to a replaced inspector stops publishing (see
 	// inspectionAvailabilityObserver).
 	inspectionEpoch uint64
+	// inspectionGeneration counts recorded outcomes, so a probe that
+	// waited on a token can tell that an inspection reported meanwhile;
+	// guarded by inspectionMu.
+	inspectionGeneration uint64
+	// inspectionLastProbe rate-limits probeManagedInspection; guarded by
+	// inspectionMu.
+	inspectionLastProbe time.Time
+	// managedInspectionPublishMu serializes publishManagedInspectionHealth
+	// so a slower publisher cannot overwrite a newer state with an older
+	// snapshot.
+	managedInspectionPublishMu sync.Mutex
+	// managedHookInspector records whether the API server's hook lane has
+	// a managed inspector (managedHookInspectorWired / ...Unwired); zero
+	// until the API server has picked one.
+	managedHookInspector atomic.Int32
+	// hookInspectorMu serializes wiring the managed inspectors of the API
+	// server's hook lane and the served guardrail proxy's lane (runAPI, a
+	// reload, retryManagedHookInspector and retryManagedProxyInspector);
+	// hookInspectorLastRetry and proxyInspectorLastRetry, guarded by it,
+	// rate-limit the two retries.
+	hookInspectorMu        sync.Mutex
+	hookInspectorLastRetry time.Time
+	// managedGuardrailProxy is the guardrail proxy runGuardrailProxy is
+	// serving in managed_enterprise, nil otherwise. While its lane has no
+	// managed inspector the managed inspection state is unavailable, and
+	// retryManagedProxyInspector rewires it.
+	managedGuardrailProxy   atomic.Pointer[GuardrailProxy]
+	proxyInspectorLastRetry time.Time
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -1933,9 +1969,11 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// lane's SetManagedInspection is called only in managed_enterprise
 	// mode.
 	if inspectorNeedsRebuild(oldCfg, newCfg) {
+		s.hookInspectorMu.Lock()
 		if inspector := s.pickInspector(ctx); inspector != nil {
 			if api := s.apiSnapshot(); api != nil {
 				api.SetCiscoInspector(inspector)
+				s.setManagedHookInspectorWired(true)
 			}
 		} else if api := s.apiSnapshot(); api != nil {
 			// Reload rejected the inspector (managed provider now
@@ -1943,13 +1981,19 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			// binding so the hook lane fails open cleanly instead of
 			// keeping stale state that points at the old endpoint.
 			api.SetCiscoInspector(nil)
+			s.setManagedHookInspectorWired(false)
 		}
 		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+				proxy.SetManagedUnavailableAction(managedAIDEffectiveUnavailableAction(s.currentConfig()))
 			}
 		}
+		s.hookInspectorMu.Unlock()
 	}
+	// Keep the Secure Client availability in step with the reloaded
+	// posture (unavailable_action, or leaving managed_enterprise).
+	s.refreshManagedInspectionHealth(nextManagedEnterprise)
 
 	// managed_enterprise: refresh the connector / MCP endpoint inventory
 	// on every reload — MCP servers and connectors can change via config
@@ -2341,9 +2385,18 @@ func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 // Both call sites always read a fresh cfg snapshot, so this helper does
 // too.
 func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Inspector {
+	return s.buildManagedInspector(ctx, siteLabel, false)
+}
+
+// buildManagedInspector is newManagedInspector. A quiet build (the hook-lane
+// retry on the guardrail health ticker) logs a build failure and records it
+// as a failed inspection only when its cause differs from the last managed
+// inspector build failure, so a build that keeps failing is reported once
+// rather than on every retry, with no request behind it.
+func (s *Sidecar) buildManagedInspector(ctx context.Context, siteLabel string, quiet bool) Inspector {
 	cfg := s.currentConfig()
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
-	prov, err := s.ensureCMIDProvider(ctx)
+	prov, err := s.ensureCMIDProviderQuietly(ctx, quiet)
 	// Hard-failure gate: only bail when we truly have no provider to
 	// hand to the inspector. A non-nil provider with err != nil means
 	// the underlying library is currently unloadable (e.g. AVC hasn't
@@ -2357,9 +2410,11 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		if err != nil {
 			detail = err.Error()
 		}
-		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
-			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
-		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
+		if s.noteManagedInspectorFailure(detail) || !quiet {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
+				"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
+			recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
+		}
 		return nil
 	}
 	if err != nil {
@@ -2376,11 +2431,14 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
-		EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
-			"managed_enterprise inspector unavailable — "+siteLabel)
-		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		if s.noteManagedInspectorFailure("managed_enterprise inspector unavailable") || !quiet {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
+				"managed_enterprise inspector unavailable — "+siteLabel)
+			recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		}
 		return nil
 	}
+	s.noteManagedInspectorFailure("")
 	m.bindObservabilityV8(metricRuntime)
 	// Wire per-request availability into /health so a dropped CMID
 	// auth after inspector construction is visible without a reload.
@@ -2389,6 +2447,17 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	// publish nil so a self-healing lane clears the fail flag.
 	m.bindAvailabilityObserver(s.setInspectionAvailability)
 	return m
+}
+
+// noteManagedInspectorFailure records the cause of a managed inspector
+// build failure ("" after a successful build) and reports whether it
+// differs from the previous one.
+func (s *Sidecar) noteManagedInspectorFailure(cause string) bool {
+	s.cmidProviderMu.Lock()
+	defer s.cmidProviderMu.Unlock()
+	changed := cause != s.managedInspectorFailure
+	s.managedInspectorFailure = cause
+	return changed
 }
 
 // cmidBuildLogCooldown throttles the "CMID provider build failed"
@@ -2425,19 +2494,25 @@ const cmidProviderTokenCacheTTL = 60 * time.Second
 // apart from a live provider whose Refresh started failing after
 // working for a while.
 //
-// Caller must hold s.cmidProviderMu. cmidBuildLastLog and
-// cmidBuildLastKind live inside that lock's scope, so no additional
-// synchronisation is needed.
+// Caller must hold s.cmidProviderMu. The cmidBuild* fields live inside
+// that lock's scope, so no additional synchronisation is needed.
 func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 	if err == nil {
 		return
 	}
 	now := time.Now()
-	if stage == s.cmidBuildLastKind && now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown {
-		return
+	detail := err.Error()
+	if stage == s.cmidBuildLastKind {
+		// A quiet build (the hook-lane retry, see ensureCMIDProviderQuietly)
+		// does not repeat a failure already logged, whatever its age.
+		if now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown ||
+			(s.cmidBuildQuiet && detail == s.cmidBuildLastDetail) {
+			return
+		}
 	}
 	s.cmidBuildLastLog = now
 	s.cmidBuildLastKind = stage
+	s.cmidBuildLastDetail = detail
 	fmt.Fprintf(os.Stderr,
 		"[managed-cloud] CMID provider build failed at %s: %v\n",
 		stage, err)
@@ -2492,11 +2567,21 @@ func (s *Sidecar) logCMIDBuildLane(lane string) {
 // hook, managedaid per batch) reuse the last-issued bearer token
 // until either the TTL expires or a 401 → Invalidate() clears it.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	return s.ensureCMIDProviderQuietly(ctx, false)
+}
+
+// ensureCMIDProviderQuietly is ensureCMIDProvider. With quiet set, a build
+// failure identical to the last one logged is not logged again (see
+// logCMIDBuildError); retryManagedHookInspector rebuilds a failing provider
+// on the guardrail health ticker and would otherwise repeat it every retry.
+func (s *Sidecar) ensureCMIDProviderQuietly(ctx context.Context, quiet bool) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
 	}
+	s.cmidBuildQuiet = quiet
+	defer func() { s.cmidBuildQuiet = false }()
 	prov, buildErr := s.buildCMIDProvider(ctx)
 	s.setInspectionAvailability(buildErr)
 	// buildCMIDProvider returns (nil, err) only on hard failures
@@ -2593,21 +2678,26 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 
 // setInspectionAvailability records whether managed inspection can reach
 // a credential provider. A failure here is what makes pickInspector
-// return nil, so /health reports it alongside enforcement mode.
+// return nil, so /health reports it alongside enforcement mode, and the
+// state is mirrored into SidecarHealth for the Secure Client availability.
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
-	defer s.inspectionMu.Unlock()
 	s.inspectionEpoch++
 	s.recordInspectionAvailabilityLocked(err)
+	s.inspectionMu.Unlock()
+	s.publishManagedInspectionHealth()
 }
 
+// recordInspectionAvailabilityLocked stores an outcome and advances the
+// generation. Caller holds inspectionMu.
 func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
+	s.inspectionGeneration++
 	s.inspectionAvailable = err == nil
+	s.inspectionVerdictFailure = errors.Is(err, errManagedAIDNoVerdict)
+	s.inspectionDetail = ""
 	if err != nil {
 		s.inspectionDetail = err.Error()
-		return
 	}
-	s.inspectionDetail = ""
 }
 
 // inspectionAvailabilityObserver returns a callback for an inspector's
@@ -2620,11 +2710,13 @@ func (s *Sidecar) inspectionAvailabilityObserver() func(error) {
 	s.inspectionMu.RUnlock()
 	return func(err error) {
 		s.inspectionMu.Lock()
-		defer s.inspectionMu.Unlock()
 		if s.inspectionEpoch != epoch {
+			s.inspectionMu.Unlock()
 			return
 		}
 		s.recordInspectionAvailabilityLocked(err)
+		s.inspectionMu.Unlock()
+		s.publishManagedInspectionHealth()
 	}
 }
 
@@ -3601,6 +3693,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	// Same provider gate as the multi-connector boot: managed mode disables
+	// the local detectors, so a build that can never mint a managed-cloud
+	// credential must report an error instead of running with no inspector.
+	if s.currentConfig().Guardrail.Enabled && managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		if err := s.requireManagedInspectionSupport(); err != nil {
+			return err
+		}
+	}
 	if !s.currentConfig().Guardrail.Enabled {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
@@ -3744,14 +3844,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// initialize, remote inspection stays disabled entirely.
 		if s.currentConfig().ManagedAIDOnly() {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+			proxy.SetManagedUnavailableAction(managedAIDEffectiveUnavailableAction(s.currentConfig()))
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
 			// block/allow, MCP block, block-list, approval, multi-turn,
 			// judge) is disabled across proxy/hook/router lanes. Cisco AI
 			// Defense is the sole decision-maker; requests it cannot decide
-			// (AID down/timeout/unwired) fail open. Log once at boot so
-			// operators see the posture in the sidecar log.
-			fmt.Fprintln(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (fail-open on AID unavailable)")
+			// (AID down/timeout/unwired) follow
+			// cisco_ai_defense.unavailable_action (allow by default). Log
+			// once at boot so operators see the posture in the sidecar log.
+			fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: local detections disabled; Cisco AI Defense authoritative (%s)\n",
+				managedAIDUnavailablePostureLabel(s.currentConfig()))
 		}
 		// Start connector hook self-heal before the observability-only
 		// short-circuit below. Hook-native connectors (codex, claudecode,
@@ -3844,7 +3947,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"lifecycle_manager":   "enterprise_hook_guardian",
 					"guardian_verified":   covered,
 				}
-				s.addStandaloneAIDefenseHealth(detail)
+				if s.currentConfig().StandaloneEnterprise() {
+					// The local engine remains available when the optional
+					// AI Defense client is unavailable.
+					detail["inspection_available"] = true
+					s.addStandaloneAIDefenseHealth(detail)
+				} else {
+					s.addManagedInspectionHealth(ctx, detail)
+				}
 				s.health.SetGuardrail(state, status, detail)
 			}
 			publishHealth()
@@ -3875,7 +3985,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	return proxy.Run(ctx)
+	return s.runGuardrailProxy(ctx, proxy)
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
@@ -4310,12 +4420,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	// and a build with no credential factory can never reach it. The
 	// standalone profile decides locally and needs no cloud provider.
 	if s.currentConfig().ManagedAIDOnly() {
-		if !cloudreg.Registered() {
-			err := fmt.Errorf(
-				"managed_enterprise requires managed-cloud support: %w",
-				cloudreg.ErrNoProviderRegistered,
-			)
-			s.health.SetGuardrail(StateError, err.Error(), nil)
+		if err := s.requireManagedInspectionSupport(); err != nil {
 			return err
 		}
 		// A registered factory that fails now may only be waiting on the
@@ -4403,30 +4508,23 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			enforcementEnabled = hookEnforcement
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
-		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
-		if s.currentConfig().StandaloneEnterprise() {
-			// The local policy engine always inspects; AI Defense only
-			// augments it, so its outage degrades rather than disables.
-			// addStandaloneAIDefenseHealth publishes the AI Defense state.
-			inspectionAvailable = true
-		}
 		detail := map[string]interface{}{
-			"summary":              summary,
-			"connectors":           succeeded,
-			"enforcement_enabled":  enforcementEnabled,
-			"inspection_available": inspectionAvailable,
-			"proxy_port":           "closed",
-			"hint":                 hint,
-			"lifecycle_manager":    "enterprise_hook_guardian",
-			"guardian_verified":    covered,
+			"summary":             summary,
+			"connectors":          succeeded,
+			"enforcement_enabled": enforcementEnabled,
+			"proxy_port":          "closed",
+			"hint":                hint,
+			"lifecycle_manager":   "enterprise_hook_guardian",
+			"guardian_verified":   covered,
 		}
-		if !inspectionAvailable {
-			detail["inspection_error"] = inspectionDetail
-			// enforcement_enabled describes the configured hook mode, so
-			// say plainly that nothing is inspecting behind it.
-			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
+		if s.currentConfig().StandaloneEnterprise() {
+			// The local engine remains available when the optional
+			// AI Defense client is unavailable.
+			detail["inspection_available"] = true
+			s.addStandaloneAIDefenseHealth(detail)
+		} else {
+			s.addManagedInspectionHealth(ctx, detail)
 		}
-		s.addStandaloneAIDefenseHealth(detail)
 		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
@@ -6635,9 +6733,17 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Callers must nil-check the concrete pointer BEFORE assigning to
 	// Inspector (interface): a typed-nil wrapper is a non-nil
 	// interface and defeats every downstream `!= nil` guard.
-	if inspector := s.pickInspector(ctx); inspector != nil {
+	s.hookInspectorMu.Lock()
+	inspector := s.pickInspector(ctx)
+	if inspector != nil {
 		api.SetCiscoInspector(inspector)
 	}
+	// A managed build with no managed-cloud credential factory can never
+	// inspect, so its hook lane blocks requests that need inspection
+	// whatever cisco_ai_defense.unavailable_action says.
+	api.SetManagedInspectionUnsupported(managedInspectionUnsupported(s.currentConfig()))
+	s.setManagedHookInspectorWired(inspector != nil)
+	s.hookInspectorMu.Unlock()
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication
 	// on the hook lane (inspectMessageContent). Same instance as the
