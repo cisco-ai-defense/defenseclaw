@@ -74,9 +74,18 @@ func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
 // describeBundle fills Result.Bundle from the store; nil when this device
 // never received a bundle or the store cannot be read (status as a
 // standard user).
-func (l *lifecycle) describeBundle() {
+func (l *lifecycle) describeBundle() { l.describeBundleBlock((*enterprisebundle.Store).Summary) }
+
+// describeCurrentBundle is describeBundle for a repeated delivery of the
+// current bundle. It wrote no receipt, so the block is the confirmed current
+// bundle and its receipt, not a newer delivery that failed after staging.
+func (l *lifecycle) describeCurrentBundle() {
+	l.describeBundleBlock((*enterprisebundle.Store).CurrentSummary)
+}
+
+func (l *lifecycle) describeBundleBlock(block func(*enterprisebundle.Store) (*enterprisestatus.BundleState, error)) {
 	store := l.env.bundleStore()
-	summary, err := store.Summary()
+	summary, err := block(store)
 	if err == nil {
 		l.result.Bundle = summary
 		if summary != nil {

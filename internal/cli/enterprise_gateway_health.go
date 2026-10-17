@@ -36,9 +36,20 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 				ProjectSkillRootsUnverified int `json:"project_skill_roots_unverified"`
 			} `json:"details"`
 		} `json:"watcher"`
+		Inspection *struct {
+			AIDefense string `json:"ai_defense"`
+		} `json:"inspection"`
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
+	}
+	// Gateway readiness proves nothing about the AI Defense key, so an
+	// enabled AI Defense is "unknown" until the gateway's own posture says
+	// whether a request was answered (ok) or the key was rejected
+	// (unavailable:auth_failed). A deployment without it stays "disabled".
+	if result.Inspection.AIDefense == "unknown" && health.Inspection != nil && health.Inspection.AIDefense != "" {
+		result.Inspection.AIDefense = health.Inspection.AIDefense
+		result.AddAIDefenseWarning()
 	}
 	var profiles struct {
 		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`

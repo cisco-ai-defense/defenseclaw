@@ -124,7 +124,7 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			layout := stubWindowsBundleHost(t)
 			driver := newWindowsBundleDriver(layout)
-			rc, err := driver.Store.Receive("b-01JA0000000000000000000033", 13)
+			rc, err := driver.Store.Receive("b-01JA0000000000000000000033", 13, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,7 +298,7 @@ func TestWindowsBundlePublicReceiptEventsCreatedProtected(t *testing.T) {
 				}
 				t.Logf("pre-existing receipt-events ACL: %s", before.String())
 			}
-			receipt, err := store.Receive("b-01JA0000000000000000000033", 1)
+			receipt, err := store.Receive("b-01JA0000000000000000000033", 1, "")
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -457,7 +457,7 @@ func TestRetryCrashWindowsKeepInstalledConfigFilesComplete(t *testing.T) {
 	switchConfig(first.Config)
 	assertInstalled(first.Receipt.Dir)
 	// Crash after the next delivery is staged, before promotion.
-	staged, err := d.Store.Receive(first.Receipt.BundleID, first.Receipt.Version)
+	staged, err := d.Store.Receive(first.Receipt.BundleID, first.Receipt.Version, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,5 +488,20 @@ func TestRetryCrashWindowsKeepInstalledConfigFilesComplete(t *testing.T) {
 	assertInstalled(retry.Receipt.Dir)
 	if _, err := os.Stat(d.Store.VersionDir(first.Receipt.Dir)); !os.IsNotExist(err) {
 		t.Fatalf("superseded directory was not collected after confirmation: %v", err)
+	}
+}
+
+// F10: Driver.DeliveryID (Windows `bundle apply --delivery-id`) is recorded
+// on the receipt Prepare starts, and the result bundle block names it.
+func TestDriverRecordsDeliveryID(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.DeliveryID = "agent-7:d.0042"
+	p, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil || p == nil || p.Receipt == nil {
+		t.Fatalf("prepare = %+v, %v", p, err)
+	}
+	if p.Receipt.DeliveryID != d.DeliveryID || p.Receipt.Status(nil).DeliveryID != d.DeliveryID {
+		t.Fatalf("receipt delivery id = %q", p.Receipt.DeliveryID)
 	}
 }

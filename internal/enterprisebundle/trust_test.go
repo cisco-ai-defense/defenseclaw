@@ -216,6 +216,29 @@ func TestDecodeAnchors(t *testing.T) {
 	}
 }
 
+// ReadAnchorsFile returns the exact bytes it decoded, so a caller that
+// installs them never reads the source a second time.
+func TestReadAnchorsFileReturnsTheDecodedBytes(t *testing.T) {
+	raw := anchorsJSON("acme", nil, 0, edAnchorKey(t))
+	path := filepath.Join(t.TempDir(), "anchors.json")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, got, err := ReadAnchorsFile(path, nil)
+	if err != nil || string(got) != raw || a.Key("k1") == nil {
+		t.Fatalf("ReadAnchorsFile = %v, %q, %v", a, got, err)
+	}
+	if _, _, err := ReadAnchorsFile(filepath.Join(t.TempDir(), "absent.json"), nil); CodeOf(err) != CodeAnchorMissing {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, got, err := ReadAnchorsFile(path, nil); CodeOf(err) != CodeAnchorInvalid || got != nil {
+		t.Fatalf("invalid: %q, %v", got, err)
+	}
+}
+
 // Anchor permission cases: the file the MDM installs must not be a link,
 // a folder, writable by other accounts or owned by a standard account.
 // Every one is anchor_insecure through the device trust check; with the

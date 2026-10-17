@@ -67,6 +67,47 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	}
 }
 
+// A status refused before the live session scan (not managed, Secure
+// Client, unreadable state) reports the scan as unknown with an empty
+// entry list, never the Go zero value {"state":"","entries":null} that the
+// published session schema does not allow.
+func TestBundleStatusRefusalReportsTheSessionScanAsUnknown(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	store := bundleDevice(t, e)
+	for name, refuse := range map[string]func(){
+		"not managed":   func() { bundleManagedDevice = func() bool { return false } },
+		"Secure Client": func() { bundleSecureClient = func() bool { return true } },
+		"state invalid": func() {
+			if err := os.MkdirAll(filepath.Dir(store.StatePath()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(store.StatePath(), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			savedDevice, savedSC := bundleManagedDevice, bundleSecureClient
+			t.Cleanup(func() {
+				bundleManagedDevice, bundleSecureClient = savedDevice, savedSC
+				_ = os.Remove(store.StatePath())
+			})
+			refuse()
+			out, code := runBundle(t, "status", "--json")
+			var res struct {
+				OK       bool                                   `json:"ok"`
+				Sessions *enterprisestatus.SessionRestartStatus `json:"sessions_restart_required"`
+			}
+			if err := json.Unmarshal([]byte(out), &res); err != nil || code != bundleFailureExitCode() || res.OK {
+				t.Fatalf("exit %d, %v:\n%s", code, err, out)
+			}
+			if s := res.Sessions; s == nil || s.State != "unknown" || s.Count != 0 || s.Entries == nil || len(s.Entries) != 0 || s.Reason == "" {
+				t.Fatalf("sessions_restart_required = %+v:\n%s", s, out)
+			}
+		})
+	}
+}
+
 // A Windows receipt that recorded an unfinished session scan must not be
 // reported as a digest mismatch (GAP-0104).
 func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
@@ -93,6 +134,51 @@ func TestConfirmedSignerRevocationIsReported(t *testing.T) {
 	// says which key no longer vouches for the enforcing bundle.
 	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) || !strings.Contains(warning.Message, "signer k1 is revoked") {
 		t.Fatalf("revoked confirmed signer warning = %+v", warning)
+	}
+}
+
+// The confirmed bundle's signer is checked against the installed anchors
+// also after its confirmed receipt was pruned (MaxReceipts newer receipts):
+// the store state names the signer.
+func TestBundleStatusWarnsOfAnUntrustedSignerAfterTheReceiptWasPruned(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k2": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000041"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	r, err := store.Receive(id, 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stage(r, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.SignerKeyID, r.ManifestSHA256, r.ExpectedDigest = "k1", strings.Repeat("f", 64), digest
+		r.SetDigestComparison(true, false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Promote(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = digest }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Confirm(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runBundle(t, "status", "--json")
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+		t.Fatalf("status exit %d, %v:\n%s", code, err, out)
+	}
+	if result.Current == nil || result.Current.BundleID != id || result.LastReceipt != nil ||
+		!hasBundleWarning(result.Warnings, string(enterprisebundle.CodeKeyUnknown)) {
+		t.Fatalf("pruned confirmed receipt, signer k1 not in the anchors: want key_unknown:\n%s", out)
 	}
 }
 
@@ -132,7 +218,7 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 
 func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
 	t.Helper()
-	r, err := store.Receive(id, version)
+	r, err := store.Receive(id, version, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +378,7 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000006"
 	digest := "sha256:" + strings.Repeat("1", 64)
 	confirmBundle(t, store, goodID, 7, digest)
-	bad, err := store.Receive(badID, 6)
+	bad, err := store.Receive(badID, 6, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +568,7 @@ func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T
 			}
 			device := "sha256:" + strings.Repeat("8", 64)
 			store := bundleDevice(t, e)
-			r, err := store.Receive(manifest.BundleID, manifest.Version)
+			r, err := store.Receive(manifest.BundleID, manifest.Version, "")
 			if err != nil {
 				t.Fatal(err)
 			}

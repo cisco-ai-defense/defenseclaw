@@ -360,7 +360,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 			id, version = m.BundleID, m.Version
 		}
 	}
-	receipt, err := store.Receive(id, version)
+	receipt, err := store.Receive(id, version, l.opts.DeliveryID)
 	if err != nil {
 		r.AddError(codeBundleStateUnreadable, "cannot write the policy bundle receipt, so the bundle is not applied: "+err.Error())
 		l.describe(ctx, record, false)
@@ -437,7 +437,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		if r.Noop {
 			r.NoopReason = "already_applied"
 		}
-		l.describeBundle()
+		l.describeCurrentBundle()
 		return code
 	}
 	m := res.Manifest

@@ -66,7 +66,27 @@ type Readiness struct {
 // Inspection reports who decides verdicts.
 type Inspection struct {
 	Local     string `json:"local"`      // active, disabled
-	AIDefense string `json:"ai_defense"` // disabled, ok, unavailable:<code>
+	AIDefense string `json:"ai_defense"` // disabled, ok, unknown, unavailable:<code>
+}
+
+// CodeAIDefenseUnavailable warns that enabled Cisco AI Defense inspection is
+// failing, for example with a rejected key (unavailable:auth_failed).
+const CodeAIDefenseUnavailable = "ai_defense_unavailable"
+
+// AddAIDefenseWarning warns when Inspection.AIDefense is unavailable:<code>.
+// Not an error: the local policy engine keeps deciding, but the cloud
+// inspection the administrator enabled is not running.
+func (r *Result) AddAIDefenseWarning() {
+	if !strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		return
+	}
+	fix := "Check the enterprise.inspection.ai_defense credential and network access"
+	if r.Inspection.AIDefense == "unavailable:auth_failed" {
+		fix = "Cisco AI Defense rejected the stored API key (HTTP 401 or 403): store a valid key under the " +
+			"credential enterprise.inspection.ai_defense.credential names, with `enterprise secret set`"
+	}
+	r.AddWarning(CodeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+		r.Inspection.AIDefense+"; the local policy engine keeps deciding. "+fix)
 }
 
 // MachinePolicyState is the per-connector machine policy report.
@@ -248,6 +268,15 @@ const (
 // generation of config.generation.json, not the gateway policy generation
 // that restarts at 1 with the gateway.
 type BundleState struct {
+	// ReceiptID names the receipt this block reports: the file name of its
+	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
+	// management agent forwards. A repeated delivery of the current bundle
+	// discards its own receipt, so the block names the confirmed one.
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// DeliveryID is the --delivery-id of the delivery that receipt records
+	// (absent without it); a repeat names the confirmed receipt, so it is
+	// that delivery id, not the repeat one.
+	DeliveryID       string   `json:"delivery_id,omitempty"`
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 	WarningCodes     []string `json:"warning_codes,omitempty"`

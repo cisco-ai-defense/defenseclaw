@@ -931,6 +931,13 @@ def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
     assert "$process.WaitForExit()" not in identity
 
 
+def test_binary_identity_accepts_the_gateway_management_contract_member() -> None:
+    # The gateway's --version-json names the management agent contract it
+    # implements; the build-time identity check must not refuse that member.
+    identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
+    assert "$allowed = @($required + 'built' + 'management_contract')" in identity
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
 def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path) -> None:
     go = shutil.which("go")

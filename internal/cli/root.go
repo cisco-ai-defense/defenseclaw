@@ -72,21 +72,29 @@ func SetBuildInfo(commit, date string) {
 	)
 }
 
+// managementContract is the version of the CLI contract a root management
+// agent drives (packaging/mdm/contract/management-agent.md): verbs, flags,
+// JSON schemas and exit codes. A breaking change to any of them bumps it;
+// a new optional member does not.
+const managementContract = 1
+
 type machineVersionReport struct {
-	SchemaVersion int    `json:"schema_version"`
-	Name          string `json:"name"`
-	Version       string `json:"version"`
-	Commit        string `json:"commit,omitempty"`
-	Built         string `json:"built,omitempty"`
+	SchemaVersion      int    `json:"schema_version"`
+	Name               string `json:"name"`
+	Version            string `json:"version"`
+	Commit             string `json:"commit,omitempty"`
+	Built              string `json:"built,omitempty"`
+	ManagementContract int    `json:"management_contract"`
 }
 
 func writeMachineVersion(w io.Writer) error {
 	return json.NewEncoder(w).Encode(machineVersionReport{
-		SchemaVersion: 1,
-		Name:          "defenseclaw-gateway",
-		Version:       appVersion,
-		Commit:        appCommit,
-		Built:         appBuildDate,
+		SchemaVersion:      1,
+		Name:               "defenseclaw-gateway",
+		Version:            appVersion,
+		Commit:             appCommit,
+		Built:              appBuildDate,
+		ManagementContract: managementContract,
 	})
 }
 

@@ -47,6 +47,9 @@ type Driver struct {
 	// value means this is the first bundle on a device with no config.
 	EnforcedConfig       []byte
 	RefuseCapabilityLoss bool
+	// DeliveryID is the --delivery-id Prepare records on the receipt it
+	// starts ("" for none).
+	DeliveryID string
 }
 
 // Prepared is a bundle ready for the ensure transaction.
@@ -109,7 +112,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 			id, version = m.BundleID, m.Version
 		}
 	}
-	receipt, err := d.Store.Receive(id, version)
+	receipt, err := d.Store.Receive(id, version, d.DeliveryID)
 	if err != nil {
 		return nil, &Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()}
 	}

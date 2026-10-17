@@ -27,6 +27,9 @@ validation, audit drill-down) silently depend on:
 
 3. CLI schema mirrors are discovered from real ``//go:embed`` directives,
    remain byte-identical, and reject unexplained duplicate JSON files.
+
+4. The management contract schemas under ``packaging/mdm/contract`` keep
+   accepting their examples and keep the contract rules.
 """
 
 from __future__ import annotations
@@ -322,6 +325,125 @@ class TestCliEmbedSchemaMirrors(unittest.TestCase):
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("unreferenced CLI embed schema copies", res.stderr)
             self.assertIn("orphan.json", res.stderr)
+
+
+MDM_CONTRACT_DIR = ROOT / "packaging" / "mdm" / "contract"
+
+
+class TestManagementContractSchemas(unittest.TestCase):
+    """The management contract check fails when a schema drifts from its
+    examples, its rules or the guide (packaging/mdm/contract)."""
+
+    def _check(self, contract_dir: Path) -> subprocess.CompletedProcess[str]:
+        shim = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec = importlib.util.spec_from_file_location('check_schemas', r'{SCRIPT}')\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            f"mod.MDM_CONTRACT_DIR = pathlib.Path(r'{contract_dir}')\n"
+            "sys.exit(0 if mod.check_management_contract() else 1)\n"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", shim],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def _tampered(self, tmp: str, change) -> subprocess.CompletedProcess[str]:
+        contract_dir = Path(tmp)
+        for source in MDM_CONTRACT_DIR.iterdir():
+            if source.is_file():
+                (contract_dir / source.name).write_bytes(source.read_bytes())
+        change(contract_dir)
+        return self._check(contract_dir)
+
+    @staticmethod
+    def _edit_schema(contract_dir: Path, name: str, edit) -> None:
+        path = contract_dir / name
+        document = json.loads(path.read_text(encoding="utf-8"))
+        edit(document)
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    def test_repository_contract_passes(self) -> None:
+        result = self._check(MDM_CONTRACT_DIR)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("packaging/mdm/contract OK", result.stdout)
+
+    def test_opened_schema_is_caught(self) -> None:
+        # Dropping additionalProperties lets a features list back into the
+        # version probe, which management_contract 1 replaced.
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(
+                tmp,
+                lambda d: self._edit_schema(d, "version.schema.json", lambda s: s.pop("additionalProperties")),
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must reject version with a features list", result.stderr)
+
+    def test_windows_exit_5_must_stay_accepted(self) -> None:
+        def drop_exit_5(schema: dict) -> None:
+            for clause in schema["allOf"]:
+                exit_code = clause.get("then", {}).get("properties", {}).get("exit_code", {})
+                if 5 in exit_code.get("enum", []):
+                    exit_code["enum"].remove(5)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(
+                tmp, lambda d: self._edit_schema(d, "lifecycle-result.schema.json", drop_exit_5)
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must accept Windows lifecycle result elevation_required with exit 5", result.stderr)
+
+    def test_example_that_no_longer_validates_is_caught(self) -> None:
+        def break_example(schema: dict) -> None:
+            schema["examples"][0]["schema_version"] = 2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(
+                tmp, lambda d: self._edit_schema(d, "bundle-verify.schema.json", break_example)
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bundle-verify.schema.json examples[0]", result.stderr)
+
+    def test_missing_example_is_drift_not_a_crash(self) -> None:
+        # The rules build their documents from fixed examples. Removing one,
+        # or emptying a nested list a rule edits, is reported for that rule,
+        # and the other rules still run.
+        def drop_examples(contract_dir: Path) -> None:
+            self._edit_schema(
+                contract_dir, "anchors-install.schema.json", lambda s: s.update(examples=s["examples"][:1])
+            )
+            self._edit_schema(
+                contract_dir, "secret-result.schema.json", lambda s: s["examples"][2].update(secrets=[])
+            )
+            self._edit_schema(contract_dir, "version.schema.json", lambda s: s.pop("additionalProperties"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(tmp, drop_examples)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("anchors-install.schema.json rule 'anchors install", result.stderr)
+        self.assertIn("secret-result.schema.json rule 'secret status that carries a value'", result.stderr)
+        self.assertIn("must reject version with a features list", result.stderr)
+
+    def test_unlisted_schema_and_undescribed_schema_are_caught(self) -> None:
+        def add_and_hide(contract_dir: Path) -> None:
+            (contract_dir / "extra.schema.json").write_text(
+                '{"$schema":"https://json-schema.org/draft/2020-12/schema"}\n', encoding="utf-8"
+            )
+            guide = contract_dir / "management-agent.md"
+            guide.write_text(
+                guide.read_text(encoding="utf-8").replace("`secret-result.schema.json`", "the secret schema"),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(tmp, add_and_hide)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unlisted=['extra.schema.json']", result.stderr)
+        self.assertIn("does not describe secret-result.schema.json", result.stderr)
 
 
 class TestGalileoExportProfileSchema(unittest.TestCase):

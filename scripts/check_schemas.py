@@ -20,12 +20,19 @@
      quartet and the v7 event_type enum (verdict / judge / lifecycle
      / error / diagnostic / scan / scan_finding / activity / egress
      / LLM/tool telemetry events / AI discovery events).
+4. The management contract under ``packaging/mdm/contract/`` (the JSON
+   documents MDM kits and management agents parse): every schema is a
+   valid Draft 2020-12 schema with a DefenseClaw ``$id``, the guide names
+   it, its examples validate, and the contract rules in
+   ``MANAGEMENT_CONTRACT_RULES`` hold. The Go contract tests validate real
+   command output against the same files.
 
 Run via ``make check-schemas``.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -133,6 +140,127 @@ PUBLIC_SCHEMA_PATHS = (
     "scan-result.json",
 )
 
+MDM_CONTRACT_DIR = ROOT / "packaging" / "mdm" / "contract"
+MANAGEMENT_CONTRACT_GUIDE = "management-agent.md"
+MDM_CONTRACT_ID_PREFIX = "https://defenseclaw.cisco.com/schemas/enterprise/"
+# Every JSON Schema in packaging/mdm/contract. A new schema is added here
+# and to the guide; an unlisted file fails the check.
+MDM_CONTRACT_SCHEMAS = (
+    "anchors-install.schema.json",
+    "bundle-anchors.schema.json",
+    "bundle-receipt.schema.json",
+    "bundle-refused.schema.json",
+    "bundle-status.schema.json",
+    "bundle-verify.schema.json",
+    "lifecycle-result.schema.json",
+    "secret-result.schema.json",
+    "version.schema.json",
+)
+
+# A Windows lifecycle result refused with lifecycle_busy: the base of the
+# exit-code rules (lifecycle-result.schema.json carries no examples).
+_WINDOWS_BUSY_RESULT = {
+    "schema_version": 2, "ok": False, "action": "ensure", "noop": False, "profile": "standalone",
+    "platform": "windows", "product_version": "1.0.3", "installed_version": "1.0.3", "installed": True,
+    "transaction_pending": False, "services": [],
+    "readiness": {"gateway": False, "guardian": False, "enumerator": False, "sensor_helper": False},
+    "inspection": {"local": "", "ai_defense": ""}, "machine_policy": {},
+    "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+    "coverage_complete": False, "security_complete": False,
+    "errors": [{"code": "lifecycle_busy", "message": "another lifecycle run holds the lock"}],
+    "exit_code": 1618,
+}
+
+
+def _from_example(schema: str, index: int, change):
+    def build(schemas: dict[str, dict]) -> object:
+        document = copy.deepcopy(schemas[schema]["examples"][index])
+        change(document)
+        return document
+    return build
+
+
+def _windows_result(change):
+    def build(_: dict[str, dict]) -> object:
+        document = copy.deepcopy(_WINDOWS_BUSY_RESULT)
+        change(document)
+        return document
+    return build
+
+
+def _set(**members):
+    return lambda document: document.update(members)
+
+
+def _elevation_required(platform: str):
+    return _set(platform=platform, exit_code=5,
+                errors=[{"code": "elevation_required", "message": "run this command elevated"}])
+
+
+def _refused_status_with_go_zero_value(document: dict) -> None:
+    document.update(ok=False, errors=[{"code": "not_managed", "message": "not a managed device"}],
+                    sessions_restart_required={"state": "", "count": 0, "entries": None})
+
+
+# Contract rules a schema edit must not loosen (or tighten): label, schema,
+# document builder, whether the document must validate.
+MANAGEMENT_CONTRACT_RULES = (
+    ("version without management_contract (a build before the contract)", "version.schema.json",
+     _from_example("version.schema.json", 0, lambda d: None), True),
+    ("version with a features list", "version.schema.json",
+     _from_example("version.schema.json", 1, _set(features=["receipt_id"])), False),
+    ("version with an unknown management_contract", "version.schema.json",
+     _from_example("version.schema.json", 1, _set(management_contract=2)), False),
+    ("receipt id outside the Crockford alphabet", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(receipt_id="b-01JAB3K9QX4M2N8P6R5T0V1WYU")), False),
+    ("failed receipt without error_code", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 1, lambda d: d.pop("error_code")), False),
+    ("public receipt in a non-terminal state", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(state="applied")), False),
+    ("receipt delivery_id of 128 bytes", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(delivery_id="a" * 128)), True),
+    ("receipt delivery_id over 128 bytes", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(delivery_id="a" * 129)), False),
+    ("receipt delivery_id with a space", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(delivery_id="agent 7")), False),
+    ("receipt delivery_id with a control character", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(delivery_id="agent\x1b7")), False),
+    ("empty receipt delivery_id", "bundle-receipt.schema.json",
+     _from_example("bundle-receipt.schema.json", 0, _set(delivery_id="")), False),
+    ("verify ok:true with errors", "bundle-verify.schema.json",
+     _from_example("bundle-verify.schema.json", 0, _set(errors=[{"code": "x", "message": "m"}])), False),
+    ("bundle status with an unknown member", "bundle-status.schema.json",
+     _from_example("bundle-status.schema.json", 0, _set(user="alice")), False),
+    ("refused bundle status with the Go zero value for sessions", "bundle-status.schema.json",
+     _from_example("bundle-status.schema.json", 0, _refused_status_with_go_zero_value), False),
+    ("anchor key time not ending in Z", "bundle-anchors.schema.json",
+     _from_example("bundle-anchors.schema.json", 0,
+                   lambda d: d["keys"][0].update(not_after="2027-01-01T00:00:00+00:00")), False),
+    ("anchors with an unknown member", "bundle-anchors.schema.json",
+     _from_example("bundle-anchors.schema.json", 0, _set(extra=1)), False),
+    ("anchors install replaced without previous_sha256", "anchors-install.schema.json",
+     _from_example("anchors-install.schema.json", 0, lambda d: d.pop("previous_sha256")), False),
+    ("anchors install refused with result replaced", "anchors-install.schema.json",
+     _from_example("anchors-install.schema.json", 2, _set(result="replaced")), False),
+    ("anchors install with a warning code the verb does not emit", "anchors-install.schema.json",
+     _from_example("anchors-install.schema.json", 3,
+                   lambda d: d["warnings"][0].update(code="anchors_any_group")), False),
+    ("Windows secret result that carries a value", "secret-result.schema.json",
+     _from_example("secret-result.schema.json", 0, _set(value="secret")), False),
+    ("Windows secret result with an identical-value no-op", "secret-result.schema.json",
+     _from_example("secret-result.schema.json", 0, _set(noop=True)), False),
+    ("Windows secret failure without errors", "secret-result.schema.json",
+     _from_example("secret-result.schema.json", 1, _set(errors=[])), False),
+    ("Windows secret failure with a non-MSI exit code", "secret-result.schema.json",
+     _from_example("secret-result.schema.json", 1, _set(exit_code=1)), False),
+    ("secret status that carries a value", "secret-result.schema.json",
+     _from_example("secret-result.schema.json", 2, lambda d: d["secrets"][0].update(value="x")), False),
+    ("Windows lifecycle result elevation_required with exit 5", "lifecycle-result.schema.json",
+     _windows_result(_elevation_required("windows")), True),
+    ("Linux lifecycle result with exit 5", "lifecycle-result.schema.json",
+     _windows_result(_elevation_required("linux")), False),
+)
+
 
 def load_json(path: Path) -> dict:
     def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -162,14 +290,8 @@ def ensure_valid_meta(doc: dict, path: Path) -> bool:
     try:
         import jsonschema  # type: ignore[import-not-found]
     except ImportError:
-        # Running without jsonschema installed — fall back to a
-        # lightweight sanity check (do not fail CI, but warn).
-        print(
-            "check_schemas: warning — jsonschema not installed; "
-            "skipping strict meta-validation",
-            file=sys.stderr,
-        )
-        return "$schema" in doc
+        print("check_schemas: jsonschema is required for meta-validation (make pycli)", file=sys.stderr)
+        return False
 
     try:
         jsonschema.Draft202012Validator.check_schema(doc)
@@ -700,6 +822,124 @@ def check_acp_inventory_instances() -> bool:
     return ok
 
 
+def check_management_contract() -> bool:
+    """Validate the management contract schemas, their examples and rules.
+
+    The schemas are closed (``additionalProperties: false``) so the Go
+    contract tests catch output drift; this check catches schema drift: a
+    schema that no longer accepts its own examples, a loosened rule, or a
+    schema the guide does not describe.
+    """
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+        from referencing import Registry, Resource  # type: ignore[import-not-found]
+        from referencing.exceptions import Unresolvable  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            "check_schemas: jsonschema is required for the management contract",
+            file=sys.stderr,
+        )
+        return False
+
+    ok = True
+    present = {path.name for path in MDM_CONTRACT_DIR.glob("*.schema.json")}
+    missing = sorted(set(MDM_CONTRACT_SCHEMAS) - present)
+    unlisted = sorted(present - set(MDM_CONTRACT_SCHEMAS))
+    if missing or unlisted:
+        print(
+            f"check_schemas: packaging/mdm/contract schema drift missing={missing} unlisted={unlisted}",
+            file=sys.stderr,
+        )
+        ok = False
+    guide_path = MDM_CONTRACT_DIR / MANAGEMENT_CONTRACT_GUIDE
+    guide = guide_path.read_text(encoding="utf-8") if guide_path.is_file() else ""
+    if not guide:
+        print(f"check_schemas: packaging/mdm/contract/{MANAGEMENT_CONTRACT_GUIDE} missing", file=sys.stderr)
+        ok = False
+
+    schemas: dict[str, dict] = {}
+    ids: dict[str, str] = {}
+    for name in sorted(present & set(MDM_CONTRACT_SCHEMAS)):
+        path = MDM_CONTRACT_DIR / name
+        doc = load_json(path)
+        if not ensure_valid_meta(doc, path):
+            ok = False
+            continue
+        schema_id = str(doc.get("$id") or "")
+        if doc.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            print(f"check_schemas: packaging/mdm/contract/{name}: $schema is not Draft 2020-12", file=sys.stderr)
+            ok = False
+        if not schema_id.startswith(MDM_CONTRACT_ID_PREFIX):
+            print(
+                f"check_schemas: packaging/mdm/contract/{name}: $id {schema_id!r} "
+                f"is not under {MDM_CONTRACT_ID_PREFIX}",
+                file=sys.stderr,
+            )
+            ok = False
+        if schema_id in ids:
+            print(f"check_schemas: packaging/mdm/contract/{name}: $id repeats {ids[schema_id]}", file=sys.stderr)
+            ok = False
+        ids[schema_id] = name
+        if guide and f"`{name}`" not in guide:
+            print(f"check_schemas: {MANAGEMENT_CONTRACT_GUIDE} does not describe {name}", file=sys.stderr)
+            ok = False
+        schemas[name] = doc
+
+    registry = Registry().with_resources(
+        (doc["$id"], Resource.from_contents(doc)) for doc in schemas.values() if doc.get("$id")
+    )
+    format_checker = jsonschema.FormatChecker()
+
+    def problems(name: str, instance: object) -> list[str]:
+        validator = jsonschema.Draft202012Validator(schemas[name], registry=registry, format_checker=format_checker)
+        return [
+            f"{'.'.join(str(part) for part in error.absolute_path) or '<root>'}: {error.message}"
+            for error in sorted(validator.iter_errors(instance), key=lambda error: list(error.absolute_path))
+        ]
+
+    examples = 0
+    try:
+        for name, doc in schemas.items():
+            for index, example in enumerate(doc.get("examples", [])):
+                examples += 1
+                found = problems(name, example)
+                if found:
+                    print(f"check_schemas: packaging/mdm/contract/{name} examples[{index}] {found[0]}", file=sys.stderr)
+                    ok = False
+        for label, name, build, want_valid in MANAGEMENT_CONTRACT_RULES:
+            if name not in schemas:
+                ok = False
+                continue
+            try:
+                document = build(schemas)
+            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+                # A rule edits a fixed schema example: a removed example or
+                # nested member is drift of that rule; the others still run.
+                print(
+                    f"check_schemas: {name} rule {label!r} cannot be built from the schema examples: {exc!r}",
+                    file=sys.stderr,
+                )
+                ok = False
+                continue
+            found = problems(name, document)
+            if want_valid and found:
+                print(f"check_schemas: {name} must accept {label}: {found[0]}", file=sys.stderr)
+                ok = False
+            elif not want_valid and not found:
+                print(f"check_schemas: {name} must reject {label}", file=sys.stderr)
+                ok = False
+    except (jsonschema.exceptions.SchemaError, Unresolvable) as exc:
+        # An unresolvable $ref between contract schemas is drift too.
+        print(f"check_schemas: packaging/mdm/contract: {exc}", file=sys.stderr)
+        return False
+    if ok:
+        print(
+            f"check_schemas: packaging/mdm/contract OK ({len(schemas)} schemas, {examples} examples, "
+            f"{len(MANAGEMENT_CONTRACT_RULES)} rules)"
+        )
+    return ok
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
@@ -781,6 +1021,9 @@ def main() -> int:
             ok = False
     else:
         print("check_schemas: Galileo export profile or runtime span schema missing", file=sys.stderr)
+        ok = False
+
+    if not check_management_contract():
         ok = False
 
     # Cross-artifact drift checks are meaningful only for the repository's

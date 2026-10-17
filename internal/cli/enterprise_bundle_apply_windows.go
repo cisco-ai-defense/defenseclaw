@@ -32,12 +32,31 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	if opts.inbox || opts.bundle == "" {
 		return bundleUsage("give --bundle; Windows takes bundles from Setup /ensure BUNDLE= or --bundle, not from an inbox")
 	}
+	lifecycle, err := windowsBundleApplyLifecycleOptions(cmd, opts)
+	if err != nil {
+		return err
+	}
+	return runWindowsEnterpriseLifecycle(cmd.Context(), cmd, "ensure", lifecycle)
+}
+
+// windowsBundleApplyLifecycleOptions turns the apply flags into the Windows
+// ensure options. --lock-wait bounds the wait for bundle.lock only; the
+// installer's lifecycle.lock keeps its fixed wait. --delivery-id goes to the
+// receipt. --reason is accepted, so one argv works on every OS, and not
+// forwarded: nothing on Windows records it.
+func windowsBundleApplyLifecycleOptions(cmd *cobra.Command, opts *bundleApplyOptions) (*windowsEnterpriseLifecycleOptions, error) {
+	if err := checkWindowsLockWait(cmd, opts.lockWait); err != nil {
+		return nil, err
+	}
+	if err := checkDeliveryID(cmd, opts.deliveryID); err != nil {
+		return nil, err
+	}
 	bundle, err := filepath.Abs(opts.bundle)
 	if err != nil {
-		return bundleUsage("--bundle: %v", err)
+		return nil, bundleUsage("--bundle: %v", err)
 	}
-	return runWindowsEnterpriseLifecycle(cmd.Context(), cmd, "ensure", &windowsEnterpriseLifecycleOptions{
+	return &windowsEnterpriseLifecycleOptions{
 		bundlePath: bundle, profile: managed.ProfileStandalone, jsonOutput: opts.json,
-		refuseCapabilityLoss: opts.refuseCapabilityLoss,
-	})
+		refuseCapabilityLoss: opts.refuseCapabilityLoss, bundleLockWait: opts.lockWait, bundleDeliveryID: opts.deliveryID,
+	}, nil
 }

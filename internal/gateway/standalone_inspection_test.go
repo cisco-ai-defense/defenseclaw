@@ -12,9 +12,11 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -299,6 +301,145 @@ func TestStandaloneAIDefenseHealthFollowsRequestOutcomes(t *testing.T) {
 	inspect(down, context.Background())
 	if available, reason := health(); !available || reason != "" {
 		t.Fatalf("a replaced client overwrote /health: available=%t reason=%q", available, reason)
+	}
+}
+
+// lifecycleAIDefenseValues reads the closed list of inspection.ai_defense
+// values from the lifecycle result contract the management agent reads.
+func lifecycleAIDefenseValues(t *testing.T) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(filepath.FromSlash("../../packaging/mdm/contract/lifecycle-result.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			Inspection struct {
+				Properties struct {
+					AIDefense struct {
+						Enum []string `json:"enum"`
+					} `json:"ai_defense"`
+				} `json:"properties"`
+			} `json:"inspection"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]bool{}
+	for _, value := range schema.Properties.Inspection.Properties.AIDefense.Enum {
+		values[value] = true
+	}
+	if len(values) == 0 {
+		t.Fatal("the lifecycle result schema lists no inspection.ai_defense values")
+	}
+	return values
+}
+
+// TestStandaloneAIDefensePostureNamesARejectedKey is F11: after a management
+// agent pushes the AI Defense key, status must tell a key Cisco AI Defense
+// rejected (HTTP 401 or 403: unavailable:auth_failed) from a service error,
+// a timeout or an unreachable endpoint, from the status code alone, and must
+// carry neither the key nor the response body.
+func TestStandaloneAIDefensePostureNamesARejectedKey(t *testing.T) {
+	const key = "stored-key-F11-MARKER"
+	const body = "BODY-F11-MARKER invalid API key"
+	contract := lifecycleAIDefenseValues(t)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	unreachableURL := closed.URL
+	closed.Close()
+	for _, test := range []struct {
+		name    string
+		status  int
+		delay   time.Duration
+		down    bool
+		inspect bool
+		want    string
+	}{
+		{name: "not yet used", status: http.StatusOK, want: "unknown"},
+		{name: "accepted", status: http.StatusOK, inspect: true, want: "ok"},
+		{name: "401", status: http.StatusUnauthorized, inspect: true, want: "unavailable:auth_failed"},
+		{name: "403", status: http.StatusForbidden, inspect: true, want: "unavailable:auth_failed"},
+		{name: "500 whose body mentions the key", status: http.StatusInternalServerError, inspect: true, want: "unavailable:error"},
+		{name: "407", status: http.StatusProxyAuthRequired, inspect: true, want: "unavailable:proxy_auth_required"},
+		{name: "timeout", status: http.StatusOK, delay: 2 * time.Second, inspect: true, want: "unavailable:unreachable"},
+		{name: "unreachable", down: true, inspect: true, want: "unavailable:unreachable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := standaloneConfig(t)
+			cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
+			s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+			endpoint := unreachableURL
+			if !test.down {
+				release := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("X-Cisco-AI-Defense-API-Key") != key {
+						t.Errorf("the request did not carry the stored key")
+					}
+					if test.delay > 0 {
+						select {
+						case <-time.After(test.delay):
+						case <-release:
+						}
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(test.status)
+					if test.status == http.StatusOK {
+						_, _ = w.Write([]byte(`{"is_safe":true,"action":"Allow"}`))
+						return
+					}
+					_, _ = w.Write([]byte(`{"message":"` + body + `"}`))
+				}))
+				t.Cleanup(server.Close)
+				t.Cleanup(func() { close(release) })
+				endpoint = server.URL
+			}
+			c := NewCiscoInspectClient(&config.CiscoAIDefenseConfig{APIKey: key, Endpoint: endpoint, TimeoutMs: 200}, "")
+			if c == nil {
+				t.Fatal("the AI Defense client was not built")
+			}
+			s.adoptStandaloneInspector(c)
+			if test.inspect {
+				c.Inspect(context.Background(), []ChatMessage{{Role: "user", Content: "hello"}})
+			}
+			detail := map[string]interface{}{}
+			s.addStandaloneAIDefenseHealth(detail)
+			posture := standaloneInspectionPosture(cfg, SubsystemHealth{State: StateRunning, Details: detail})
+			if got := posture["ai_defense"]; got != test.want {
+				t.Fatalf("inspection.ai_defense = %q, want %q (detail %+v)", got, test.want, detail)
+			}
+			if !contract[posture["ai_defense"]] {
+				t.Fatalf("inspection.ai_defense %q is not in the lifecycle result contract", posture["ai_defense"])
+			}
+			published, err := json.Marshal(map[string]interface{}{"detail": detail, "inspection": posture})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(published), "F11-MARKER") {
+				t.Fatalf("/health carries the key or the response body: %s", published)
+			}
+		})
+	}
+}
+
+// TestStandaloneAIDefensePostureCodesAreInTheContract keeps every code the
+// gateway can publish in the closed list the management agent is given.
+func TestStandaloneAIDefensePostureCodesAreInTheContract(t *testing.T) {
+	contract := lifecycleAIDefenseValues(t)
+	for _, reason := range []string{
+		"", "ai_defense: client not initialized", "ai_defense: the API key was rejected (HTTP 403)",
+		"ai_defense: the egress proxy requires authentication (HTTP 407)", `ai_defense: credential "x": missing`,
+		"ai_defense: enterprise.network: bad proxy", "ai_defense: endpoint or egress proxy unreachable: dial",
+		"ai_defense: inspection failed (HTTP 502)",
+	} {
+		if value := "unavailable:" + aiDefenseUnavailableCode(reason); !contract[value] {
+			t.Errorf("%q maps to %q, which the lifecycle result contract does not list", reason, value)
+		}
+	}
+	for _, value := range []string{"disabled", "ok", "unknown"} {
+		if !contract[value] {
+			t.Errorf("the lifecycle result contract does not list %q", value)
+		}
 	}
 }
 

@@ -161,7 +161,7 @@ func TestBundleReceiptReporterDrainsConsecutiveRefusalsBeforePoll(t *testing.T) 
 	var ids []string
 	codes := []enterprisebundle.Code{enterprisebundle.CodeSignatureInvalid, enterprisebundle.CodeConfigInvalid}
 	for _, code := range codes {
-		receipt, err := store.Receive(testBundleID, 9)
+		receipt, err := store.Receive(testBundleID, 9, "")
 		if err != nil {
 			t.Fatal(err)
 		}

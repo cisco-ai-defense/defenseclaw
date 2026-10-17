@@ -76,7 +76,11 @@ Run it as root or an administrator.`,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			res := &bundleStatusResult{SchemaVersion: bundleOutputSchemaVersion, Command: "status",
-				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
+				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{},
+				// Replaced by the live scan; a status refused before it reports
+				// the scan as unknown rather than the zero value.
+				SessionsRestartRequired: enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{},
+					Reason: "not scanned: bundle status was refused before the session scan"}}
 			err := bundleStatus(bundleContext(cmd), res)
 			if err != nil {
 				res.Errors, err = bundleRefusal(err)
@@ -222,10 +226,18 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		}
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: bundleReceiptWarningMessage(code, currentReceipt)})
 	}
+	// The state records the signer of the current bundle, so the check
+	// still runs once its confirmed receipt was pruned.
+	signer := ""
 	if currentReceipt != nil {
-		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
-			res.Warnings = append(res.Warnings, *warning)
-		}
+		signer = currentReceipt.SignerKeyID
+	} else if st.Current != nil {
+		signer = st.Current.SignerKeyID
+	}
+	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
+	}
+	if currentReceipt != nil {
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
@@ -283,6 +295,15 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
 	if err != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
+	}
+	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleSignerWarning is key_unknown or key_revoked when anchors no longer
+// trust the confirmed bundle signer ("" for none); nil otherwise.
+func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) *enterprisebundle.Warning {
+	if anchors == nil || signerKeyID == "" {
+		return nil
 	}
 	key := anchors.Key(signerKeyID)
 	if key == nil {

@@ -56,8 +56,12 @@ type bundleCLIEnv struct {
 
 func newBundleCLIEnv(t *testing.T) *bundleCLIEnv {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	policies := filepath.Join(filepath.Dir(file), "..", "..", "policies")
+	// The test runs in its package folder; a source path compiled into a
+	// cross-built test binary does not exist on the host that runs it.
+	policies, err := filepath.Abs(filepath.Join("..", "..", "policies"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(policies, "guardrail", "default")); err != nil {
 		t.Skipf("policies not found: %v", err)
 	}

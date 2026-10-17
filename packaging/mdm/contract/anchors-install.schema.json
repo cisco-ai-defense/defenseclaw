@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/anchors-install-v1.json",
+  "title": "enterprise bundle anchors install --json (Linux, macOS)",
+  "description": "`enterprise bundle anchors install --file F [--lock-wait D] --json` on Linux and macOS. The verb is not registered on Windows, where the call is `enterprise windows ensure --profile standalone --trust-anchors F [--bundle B] --json` and prints lifecycle result v2. Source trust: the verb reads F once, as LoadAnchors(F, TrustAnchorFile) does (internal/enterprisebundle/anchors.go): Lstat, regular file, the file and every folder above it root-owned, not group or other writable, without an ACL write entry and without links; open; SameFile against the Lstat; bounded read; strict decode. A source that fails is refused (anchor_insecure, anchor_missing or anchor_invalid) and nothing is written. The bytes written are exactly the bytes validated in that one read. Then, under the lifecycle lock: a file byte-identical to a trusted installed file is result unchanged and writes nothing; otherwise <etc>/trust/bundle-anchors.json is written atomically (root:root 0644 in a root 0755 folder) and re-checked with TrustAnchorFile, and the previous file is put back when that check fails. No audit event, OTel record or receipt records the change: the agent reports it from sha256, previous_sha256 and key_ids. Exit codes: 0; 1 refused (errors[0].code); 2 invalid arguments; 75 lifecycle_busy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "result",
+    "anchors",
+    "warnings",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "const": "anchors install"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "result": {
+      "enum": [
+        "installed",
+        "replaced",
+        "unchanged",
+        "refused"
+      ],
+      "description": "installed: no anchor file before (bundle mode turns on); replaced: the installed file was replaced (a different file, or identical bytes in an installed file that failed its trust check, then previous_sha256 equals sha256); unchanged: byte-identical, nothing written; refused: nothing written, the previous file (if any) stays."
+    },
+    "anchors": {
+      "type": "string",
+      "description": "The installed path, <etc>/trust/bundle-anchors.json."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the file now installed (absent when refused and none is installed)."
+    },
+    "previous_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the file replaced (result replaced)."
+    },
+    "tenant_id": {
+      "type": "string"
+    },
+    "key_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "key_id of every key in the installed file, in file order."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-verify-v1.json#/$defs/warning"
+          },
+          {
+            "properties": {
+              "code": {
+                "enum": [
+                  "key_unknown",
+                  "key_revoked",
+                  "anchor_unreadable"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "description": "The codes bundleCurrentSignerWarning emits (internal/cli/enterprise_bundle_status.go), checked against the new file: key_unknown (the confirmed bundle's signer is not in it), key_revoked (it is revoked there), anchor_unreadable. The current bundle keeps enforcing; the next bundle must be signed by an active key."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json#/$defs/bundleError"
+      },
+      "description": "Codes: anchor_insecure (the source file or a folder above it can be written by a non-root account, is a link, or changed while it was read; or the installed file failed the re-check), anchor_missing (--file does not exist), anchor_invalid, anchor_restore_failed, lifecycle_busy, not_managed, not_supported_secure_client, state_invalid, not_root, invalid_arguments."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "installed",
+              "replaced",
+              "unchanged"
+            ]
+          },
+          "errors": {
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "sha256"
+        ]
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "const": "refused"
+          },
+          "errors": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "replaced"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "previous_sha256"
+        ]
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "command": "anchors install",
+      "ok": true,
+      "result": "replaced",
+      "anchors": "/opt/cisco/defenseclaw/etc/trust/bundle-anchors.json",
+      "sha256": "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
+      "previous_sha256": "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+      "tenant_id": "acme",
+      "key_ids": [
+        "acme-2026a",
+        "acme-2026b"
+      ],
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "schema_version": 1,
+      "command": "anchors install",
+      "ok": false,
+      "result": "refused",
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "warnings": [],
+      "errors": [
+        {
+          "code": "anchor_invalid",
+          "path": "bundle-anchors.json",
+          "message": "bundle anchor_invalid: bundle-anchors.json: keys[0].not_after: want an RFC 3339 UTC time ending in Z"
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "command": "anchors install",
+      "ok": false,
+      "result": "refused",
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "warnings": [],
+      "errors": [
+        {
+          "code": "anchor_insecure",
+          "path": "bundle-anchors.json",
+          "message": "bundle anchor_insecure: bundle-anchors.json: /var/lib/acme-agent/trust is writable by group or other accounts"
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "command": "anchors install",
+      "ok": true,
+      "result": "replaced",
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "sha256": "2a3b4c5d6e7f80912a3b4c5d6e7f80912a3b4c5d6e7f80912a3b4c5d6e7f8091",
+      "previous_sha256": "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
+      "tenant_id": "acme",
+      "key_ids": [
+        "acme-2026a",
+        "acme-2026b"
+      ],
+      "warnings": [
+        {
+          "code": "key_revoked",
+          "message": "the confirmed bundle's signer acme-2026a is revoked in the installed trust anchors; it keeps enforcing until a bundle signed by an active key replaces it"
+        }
+      ],
+      "errors": []
+    }
+  ]
+}

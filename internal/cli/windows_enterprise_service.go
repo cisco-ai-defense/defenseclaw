@@ -120,6 +120,14 @@ type windowsEnterpriseLifecycleOptions struct {
 	bundlePath           string
 	trustAnchors         string
 	refuseCapabilityLoss bool
+	// bundleLockWait is how long the run waits for another bundle run to
+	// release bundle.lock (`enterprise bundle apply --lock-wait`); 0 tries
+	// once, as Setup and `enterprise windows ensure` do.
+	bundleLockWait time.Duration
+	// bundleDeliveryID is the `enterprise bundle apply --delivery-id` the
+	// bundle receipt records ("" for none, and for Setup BUNDLE= and
+	// `enterprise windows ensure --bundle`).
+	bundleDeliveryID string
 	// bundle is the bundle state of the run; bundleRollback marks the
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun

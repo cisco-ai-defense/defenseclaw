@@ -417,6 +417,126 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 }
 
+// The bundle block of an apply names the receipt it reports (receipt_id). A
+// fresh apply names the receipt it wrote, which is also the name of its
+// public receipt; a repeat of the current bundle writes no receipt and names
+// the current confirmed one (noop_reason is already_applied only when ensure
+// had nothing else to do); a bundle refused after its
+// receipt was written leaves the block on the confirmed receipt and names
+// its own receipt in last_refusal; a refusal before any receipt was written
+// reports no block.
+func TestBundleApplyResultNamesTheReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	r := b.apply(path)
+	requireOK(t, r)
+	rc := b.receipt(bundleID(1))
+	if r.Bundle == nil || r.Bundle.ReceiptID == "" || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("fresh apply: bundle block = %+v, receipt %s", r.Bundle, rc.ReceiptID)
+	}
+	public := filepath.Join(b.env.bundleStore().PublicReceiptEventsDir(), r.Bundle.ReceiptID+".json")
+	if _, err := os.Stat(public); err != nil {
+		t.Fatalf("no public receipt named by receipt_id: %v", err)
+	}
+
+	receipts, _ := b.env.bundleStore().Receipts()
+	r = b.apply(path)
+	requireOK(t, r)
+	after, _ := b.env.bundleStore().Receipts()
+	if len(after) != len(receipts) || r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("repeated delivery: receipts %d -> %d, bundle block = %+v", len(receipts), len(after), r.Bundle)
+	}
+
+	r = b.apply(b.dir(1, v2))
+	if r.OK || !hasMessageCode(r.Errors, string(enterprisebundle.CodeVersionNotNewer)) {
+		t.Fatalf("same version, other bytes: ok %v, errors %+v", r.OK, r.Errors)
+	}
+	if r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID || r.LastRefusal == nil ||
+		r.LastRefusal.ReceiptID == "" || r.LastRefusal.ReceiptID == rc.ReceiptID {
+		t.Fatalf("refusal after the receipt: bundle block = %+v, last refusal = %+v", r.Bundle, r.LastRefusal)
+	}
+
+	fresh := newTestHost(t, "linux")
+	r = fresh.run(Options{Action: ActionEnsure, Bundle: path})
+	if r.OK || !hasMessageCode(r.Errors, codeNotInstalled) || r.Bundle != nil {
+		t.Fatalf("refusal before the receipt: ok %v, errors %+v, bundle block = %+v", r.OK, r.Errors, r.Bundle)
+	}
+}
+
+// failAfterStaging delivers version v and fails it after its receipt reached
+// staging, so it is the latest receipt the store summary reports.
+func (b *bundleHost) failAfterStaging(version uint64, cfg string) {
+	b.t.Helper()
+	b.env.bundleFault = func(phase string) error {
+		if phase == enterprisebundle.StateStaged {
+			return errors.New("injected failure after staging")
+		}
+		return nil
+	}
+	defer func() { b.env.bundleFault = nil }()
+	if r := b.apply(b.dir(version, cfg)); r.OK || r.Bundle == nil || r.Bundle.BundleID != bundleID(version) || r.Bundle.State != enterprisebundle.StateFailed {
+		b.t.Fatalf("delivery of v%d did not fail after staging: ok %v, bundle block = %+v", version, r.OK, r.Bundle)
+	}
+}
+
+// A repeat of the current bundle after a newer delivery failed after
+// staging reports the current confirmed bundle and its receipt, not the
+// failed delivery that is the latest receipt: the receipt_id it returns is
+// the one the device enforces.
+func TestBundleApplyRepeatAfterANewerFailureNamesTheConfirmedReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID || r.Bundle.BundleID != bundleID(1) ||
+		r.Bundle.State != enterprisebundle.StateConfirmed || r.Bundle.CurrentBundleID != "" || r.Bundle.ConfirmedAt == "" {
+		t.Fatalf("repeat after a newer failure: bundle block = %+v, want the confirmed receipt %s", r.Bundle, confirmed.ReceiptID)
+	}
+	// The first repeat converged what the failed delivery left; the next
+	// is the already_applied no-op and reports the same block.
+	r = b.apply(path)
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != "already_applied" || r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID ||
+		r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("no-op repeat: noop %v, reason %q, bundle block = %+v", r.Noop, r.NoopReason, r.Bundle)
+	}
+}
+
+// A repeat of the current bundle that also repairs drift (here a new
+// credential to apply) has no noop_reason, and still passes the contract's
+// success test: exit 0, ok, bundle.bundle_id the submitted bundle and
+// bundle.state confirmed, also after a newer delivery failed after staging.
+func TestBundleApplyRepeatThatRepairsDriftPassesTheSuccessTest(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+	if err := b.env.WriteSecret(context.Background(), "ai-defense-api-key", []byte("drift-value")); err != nil {
+		t.Fatal(err)
+	}
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Noop || r.NoopReason != "" {
+		t.Fatalf("repeat with drift: noop %v, reason %q; want the drift repaired", r.Noop, r.NoopReason)
+	}
+	if r.ExitCode != 0 || r.Bundle == nil || r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed ||
+		r.Bundle.ReceiptID != confirmed.ReceiptID {
+		t.Fatalf("repeat with drift: exit %d, bundle block = %+v; want confirmed %s", r.ExitCode, r.Bundle, bundleID(1))
+	}
+}
+
 func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
 	b := newBundleHost(t)
 	stagePackage(t, b.testHost, "1.0.0")

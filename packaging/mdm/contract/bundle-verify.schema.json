@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-verify-v1.json",
+  "title": "enterprise bundle verify --json",
+  "description": "`enterprise bundle verify --json` (bundleVerifyResult, internal/cli/enterprise_bundle.go). Read-only: it runs every apply check (anchors, key, signature, manifest, tenant, device group, platform, version floor, minimum product version, file hashes, inline secrets, secret references and, on a managed device, credential presence, the config validator and the effective policy digest) and changes nothing. As root on a managed device the floor includes the confirmed bundle; otherwise a floor_unchecked warning says only the anchor min_version was checked. Exit 0 when ok; 1 (Linux, macOS) or 1603 (Windows) for a refusal; 2 or 1639 for invalid arguments (errors[0].code invalid_arguments).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "result",
+    "platform",
+    "floor",
+    "digest_verified",
+    "warnings",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "const": "verify"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "result": {
+      "enum": [
+        "verified",
+        "already_applied",
+        "refused"
+      ],
+      "description": "already_applied: the bytes are the current confirmed bundle, and apply would be a success no-op."
+    },
+    "platform": {
+      "enum": [
+        "linux",
+        "darwin",
+        "windows"
+      ]
+    },
+    "anchors": {
+      "type": "string",
+      "description": "The anchor file read; default <etc>/trust/bundle-anchors.json."
+    },
+    "anchor_trust": {
+      "enum": [
+        "checked",
+        "unchecked"
+      ]
+    },
+    "bundle": {
+      "$ref": "#/$defs/bundleSummary"
+    },
+    "signer_key_id": {
+      "type": "string"
+    },
+    "alg": {
+      "enum": [
+        "ed25519",
+        "ecdsa-p256-sha256"
+      ]
+    },
+    "floor": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The version a bundle must exceed."
+    },
+    "floor_source": {
+      "enum": [
+        "none",
+        "trust_anchor_min_version",
+        "last_confirmed_bundle",
+        "both"
+      ],
+      "description": "What sets the floor (enterprisebundle.FloorSource): none, the anchor file's min_version, the last confirmed bundle, or both at the same version."
+    },
+    "effective_policy_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "expected_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "digest_verified": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json#/$defs/bundleError"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "verified",
+              "already_applied"
+            ]
+          },
+          "errors": {
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "bundle"
+        ]
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "const": "refused"
+          },
+          "errors": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bundleSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "bundleSummary (internal/cli/enterprise_bundle.go).",
+      "required": [
+        "bundle_id",
+        "version",
+        "tenant_id",
+        "device_group",
+        "platforms",
+        "created_at",
+        "created_by"
+      ],
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string"
+        },
+        "device_group": {
+          "type": "string"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "linux",
+              "darwin",
+              "windows"
+            ]
+          }
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "created_by": {
+          "type": "string",
+          "description": "operator:<os-admin> or control-plane:<tenant>/<admin>."
+        },
+        "change_summary": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "rollback_of": {
+          "type": "string"
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "description": "enterprisebundle.Warning (internal/enterprisebundle/manifest.go).",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "command": "verify",
+      "ok": true,
+      "result": "verified",
+      "platform": "linux",
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "anchor_trust": "checked",
+      "bundle": {
+        "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "version": 13,
+        "tenant_id": "acme",
+        "device_group": "eng-laptops",
+        "platforms": [
+          "linux",
+          "darwin",
+          "windows"
+        ],
+        "created_at": "2026-10-16T21:00:00Z",
+        "created_by": "control-plane:acme/alice",
+        "change_summary": "Block HIGH for eng",
+        "parent": "b-01JA9Z3K9QX4M2N8P6R5T0V1WY"
+      },
+      "signer_key_id": "acme-2026a",
+      "alg": "ed25519",
+      "floor": 12,
+      "floor_source": "last_confirmed_bundle",
+      "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+      "expected_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+      "digest_verified": true,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "schema_version": 1,
+      "command": "verify",
+      "ok": false,
+      "result": "refused",
+      "platform": "windows",
+      "anchors": "C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\trust\\bundle-anchors.json",
+      "anchor_trust": "checked",
+      "bundle": {
+        "bundle_id": "b-01JA8Z3K9QX4M2N8P6R5T0V1WX",
+        "version": 12,
+        "tenant_id": "acme",
+        "device_group": "eng-laptops",
+        "platforms": [
+          "windows"
+        ],
+        "created_at": "2026-10-15T10:00:00Z",
+        "created_by": "control-plane:acme/alice"
+      },
+      "signer_key_id": "acme-2026a",
+      "alg": "ed25519",
+      "floor": 12,
+      "floor_source": "last_confirmed_bundle",
+      "digest_verified": false,
+      "warnings": [],
+      "errors": [
+        {
+          "code": "version_not_newer",
+          "message": "bundle version_not_newer: version 12 is not above the floor 12 (the last confirmed bundle)"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json",
+  "title": "Bundle verb refused before it read device state",
+  "description": "The short document `enterprise bundle apply --json` prints when it refuses before the lifecycle runs (a Secure Client computer, a computer that is not a standalone managed device, and on Windows a token that is not elevated; internal/cli/enterprise_bundle_apply.go), and the document `enterprise bundle status --json` prints for not_admin on Windows (internal/cli/enterprise_bundle_status.go). Every other apply prints lifecycle result v2 (lifecycle-result.schema.json); every other status prints bundle-status.schema.json. Exit code 1 (Linux, macOS) or 1603 (Windows).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "enum": [
+        "apply",
+        "status"
+      ]
+    },
+    "ok": {
+      "const": false
+    },
+    "errors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/bundleError"
+      }
+    }
+  },
+  "$defs": {
+    "bundleError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "description": "bundleError (internal/cli/enterprise_bundle.go). code is a bundle error code (internal/enterprisebundle/errors.go), invalid_arguments, not_root, or failed for an error without a bundle code.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "command": "apply",
+      "ok": false,
+      "errors": [
+        {
+          "code": "not_managed",
+          "message": "bundle not_managed: this computer is not a standalone managed device; install the enterprise profile first"
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "command": "status",
+      "ok": false,
+      "errors": [
+        {
+          "code": "not_admin",
+          "message": "bundle not_admin: run this command from an elevated administrator or SYSTEM session to read the managed bundle state"
+        }
+      ]
+    }
+  ]
+}

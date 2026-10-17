@@ -1089,7 +1089,9 @@ func applyWindowsEnterpriseInstallerReport(
 		if err == nil && aiDefense {
 			result.Inspection.AIDefense = "unavailable:gateway_not_ready"
 			if report.GatewayReady {
-				result.Inspection.AIDefense = "ok"
+				// Status, verify and a hot config apply replace this with
+				// the gateway's /health posture (appendStandaloneGatewayWarnings).
+				result.Inspection.AIDefense = "unknown"
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)

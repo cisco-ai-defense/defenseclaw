@@ -47,7 +47,8 @@ type enterpriseSecretOptions struct {
 	fromFile  string
 	json      bool
 	// lockWait is how long set and remove wait for another lifecycle run
-	// (Linux and macOS).
+	// (Linux and macOS) or for a policy bundle run to release bundle.lock
+	// (Windows).
 	lockWait time.Duration
 }
 
@@ -282,25 +283,47 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
 	}
-	if action != "status" && runtime.GOOS != "windows" {
+	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
+		if runtime.GOOS == "windows" {
+			cmd.Flags().Lookup("lock-wait").Usage = windowsSecretLockWaitUsage
+		}
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
-	if runtime.GOOS != "windows" {
-		// An unknown flag, a malformed value, a stray argument or a missing
-		// --name is invalid arguments: exit 2 with the usage line and the
-		// --help pointer, as on enterprise linux|macos (GAP-2095).
-		cmd.SetFlagErrorFunc(lifecycleFlagError)
-		cmd.Args = lifecycleNoArgs
-		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
-			if err := cmd.ValidateRequiredFlags(); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
+	// An unknown flag, a malformed value, a stray argument or a missing
+	// --name is invalid arguments: exit 2 (Windows 1639) with the usage line
+	// and the --help pointer, as on enterprise linux|macos (GAP-2095).
+	// Windows set and remove also print their --json failure document.
+	flagError := func(c *cobra.Command, err error) error {
+		err = lifecycleFlagError(c, err)
+		if enterpriseSecretArgumentRefusal != nil {
+			return enterpriseSecretArgumentRefusal(c, action, opts, err)
 		}
+		return err
+	}
+	cmd.SetFlagErrorFunc(flagError)
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return flagError(cmd, err)
+		}
+		return nil
 	}
 	return cmd
 }
+
+// windowsSecretLockWaitUsage is --lock-wait of Windows `secret set|remove`.
+const windowsSecretLockWaitUsage = "wait up to this long for a policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618; the installer's lifecycle.lock is waited for up to 30s either way"
+
+// enterpriseSecretArgumentRefusal reports an argument error of `secret set`
+// or `remove` the way the platform documents it: Windows prints the --json
+// failure document (enterprise_secret_windows.go); nil elsewhere.
+var enterpriseSecretArgumentRefusal func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error
 
 func init() {
 	enterpriseSecretCmd.AddCommand(
