@@ -135,8 +135,28 @@ $script:ManifestCatchUpWaitSeconds = 30
 $script:ManifestCatchUpPollMilliseconds = 3000
 $script:ManifestCatchUpWindowSeconds = 120
 $script:SchemaVersion = 1
-$script:AgentApplicationControlAttestationSchemaVersion = 2
+# Schema 3 binds Claude effective-policy evidence to the Claude policy identity
+# (machine policy bytes plus hook binary). Schema 2 bound it to targets.yaml,
+# which the enumerator rewrites on every enrollment change; schema-2 files are
+# still read, but a verified Claude result in one is reported as stale.
+$script:AgentApplicationControlAttestationSchemaVersion = 3
+$script:LegacyAgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
+# The lowest Claude hook contract (claudecode min_inclusive in
+# cli/defenseclaw/inventory/hook_contracts.json, which a contract test pins
+# this to). The gateway's Windows gate derives the same floor from the
+# contract table: an older client has no hook contract to render policy for.
+$script:ClaudeMinimumClientVersion = '2.1.154'
+# Floors recorded by earlier releases in protected evidence and metadata.
+# They remain readable so an existing deployment is not locked out; every
+# new record carries the current floor.
+$script:LegacyClaudeMinimumClientVersions = @('2.1.152')
+# Claude Code honors "managedSourcesBehavior": "merge" from this release
+# (connector.ClaudeCodeManagedSourcesMergeMinimumVersion, which a contract test
+# pins this to). An older approved client ignores the key and loads only an
+# outranking HKLM policy, so under an HKLM merge policy that does not carry the
+# DefenseClaw hooks this is the effective approved-client floor.
+$script:ClaudeManagedSourcesMergeMinimumClientVersion = '2.1.242'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
 $script:ProgramData = [string]$trustedMachineRoots.ProgramData
@@ -2437,12 +2457,227 @@ function Assert-DefenseClawUnsignedCertificationScope {
     }
 }
 
+# Production payload files carry a valid Authenticode signature whose signer
+# certificate has exactly one subject common name (CN), and that name is the
+# DefenseClaw publisher. This is the same publisher
+# contract the Setup assembler (packaging/scripts/lib/assert-cisco-signature.ps1)
+# enforces. An organization that re-signs the payload with its own code-signing
+# certificate names that exact certificate by SHA-256 fingerprint through
+# -AdditionalTrustedSignerSha256; any other valid signer is rejected.
+$script:DefenseClawPayloadPublisher = 'Cisco Systems, Inc.'
+$script:DefenseClawMaximumAdditionalTrustedSigners = 16
+
+function ConvertTo-DefenseClawTrustedSignerSet {
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Value)
+    $set = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Value)) {
+        if ($null -eq $entry) {
+            continue
+        }
+        # -File invocations bind a comma-separated list as one string.
+        foreach ($token in ([string]$entry -split '[,;\s]+')) {
+            if ([string]::IsNullOrEmpty($token)) {
+                continue
+            }
+            if ($token -cmatch '^[0-9A-Fa-f]{40}\z') {
+                throw (
+                    "-AdditionalTrustedSignerSha256 entry '$token' is a SHA-1 " +
+                    'thumbprint; supply the 64-hex-character SHA-256 fingerprint ' +
+                    'of the signing certificate'
+                )
+            }
+            if ($token -cnotmatch '^[0-9A-Fa-f]{64}\z') {
+                throw (
+                    "-AdditionalTrustedSignerSha256 entry '$token' is not a " +
+                    '64-hex-character SHA-256 certificate fingerprint'
+                )
+            }
+            $normalized = $token.ToLowerInvariant()
+            if (-not $set.Contains($normalized)) {
+                $set.Add($normalized)
+            }
+        }
+    }
+    if ($set.Count -gt $script:DefenseClawMaximumAdditionalTrustedSigners) {
+        throw (
+            '-AdditionalTrustedSignerSha256 accepts at most ' +
+            "$script:DefenseClawMaximumAdditionalTrustedSigners fingerprints"
+        )
+    }
+    return ,[string[]]$set.ToArray()
+}
+
+function Get-DefenseClawSourceTrustedSigners {
+    param([Parameter(Mandatory)][hashtable]$Source)
+    if (-not $Source.ContainsKey('trusted_signer_sha256') -or
+        $null -eq $Source['trusted_signer_sha256']) {
+        return ,[string[]]@()
+    }
+    return ,(ConvertTo-DefenseClawTrustedSignerSet `
+        -Value ([string[]]@($Source['trusted_signer_sha256'])))
+}
+
+function Get-DefenseClawCertificateSha256 {
+    param([Parameter(Mandatory)][Security.Cryptography.X509Certificates.X509Certificate]$Certificate)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $hasher.ComputeHash($Certificate.GetRawCertData())
+    }
+    finally {
+        $hasher.Dispose()
+    }
+    return ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+}
+
+function Get-DefenseClawCertificateCommonName {
+    # Returns the one common name (CN attribute, 2.5.4.3) in the certificate's
+    # DER-encoded subject, or $null when the subject is malformed, has no
+    # common name, has more than one, or has one that is not a UTF8String,
+    # PrintableString, IA5String, or BMPString. GetNameInfo(SimpleName) is
+    # not used: for a subject without a CN, Windows returns its OU, O, or
+    # e-mail address instead, so OU=Cisco Systems, Inc. would pass as the
+    # publisher. The CMID broker applies the same rule
+    # (internal/managed/cmidbroker/library_trust.go).
+    param(
+        [Parameter(Mandatory)]
+        [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+    $der = [byte[]]$Certificate.SubjectName.RawData
+    if ($null -eq $der -or $der.Length -lt 2) {
+        return $null
+    }
+    # One DER header at $Offset, bounded by $Limit: returns the tag, the first
+    # content byte, and the end of the content, or $null.
+    $readElement = {
+        param([int]$Offset, [int]$Limit)
+        if ($Offset + 2 -gt $Limit) {
+            return $null
+        }
+        $length = [int]$der[$Offset + 1]
+        $content = $Offset + 2
+        if ($length -ge 0x80) {
+            $lengthBytes = $length -band 0x7f
+            if ($lengthBytes -lt 1 -or $lengthBytes -gt 3 -or
+                $content + $lengthBytes -gt $Limit) {
+                return $null
+            }
+            $length = 0
+            for ($index = 0; $index -lt $lengthBytes; $index++) {
+                $length = ($length -shl 8) -bor [int]$der[$content + $index]
+            }
+            $content += $lengthBytes
+        }
+        if ($content + $length -gt $Limit) {
+            return $null
+        }
+        return @([int]$der[$Offset], $content, ($content + $length))
+    }
+    $name = & $readElement 0 $der.Length
+    if ($null -eq $name -or $name[0] -ne 0x30 -or $name[2] -ne $der.Length) {
+        return $null
+    }
+    $commonNames = [Collections.Generic.List[string]]::new()
+    $setOffset = $name[1]
+    while ($setOffset -lt $name[2]) {
+        $set = & $readElement $setOffset $name[2]
+        if ($null -eq $set -or $set[0] -ne 0x31) {
+            return $null
+        }
+        $attributeOffset = $set[1]
+        while ($attributeOffset -lt $set[2]) {
+            $attribute = & $readElement $attributeOffset $set[2]
+            if ($null -eq $attribute -or $attribute[0] -ne 0x30) {
+                return $null
+            }
+            $type = & $readElement $attribute[1] $attribute[2]
+            if ($null -eq $type -or $type[0] -ne 0x06) {
+                return $null
+            }
+            $value = & $readElement $type[2] $attribute[2]
+            if ($null -eq $value -or $value[2] -ne $attribute[2]) {
+                return $null
+            }
+            # id-at-commonName (2.5.4.3) is encoded as 55 04 03.
+            if ($type[2] - $type[1] -eq 3 -and
+                $der[$type[1]] -eq 0x55 -and
+                $der[$type[1] + 1] -eq 0x04 -and
+                $der[$type[1] + 2] -eq 0x03) {
+                if ($value[0] -eq 0x0c -or $value[0] -eq 0x13 -or $value[0] -eq 0x16) {
+                    $encoding = [Text.UTF8Encoding]::new($false, $true)
+                }
+                elseif ($value[0] -eq 0x1e) {
+                    $encoding = [Text.UnicodeEncoding]::new($true, $false, $true)
+                }
+                else {
+                    return $null
+                }
+                try {
+                    $commonNames.Add(
+                        $encoding.GetString($der, $value[1], $value[2] - $value[1])
+                    )
+                }
+                catch {
+                    return $null
+                }
+            }
+            $attributeOffset = $attribute[2]
+        }
+        $setOffset = $set[2]
+    }
+    if ($commonNames.Count -ne 1) {
+        return $null
+    }
+    return $commonNames[0]
+}
+
+function Assert-DefenseClawPayloadSigner {
+    param(
+        [Parameter(Mandatory)][AllowNull()]$SignerCertificate,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256
+    )
+    if ($null -eq $SignerCertificate) {
+        throw "$Label Authenticode signature has no signer certificate: $Path"
+    }
+    $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $SignerCertificate
+    )
+    try {
+        $publisher = Get-DefenseClawCertificateCommonName -Certificate $certificate
+        if ([string]::Equals(
+                $publisher,
+                $script:DefenseClawPayloadPublisher,
+                [StringComparison]::Ordinal
+            )) {
+            return
+        }
+        $subject = $certificate.Subject
+        $fingerprint = Get-DefenseClawCertificateSha256 -Certificate $certificate
+    }
+    finally {
+        $certificate.Dispose()
+    }
+    $trusted = ConvertTo-DefenseClawTrustedSignerSet `
+        -Value $AdditionalTrustedSignerSha256
+    if ($trusted -ccontains $fingerprint) {
+        return
+    }
+    throw (
+        "$Label is signed by '$subject' (certificate SHA-256 $fingerprint), " +
+        "not the DefenseClaw publisher '$script:DefenseClawPayloadPublisher'; " +
+        'a payload re-signed by your organization requires that exact ' +
+        "certificate in -AdditionalTrustedSignerSha256: $Path"
+    )
+}
+
 function Assert-DefenseClawRegularSource {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Label,
         [switch]$Authenticode,
-        [switch]$AllowUnsigned
+        [switch]$AllowUnsigned,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256
     )
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     Assert-DefenseClawNoReparsePath -Path $full
@@ -2466,6 +2701,16 @@ function Assert-DefenseClawRegularSource {
         }
         elseif ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not $AllowUnsigned) {
             throw "$Label Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for controlled test builds"
+        }
+        # Standalone has already admitted the source through its configured
+        # Authenticode or manifest hash policy. The Cisco signer pin belongs
+        # to the Secure Client payload contract.
+        if (-not $AllowUnsigned -and -not (Test-DefenseClawStandaloneProfile)) {
+            Assert-DefenseClawPayloadSigner `
+                -SignerCertificate $signature.SignerCertificate `
+                -Label $Label `
+                -Path $full `
+                -AdditionalTrustedSignerSha256 $AdditionalTrustedSignerSha256
         }
     }
     return $full
@@ -2504,20 +2749,26 @@ function Get-DefenseClawSourceDescriptor {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Label,
         [switch]$Authenticode,
-        [switch]$AllowUnsigned
+        [switch]$AllowUnsigned,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256
     )
+    $trustedSigners = ConvertTo-DefenseClawTrustedSignerSet `
+        -Value $AdditionalTrustedSignerSha256
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     [void](Assert-DefenseClawTrustedSource -Path $full -Label $Label)
     $full = Assert-DefenseClawRegularSource `
         -Path $Path `
         -Label $Label `
         -Authenticode:$Authenticode `
-        -AllowUnsigned:$AllowUnsigned
+        -AllowUnsigned:$AllowUnsigned `
+        -AdditionalTrustedSignerSha256 $trustedSigners
     $descriptor = @{
         path = $full
         label = $Label
         authenticode = [bool]$Authenticode
         allow_unsigned = [bool]$AllowUnsigned
+        # Every later re-check of this source applies the same signer policy.
+        trusted_signer_sha256 = $trustedSigners
         sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
     }
     if ($Authenticode) {
@@ -2562,7 +2813,8 @@ function Assert-DefenseClawSourceDescriptorCurrent {
         -Path ([string]$Source.path) `
         -Label ([string]$Source.label) `
         -Authenticode:([bool]$Source.authenticode) `
-        -AllowUnsigned:([bool]$Source.allow_unsigned)
+        -AllowUnsigned:([bool]$Source.allow_unsigned) `
+        -AdditionalTrustedSignerSha256 (Get-DefenseClawSourceTrustedSigners -Source $Source)
     foreach ($field in @('path', 'label', 'sha256')) {
         if (-not [string]::Equals(
                 [string]$current[$field],
@@ -2640,7 +2892,8 @@ function Install-DefenseClawSourceDescriptor {
             -Path $destinationPath `
             -Label ([string]$Source.label) `
             -Authenticode `
-            -AllowUnsigned:([bool]$Source.allow_unsigned))
+            -AllowUnsigned:([bool]$Source.allow_unsigned) `
+            -AdditionalTrustedSignerSha256 (Get-DefenseClawSourceTrustedSigners -Source $Source))
         $installedSignature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
             -LiteralPath $destinationPath
         $installedThumbprint = if ($null -eq $installedSignature.SignerCertificate) {
@@ -6755,6 +7008,9 @@ function Get-DefenseClawLayout {
     )
     $codexVendorDirectory = Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI'
     $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path $codexVendorDirectory 'Codex'
+    $claudeManagedPolicyDirectory = Microsoft.PowerShell.Management\Join-Path `
+        (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'ClaudeCode') `
+        'managed-settings.d'
     $runtimeDirectory = Microsoft.PowerShell.Management\Join-Path `
         $StateRoot `
         'runtime'
@@ -6858,6 +7114,20 @@ function Get-DefenseClawLayout {
                     'managed-settings.d') `
                 '.defenseclaw-managed-hooks.lock'
         )
+        # The machine-wide Claude policy fragment and its DefenseClaw sidecar
+        # are written by the gateway, never by this module. They are read
+        # only to bind Claude effective-policy evidence to the exact policy
+        # identity the live Claude proof exercised.
+        ClaudeManagedPolicyPath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $claudeManagedPolicyDirectory `
+                '90-defenseclaw.json'
+        )
+        ClaudeManagedPolicyStatePath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $claudeManagedPolicyDirectory `
+                '.defenseclaw-managed-hooks.state'
+        )
         CodexRequirementsOwnershipPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-ownership.json')
         CodexRequirementsAclBackupPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-acl-backup.json')
         AgentApplicationControlAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
@@ -6866,6 +7136,11 @@ function Get-DefenseClawLayout {
         CoreHardeningCertification = [bool]$CoreHardeningCertification
         AgentApplicationControlAttested = [bool]$AgentApplicationControlAttested
         ClaudeEffectivePolicyVerified = $false
+        # Non-empty when protected evidence records a verified Claude policy
+        # that is not the currently installed Claude policy identity.
+        ClaudeEffectivePolicyStaleReason = ''
+        # The Claude floor the application-control evidence was attested at.
+        AgentApplicationControlClaudeMinimumVersion = $script:ClaudeMinimumClientVersion
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
         CursorTargetEnabled = $false
@@ -8745,6 +9020,84 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
+function Test-DefenseClawClaudeMinimumClientVersion {
+    param([AllowNull()]$Value)
+    $text = [string]$Value
+    if (Test-DefenseClawStandaloneProfile) {
+        return [bool]($text -ceq (Get-DefenseClawClaudeMinimumClientVersion))
+    }
+    return [bool](
+        $text -ceq $script:ClaudeMinimumClientVersion -or
+        $text -ceq $script:ClaudeManagedSourcesMergeMinimumClientVersion -or
+        $text -cin $script:LegacyClaudeMinimumClientVersions
+    )
+}
+
+function Test-DefenseClawClaudeVersionAtLeast {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory)][string]$Minimum
+    )
+    $parsed = $null
+    $floor = $null
+    if (-not [Version]::TryParse([string]$Value, [ref]$parsed) -or
+        -not [Version]::TryParse($Minimum, [ref]$floor)) {
+        return $false
+    }
+    return [bool]($parsed -ge $floor)
+}
+
+function Get-DefenseClawClaudeRequiredClientVersion {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (Test-DefenseClawStandaloneProfile) {
+        return Get-DefenseClawClaudeMinimumClientVersion
+    }
+    # The approved-client floor application control must enforce for the
+    # DefenseClaw Claude hooks to load. An outranking HKLM merge policy raises
+    # it: an older client ignores the merge and applies only that policy.
+    $hklm = Get-DefenseClawClaudeHKLMPolicyState -Layout $Layout
+    if ([bool]$hklm.merge_client_floor_required) {
+        return $script:ClaudeManagedSourcesMergeMinimumClientVersion
+    }
+    return $script:ClaudeMinimumClientVersion
+}
+
+function Set-DefenseClawRequestedAttestations {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$AttestAgentApplicationControl,
+        [switch]$AttestClaudeEffectivePolicy
+    )
+    # Explicit attestations describe the transaction being started. The
+    # lifecycle applies them after reading existing evidence and again after
+    # pending-transaction recovery, which restores the interrupted
+    # transaction's evidence state (and any stale reason) into the layout.
+    if ($AttestAgentApplicationControl) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
+        }
+        $Layout.AgentApplicationControlAttested = $true
+        # The administrator attests the floor this host currently requires.
+        # Re-published evidence without a fresh attestation keeps the floor
+        # it recorded.
+        $Layout.AgentApplicationControlClaudeMinimumVersion =
+            Get-DefenseClawClaudeRequiredClientVersion -Layout $Layout
+    }
+    if ($AttestClaudeEffectivePolicy) {
+        if ([bool]$Layout.CoreHardeningCertification) {
+            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
+        }
+        # A fresh live proof rebinds the evidence to the current Claude
+        # policy identity, whatever the recorded evidence said.
+        $Layout.ClaudeEffectivePolicyVerified = $true
+        if (Test-DefenseClawStandaloneProfile) {
+            $Layout['ClaudeEffectivePolicyStaleReason'] = ''
+        }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = ''
+        }
+    }
+}
 function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -8794,8 +9147,17 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     catch {
         throw "cannot parse agent application-control attestation: $($_.Exception.Message)"
     }
-    if ([int]$attestation.schema_version -ne
-        (Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)) {
+    $schemaVersion = [int]$attestation.schema_version
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $schemaVersion -ne
+            (Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)) {
+        throw "unsupported agent application-control attestation schema: $($attestation.schema_version)"
+    }
+    if (-not (Test-DefenseClawStandaloneProfile) -and
+        $schemaVersion -ne
+            $script:AgentApplicationControlAttestationSchemaVersion -and
+        $schemaVersion -ne
+            $script:LegacyAgentApplicationControlAttestationSchemaVersion) {
         throw "unsupported agent application-control attestation schema: $($attestation.schema_version)"
     }
     $enforced = $attestation.PSObject.Properties[
@@ -8815,8 +9177,8 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     if ($null -eq $approvedClient -or
         $approvedClient.Value -isnot [bool] -or
         [bool]$approvedClient.Value -ne [bool]$enforced.Value -or
-        [string]$attestation.minimum_claude_version -cne
-            (Get-DefenseClawClaudeMinimumClientVersion)) {
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $attestation.minimum_claude_version)) {
         throw 'agent application-control evidence has an invalid approved-client result or Claude version floor'
     }
     $claudeEffective = $attestation.PSObject.Properties[
@@ -8829,6 +9191,13 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     $claudeManifestHash = $attestation.PSObject.Properties[
         'claude_effective_policy_manifest_sha256'
     ]
+    $claudePolicyHash = $attestation.PSObject.Properties[
+        'claude_effective_policy_managed_policy_sha256'
+    ]
+    $claudeHookHash = $attestation.PSObject.Properties[
+        'claude_effective_policy_hook_sha256'
+    ]
+    $claudeStaleReason = ''
     if (Test-DefenseClawStandaloneProfile) {
         # Standalone evidence binds the Claude policy identity the live proof
         # exercised, never targets.yaml (which the enumerator rewrites on
@@ -8838,32 +9207,70 @@ function Get-DefenseClawAgentApplicationControlAttestation {
             -Layout $Layout `
             -Attestation $attestation `
             -Verified ([bool]$claudeEffective.Value)
-        Microsoft.PowerShell.Utility\Add-Member `
-            -InputObject $attestation `
-            -NotePropertyName 'claude_effective_policy_stale_reason' `
-            -NotePropertyValue $claudeStaleReason `
-            -Force
     }
-    elseif ([bool]$claudeEffective.Value) {
-        if ($null -eq $claudeManifestHash -or
-            [string]$claudeManifestHash.Value -cnotmatch '^[0-9a-f]{64}$' -or
-            -not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.ManifestPath `
-                -PathType Leaf)) {
-            throw 'Claude effective-policy evidence is not bound to an installed manifest'
+    else {
+    # A verified Claude result whose binding no longer matches the installed
+    # Claude policy identity is reported as unverified, never thrown: every
+    # lifecycle action, including the re-attesting Repair and Uninstall, must
+    # stay available. Only malformed evidence fails closed.
+    if ($schemaVersion -eq
+        $script:LegacyAgentApplicationControlAttestationSchemaVersion) {
+        if ([bool]$claudeEffective.Value) {
+            if ($null -eq $claudeManifestHash -or
+                [string]$claudeManifestHash.Value -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Claude effective-policy evidence is not bound to an installed manifest'
+            }
+            $claudeStaleReason = (
+                'Claude effective-policy evidence predates the Claude policy ' +
+                'binding; rerun the live Claude proof and Repair ' +
+                '-AttestClaudeEffectivePolicy'
+            )
         }
-        $actualManifestHash = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.ManifestPath `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
-        if ($actualManifestHash -cne [string]$claudeManifestHash.Value) {
-            throw 'Claude effective-policy evidence is stale for the installed manifest'
+        elseif ($null -ne $claudeManifestHash -and
+            -not [string]::IsNullOrEmpty([string]$claudeManifestHash.Value)) {
+            throw 'unverified Claude effective-policy evidence unexpectedly records a manifest binding'
         }
     }
-    elseif ($null -ne $claudeManifestHash -and
-        -not [string]::IsNullOrEmpty([string]$claudeManifestHash.Value)) {
-        throw 'unverified Claude effective-policy evidence unexpectedly records a manifest binding'
+    else {
+        if ($null -ne $claudeManifestHash) {
+            throw 'Claude effective-policy evidence records a legacy manifest binding'
+        }
+        if ([bool]$claudeEffective.Value) {
+            if ($null -eq $claudePolicyHash -or
+                [string]$claudePolicyHash.Value -cnotmatch '^[0-9a-f]{64}$' -or
+                $null -eq $claudeHookHash -or
+                [string]$claudeHookHash.Value -cnotmatch '^[0-9a-f]{64}$') {
+                throw 'Claude effective-policy evidence is not bound to a Claude policy identity'
+            }
+            try {
+                $currentClaudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding `
+                    -Layout $Layout
+                if ([string]$currentClaudeBinding.managed_policy_sha256 -cne
+                        [string]$claudePolicyHash.Value -or
+                    [string]$currentClaudeBinding.hook_sha256 -cne
+                        [string]$claudeHookHash.Value) {
+                    $claudeStaleReason = (
+                        'Claude effective-policy evidence was recorded for a ' +
+                        'different DefenseClaw Claude policy or hook binary; ' +
+                        'rerun the live Claude proof and Repair ' +
+                        '-AttestClaudeEffectivePolicy'
+                    )
+                }
+            }
+            catch {
+                $claudeStaleReason = (
+                    'the installed DefenseClaw Claude policy identity is ' +
+                    "unavailable: $($_.Exception.Message)"
+                )
+            }
+        }
+        elseif (($null -ne $claudePolicyHash -and
+                -not [string]::IsNullOrEmpty([string]$claudePolicyHash.Value)) -or
+            ($null -ne $claudeHookHash -and
+                -not [string]::IsNullOrEmpty([string]$claudeHookHash.Value))) {
+            throw 'unverified Claude effective-policy evidence unexpectedly records a Claude policy binding'
+        }
+    }
     }
     if ([string]$attestation.attested_by_sid -notmatch '^S-\d-\d+(?:-\d+)+$') {
         throw 'agent application-control attestation contains an invalid administrator SID'
@@ -8889,7 +9296,155 @@ function Get-DefenseClawAgentApplicationControlAttestation {
     catch {
         throw "agent application-control attestation contains an invalid timestamp: $($_.Exception.Message)"
     }
+    # claude_effective_policy_verified stays the recorded claim, which is what
+    # metadata, service environments and transaction snapshots were published
+    # with. Callers that report or re-publish the result consult this reason.
+    Microsoft.PowerShell.Utility\Add-Member `
+        -InputObject $attestation `
+        -NotePropertyName 'claude_effective_policy_stale_reason' `
+        -NotePropertyValue $claudeStaleReason `
+        -Force
     return $attestation
+}
+
+function Get-DefenseClawClaudeEffectivePolicyBinding {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # The live Claude proof exercises the machine-wide DefenseClaw policy
+    # fragment and the hook binary it launches, so the evidence binds exactly
+    # those bytes. The fragment is rendered from the resolved Claude hook
+    # contract, so a contract change also changes its digest. targets.yaml and
+    # the sidecar's target SID list are deliberately excluded: the enumerator
+    # rewrites both on every enrollment change without changing the policy
+    # Claude loads.
+    $policyPath = [string]$Layout.ClaudeManagedPolicyPath
+    $statePath = [string]$Layout.ClaudeManagedPolicyStatePath
+    foreach ($entry in @(
+        @($policyPath, 'DefenseClaw Claude managed policy', 4194304),
+        @($statePath, 'DefenseClaw Claude managed policy state', 65536),
+        @([string]$Layout.HookPath, 'DefenseClaw hook binary', [int64]::MaxValue)
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath ([string]$entry[0]) `
+            -PathType Leaf)) {
+            throw "$($entry[1]) is missing: $($entry[0])"
+        }
+        Assert-DefenseClawNoReparsePath -Path ([string]$entry[0])
+        $item = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath ([string]$entry[0]) `
+            -Force
+        if ([int64]$item.Length -le 0 -or [int64]$item.Length -gt [int64]$entry[2]) {
+            throw "$($entry[1]) has an invalid size: $($entry[0])"
+        }
+    }
+    $policySha256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $policyPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    try {
+        $state = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $statePath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        throw "cannot parse DefenseClaw Claude managed policy state: $($_.Exception.Message)"
+    }
+    # The sidecar is the gateway's ownership record for the fragment. Requiring
+    # its digest proves the bytes are DefenseClaw's canonical rendering rather
+    # than an arbitrary file at the documented path.
+    if ([string]$state.policy_sha256 -cne "sha256:$policySha256") {
+        throw 'DefenseClaw Claude managed policy does not match its ownership record'
+    }
+    $recordedHook = [string]$state.hook_executable
+    if ([string]::IsNullOrWhiteSpace($recordedHook) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($recordedHook).TrimEnd('\'),
+            [IO.Path]::GetFullPath([string]$Layout.HookPath).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'DefenseClaw Claude managed policy launches a hook outside the installed layout'
+    }
+    $hookSha256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.HookPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    return [ordered]@{
+        managed_policy_sha256 = $policySha256
+        hook_sha256 = $hookSha256
+    }
+}
+
+function Get-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    # -AttestClaudeEffectivePolicy records a live Claude proof the
+    # administrator ran before this transaction started, so it can only vouch
+    # for the Claude policy and hook binary installed at that point. Capture
+    # that identity before anything is staged, and refuse up front when the
+    # transaction would replace the hook the proof exercised (threat model
+    # W-34).
+    try {
+        $baseline = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw (
+            '-AttestClaudeEffectivePolicy requires the installed DefenseClaw ' +
+            'Claude policy and hook binary that the live Claude proof ' +
+            "exercised: $($_.Exception.Message)"
+        )
+    }
+    if ($Sources.ContainsKey('hook') -and
+        -not [string]::Equals(
+            [string]$Sources['hook'].sha256,
+            [string]$baseline.hook_sha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the supplied hook binary ' +
+            'differs from the installed DefenseClaw hook binary that the live ' +
+            'Claude proof exercised. Run this transaction without ' +
+            '-AttestClaudeEffectivePolicy, rerun the live Claude proof against ' +
+            'the new hook, then run Repair -AttestClaudeEffectivePolicy with ' +
+            'the same hook binary'
+        )
+    }
+    return $baseline
+}
+
+function Assert-DefenseClawClaudeEffectivePolicyProofBaseline {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][Collections.IDictionary]$Baseline
+    )
+    # The evidence writer hashes the policy and hook on disk after staging.
+    # Both must still be the bytes captured before this transaction, so the
+    # published binding never names bytes the live proof did not run.
+    try {
+        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+    }
+    catch {
+        throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+    }
+    if ([string]$current.hook_sha256 -cne [string]$Baseline.hook_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: this transaction replaced ' +
+            'the DefenseClaw hook binary that the live Claude proof exercised; ' +
+            'rerun the live Claude proof against the new hook, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
+    if ([string]$current.managed_policy_sha256 -cne
+        [string]$Baseline.managed_policy_sha256) {
+        throw (
+            '-AttestClaudeEffectivePolicy refused: the DefenseClaw Claude ' +
+            'policy changed during this transaction, so the live Claude proof ' +
+            'did not exercise it; rerun the live Claude proof, then run ' +
+            'Repair -AttestClaudeEffectivePolicy'
+        )
+    }
 }
 
 function Write-DefenseClawAgentApplicationControlAttestation {
@@ -8902,39 +9457,55 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         return
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $claudeManifestHash = ''
+    $claudePolicyHash = ''
+    $claudeHookHash = ''
     if ([bool]$Layout.ClaudeEffectivePolicyVerified) {
-        if (-not (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.ManifestPath `
-            -PathType Leaf)) {
-            throw 'cannot attest Claude effective policy without an installed protected manifest'
+        if (-not [string]::IsNullOrEmpty(
+            [string]$Layout.ClaudeEffectivePolicyStaleReason)) {
+            throw "refusing to re-publish stale Claude effective-policy evidence: $($Layout.ClaudeEffectivePolicyStaleReason)"
         }
-        $claudeManifestHash = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.ManifestPath `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
+        try {
+            $claudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+        }
+        catch {
+            throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
+        }
+        $claudePolicyHash = [string]$claudeBinding.managed_policy_sha256
+        $claudeHookHash = [string]$claudeBinding.hook_sha256
     }
     Write-DefenseClawJsonAtomic -Value ([ordered]@{
         schema_version = $script:AgentApplicationControlAttestationSchemaVersion
         agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested
         prerequisite = $script:AgentApplicationControlPrerequisite
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
-        minimum_claude_version = (Get-DefenseClawClaudeMinimumClientVersion)
+        minimum_claude_version = $(
+            if ([bool]$Layout.AgentApplicationControlAttested -and
+                (Test-DefenseClawClaudeMinimumClientVersion `
+                    -Value $Layout.AgentApplicationControlClaudeMinimumVersion)) {
+                [string]$Layout.AgentApplicationControlClaudeMinimumVersion
+            }
+            else {
+                $script:ClaudeMinimumClientVersion
+            }
+        )
         claude_effective_policy_verified = [bool]$Layout.ClaudeEffectivePolicyVerified
-        claude_effective_policy_manifest_sha256 = $claudeManifestHash
+        claude_effective_policy_managed_policy_sha256 = $claudePolicyHash
+        claude_effective_policy_hook_sha256 = $claudeHookHash
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
     }) -Path $Layout.AgentApplicationControlAttestationPath
-    [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
+    $written = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
+    if (-not [string]::IsNullOrEmpty(
+        [string]$written.claude_effective_policy_stale_reason)) {
+        throw "Claude policy identity changed while attesting: $($written.claude_effective_policy_stale_reason)"
+    }
+    $Layout.ClaudeEffectivePolicyStaleReason = ''
 }
 
 function Get-DefenseClawAgentApplicationControlAttestationSchemaVersion {
     <#
-        Standalone evidence is schema 3: Claude effective-policy evidence is
-        bound to the Claude policy identity. The Secure Client profile keeps
-        its historical schema.
+        Both profiles write schema 3 Claude policy identity evidence.
     #>
     if (Test-DefenseClawStandaloneProfile) {
         return 3
@@ -8957,7 +9528,7 @@ function Get-DefenseClawClaudeManagedPolicyPaths {
     }
 }
 
-function Get-DefenseClawClaudeEffectivePolicyBinding {
+function Get-DefenseClawStandaloneClaudeEffectivePolicyBinding {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # The live Claude proof exercises the machine-wide DefenseClaw policy
     # fragment and the hook binary it launches, so the evidence binds exactly
@@ -9058,7 +9629,7 @@ function Get-DefenseClawStandaloneClaudeEvidenceStaleReason {
         throw 'Claude effective-policy evidence is not bound to a Claude policy identity'
     }
     try {
-        $current = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+        $current = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
     }
     catch {
         return "the installed DefenseClaw Claude policy identity is unavailable: $($_.Exception.Message)"
@@ -9085,7 +9656,7 @@ function Write-DefenseClawStandaloneAgentApplicationControlAttestation {
             throw "refusing to re-publish stale Claude effective-policy evidence: $staleReason"
         }
         try {
-            $claudeBinding = Get-DefenseClawClaudeEffectivePolicyBinding -Layout $Layout
+            $claudeBinding = Get-DefenseClawStandaloneClaudeEffectivePolicyBinding -Layout $Layout
         }
         catch {
             throw "cannot attest Claude effective policy without the installed DefenseClaw Claude policy: $($_.Exception.Message)"
@@ -9612,6 +10183,8 @@ function Restore-DefenseClawTransaction {
     $Layout.ClaudeEffectivePolicyVerified = [bool](
         $snapshotClaudeEffective.Value
     )
+    $Layout.ClaudeEffectivePolicyStaleReason = ''
+    $Layout.AgentApplicationControlClaudeMinimumVersion = $script:ClaudeMinimumClientVersion
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf) {
@@ -9630,6 +10203,14 @@ function Restore-DefenseClawTransaction {
                 $restoredAttestation.claude_effective_policy_stale_reason
             )
         }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = [string](
+                $restoredAttestation.claude_effective_policy_stale_reason
+            )
+        }
+        $Layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $restoredAttestation.minimum_claude_version
+        )
     }
     $previousServices = @($snapshot.services | Microsoft.PowerShell.Core\Where-Object { [bool]$_.existed })
     if ($previousServices.Count -gt 0) {
@@ -16950,9 +17531,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         $approvedAgentsProperty.Value -isnot [bool] -or
         [bool]$approvedAgentsProperty.Value -ne
             [bool]$applicationControlProperty.Value -or
-        [string]$metadata.claude_minimum_client_version -cne
-            (Get-DefenseClawClaudeMinimumClientVersion)) {
-        throw "deployment metadata does not attest approved Claude clients at version $(Get-DefenseClawClaudeMinimumClientVersion) or newer"
+        -not (Test-DefenseClawClaudeMinimumClientVersion `
+            -Value $metadata.claude_minimum_client_version)) {
+        throw 'deployment metadata does not attest approved Claude clients at a supported version floor'
     }
     $claudeTargetProperty = $metadata.PSObject.Properties[
         'claude_target_enabled'
@@ -17006,6 +17587,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         $Layout.ClaudeEffectivePolicyVerified = [bool](
             $metadata.claude_effective_policy_verified
         )
+        $Layout.ClaudeEffectivePolicyStaleReason = ''
     }
     else {
         $attestation = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
@@ -17025,6 +17607,14 @@ function Assert-DefenseClawEnterpriseDeployment {
                 $attestation.claude_effective_policy_stale_reason
             )
         }
+        else {
+            $Layout.ClaudeEffectivePolicyStaleReason = [string](
+                $attestation.claude_effective_policy_stale_reason
+            )
+        }
+        $Layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $attestation.minimum_claude_version
+        )
         if ($recordedAttestationHash -cnotmatch '^[0-9a-f]{64}$') {
             throw 'deployment metadata contains an invalid agent application-control attestation SHA-256'
         }
@@ -17611,6 +18201,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$InstallerSource,
         [string]$ModuleSource,
         [switch]$AllowUnsigned,
+        [AllowNull()][AllowEmptyCollection()][string[]]$AdditionalTrustedSignerSha256,
         # Retained only for internal call-shape compatibility. The public
         # lifecycle entry point rejects deferred configuration before layout
         # resolution, so this legacy source-selection branch is unreachable.
@@ -17622,7 +18213,8 @@ function Get-DefenseClawLifecycleSources {
             -Path $NativeCleanupBinary `
             -Label 'native exact-scope cleanup executable' `
             -Authenticode `
-            -AllowUnsigned:$AllowUnsigned
+            -AllowUnsigned:$AllowUnsigned `
+            -AdditionalTrustedSignerSha256 $AdditionalTrustedSignerSha256
     }
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
         return $sources
@@ -17703,7 +18295,8 @@ function Get-DefenseClawLifecycleSources {
             -Path ([string]$entry[1]) `
             -Label ([string]$entry[2]) `
             -Authenticode:([bool]$entry[3]) `
-            -AllowUnsigned:$AllowUnsigned
+            -AllowUnsigned:$AllowUnsigned `
+            -AdditionalTrustedSignerSha256 $AdditionalTrustedSignerSha256
     }
     return $sources
 }
@@ -17725,6 +18318,808 @@ function Get-DefenseClawServiceState {
         return 'absent'
     }
     return $service.Status.ToString().ToLowerInvariant()
+}
+
+function ConvertFrom-DefenseClawStrictJsonString {
+    param([Parameter(Mandatory)][string]$Token)
+    # The value of a JSON string token that ConvertFrom-DefenseClawStrictJson
+    # has already validated, quotes included.
+    $body = $Token.Substring(1, $Token.Length - 2)
+    if ($body.IndexOf([char]'\') -lt 0) {
+        return $body
+    }
+    $builder = [Text.StringBuilder]::new($body.Length)
+    $index = 0
+    while ($index -lt $body.Length) {
+        $slash = $body.IndexOf([char]'\', $index)
+        if ($slash -lt 0) {
+            [void]$builder.Append($body, $index, $body.Length - $index)
+            break
+        }
+        [void]$builder.Append($body, $index, $slash - $index)
+        $escape = $body[$slash + 1]
+        $index = $slash + 2
+        if ($escape -ceq 'u') {
+            [void]$builder.Append([char][Convert]::ToInt32($body.Substring($index, 4), 16))
+            $index += 4
+        }
+        elseif ($escape -ceq 'b') {
+            [void]$builder.Append([char]8)
+        }
+        elseif ($escape -ceq 'f') {
+            [void]$builder.Append([char]12)
+        }
+        elseif ($escape -ceq 'n') {
+            [void]$builder.Append([char]10)
+        }
+        elseif ($escape -ceq 'r') {
+            [void]$builder.Append([char]13)
+        }
+        elseif ($escape -ceq 't') {
+            [void]$builder.Append([char]9)
+        }
+        else {
+            # '"', '\' and '/' stand for themselves.
+            [void]$builder.Append($escape)
+        }
+    }
+    return $builder.ToString()
+}
+
+function ConvertFrom-DefenseClawStrictJson {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # One JSON document (RFC 8259), read the way Claude Code (JSON.parse) and
+    # the gateway (encoding/json) read settings: no comments, trailing commas,
+    # single quotes, NaN or leading zeros, and only JSON whitespace around the
+    # value. Keys are case-sensitive and a repeated key keeps its last value.
+    # ConvertFrom-Json differs from both, and between Windows PowerShell 5.1
+    # and PowerShell 7: it accepts some of those forms and rejects keys that
+    # differ only in case. An object is a Dictionary[string, object] with
+    # ordinal keys, an array a List[object] and a number a double. Throws on
+    # anything else.
+    $tokens = [regex]::new(
+        '\G[\t\n\r ]*(?:(?<string>"(?>(?:[^"\\\x00-\x1f]+|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*)")|' +
+            '(?<number>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)|' +
+            '(?<literal>true|false|null)|(?<punctuation>[{}\[\]:,])|(?<end>\z))',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    $stack = [Collections.Generic.Stack[hashtable]]::new()
+    # value: a value is due; first-value: a value or ']' after '[';
+    # first-key: a key or '}' after '{'; key: a key after ','; colon: ':';
+    # next: ',' or the closing bracket; end: only whitespace may follow.
+    $state = 'value'
+    $position = 0
+    $root = $null
+    while ($true) {
+        $match = $tokens.Match($Text, $position)
+        if (-not $match.Success) {
+            throw "invalid JSON at offset $position"
+        }
+        $position = $match.Index + $match.Length
+        if ($match.Groups['end'].Success) {
+            if ($state -cne 'end') {
+                throw 'unexpected end of JSON input'
+            }
+            return , $root
+        }
+        if ($state -ceq 'end') {
+            throw "invalid JSON after the top-level value at offset $($match.Index)"
+        }
+        $punctuation = ''
+        if ($match.Groups['punctuation'].Success) {
+            $punctuation = $match.Groups['punctuation'].Value
+        }
+        $frame = $null
+        if ($stack.Count -gt 0) {
+            $frame = $stack.Peek()
+        }
+        $value = $null
+        if ($state -ceq 'colon') {
+            if ($punctuation -cne ':') {
+                throw "invalid JSON at offset $($match.Index): expected ':'"
+            }
+            $state = 'value'
+            continue
+        }
+        elseif ($state -ceq 'next') {
+            if ($punctuation -ceq ',') {
+                $state = if ([bool]$frame['object']) { 'key' } else { 'value' }
+                continue
+            }
+            if (($punctuation -ceq '}' -and [bool]$frame['object']) -or
+                ($punctuation -ceq ']' -and -not [bool]$frame['object'])) {
+                [void]$stack.Pop()
+                $value = $frame['container']
+            }
+            else {
+                throw "invalid JSON at offset $($match.Index): expected ',' or a closing bracket"
+            }
+        }
+        elseif ($state -ceq 'first-key' -or $state -ceq 'key') {
+            if ($state -ceq 'first-key' -and $punctuation -ceq '}') {
+                [void]$stack.Pop()
+                $value = $frame['container']
+            }
+            elseif ($match.Groups['string'].Success) {
+                $frame['key'] = ConvertFrom-DefenseClawStrictJsonString -Token $match.Groups['string'].Value
+                $state = 'colon'
+                continue
+            }
+            else {
+                throw "invalid JSON at offset $($match.Index): expected a string key"
+            }
+        }
+        elseif ($state -ceq 'first-value' -and $punctuation -ceq ']') {
+            [void]$stack.Pop()
+            $value = $frame['container']
+        }
+        elseif ($punctuation -ceq '{' -or $punctuation -ceq '[') {
+            # encoding/json refuses nesting deeper than 10000.
+            if ($stack.Count -ge 10000) {
+                throw 'JSON nesting exceeds 10000 levels'
+            }
+            if ($punctuation -ceq '{') {
+                $stack.Push(@{
+                    object = $true
+                    key = ''
+                    container = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+                })
+                $state = 'first-key'
+            }
+            else {
+                $stack.Push(@{
+                    object = $false
+                    key = ''
+                    container = [Collections.Generic.List[object]]::new()
+                })
+                $state = 'first-value'
+            }
+            continue
+        }
+        elseif ($match.Groups['string'].Success) {
+            $value = ConvertFrom-DefenseClawStrictJsonString -Token $match.Groups['string'].Value
+        }
+        elseif ($match.Groups['number'].Success) {
+            $number = $match.Groups['number'].Value
+            try {
+                $value = [double]::Parse(
+                    $number,
+                    [Globalization.NumberStyles]::Float,
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+            }
+            catch {
+                # Windows PowerShell 5.1 throws on overflow where PowerShell 7
+                # returns infinity.
+                $value = if ($number.StartsWith('-')) { [double]::NegativeInfinity } else { [double]::PositiveInfinity }
+            }
+        }
+        elseif ($match.Groups['literal'].Success) {
+            $literal = $match.Groups['literal'].Value
+            if ($literal -ceq 'true') {
+                $value = $true
+            }
+            elseif ($literal -ceq 'false') {
+                $value = $false
+            }
+        }
+        else {
+            throw "invalid JSON at offset $($match.Index): expected a value"
+        }
+        if ($stack.Count -eq 0) {
+            $root = $value
+            $state = 'end'
+            continue
+        }
+        $parent = $stack.Peek()
+        if ([bool]$parent['object']) {
+            $parent['container'][[string]$parent['key']] = $value
+        }
+        else {
+            [void]$parent['container'].Add($value)
+        }
+        $state = 'next'
+    }
+}
+
+function Test-DefenseClawJsonObject {
+    param([AllowNull()]$Value)
+    return [bool]($Value -is [Collections.Generic.Dictionary[string, object]])
+}
+
+function ConvertTo-DefenseClawCanonicalJsonText {
+    param([AllowNull()]$Value)
+    # Key-sorted compact JSON of a ConvertFrom-DefenseClawStrictJson value, so
+    # two documents compare by content rather than by key order or
+    # whitespace. Numbers compare by value, as the gateway compares them.
+    if ($null -eq $Value) {
+        return 'null'
+    }
+    if ($Value -is [string]) {
+        return (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $Value -Compress)
+    }
+    if ($Value -is [bool]) {
+        if ($Value) {
+            return 'true'
+        }
+        return 'false'
+    }
+    if (Test-DefenseClawJsonObject -Value $Value) {
+        $names = [string[]]@($Value.Keys)
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $members = @(foreach ($name in $names) {
+            (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $name -Compress) + ':' +
+                (ConvertTo-DefenseClawCanonicalJsonText -Value (Get-DefenseClawJsonMember -Object $Value -Name $name).Value)
+        })
+        return '{' + ($members -join ',') + '}'
+    }
+    if ($Value -is [Collections.IList]) {
+        $items = @(foreach ($item in $Value) {
+            ConvertTo-DefenseClawCanonicalJsonText -Value $item
+        })
+        return '[' + ($items -join ',') + ']'
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [decimal] -or
+        $Value -is [single] -or $Value -is [double]) {
+        return [Convert]::ToString([double]$Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-DefenseClawJsonMember {
+    param(
+        [AllowNull()]$Object,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name
+    )
+    # One member of a ConvertFrom-DefenseClawStrictJson object, by exact case
+    # as Claude Code and the gateway read settings keys, or $null.
+    if (-not (Test-DefenseClawJsonObject -Value $Object)) {
+        return $null
+    }
+    $value = $null
+    if (-not $Object.TryGetValue($Name, [ref]$value)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        Name = $Name
+        Value = $value
+    }
+}
+
+function Get-DefenseClawClaudeInstalledHookContract {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # The DefenseClaw managed-settings.d policy the gateway rendered: its hook
+    # entries (the selected hook contract), the handler command and argv, and
+    # whether it carries the managed-hooks-only lock, which the gateway omits
+    # only under claude_code.allow_unmanaged_hooks. $null when not installed.
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ClaudeManagedPolicyPath `
+        -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $installed = ConvertFrom-DefenseClawStrictJson -Text (
+            [IO.File]::ReadAllText([string]$Layout.ClaudeManagedPolicyPath, [Text.Encoding]::UTF8)
+        )
+    }
+    catch {
+        # A drop-in that does not parse is reported by verify; it carries no
+        # contract to compare with here.
+        return $null
+    }
+    $hooks = Get-DefenseClawJsonMember -Object $installed -Name 'hooks'
+    if ($null -eq $hooks -or -not (Test-DefenseClawJsonObject -Value $hooks.Value)) {
+        return $null
+    }
+    $command = $null
+    $arguments = $null
+    foreach ($eventName in @($hooks.Value.Keys)) {
+        foreach ($entry in @((Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName).Value)) {
+            $handlers = Get-DefenseClawJsonMember -Object $entry -Name 'hooks'
+            if ($null -eq $handlers) {
+                continue
+            }
+            foreach ($handler in @($handlers.Value)) {
+                $handlerCommand = Get-DefenseClawJsonMember -Object $handler -Name 'command'
+                $handlerArgs = Get-DefenseClawJsonMember -Object $handler -Name 'args'
+                if ($null -ne $handlerCommand -and $handlerCommand.Value -is [string] -and $null -ne $handlerArgs) {
+                    $command = [string]$handlerCommand.Value
+                    $arguments = ConvertTo-DefenseClawCanonicalJsonText -Value $handlerArgs.Value
+                    break
+                }
+            }
+            if ($null -ne $command) {
+                break
+            }
+        }
+        if ($null -ne $command) {
+            break
+        }
+    }
+    if ($null -eq $command) {
+        return $null
+    }
+    $lock = Get-DefenseClawJsonMember -Object $installed -Name 'allowManagedHooksOnly'
+    return [pscustomobject]@{
+        hooks = $hooks.Value
+        command = $command
+        arguments = $arguments
+        locked = [bool]($null -ne $lock -and $lock.Value -is [bool] -and [bool]$lock.Value)
+    }
+}
+
+function Test-DefenseClawClaudeHookPathSame {
+    param(
+        [AllowNull()]$Left,
+        [AllowNull()]$Right
+    )
+    if ($Left -isnot [string] -or $Right -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    try {
+        return [bool]([IO.Path]::GetFullPath($Left) -ieq [IO.Path]::GetFullPath($Right))
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-DefenseClawClaudeHandlerTargetsHook {
+    param(
+        [AllowNull()]$Handler,
+        [Parameter(Mandatory)]$Contract
+    )
+    # A command handler that runs the installed DefenseClaw hook with the
+    # DefenseClaw argv (claudeCodeHandlerTargetsCurrentRuntime).
+    $type = Get-DefenseClawJsonMember -Object $Handler -Name 'type'
+    $command = Get-DefenseClawJsonMember -Object $Handler -Name 'command'
+    $arguments = Get-DefenseClawJsonMember -Object $Handler -Name 'args'
+    if ($null -eq $type -or $type.Value -isnot [string] -or [string]$type.Value -cne 'command' -or
+        $null -eq $command -or $null -eq $arguments -or
+        $arguments.Value -isnot [Collections.IList]) {
+        return $false
+    }
+    if (-not (Test-DefenseClawClaudeHookPathSame -Left $command.Value -Right $Contract.command)) {
+        return $false
+    }
+    return [bool]((ConvertTo-DefenseClawCanonicalJsonText -Value $arguments.Value) -ceq $Contract.arguments)
+}
+
+function Get-DefenseClawClaudeEntryHookHandlerCount {
+    param(
+        [AllowNull()]$Entry,
+        [Parameter(Mandatory)]$Contract
+    )
+    # The DefenseClaw handlers in one policy hook entry
+    # (claudeCodeOSAdminEntryManagedHandlers).
+    $handlers = Get-DefenseClawJsonMember -Object $Entry -Name 'hooks'
+    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
+        return 0
+    }
+    $count = 0
+    foreach ($handler in $handlers.Value) {
+        if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $Contract) {
+            $count++
+        }
+    }
+    return $count
+}
+
+function ConvertTo-DefenseClawClaudeCanonicalHookEntry {
+    param(
+        [AllowNull()]$Entry,
+        [Parameter(Mandatory)]$Contract
+    )
+    # Canonical JSON of one policy hook entry with each DefenseClaw handler's
+    # command spelled as installed, so a path typed in another case matches.
+    $handlers = Get-DefenseClawJsonMember -Object $Entry -Name 'hooks'
+    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
+        return (ConvertTo-DefenseClawCanonicalJsonText -Value $Entry)
+    }
+    $names = [string[]]@($Entry.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $members = @(foreach ($name in $names) {
+        $value = (Get-DefenseClawJsonMember -Object $Entry -Name $name).Value
+        $text = if ($name -ceq 'hooks') {
+            $items = @(foreach ($handler in $value) {
+                if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $Contract) {
+                    $handlerNames = [string[]]@($handler.Keys)
+                    [Array]::Sort($handlerNames, [StringComparer]::Ordinal)
+                    $handlerMembers = @(foreach ($handlerName in $handlerNames) {
+                        $handlerValue = if ($handlerName -ceq 'command') {
+                            $Contract.command
+                        }
+                        else {
+                            (Get-DefenseClawJsonMember -Object $handler -Name $handlerName).Value
+                        }
+                        (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $handlerName -Compress) + ':' +
+                            (ConvertTo-DefenseClawCanonicalJsonText -Value $handlerValue)
+                    })
+                    '{' + ($handlerMembers -join ',') + '}'
+                }
+                else {
+                    ConvertTo-DefenseClawCanonicalJsonText -Value $handler
+                }
+            })
+            '[' + ($items -join ',') + ']'
+        }
+        else {
+            ConvertTo-DefenseClawCanonicalJsonText -Value $value
+        }
+        (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $name -Compress) + ':' + $text
+    })
+    return '{' + ($members -join ',') + '}'
+}
+
+function Get-DefenseClawClaudeHKLMHookCopies {
+    param(
+        [Parameter(Mandatory)]$Settings,
+        [Parameter(Mandatory)]$Contract
+    )
+    # How the policy registers the installed DefenseClaw hooks
+    # (connector claudeCodeOSAdminCarriesManagedHooks). carries: every
+    # installed entry is present exactly, with the same matcher, timeout,
+    # async flag and argv; other administrator entries may sit beside them.
+    # differs: the first installed event, in ordinal order, with a DefenseClaw
+    # handler in any other entry. Claude Code runs one copy of a repeated
+    # command hook, keyed by command, argv and condition but not by timeout or
+    # async flag, so such a copy can replace the enforcing one under carry and
+    # merge alike. repeated: the first event
+    # with more DefenseClaw handlers than installed entries, with its count.
+    $result = [ordered]@{
+        carries = $false
+        differs = $null
+        repeated = $null
+        repeated_count = 0
+    }
+    $policyHooks = Get-DefenseClawJsonMember -Object $Settings -Name 'hooks'
+    if ($null -eq $policyHooks -or -not (Test-DefenseClawJsonObject -Value $policyHooks.Value)) {
+        return [pscustomobject]$result
+    }
+    $carries = $true
+    $events = [string[]]@($Contract.hooks.Keys)
+    [Array]::Sort($events, [StringComparer]::Ordinal)
+    foreach ($eventName in $events) {
+        $installedEntries = @((Get-DefenseClawJsonMember -Object $Contract.hooks -Name $eventName).Value)
+        $wanted = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($entry in $installedEntries) {
+            [void]$wanted.Add((ConvertTo-DefenseClawCanonicalJsonText -Value $entry))
+        }
+        $present = Get-DefenseClawJsonMember -Object $policyHooks.Value -Name $eventName
+        $found = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $handlers = 0
+        if ($null -ne $present -and $present.Value -is [Collections.IList]) {
+            foreach ($entry in $present.Value) {
+                $owned = Get-DefenseClawClaudeEntryHookHandlerCount -Entry $entry -Contract $Contract
+                if ($owned -eq 0) {
+                    continue
+                }
+                $text = ConvertTo-DefenseClawClaudeCanonicalHookEntry -Entry $entry -Contract $Contract
+                if (-not $wanted.Contains($text)) {
+                    $result.differs = $eventName
+                    return [pscustomobject]$result
+                }
+                [void]$found.Add($text)
+                $handlers += $owned
+            }
+        }
+        if ($found.Count -ne $wanted.Count) {
+            $carries = $false
+        }
+        elseif ($handlers -ne $installedEntries.Count -and $null -eq $result.repeated) {
+            $result.repeated = $eventName
+            $result.repeated_count = $handlers
+        }
+    }
+    $result.carries = $carries
+    return [pscustomobject]$result
+}
+
+function Test-DefenseClawClaudeHKLMCarriesInstalledHooks {
+    param(
+        [Parameter(Mandatory)]$Settings,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        $Contract = $null
+    )
+    # Whether the policy carries the installed DefenseClaw hooks exactly
+    # (connector claudeCodeOSAdminCarriesManagedHooks): every installed entry,
+    # with the same matcher, timeout, async flag and argv, and no other
+    # DefenseClaw handler on those events. Other administrator entries may sit
+    # beside them. $Settings is a ConvertFrom-DefenseClawStrictJson object.
+    if ($null -eq $Contract) {
+        $Contract = Get-DefenseClawClaudeInstalledHookContract -Layout $Layout
+    }
+    if ($null -eq $Contract) {
+        return $false
+    }
+    $copies = Get-DefenseClawClaudeHKLMHookCopies -Settings $Settings -Contract $Contract
+    return [bool]([bool]$copies.carries -and $null -eq $copies.differs -and $null -eq $copies.repeated)
+}
+
+function Get-DefenseClawClaudeMergePendingTargets {
+    param([AllowNull()]$Report)
+    # Guardian rows whose recorded Claude version is below the merge floor.
+    # The version is recorded once, at discovery, and is often the installer's
+    # placeholder, so a listed target may already run a newer client; if it
+    # really is older, it ignores the merge and loads no DefenseClaw hooks.
+    $targets = [Collections.Generic.List[string]]::new()
+    if ($null -eq $Report) {
+        return @()
+    }
+    $rows = $Report.PSObject.Properties['verification']
+    if ($null -eq $rows) {
+        return @()
+    }
+    foreach ($row in @($rows.Value)) {
+        if ($null -eq $row -or $row -isnot [Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $connector = $row.PSObject.Properties['connector']
+        $result = $row.PSObject.Properties['result']
+        if ($null -eq $connector -or [string]$connector.Value -cne 'claudecode' -or
+            $null -eq $result -or $result.Value -isnot [Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $recorded = $result.Value.PSObject.Properties['agent_version']
+        $version = ''
+        if ($null -ne $recorded -and
+            [string]$recorded.Value -match '(\d+)\.(\d+)\.(\d+)') {
+            $version = $Matches[0]
+        }
+        if (Test-DefenseClawClaudeVersionAtLeast `
+            -Value $version `
+            -Minimum $script:ClaudeManagedSourcesMergeMinimumClientVersion) {
+            continue
+        }
+        $sid = $row.PSObject.Properties['sid']
+        $label = if ($null -ne $sid -and -not [string]::IsNullOrWhiteSpace([string]$sid.Value)) {
+            "claudecode@$([string]$sid.Value)"
+        }
+        else {
+            'claudecode'
+        }
+        $shown = if ([string]::IsNullOrEmpty($version)) { 'unknown' } else { $version }
+        $targets.Add("$label (recorded $shown)")
+    }
+    return @($targets)
+}
+
+function Get-DefenseClawClaudeHKLMPolicyVerdict {
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Raw,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    # What an MDM/GPO Claude policy (the HKLM Settings value, $Raw) means for
+    # the DefenseClaw hooks. It outranks the DefenseClaw managed-settings.d
+    # drop-in, so the gateway enrolls Claude targets only when the policy
+    # carries the DefenseClaw hook entries exactly or merges managed sources,
+    # and either way keeps the managed-hooks-only lock. These are the rules of
+    # connector.ClaudeCodeOSAdminPolicyAdmitsManagedHooks, which compares
+    # against the policy it renders; this compares against the installed
+    # drop-in. The value is parsed as strict JSON with case-sensitive keys and
+    # settings compare by JSON type, as Claude reads them. Both
+    # implementations run the documents in
+    # internal/gateway/connector/testdata/claude_hklm_admission_vectors.json,
+    # so change them together. Never throws.
+    $policyName = 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings'
+    $mergeFloor = $script:ClaudeManagedSourcesMergeMinimumClientVersion
+    $export = (
+        'defenseclaw-gateway enterprise windows export-claude-policy ' +
+        '--agent-version <the agent_version recorded for the target, which the enrollment refusal names>'
+    )
+    $optOut = 'or set claude_code.allow_unmanaged_hooks: true in the DefenseClaw config'
+    $remedy = (
+        "set `"managedSourcesBehavior`": `"merge`" in it (Claude Code $mergeFloor " +
+        "or newer), or add the `"hooks`" and `"allowManagedHooksOnly`" settings " +
+        "printed by $export to it; the guardian error for each Claude target " +
+        'names the exact command'
+    )
+    $state = [ordered]@{
+        shadowed = $false
+        managed_sources_merge = $false
+        # True when the DefenseClaw hooks load only on a merge-honoring
+        # client, which makes the merge floor the approved-client floor.
+        merge_client_floor_required = $false
+        detail = $null
+    }
+    try {
+        # An empty value, JSON null and an empty object carry no settings, so
+        # Claude falls through to the file tier.
+        if ([string]::IsNullOrWhiteSpace($Raw)) {
+            return [pscustomobject]$state
+        }
+        $settings = ConvertFrom-DefenseClawStrictJson -Text $Raw
+        if ($null -eq $settings) {
+            return [pscustomobject]$state
+        }
+        if (-not (Test-DefenseClawJsonObject -Value $settings)) {
+            throw 'the Settings value is not a JSON object'
+        }
+        if ($settings.Count -eq 0) {
+            return [pscustomobject]$state
+        }
+        $contract = Get-DefenseClawClaudeInstalledHookContract -Layout $Layout
+        # The gateway omits the lock from the drop-in only under the
+        # administrator opt-out, which also waives the lock checks here.
+        $lockWaived = [bool]($null -ne $contract -and -not [bool]$contract.locked)
+        $disable = Get-DefenseClawJsonMember -Object $settings -Name 'disableAllHooks'
+        $lock = Get-DefenseClawJsonMember -Object $settings -Name 'allowManagedHooksOnly'
+        $strict = Get-DefenseClawJsonMember -Object $settings -Name 'strictPluginOnlyCustomization'
+        $helper = Get-DefenseClawJsonMember -Object $settings -Name 'policyHelper'
+        $hooks = Get-DefenseClawJsonMember -Object $settings -Name 'hooks'
+        $behavior = Get-DefenseClawJsonMember -Object $settings -Name 'managedSourcesBehavior'
+        $strictValid = (
+            $null -eq $strict -or
+            $strict.Value -is [bool] -or
+            ($strict.Value -is [Collections.IList] -and
+                @($strict.Value | Microsoft.PowerShell.Core\Where-Object { $_ -isnot [string] }).Count -eq 0)
+        )
+        if ($null -ne $helper -and $null -ne $helper.Value) {
+            $state.shadowed = $true
+            $state.detail = "$policyName sets policyHelper, which supersedes file-based managed hooks; add the hooks printed by $export to the helper output"
+            return [pscustomobject]$state
+        }
+        if ($null -ne $disable -and
+            ($disable.Value -isnot [bool] -or [bool]$disable.Value)) {
+            $state.shadowed = $true
+            $state.detail = "$policyName sets disableAllHooks, which disables the DefenseClaw hooks"
+            return [pscustomobject]$state
+        }
+        if ($null -ne $lock -and $lock.Value -isnot [bool]) {
+            $state.shadowed = $true
+            $state.detail = "$policyName sets allowManagedHooksOnly to a value that is not true or false"
+            return [pscustomobject]$state
+        }
+        if (-not $strictValid) {
+            $state.shadowed = $true
+            $state.detail = "$policyName sets strictPluginOnlyCustomization to a value Claude Code does not accept"
+            return [pscustomobject]$state
+        }
+        if ($null -ne $hooks -and -not (Test-DefenseClawJsonObject -Value $hooks.Value)) {
+            $state.shadowed = $true
+            $state.detail = "$policyName sets hooks to a value that is not a JSON object"
+            return [pscustomobject]$state
+        }
+        # Claude runs the policy's DefenseClaw handlers either way: first-wins
+        # loads only that policy and merge unions its hooks with the drop-in.
+        # One on an event outside the installed contract comes from an export
+        # for another Claude Code version, and the gateway refuses it.
+        if ($null -ne $contract -and $null -ne $hooks) {
+            foreach ($eventName in @($hooks.Value.Keys)) {
+                $eventHooks = Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName
+                if ($null -ne (Get-DefenseClawJsonMember -Object $contract.hooks -Name $eventName) -or
+                    $eventHooks.Value -isnot [Collections.IList]) {
+                    continue
+                }
+                foreach ($entry in $eventHooks.Value) {
+                    $handlers = Get-DefenseClawJsonMember -Object $entry -Name 'hooks'
+                    if ($null -eq $handlers -or $handlers.Value -isnot [Collections.IList]) {
+                        continue
+                    }
+                    foreach ($handler in $handlers.Value) {
+                        if (Test-DefenseClawClaudeHandlerTargetsHook -Handler $handler -Contract $contract) {
+                            $state.shadowed = $true
+                            $state.detail = "$policyName registers the DefenseClaw $eventName hook, which is outside the installed DefenseClaw hook contract; replace the DefenseClaw hooks in it with the ones printed by $export"
+                            return [pscustomobject]$state
+                        }
+                    }
+                }
+            }
+        }
+        $merge = [bool]($null -ne $behavior -and $behavior.Value -is [string] -and
+            [string]$behavior.Value -ceq 'merge')
+        $unlocks = [bool]($null -ne $lock -and -not [bool]$lock.Value)
+        $locks = [bool]($null -ne $lock -and [bool]$lock.Value)
+        $lockConflict = "$policyName sets allowManagedHooksOnly false, which conflicts with the DefenseClaw managed-hooks-only lock; remove the setting $optOut"
+        # Claude Code runs one copy of a repeated command hook whatever its
+        # timeout or async flag, so a DefenseClaw handler outside the installed
+        # entry is refused under carry and merge alike, and a carried policy
+        # keeps one DefenseClaw handler per event, as the drop-in verify does.
+        $carries = $false
+        if ($null -ne $contract) {
+            $copies = Get-DefenseClawClaudeHKLMHookCopies -Settings $settings -Contract $contract
+            if ($null -ne $copies.differs) {
+                $state.shadowed = $true
+                $state.detail = "$policyName registers a DefenseClaw $($copies.differs) hook that differs from the installed entry; Claude Code runs one copy of a repeated hook whatever its timeout or async flag, so that copy can replace the enforcing one. Keep only the DefenseClaw hooks printed by $export"
+                return [pscustomobject]$state
+            }
+            if ([bool]$copies.carries -and $null -ne $copies.repeated) {
+                $state.shadowed = $true
+                $state.detail = "$policyName registers the DefenseClaw $($copies.repeated) hook $($copies.repeated_count) times; keep one copy of each DefenseClaw hook printed by $export"
+                return [pscustomobject]$state
+            }
+            $carries = [bool]$copies.carries
+        }
+        # A policy that carries the hooks is the one a first-wins client loads
+        # alone, merge or not, so it must keep the lock itself.
+        if ($carries) {
+            $state.managed_sources_merge = $merge
+            if (-not $lockWaived -and $unlocks) {
+                $state.shadowed = $true
+                $state.detail = $lockConflict
+            }
+            elseif (-not $lockWaived -and -not $locks) {
+                $state.shadowed = $true
+                $state.detail = "$policyName carries the DefenseClaw hooks and outranks the DefenseClaw managed-settings.d policy, so the managed-hooks-only lock in that policy does not apply; add `"allowManagedHooksOnly`": true (printed by $export) to it, $optOut"
+            }
+            return [pscustomobject]$state
+        }
+        if ($merge) {
+            $state.managed_sources_merge = $true
+            if (-not $lockWaived -and $unlocks) {
+                $state.shadowed = $true
+                $state.detail = $lockConflict
+                return [pscustomobject]$state
+            }
+            if ($null -ne $hooks) {
+                foreach ($eventName in @($hooks.Value.Keys)) {
+                    if ((Get-DefenseClawJsonMember -Object $hooks.Value -Name $eventName).Value -isnot [Collections.IList]) {
+                        $state.shadowed = $true
+                        $state.detail = "$policyName sets hooks.$eventName to a value that is not a list, so Claude Code cannot merge it"
+                        return [pscustomobject]$state
+                    }
+                }
+            }
+            $state.merge_client_floor_required = $true
+            $state.detail = "$policyName requests managedSourcesBehavior merge; Claude Code clients older than $mergeFloor ignore it and load only that policy, so approved-client application control must require Claude Code $mergeFloor or newer"
+            return [pscustomobject]$state
+        }
+        $state.shadowed = $true
+        $state.detail = "$policyName outranks the DefenseClaw managed-settings.d policy; $remedy"
+    }
+    catch {
+        $state.shadowed = $true
+        $state.managed_sources_merge = $false
+        $state.merge_client_floor_required = $false
+        $state.detail = "cannot evaluate $policyName ($($_.Exception.Message)); $remedy"
+    }
+    return [pscustomobject]$state
+}
+
+function Get-DefenseClawClaudeHKLMPolicyState {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # Read-only Status view of an MDM/GPO Claude policy: reads the HKLM
+    # Settings value and reports Get-DefenseClawClaudeHKLMPolicyVerdict for
+    # it, with its fix. Never throws.
+    $policyName = 'HKLM\SOFTWARE\Policies\ClaudeCode\Settings'
+    $base = $null
+    $key = $null
+    $raw = ''
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $key = $base.OpenSubKey('SOFTWARE\Policies\ClaudeCode', $false)
+        $raw = if ($null -eq $key) {
+            ''
+        }
+        else {
+            [string]$key.GetValue(
+                'Settings',
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+        }
+    }
+    catch {
+        return [pscustomobject][ordered]@{
+            shadowed = $true
+            managed_sources_merge = $false
+            merge_client_floor_required = $false
+            detail = "cannot read $policyName ($($_.Exception.Message)); set `"managedSourcesBehavior`": `"merge`" in it, or add the settings printed by defenseclaw-gateway enterprise windows export-claude-policy to it"
+        }
+    }
+    finally {
+        if ($null -ne $key) {
+            $key.Dispose()
+        }
+        if ($null -ne $base) {
+            $base.Dispose()
+        }
+    }
+    return (Get-DefenseClawClaudeHKLMPolicyVerdict -Raw $raw -Layout $Layout)
 }
 
 function ConvertTo-DefenseClawBoundedDiagnostic {
@@ -17841,6 +19236,7 @@ function Get-DefenseClawLifecycleStatus {
         }
     }
     $generation = $null
+    $guardianReport = $null
     if ($installed -and -not $pending) {
         try {
             $gatewayReady = Test-DefenseClawGatewayReady `
@@ -17924,6 +19320,56 @@ function Get-DefenseClawLifecycleStatus {
             -not $pending -and
             $errors.Count -eq 0
     }
+    # Recorded Claude evidence for a policy identity that is no longer
+    # installed degrades to unverified with the reason, rather than failing
+    # the lifecycle.
+    $claudeEffectivePolicyStaleReason = [string](
+        $Layout.ClaudeEffectivePolicyStaleReason
+    )
+    if (-not [string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
+        $claudeEffectivePolicyVerified = $false
+    }
+    # An outranking MDM/GPO policy that neither merges nor carries the
+    # DefenseClaw hooks means the DefenseClaw policy is not the one Claude
+    # applies, whatever evidence was recorded.
+    $claudeHKLMPolicy = [pscustomobject]@{
+        shadowed = $false
+        managed_sources_merge = $false
+        merge_client_floor_required = $false
+        detail = $null
+    }
+    $claudeMinimumClientVersion = Get-DefenseClawClaudeMinimumClientVersion
+    $claudeMergePendingTargets = @()
+    if ($installed -and $claudeTargetEnabled -and
+        -not (Test-DefenseClawStandaloneProfile)) {
+        $claudeHKLMPolicy = Get-DefenseClawClaudeHKLMPolicyState -Layout $Layout
+        if ([bool]$claudeHKLMPolicy.shadowed) {
+            $claudeEffectivePolicyVerified = $false
+        }
+        elseif ([bool]$claudeHKLMPolicy.merge_client_floor_required) {
+            # Under merge an approved client older than the merge floor loads
+            # only the HKLM policy, with no DefenseClaw hooks. The recorded
+            # target versions cannot rule that out; only application control
+            # attested at the merge floor can.
+            $claudeMinimumClientVersion = $script:ClaudeManagedSourcesMergeMinimumClientVersion
+            $claudeMergePendingTargets = @(
+                Get-DefenseClawClaudeMergePendingTargets -Report $guardianReport
+            )
+            if (-not ([bool]$Layout.AgentApplicationControlAttested -and
+                (Test-DefenseClawClaudeVersionAtLeast `
+                    -Value $Layout.AgentApplicationControlClaudeMinimumVersion `
+                    -Minimum $claudeMinimumClientVersion))) {
+                $claudeEffectivePolicyVerified = $false
+                $claudeHKLMPolicy.detail = (
+                    "$($claudeHKLMPolicy.detail); application control is not " +
+                    "attested at that floor, so an older approved client runs " +
+                    'without the DefenseClaw hooks: enforce Claude Code ' +
+                    "$claudeMinimumClientVersion or newer in WDAC/AppLocker, " +
+                    'then run Repair -AttestAgentApplicationControl'
+                )
+            }
+        }
+    }
     # Cursor uses the same protected Guardian/runtime readiness lane but does
     # not require Codex machine policy or application-control proof.
     $externalSecuritySatisfied = [bool](
@@ -17962,9 +19408,29 @@ function Get-DefenseClawLifecycleStatus {
         cursor_target_enabled = [bool]$cursorTargetEnabled
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
-        claude_minimum_client_version = (Get-DefenseClawClaudeMinimumClientVersion)
+        claude_minimum_client_version = $claudeMinimumClientVersion
+        agent_application_control_claude_minimum_version = $(
+            if ([bool]$Layout.AgentApplicationControlAttested) {
+                [string]$Layout.AgentApplicationControlClaudeMinimumVersion
+            }
+            else {
+                $null
+            }
+        )
         approved_agent_clients_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_effective_policy_verified = [bool]$claudeEffectivePolicyVerified
+        claude_effective_policy_stale_reason = $(
+            if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
+                $null
+            }
+            else {
+                $claudeEffectivePolicyStaleReason
+            }
+        )
+        claude_policy_shadowed_by_hklm = [bool]$claudeHKLMPolicy.shadowed
+        claude_policy_hklm_managed_sources_merge = [bool]$claudeHKLMPolicy.managed_sources_merge
+        claude_policy_hklm_detail = $claudeHKLMPolicy.detail
+        claude_policy_hklm_merge_pending_targets = @($claudeMergePendingTargets)
         security_complete = [bool](
             $healthy -and
             $externalSecuritySatisfied
@@ -21029,6 +22495,171 @@ function Complete-DefenseClawStatePurge {
     return $result
 }
 
+# A production enterprise deployment owns the machine policy
+# HKLM\SOFTWARE\Policies\Cisco\DefenseClaw DisableSelfUpdate=1, so the
+# per-user product defers updates to the managed deployment channel. A value
+# that already exists was set by Group Policy, MDM, or another administrator
+# and is never changed. Ownership is recorded by a marker value that is written
+# before DisableSelfUpdate and removed after it, so an interrupted lifecycle
+# never leaves an unowned value behind.
+$script:DefenseClawSelfUpdatePolicyKeyPath = 'SOFTWARE\Policies\Cisco\DefenseClaw'
+$script:DefenseClawSelfUpdatePolicyValueName = 'DisableSelfUpdate'
+$script:DefenseClawSelfUpdatePolicyOwnerValueName = 'DisableSelfUpdateOwner'
+$script:DefenseClawSelfUpdatePolicyOwner = 'DefenseClaw managed_enterprise lifecycle'
+
+function Test-DefenseClawProductionGatewayService {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return [string]::Equals(
+        $GatewayServiceName,
+        'DefenseClawGateway',
+        [StringComparison]::Ordinal
+    )
+}
+
+function Open-DefenseClawMachinePolicyRoot {
+    return [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64
+    )
+}
+
+function Test-DefenseClawRegistryValue {
+    param(
+        [Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][Microsoft.Win32.RegistryValueKind]$Kind,
+        [Parameter(Mandatory)]$Expected
+    )
+    if (@($Key.GetValueNames()) -notcontains $Name) {
+        return $false
+    }
+    if ($Key.GetValueKind($Name) -ne $Kind) {
+        return $false
+    }
+    $actual = $Key.GetValue(
+        $Name,
+        $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    )
+    if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+        return [string]::Equals([string]$actual, [string]$Expected, [StringComparison]::Ordinal)
+    }
+    return [int64]$actual -eq [int64]$Expected
+}
+
+function Test-DefenseClawOwnedSelfUpdateMarker {
+    param([Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key)
+    return Test-DefenseClawRegistryValue `
+        -Key $Key `
+        -Name $script:DefenseClawSelfUpdatePolicyOwnerValueName `
+        -Kind ([Microsoft.Win32.RegistryValueKind]::String) `
+        -Expected $script:DefenseClawSelfUpdatePolicyOwner
+}
+
+function Test-DefenseClawSelfUpdateDisabledValue {
+    param([Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$Key)
+    return Test-DefenseClawRegistryValue `
+        -Key $Key `
+        -Name $script:DefenseClawSelfUpdatePolicyValueName `
+        -Kind ([Microsoft.Win32.RegistryValueKind]::DWord) `
+        -Expected 1
+}
+
+# Returns created, owned, relinquished, or foreign.
+function Set-DefenseClawOwnedSelfUpdatePolicy {
+    param(
+        [Microsoft.Win32.RegistryKey]$Root,
+        [string]$KeyPath = $script:DefenseClawSelfUpdatePolicyKeyPath
+    )
+    $openedRoot = $null
+    if ($null -eq $Root) {
+        $openedRoot = Open-DefenseClawMachinePolicyRoot
+        $Root = $openedRoot
+    }
+    try {
+        $key = $Root.CreateSubKey($KeyPath, $true)
+        if ($null -eq $key) {
+            throw "machine policy key could not be opened: $KeyPath"
+        }
+        try {
+            $owned = Test-DefenseClawOwnedSelfUpdateMarker -Key $key
+            if (@($key.GetValueNames()) -contains $script:DefenseClawSelfUpdatePolicyValueName) {
+                if (-not $owned) {
+                    return 'foreign'
+                }
+                if (Test-DefenseClawSelfUpdateDisabledValue -Key $key) {
+                    return 'owned'
+                }
+                # Someone else changed the value this lifecycle set; that
+                # decision stands and the value is no longer ours.
+                $key.DeleteValue($script:DefenseClawSelfUpdatePolicyOwnerValueName, $false)
+                return 'relinquished'
+            }
+            $key.SetValue(
+                $script:DefenseClawSelfUpdatePolicyOwnerValueName,
+                $script:DefenseClawSelfUpdatePolicyOwner,
+                [Microsoft.Win32.RegistryValueKind]::String
+            )
+            $key.SetValue(
+                $script:DefenseClawSelfUpdatePolicyValueName,
+                1,
+                [Microsoft.Win32.RegistryValueKind]::DWord
+            )
+            return 'created'
+        }
+        finally {
+            $key.Dispose()
+        }
+    }
+    finally {
+        if ($null -ne $openedRoot) {
+            $openedRoot.Dispose()
+        }
+    }
+}
+
+# Returns removed, foreign, or absent.
+function Remove-DefenseClawOwnedSelfUpdatePolicy {
+    param(
+        [Microsoft.Win32.RegistryKey]$Root,
+        [string]$KeyPath = $script:DefenseClawSelfUpdatePolicyKeyPath
+    )
+    $openedRoot = $null
+    if ($null -eq $Root) {
+        $openedRoot = Open-DefenseClawMachinePolicyRoot
+        $Root = $openedRoot
+    }
+    try {
+        $key = $Root.OpenSubKey($KeyPath, $true)
+        if ($null -eq $key) {
+            return 'absent'
+        }
+        $empty = $false
+        try {
+            if (-not (Test-DefenseClawOwnedSelfUpdateMarker -Key $key)) {
+                return 'foreign'
+            }
+            if (Test-DefenseClawSelfUpdateDisabledValue -Key $key) {
+                $key.DeleteValue($script:DefenseClawSelfUpdatePolicyValueName, $false)
+            }
+            $key.DeleteValue($script:DefenseClawSelfUpdatePolicyOwnerValueName, $false)
+            $empty = $key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0
+        }
+        finally {
+            $key.Dispose()
+        }
+        if ($empty) {
+            $Root.DeleteSubKey($KeyPath, $false)
+        }
+        return 'removed'
+    }
+    finally {
+        if ($null -ne $openedRoot) {
+            $openedRoot.Dispose()
+        }
+    }
+}
+
 function Invoke-DefenseClawCommittedUninstallCleanup {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -21054,6 +22685,19 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed-uninstall cleanup refused while service exists: $name"
+        }
+    }
+    # Every managed service is gone, so the deployment no longer owns the
+    # per-user self-update policy.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall committed, but the owned DisableSelfUpdate machine ' +
+                "policy could not be removed; retry Uninstall: $($_.Exception.Message)"
+            )
         }
     }
     $cleanupGatewaySID = Resolve-DefenseClawRetiredGatewayServiceSID `
@@ -21653,6 +23297,26 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         $name = [string]$roleServiceNames[$role]
         Remove-DefenseClawService -Name $name
     }
+    # Every exact managed service is gone, so this scope no longer owns the
+    # per-user self-update policy. Only a value that still carries the
+    # deployment's owner marker is removed; a Group Policy or MDM value stays.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        foreach ($name in $expectedServiceNames) {
+            if (Test-DefenseClawServiceExists -Name ([string]$name)) {
+                throw "exact-scope purge refused to release the self-update policy while service exists: $name"
+            }
+        }
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall -Purge removed the managed services, but the owned ' +
+                'DisableSelfUpdate machine policy could not be removed; retry ' +
+                "Uninstall -Purge: $($_.Exception.Message)"
+            )
+        }
+    }
     foreach ($path in @($requestPath, $reportPath)) {
         if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $path `
@@ -22001,6 +23665,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    # Pending-transaction recovery has already run, so this is the Claude
+    # policy identity the administrator's live proof exercised. Capture it
+    # before any service, journal, or artifact is touched.
+    $claudeProofBaseline = $null
+    if ($RefreshClaudeEffectivePolicyAttestation) {
+        $claudeProofBaseline = Get-DefenseClawClaudeEffectivePolicyProofBaseline `
+            -Layout $Layout `
+            -Sources $Sources
+    }
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
@@ -22418,8 +24091,27 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Force
             $attestationExists = $false
         }
-        elseif (-not $attestationNeedsRefresh -and $attestationExists) {
-            [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
+        elseif ($attestationExists) {
+            # Re-read after this transaction staged its binaries: a replaced
+            # hook binary changes the Claude policy identity.
+            $currentAttestation =
+                Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
+            if (-not $RefreshClaudeEffectivePolicyAttestation) {
+                $Layout.ClaudeEffectivePolicyStaleReason = [string](
+                    $currentAttestation.claude_effective_policy_stale_reason
+                )
+            }
+        }
+        if (-not $RefreshClaudeEffectivePolicyAttestation -and
+            [bool]$Layout.ClaudeEffectivePolicyVerified -and
+            -not [string]::IsNullOrEmpty(
+                [string]$Layout.ClaudeEffectivePolicyStaleReason)) {
+            # Evidence recorded for another Claude policy identity is retired
+            # as unverified. It is never re-bound to the current identity,
+            # including by an -AttestAgentApplicationControl-only refresh.
+            $Layout.ClaudeEffectivePolicyVerified = $false
+            $Layout.ClaudeEffectivePolicyStaleReason = ''
+            $attestationNeedsRefresh = $true
         }
         if ($Action -ne 'Install') {
             # Upgrade/Repair deliberately capture the previous hook identity
@@ -22444,9 +24136,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($Sources.ContainsKey('manifest') -and
             -not $RefreshClaudeEffectivePolicyAttestation -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
-            # Approved-client evidence is bound to exact manifest bytes. A
-            # replacement manifest must be exercised again before the external
-            # prerequisite can be re-attested.
+            # An administrator-supplied replacement manifest can change
+            # Claude enrollment, so it must be exercised again before the
+            # external prerequisite can be re-attested.
             $Layout.ClaudeEffectivePolicyVerified = $false
             $attestationNeedsRefresh = $true
             $targetReport = Invoke-DefenseClawCodexRequirementsCommand `
@@ -22468,6 +24160,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($RefreshClaudeEffectivePolicyAttestation -and
             -not [bool]$Layout.ClaudeTargetEnabled) {
             throw '-AttestClaudeEffectivePolicy requires at least one enabled Claude target in the protected manifest'
+        }
+        if ($RefreshClaudeEffectivePolicyAttestation) {
+            Assert-DefenseClawClaudeEffectivePolicyProofBaseline `
+                -Layout $Layout `
+                -Baseline $claudeProofBaseline
         }
         if (-not [bool]$Layout.ClaudeTargetEnabled -and
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
@@ -22806,6 +24503,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             "$Action committed, but its protected managed-hook lifecycle " +
             "journal could not be retired: $($_.Exception.Message)"
         )
+    }
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        try {
+            [void](Set-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                "$Action committed, but the DisableSelfUpdate machine policy " +
+                "could not be applied; run Repair: $($_.Exception.Message)"
+            )
+        }
     }
     $result = Get-DefenseClawLifecycleStatus `
         -Action $Action `
@@ -23804,6 +25512,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$NoStart,
         [switch]$Purge,
         [switch]$AllowUnsigned,
+        [string[]]$AdditionalTrustedSignerSha256,
         [switch]$AttestAgentApplicationControl,
         [switch]$AttestClaudeEffectivePolicy,
         [string]$InstallerSource,
@@ -23926,8 +25635,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         throw '-AttestAgentApplicationControl is valid only with Install, Upgrade, or Repair'
     }
     if ($AttestClaudeEffectivePolicy -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-AttestClaudeEffectivePolicy is valid only with Install, Upgrade, or Repair'
+        $Action -notin @('Upgrade', 'Repair')) {
+        # A fresh Install has no DefenseClaw Claude policy yet, so no live
+        # Claude proof can have exercised it (threat model W-34).
+        throw (
+            '-AttestClaudeEffectivePolicy is valid only with Upgrade or ' +
+            'Repair: install first, run the live Claude proof against the ' +
+            'installed policy, then run Repair -AttestClaudeEffectivePolicy'
+        )
     }
     if ($CoreHardeningCertification -and
         ($AttestAgentApplicationControl -or
@@ -23936,6 +25651,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             '-CoreHardeningCertification cannot be combined with production ' +
             'application-control or Claude-policy attestations'
         )
+    }
+    $trustedSigners = ConvertTo-DefenseClawTrustedSignerSet `
+        -Value $AdditionalTrustedSignerSha256
+    if ($AllowUnsigned -and $trustedSigners.Count -gt 0) {
+        throw '-AdditionalTrustedSignerSha256 applies only to signed payloads and cannot be combined with -AllowUnsigned'
     }
     if ($Action -ne 'Status') {
         Assert-DefenseClawAdministrator
@@ -24041,24 +25761,19 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 $existingApplicationControlAttestation.claude_effective_policy_stale_reason
             )
         }
-    }
-    if ($AttestAgentApplicationControl) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestAgentApplicationControl is forbidden in core-hardening certification mode'
+        else {
+            $layout.ClaudeEffectivePolicyStaleReason = [string](
+                $existingApplicationControlAttestation.claude_effective_policy_stale_reason
+            )
         }
-        $layout.AgentApplicationControlAttested = $true
+        $layout.AgentApplicationControlClaudeMinimumVersion = [string](
+            $existingApplicationControlAttestation.minimum_claude_version
+        )
     }
-    if ($AttestClaudeEffectivePolicy) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestClaudeEffectivePolicy is forbidden in core-hardening certification mode'
-        }
-        $layout.ClaudeEffectivePolicyVerified = $true
-        # A fresh live proof supersedes recorded evidence for another
-        # Claude policy identity.
-        if (Test-DefenseClawStandaloneProfile) {
-            $layout['ClaudeEffectivePolicyStaleReason'] = ''
-        }
-    }
+    Set-DefenseClawRequestedAttestations `
+        -Layout $layout `
+        -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+        -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
     if ($Action -eq 'Status') {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
@@ -24115,6 +25830,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -InstallerSource $InstallerSource `
         -ModuleSource $ModuleSource `
         -AllowUnsigned:$AllowUnsigned `
+        -AdditionalTrustedSignerSha256 $trustedSigners `
         -DeferredConfig:$DeferredConfig
 
     # Secure creation is race-safe and validates every existing ancestor
@@ -24348,6 +26064,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Purge:$Purge `
                 -SelfUninstallCallerPID $SelfUninstallCallerPID
         }
+        # Recovery above restored the interrupted transaction's evidence
+        # state; this transaction's explicit attestations still apply.
+        Set-DefenseClawRequestedAttestations `
+            -Layout $layout `
+            -AttestAgentApplicationControl:$AttestAgentApplicationControl `
+            -AttestClaudeEffectivePolicy:$AttestClaudeEffectivePolicy
         return Invoke-DefenseClawInstallLikeLifecycle `
             -Action $Action `
             -Layout $layout `

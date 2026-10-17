@@ -171,13 +171,12 @@ type EnumerateOptions struct {
 // that already exists in `opts.ExistingManifestPath` (if set), the
 // pre-existing AgentVersion + Enabled + Deferred fields are carried over. New
 // rows — those discovered by the ProfileList walk that had no
-// counterpart in the file — start with `Enabled: false` and empty
-// AgentVersion so the guardian's LoadManifest skips schema-validation
-// (which requires AgentVersion ≥ Windows minimum on enabled rows).
-// An admin / UCB flow promotes the row to enabled by patching
-// targets.yaml with a real AgentVersion. This preserves the security
-// posture: a new user profile is DISCOVERED by the enumerator but
-// only receives hooks when the admin explicitly promotes it.
+// counterpart in the file — are emitted only when the profile contains a
+// supported per-user CLI, and then as enabled + deferred rows at the
+// discovered AgentVersion (see applyPreviousRowState). The walk covers every
+// ProfileList entry, not only signed-in users, so a new row must not require
+// an active session before the guardian can reconcile the rest of the
+// manifest.
 //
 // The standalone profile uses applyStandaloneRowState instead: new rows
 // are written deferred, and discovery also covers the native Claude
@@ -531,10 +530,24 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 //     profile contains a supported per-user install of the
 //     connector's CLI.
 //   - If a version is discoverable: emit the row with
-//     `Enabled: true`, `Deferred: false`, `AgentVersion: <found>`.
+//     `Enabled: true`, `Deferred: true`, `AgentVersion: <found>`.
 //     This is the auto-authorize path — parity with macOS
 //     render-targets.sh, which emits enabled rows for any
-//     (user × connector) whose CLI is present.
+//     (user × connector) whose CLI is present. The row is deferred
+//     because the ProfileList walk also discovers signed-out and
+//     disconnected users: exactly like the installer's -Mode/-Connector
+//     renderer does for sessionless profiles, `deferred: true` lets the
+//     guardian report the row as pending while no exact WTSActive token
+//     exists for its SID, provided the deferred pending proof passes
+//     (it requires the installer-created canonical data root, so rows
+//     present at Install qualify). A row first discovered after install
+//     for a user who has not signed in since stays a guardian failure,
+//     but the guardian no longer lets such a never-protected, unselected,
+//     signed-out target withhold the exact protected enrollment
+//     publication for every other SID. A deferred row whose user is
+//     signed in is installed immediately, and once the guardian has
+//     protected it the row is verified like any other target, so no
+//     later promotion is required.
 //   - If no version is discoverable: return false. The caller
 //     drops the row entirely — parity with macOS, which never
 //     emits a row for a user whose CLI is not installed.
@@ -576,12 +589,12 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	enabled := true
 	row.AgentVersion = version
 	row.Enabled = &enabled
-	row.Deferred = false
+	row.Deferred = true
 	logfSafely(
 		logf,
 		row.SID,
 		fmt.Sprintf(
-			"newly-discovered (SID, %s) row auto-authorized at version %s",
+			"newly-discovered (SID, %s) row auto-authorized (deferred until an active session) at version %s",
 			row.Connector,
 			version,
 		),

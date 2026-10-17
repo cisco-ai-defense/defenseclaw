@@ -56,6 +56,26 @@ message HealthSnapshot {
   // which lets Secure Client render a first-class "waiting for
   // configuration" UI state distinct from a generic "starting" spinner.
   ConfigurationState configuration_state = 4;
+
+  // Why `availability` is not READY, as a stable lower_snake_case code the
+  // Secure Client UI can map to its own text. Empty when availability is
+  // READY. Clients must tolerate codes added later. Current codes:
+  //   - managed_ipc_error: the local IPC server reports an error (ERROR).
+  //   - gateway_error, api_error: a core subsystem failed (ERROR).
+  //   - starting: DefenseClaw is starting (STARTING).
+  //   - gateway_stopped, api_stopped: a core subsystem stopped
+  //     (UNAVAILABLE).
+  //   - gateway_reconnecting: the gateway connection is recovering
+  //     (DEGRADED).
+  //   - guardrail_error: tool-call protection failed to start or stopped
+  //     with an error, so tool calls are not being enforced (DEGRADED).
+  //   - inspection_unavailable_allowing: Cisco AI Defense inspection is
+  //     unavailable and tool calls are being allowed without inspection
+  //     (DEGRADED).
+  //   - inspection_unavailable_blocking: Cisco AI Defense inspection is
+  //     unavailable and tool calls that need inspection are being blocked
+  //     (DEGRADED).
+  string availability_reason = 5;
 }
 
 enum ServiceAvailability {

@@ -243,6 +243,21 @@ type SetupOpts struct {
 	// without one), and setup never launches the user's agent executable
 	// from the guardian process. Empty everywhere else.
 	ManagedTargetSID string
+	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out
+	// (claude_code.allow_unmanaged_hooks) from the managed-hooks-only lock.
+	// By default the machine-managed Claude Code policy sets
+	// allowManagedHooksOnly=true so user, project, local and plugin hooks
+	// cannot run beside DefenseClaw's managed hooks. It has no effect on
+	// per-user hook registrations.
+	ClaudeCodeAllowUnmanagedHooks bool
+
+	// CursorApprovedForeignHooks is the administrator allowlist
+	// (connector_hooks.cursor.approved_foreign_hooks) of sha256 handler
+	// digests that the managed Cursor hook accepts in user- or project-level
+	// hook files. nil means "not supplied by this caller": machine-policy
+	// writers keep the allowlist already published in protected state. A
+	// non-nil (possibly empty) slice replaces it.
+	CursorApprovedForeignHooks []string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

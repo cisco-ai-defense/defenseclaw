@@ -43,3 +43,14 @@ func IsWindowsTargetSessionUnavailable(err error) bool {
 func RequireWindowsEnterpriseDeferredTargetPending(target ManifestTarget) error {
 	return requireWindowsEnterpriseDeferredTargetPendingPlatform(target)
 }
+
+// RequireWindowsEnterpriseTargetUnselected proves that no immutable managed
+// runtime is selected for the enabled target's exact SID and connector. It
+// establishes that DefenseClaw holds no runtime for the target, so leaving
+// the target out of the exact protected enrollment publication cannot
+// revoke or orphan anything it protects. Unlike
+// RequireWindowsEnterpriseDeferredTargetPending it does not require the
+// target's managed data root to exist, and it authorizes no staging.
+func RequireWindowsEnterpriseTargetUnselected(target ManifestTarget) error {
+	return requireWindowsEnterpriseTargetUnselectedPlatform(target)
+}

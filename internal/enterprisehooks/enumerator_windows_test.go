@@ -555,7 +555,10 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 // (SID, Connector) whose per-user profile contains a supported CLI
 // (via the package.json probe added in the previous commit) is
 // emitted with Enabled=true, AgentVersion set to the discovered
-// value, and Deferred=false.
+// value, and Deferred=true. The ProfileList walk also finds signed-out
+// users; a non-deferred new row for one of them would fail the guardian
+// reconcile and withhold the enrollment publication for every SID
+// (issue #894).
 func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
@@ -575,8 +578,85 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 	if fresh.Enabled == nil || !*fresh.Enabled {
 		t.Fatal("new row Enabled: want pointer-to-true")
 	}
-	if fresh.Deferred {
-		t.Fatal("new row Deferred: want false")
+	if !fresh.Deferred {
+		t.Fatal("new row Deferred: want true so a signed-out user stays pending instead of failing reconcile")
+	}
+}
+
+// TestApplyPreviousRowStatePreservesNonDeferredPriorRow pins that the
+// new-row deferral does not rewrite state the manifest already carries: an
+// existing enabled, non-deferred row (an active-session renderer row or an
+// administrator-supplied row) keeps Deferred=false across cycles.
+func TestApplyPreviousRowStatePreservesNonDeferredPriorRow(t *testing.T) {
+	enabled := true
+	previous := map[string]ManifestTarget{
+		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "claudecode"): {
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			Connector:    "claudecode",
+			AgentVersion: "2.1.152",
+			Enabled:      &enabled,
+		},
+	}
+	row := ManifestTarget{
+		SID:       "S-1-5-21-1000-2000-3000-1001",
+		UserHome:  t.TempDir(),
+		Connector: "claudecode",
+	}
+	if !applyPreviousRowState(&row, previous, nil) {
+		t.Fatal("existing-row emission signal: want true, got false")
+	}
+	if row.Deferred {
+		t.Fatal("existing non-deferred row was rewritten as deferred")
+	}
+	if row.AgentVersion != "2.1.152" || row.Enabled == nil || !*row.Enabled {
+		t.Fatalf("existing row state not preserved: %+v", row)
+	}
+}
+
+// TestNewEnumeratorRowRoundTripsAsDeferredManifestTarget proves the
+// enumerator's auto-authorized row survives the exact serialisation the
+// guardian consumes: it marshals to `deferred: true`, passes the Windows
+// LoadManifest schema (enabled + deferred + explicit SID/home/version), and
+// reloads as an enabled deferred target that the reconcile loop may leave
+// pending while its user has no active session (issue #894).
+func TestNewEnumeratorRowRoundTripsAsDeferredManifestTarget(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
+	writeWindowsAgentPackageJSON(t, dir, "0.145.0")
+
+	row := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "codex",
+		DataDir:   filepath.Join(home, ".defenseclaw"),
+	}
+	if !applyPreviousRowState(&row, nil, nil) {
+		t.Fatal("new row with discoverable CLI was dropped")
+	}
+	body, err := marshalTargetsManifest(Manifest{Version: 1, Targets: []ManifestTarget{row}})
+	if err != nil {
+		t.Fatalf("marshal enumerated manifest: %v", err)
+	}
+	if !bytes.Contains(body, []byte("deferred: true")) {
+		t.Fatalf("enumerated manifest does not carry deferred: true:\n%s", body)
+	}
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("guardian manifest loader rejected enumerated deferred row: %v", err)
+	}
+	if len(loaded.Targets) != 1 {
+		t.Fatalf("loaded %d targets, want 1", len(loaded.Targets))
+	}
+	got := loaded.Targets[0]
+	if !got.IsEnabled() || !got.IsDeferred() {
+		t.Fatalf("reloaded enumerated row enabled=%t deferred=%t, want true/true", got.IsEnabled(), got.IsDeferred())
+	}
+	if got.AgentVersion != "0.145.0" {
+		t.Fatalf("reloaded AgentVersion = %q, want 0.145.0", got.AgentVersion)
 	}
 }
 

@@ -1169,7 +1169,13 @@ func defaultWindowsClaudeManagedPolicyPath() (string, error) {
 	return filepath.Join(programFiles, "ClaudeCode", "managed-settings.d", windowsClaudeManagedPolicyFile), nil
 }
 
-func defaultWindowsClaudeHigherPolicyCheck() error {
+// defaultWindowsClaudeHigherPolicyCheck authenticates the HKLM policy key,
+// then lets the connector decide whether its Settings leave the DefenseClaw
+// managed-settings.d hooks effective: the policy either carries the
+// DefenseClaw contract itself or opts into merging managed sources. Merge is
+// honored only by Claude Code 2.1.242 or newer; that client floor is
+// enforced host-wide by the lifecycle module, not by the recorded version.
+func defaultWindowsClaudeHigherPolicyCheck(opts connector.SetupOpts) error {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\ClaudeCode`, registry.READ)
 	if errors.Is(err, registry.ErrNotExist) {
 		return nil
@@ -1188,8 +1194,12 @@ func defaultWindowsClaudeHigherPolicyCheck() error {
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: read Claude Code HKLM Settings policy: %w", err)
 	}
-	if strings.TrimSpace(settings) != "" {
-		return fmt.Errorf("enterprise hooks: Claude Code HKLM Settings policy has higher precedence than file-based policy; deploy the DefenseClaw hook matrix through the existing MDM/GPO source")
+	if err := connector.ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
+		settings,
+		`HKLM Settings policy (HKLM\SOFTWARE\Policies\ClaudeCode\Settings)`,
+		opts,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: %w", err)
 	}
 	return nil
 }
@@ -1399,14 +1409,14 @@ func installWindowsClaudeManagedPolicy(body []byte, opts connector.SetupOpts, ta
 }
 
 func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.SetupOpts, targetSID *windows.SID) (string, func() error, error) {
-	if err := windowsClaudeHigherPolicyCheck(); err != nil {
+	if err := windowsClaudeHigherPolicyCheck(opts); err != nil {
 		return "", nil, err
 	}
 	path, err := windowsClaudeManagedPolicyPath()
 	if err != nil {
 		return "", nil, err
 	}
-	if err := inspectWindowsClaudeFilePolicyCompatibility(path); err != nil {
+	if err := inspectWindowsClaudeFilePolicyCompatibility(path, !opts.ClaudeCodeAllowUnmanagedHooks); err != nil {
 		return "", nil, err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
@@ -1793,7 +1803,7 @@ func canonicalWindowsClaudeTargetSIDs(values []string) ([]string, error) {
 	return result, nil
 }
 
-func inspectWindowsClaudeFilePolicyCompatibility(policyPath string) error {
+func inspectWindowsClaudeFilePolicyCompatibility(policyPath string, enforceManagedHooksOnly bool) error {
 	root := filepath.Dir(filepath.Dir(policyPath))
 	rootExists, err := validateExistingWindowsManagedPolicyDirectory(root)
 	if err != nil {
@@ -1847,6 +1857,11 @@ func inspectWindowsClaudeFilePolicyCompatibility(policyPath string) error {
 		}
 		if raw, exists := settings["policyHelper"]; exists && raw != nil {
 			policyHelper = true
+		}
+		if enforceManagedHooksOnly {
+			if err := windowsClaudeManagedHooksOnlyConflict(path, settings); err != nil {
+				return err
+			}
 		}
 	}
 	if policyHelper {

@@ -8562,7 +8562,7 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         -LiteralPath $script:AgentApplicationControlAttestationPath `
         -Raw |
         ConvertFrom-Json -ErrorAction Stop
-    if ([int]$attestation.schema_version -ne 2 -or
+    if ([int]$attestation.schema_version -ne 3 -or
         [string]$attestation.prerequisite -cne
             'wdac_or_applocker_approved_agent_client_rules' -or
         [bool]$attestation.agent_application_control_enforced -ne
@@ -8572,6 +8572,13 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         [string]$attestation.minimum_claude_version -cne '2.1.152' -or
         [bool]$attestation.claude_effective_policy_verified -ne
             $expectedClaudeAttestation -or
+        ([string]$attestation.claude_effective_policy_managed_policy_sha256 -cmatch
+            '^[0-9a-f]{64}$') -ne $expectedClaudeAttestation -or
+        ([string]$attestation.claude_effective_policy_hook_sha256 -cmatch
+            '^[0-9a-f]{64}$') -ne $expectedClaudeAttestation -or
+        $null -ne $attestation.PSObject.Properties[
+            'claude_effective_policy_manifest_sha256'
+        ] -or
         -not [bool]$attestation.certification_required -or
         [string]$attestation.attested_by_sid -notmatch '^S-1-5-' -or
         [string]::IsNullOrWhiteSpace([string]$attestation.attested_at)) {
@@ -21957,7 +21964,7 @@ targets:
             Add-Result `
                 'claude-effective-policy-evidence-persistence' `
                 'passed' `
-                'initial Install remained incomplete; only after the real hostile-precedence Claude proof did Repair receive -AttestClaudeEffectivePolicy, bind it to the protected manifest, and make aggregate security_complete=true' `
+                'initial Install remained incomplete; only after the real hostile-precedence Claude proof did Repair receive -AttestClaudeEffectivePolicy, bind it to the installed Claude policy and hook digests, and make aggregate security_complete=true' `
                 @{
                     live_proof = $claudeRun
                     repair = $attestedRepair.JSON
