@@ -416,12 +416,47 @@ The default managed layout is:
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
 | Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
+| Guardian readiness state | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\.state` | Diagnostic, not authorization. The guardian writes it through the protected writer (LocalSystem/Administrators write, gateway read-only) and the gateway reads the same file. It says `ready` only after a reconcile with no failed targets and a published protected state, is refreshed at least every minute, and a `ready` older than five minutes reads as `waiting_for_targets`. The guardian rewrites it to `waiting_for_targets` after a failed reconcile and when it stops; if that rewrite fails, it deletes the file, which also reads as `waiting_for_targets`. |
 | Deployment metadata | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\deployment.json` | Installer-owned transaction and servicing state. |
 | Shared Codex machine-policy parent | `C:\ProgramData\OpenAI\Codex` | Explicit install/upgrade/repair creates missing `OpenAI` and `Codex` directories atomically with Administrators/System full control and Users read/traverse only. Existing directories are validation-only and are never taken over. |
 | Codex managed requirements | `C:\ProgramData\OpenAI\Codex\requirements.toml`, `.defenseclaw-managed-hooks.state`, and `.defenseclaw-managed-hooks.lock` | DefenseClaw-owned canonical ten-event policy, enrollment state, and protected bounded transaction lock; users can read policy but cannot write it. Ownership and ACL-preimage records are private under the install-state directory. |
 | Claude managed hook policy | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` and adjacent ownership state | Administrators/LocalSystem write; registered users read and invoke; unrelated Claude settings remain outside DefenseClaw ownership. |
-| Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v2 application-control and Claude-precedence evidence. |
+| Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v3 application-control and Claude-precedence evidence. |
 | Service definitions | SCM registry and security descriptors | Administrators/LocalSystem only. |
+
+In the Secure Client profile, AI Defense makes the inspection decision. If
+Cloud Management is offline, the identity library is unavailable, or the
+service does not answer, requests that need inspection are allowed by default.
+`/health` reports `managed_inspection.available: false`, and the Secure Client
+GUI reports `DEGRADED`. Set `cisco_ai_defense.unavailable_action: block` in the
+administrator-owned `config.yaml` to deny those requests for active connectors
+in action mode. Observe mode records a would-block result and lets the request
+run uninspected; if no enabled connector (including one enabled through
+`connector_hooks` or application protection) is in action mode, the GUI reports
+`inspection_unavailable_allowing`. Requests with nothing to inspect remain
+allowed. Inspection counts as available only while AI Defense returns
+verdicts: a valid token does not clear a failed inspection, but the next
+inspection with a verdict does. A guardrail startup error also reports
+`DEGRADED`; a build without managed-cloud support blocks hook requests that
+need inspection regardless of `unavailable_action`.
+
+The Secure Client UI socket check identifies the executable a connecting
+process was started from, at the time it connects. The kernel's image name for
+that process must equal an allowed path exactly (ASCII letters in either case;
+every other character must match), and the file at that path must carry an
+allowed embedded Authenticode signature. Two limits follow from this design:
+
+- The check does not prove which code runs inside the process. Windows does not
+  isolate the processes of one signed-in user from each other, so a process of
+  the same user can start `csc_ui.exe` and control it, or reuse a connection the
+  GUI already opened, and read the same stream. On macOS the hardened runtime
+  prevents this; Windows has no equivalent for the Secure Client GUI. The stream
+  is read-only (health, statistics, and notifications), notification text
+  carries no credentials, raw prompts, or policy bodies, and every signed-in
+  user's GUI already receives the same machine-wide stream.
+- Start the GUI through its full path. A launch through an 8.3 short path such
+  as `C:\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe` is refused, and the gateway log
+  shows the short path and says so in the refusal reason.
 
 The installer rejects install/state roots outside exact mount-manager drive
 roots on fixed local NTFS volumes, path escapes, unsafe owners or DACLs, and
@@ -556,6 +591,28 @@ rights must be administrator-controlled, the module leaf must have no
 untrusted write-like ACE, and Authenticode must be valid unless a disposable
 test run explicitly uses `-AllowUnsigned`.
 
+A valid signature is not sufficient on its own. The module, the installer, and
+every payload executable and library must be signed by a certificate whose
+subject has exactly one common name (CN), and that common name is exactly
+`Cisco Systems, Inc.`. The CN attribute itself is compared, not the Windows
+display name, which shows the OU or O instead when a certificate has no CN.
+An organization that re-signs the payload with its own code-signing
+certificate names that certificate with
+`-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
+`--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
+that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
+the SHA-256 of the DER-encoded signing certificate, for example
+`(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
+thumbprint is rejected, and the parameter cannot be combined with
+`-AllowUnsigned`.
+
+When the CMID broker adopts `cmidapi.dll`, it verifies the embedded
+Authenticode signature and requires exactly one subject common name,
+`Cisco Systems, Inc.`. The broker keeps the verified file open without write
+or delete sharing until the first refresh loads it. A missing or rejected
+library leaves the broker running and managed inspection unavailable; later
+requests retry discovery after Cloud Management is installed or repaired.
+
 The unsigned exception is itself fail-closed before module import. It is valid
 only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`,
 `Reconcile`, `Status`, `Verify`, `Uninstall`), and only when the service names
@@ -629,8 +686,23 @@ WDAC or AppLocker is an optional defense-in-depth layer. Pass
 `--attest-agent-application-control`) only after it allows approved signed
 clients and blocks explicitly tested old and unsigned clients. Omitting the
 attestation does not block either connector's managed hooks. The current
-minimum Claude version is 2.1.152. An enabled Codex target is complete when its
-protected managed hook policy is installed and verified.
+minimum Claude version is 2.1.154, the first Claude hook contract. A
+`targets.yaml` row that an earlier release recorded at 2.1.152 or 2.1.153
+(often its placeholder for a user with no detected client) still loads, so
+Upgrade, Repair, Uninstall and the enumerator keep working. That one target
+fails enrollment until a `Repair -Mode` or `-Manifest` records 2.1.154 or newer
+for it, or the row is disabled. The DefenseClaw Claude policy is one
+machine-wide file rendered from the Claude hook contract of each enrolled row,
+so the `-Mode`/`-Connector` renderer records a user who has no Claude client
+yet at the minimum of the newest contract a detected client on the endpoint
+uses: 2.1.219 beside a client at 2.1.219 or newer (a pre-release or build
+suffix is ignored, as it is for contract selection), otherwise 2.1.154. Rows on
+different contracts, such as clients at 2.1.200 and 2.1.250 on one endpoint,
+still render different policies and leave the Claude effective-policy
+evidence stale after each enrollment, so keep an endpoint's Claude clients in
+one contract range. An enabled
+Codex target is complete when its protected managed hook policy is installed
+and verified.
 
 Install is intentionally only phase one. Even when the protected services,
 files, ACLs, and any optional application-control evidence are structurally
@@ -677,9 +749,21 @@ The equivalent post-proof CLI transaction is:
 ```
 
 That Repair revalidates the structural attestations, then
-binds the live Claude proof to the protected manifest hash. A manifest change
-invalidates it. Application-control evidence, a healthy Program Files policy,
-or a prior run against another manifest is never substituted for this gate.
+binds the live Claude proof to the Claude policy identity it exercised: the
+DefenseClaw `90-defenseclaw.json` machine policy and the installed
+`defenseclaw-hook.exe`. Enrollment changes that only rewrite `targets.yaml` keep
+it current. A different policy or hook binary reports it unverified until the
+proof and this Repair are repeated. The identity is captured before the
+transaction stages anything, so pass the same `defenseclaw-hook.exe` the proof
+ran against: an Upgrade or Repair with `-AttestClaudeEffectivePolicy` and a
+different hook binary is refused before its transaction opens. Do not keep the attestation
+on an Upgrade command line; upgrade, repeat the proof, then run this Repair.
+The Repair still rebinds it when it first
+recovers an interrupted transaction. Install refuses
+`-AttestClaudeEffectivePolicy` up front, because no DefenseClaw Claude policy
+exists yet for a live proof to have exercised. Application-control evidence, a
+healthy Program Files policy, or a prior run against another policy is never
+substituted for this gate.
 
 `-NoStart` stages and verifies the transaction with all managed services disabled and
 stopped. Use it when endpoint management has a separate activation phase, then
@@ -1102,6 +1186,17 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
 Running the installed CLI is still valid for a broker/gateway/hook-only upgrade when
 `--cli-binary` is omitted.
 
+Upgrade moves forward only. Do not run an earlier release's installer against a
+deployment this release installed or attested. The application-control
+evidence this release writes uses schema 3 and the Claude 2.1.154 client
+floor, which earlier releases such as 26.8.4 do not accept, so every lifecycle
+action of such a release, Uninstall included, stops before doing any work.
+Such a release also cannot remove the owned `DisableSelfUpdate` machine
+policy. To
+return to an earlier release, run `Uninstall` with this release's installer,
+then `Install` the earlier release and repeat its live Claude proof and
+attestations.
+
 Only an administrator can remove the service registration:
 
 ```powershell
@@ -1314,6 +1409,50 @@ can use another target's credential. This is distinct from normal/unmanaged
 mode, whose existing per-user hook and auto-heal behavior is unchanged.
 Invalid or tampered ownership metadata also fails closed.
 
+The drop-in also sets `allowManagedHooksOnly: true`, so Claude Code loads only
+administrator-managed hooks on the endpoint and the tool input DefenseClaw
+inspects is the input that runs. User, project, local, and plugin hooks do not
+load. An administrator who must keep them can set
+`claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config.
+`defenseclaw-gateway enterprise hooks status` and `verify` then print a warning, and
+verify results report `claude_managed_hooks_only: disabled_by_admin`. While the
+lock is enforced, another managed-settings file that sets
+`allowManagedHooksOnly: false` (for example a later-sorting drop-in) is reported
+as a conflict, and install and verify fail until the file is changed or the
+opt-out is set. A managed file that sets `disableAllHooks: true` is always
+reported.
+
+Cursor has no managed-hooks-only setting. On managed Windows endpoints,
+DefenseClaw scans user, workspace, and plugin hooks before each `preToolUse`
+or `workspaceOpen` invocation and denies unapproved handlers. The scan covers
+Cursor and imported Claude-format files, plugin manifests, marketplace entries,
+and nested plugin folders. It denies if a hook source cannot be checked, if
+there are more than 32 workspace roots or 4096 plugin directories, or if a
+plugin folder link cannot be resolved. Hook files are reread for every
+invocation. The denial names the source and approval digest; the user message
+also shows the handler command, while the agent message omits it.
+
+An administrator can add a digest to
+`connector_hooks.cursor.approved_foreign_hooks`. The digest covers the handler
+registration, event, scope, and matcher. It does not cover the contents of a
+script that the command runs. Approve only absolute commands whose executable
+and script cannot be modified by standard users. Existing per-user DefenseClaw
+hook entries require the cleanup in #917 and #918 before enabling this guard
+on an enrolled profile.
+
+During a managed Cursor install or repair, the guardian removes only the
+exact per-user DefenseClaw registrations it recognizes in that target user's
+`.cursor/hooks.json`. It keeps a backup and logs the removals. It leaves other
+hooks and unrelated file content in place, and skips a file it cannot edit
+safely; the managed hook still denies any unsafe entry left behind. Uninstall
+does not restore these per-user registrations. The same install or repair also
+removes exact DefenseClaw per-user Claude Code hook handlers from that user's
+`.claude/settings.json`, preserving unrelated handlers and settings. It backs
+up the previous file as `settings.json.defenseclaw-backup` and leaves files it
+cannot safely edit unchanged with a warning. It does not edit
+`settings.local.json` or a folder set with `CLAUDE_CONFIG_DIR`. Uninstall does
+not restore those handlers.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as
@@ -1331,13 +1470,29 @@ policy under `C:\Program Files\ClaudeCode`, so no user or project environment
 can redirect this managed registration.
 
 DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
-policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
-a file policy superseded by `policyHelper`. It also refuses installation when
-an HKLM `Settings` policy has higher precedence. In those environments, merge
-the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
-local file installation cannot override it. Remotely delivered policy is an
-external management boundary and must likewise include the hook matrix at its
-authoritative source.
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or a
+file policy superseded by `policyHelper`. An HKLM `Settings` policy outranks the
+DefenseClaw drop-in. Enrollment accepts it when it sets
+`"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
+which then becomes the approved-client floor) or already carries the
+DefenseClaw hook entries exactly (same matcher, timeout, `async` flag and
+arguments, one copy of each), which the installed CLI prints with `enterprise
+windows export-claude-policy --agent-version <x.y.z>`, where `<x.y.z>` is the
+`agent_version` recorded for the target (the version its enrollment refusal
+names); any other HKLM policy is refused with both fixes named, and the
+refusal names the export command for its target. Without `--agent-version` the
+export prints the oldest supported hook contract. A policy that registers a
+DefenseClaw hook outside the target's hook contract, or anywhere but in the
+exported entry, is refused either way: Claude Code runs one copy of a repeated
+hook whatever its timeout or `async` flag, so a changed copy could replace the
+exported one.
+Claude loads only an HKLM policy that carries the
+matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
+and while the lock is enforced no HKLM policy may set it to `false`; setting
+`claude_code.allow_unmanaged_hooks: true` waives both. Status reports
+`claude_policy_shadowed_by_hklm`, `claude_minimum_client_version`, and
+`claude_policy_hklm_merge_pending_targets` for this case. Remotely delivered policy is an external management
+boundary and must likewise include the hook matrix at its authoritative source.
 
 Claude managed-source precedence is server-managed, then HKLM/MDM, then the
 Program Files policy, then HKCU; the first authoritative source wins.

@@ -44,7 +44,7 @@ type service struct {
 
 // GetHealth streams health snapshots per the contract: the first
 // message is the current state; subsequent messages are sent when
-// the mapped ServiceAvailability changes. Sends are debounced by
+// the mapped ServiceAvailability or its reason code changes. Sends are debounced by
 // healthWait so a flapping SetGateway does not storm the client.
 func (s *service) GetHealth(req *pb.GetHealthRequest, stream grpc.ServerStreamingServer[pb.HealthSnapshot]) error {
 	ctx := stream.Context()
@@ -78,7 +78,7 @@ func (s *service) GetHealth(req *pb.GetHealthRequest, stream grpc.ServerStreamin
 		case <-debounce.C:
 			pending = false
 			cur := s.currentHealth()
-			if cur.Availability != last.Availability {
+			if cur.Availability != last.Availability || cur.AvailabilityReason != last.AvailabilityReason {
 				if err := stream.Send(cur); err != nil {
 					return err
 				}
@@ -186,11 +186,13 @@ func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream g
 // and MUST NOT render it as an error.
 func (s *service) currentHealth() *pb.HealthSnapshot {
 	snap := s.health.Snapshot()
+	availability, reason := mapHealthWithReason(snap)
 	return &pb.HealthSnapshot{
 		SchemaVersion:      schemaVersion,
-		Availability:       mapHealth(snap),
+		Availability:       availability,
 		DefenseClawVersion: strings.TrimSpace(s.version),
 		ConfigurationState: mapConfigurationState(snap.Configuration),
+		AvailabilityReason: reason,
 	}
 }
 

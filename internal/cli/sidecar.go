@@ -119,7 +119,9 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// the collapsing rule loaded (we reached this point AFTER
 	// loadGatewayConfigV8 succeeded — either directly or via the wait
 	// loop in rootPersistentPreRunE), wire the sidecar's guardian
-	// state reader against the well-known .state file path, and start
+	// state reader against the .state file in the protected guardian
+	// authorization directory (the same helper the guardian writes
+	// through), and start
 	// a periodic RefreshConfiguration ticker so a guardian-side
 	// transition surfaces without a daemon-side event.
 	//
@@ -129,10 +131,14 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForPlatform(enterpriseHooksStandaloneUnixActive(), cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
-		sc.Health().SetGuardianStateReader(func() string {
-			return guardianstate.ReadState(statePath)
-		})
+		if enterpriseHooksStandaloneUnixActive() {
+			statePath := guardianstate.PathForPlatform(true, cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
+			sc.Health().SetGuardianStateReader(func() string {
+				return guardianstate.ReadState(statePath)
+			})
+		} else {
+			sc.Health().SetGuardianStateReader(newGuardianReadinessStateReader(cfg.DataDir))
+		}
 	}
 
 	// Local UDS gRPC server for external consumers. Only constructed
@@ -266,7 +272,10 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		}()
 	}
 
-	runErr := sc.Run(ctx)
+	// A per-user gateway that was already running when an enterprise
+	// deployment was installed stops itself, so the enterprise service can
+	// take the hook port without waiting for this user to log off.
+	runErr := runWithEnterpriseCoexistenceWatch(ctx, cancel, cfg.DeploymentMode, sc.Run)
 	if diag {
 		fmt.Fprintf(os.Stderr,
 			"[sidecar][diag] sc.Run returned: err=%v ctxErr=%v at %s pid=%d\n",

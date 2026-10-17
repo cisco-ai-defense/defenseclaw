@@ -330,8 +330,8 @@ def test_windows_copilot_doctor_classifies_tamper(
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
-        ("unbounded-timeout", "$timeoutMS = 25000"),
-        ("missing-timeout", "$timeoutMS = 25000"),
+        ("unbounded-timeout", "$timeoutMS = 20000"),
+        ("missing-timeout", "$timeoutMS = 20000"),
         ("duplicate-timeout", "exactly one bounded timeout assignment"),
         ("duplicate-hook", "exactly one bound hook executable"),
     ],

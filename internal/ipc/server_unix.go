@@ -91,3 +91,17 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	}
 	return inner, nil
 }
+
+// wrapPeerAuthListener applies the codesign / peer-credential policy
+// at accept time. It returns inner unwrapped only when no check is
+// configured at all (the dev / unmanaged posture); managed_enterprise
+// always configures the strict Secure Client policy.
+func (s *Server) wrapPeerAuthListener(inner net.Listener) (net.Listener, error) {
+	return newCodesignValidatingListener(inner,
+		s.allowedTeamIDs,
+		s.allowedSigningIDs,
+		s.allowedBundleIDs,
+		s.requireUnixPeer,
+		s.requireSigningMetadata,
+		s.logReject), nil
+}

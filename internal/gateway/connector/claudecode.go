@@ -978,7 +978,7 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 }
 
 func claudeCodeEventHasEnforcingHook(
-	entries []interface{}, eventType, requiredMatcher string, requiredAsync bool, opts SetupOpts,
+	entries []interface{}, eventType, requiredMatcher string, requiredAsync bool, requiredTimeout int, opts SetupOpts,
 ) bool {
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]interface{})
@@ -991,10 +991,34 @@ func claudeCodeEventHasEnforcingHook(
 		}
 		for _, rawHandler := range handlers {
 			handler, ok := rawHandler.(map[string]interface{})
-			if !ok || !claudeCodeHandlerMatchesContract(handler, requiredAsync, opts) {
+			if !ok || !claudeCodeHandlerMatchesContract(handler, requiredAsync, requiredTimeout, opts) {
 				continue
 			}
 			return true
+		}
+	}
+	return false
+}
+
+// claudeCodeEventHasWeakManagedHandler reports whether any DefenseClaw
+// handler on the event, under any matcher, falls short of the contract.
+// Claude Code runs one copy of a repeated command hook: it keys the copies by
+// command, argv and condition, not by timeout or async flag, and keeps one of
+// them. One enforcing copy therefore proves nothing while another copy with a
+// shorter timeout or an async flag sits beside it.
+func claudeCodeEventHasWeakManagedHandler(entries []interface{}, requiredAsync bool, requiredTimeout int, opts SetupOpts) bool {
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		handlers, _ := entry["hooks"].([]interface{})
+		for _, rawHandler := range handlers {
+			handler, ok := rawHandler.(map[string]interface{})
+			if ok && claudeCodeHandlerTargetsCurrentRuntime(handler, opts) &&
+				!claudeCodeHandlerMatchesContract(handler, requiredAsync, requiredTimeout, opts) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1056,9 +1080,18 @@ func claudeCodeMatcherCovers(eventType string, raw interface{}, required string)
 	return false
 }
 
-func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAsync bool, opts SetupOpts) bool {
+func claudeCodeHandlerMatchesContract(handler map[string]interface{}, requiredAsync bool, requiredTimeout int, opts SetupOpts) bool {
 	asynchronous, err := claudeCodeHandlerAsync(handler)
 	if err != nil || asynchronous != requiredAsync {
+		return false
+	}
+	// Claude stops a handler at its registered timeout and treats that as a
+	// non-blocking error, so the action proceeds. The hook sizes its own
+	// budget to the rendered timeout (hookexec.ClaudeCodeHookTimeoutSeconds)
+	// so it can still answer with the configured fail mode; a shorter
+	// registration ends it first. Every DefenseClaw rendering writes the
+	// timeout, so a missing or shorter one is not the DefenseClaw contract.
+	if timeout, ok := claudeCodeHookInteger(handler["timeout"]); !ok || timeout < requiredTimeout {
 		return false
 	}
 	if condition, exists := handler["if"]; exists {
@@ -1125,19 +1158,29 @@ func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string,
 	return command, args
 }
 
+// claudeCodeManagedHooksOnlyKey is the Claude Code managed setting that loads
+// only administrator-managed hooks (not user, project, local or plugin hooks),
+// so the tool input DefenseClaw's managed hook inspects is the input that runs.
+const claudeCodeManagedHooksOnlyKey = "allowManagedHooksOnly"
+
 // ManagedHookPolicy renders the Claude Code settings fragment installed in
 // the administrator-managed policy tier. Claude treats hooks from this tier as
 // trusted even when allowManagedHooksOnly=true. The fragment contains the
 // hooks and, when opts.ClaudeAllowManagedHooksOnly is set (the Windows
-// standalone lock), allowManagedHooksOnly: true; per-user OTLP credentials
-// cannot safely be placed in a machine-wide policy document.
+// standalone lock), or the Secure Client administrator has not opted out,
+// sets allowManagedHooksOnly: true. Per-user OTLP credentials cannot safely
+// be placed in a machine-wide policy document.
 func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
 	}
-	if err := validateClaudeCodeManagedFileDestination(); err != nil {
+	if err := validateClaudeCodeManagedFileDestination(opts); err != nil {
 		return nil, err
 	}
+	return renderClaudeCodeManagedHookPolicy(opts)
+}
+
+func renderClaudeCodeManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)
 	if runtime.GOOS == "windows" && (hookExecutable == "" || !filepath.IsAbs(hookExecutable)) {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires an absolute native hook executable")
@@ -1151,8 +1194,8 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 		return nil, err
 	}
 	policy := map[string]interface{}{"hooks": hooks}
-	if opts.ClaudeAllowManagedHooksOnly {
-		policy["allowManagedHooksOnly"] = true
+	if opts.ClaudeAllowManagedHooksOnly || !opts.ClaudeCodeAllowUnmanagedHooks {
+		policy[claudeCodeManagedHooksOnlyKey] = true
 	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
@@ -1161,7 +1204,40 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	return append(body, '\n'), nil
 }
 
-// VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
+// ClaudeCodeManagedHookPolicyEnforcesManagedOnly reports whether a persisted
+// DefenseClaw managed policy carries allowManagedHooksOnly=true. DefenseClaw
+// renders exactly two forms: the default locked policy, and the hooks-only
+// policy an administrator selects with claude_code.allow_unmanaged_hooks.
+// Any other value of the key is rejected.
+func ClaudeCodeManagedHookPolicyEnforcesManagedOnly(data []byte) (bool, error) {
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("parse Claude Code managed hook policy: %w", err)
+	}
+	return claudeCodeManagedPolicyLockState(settings)
+}
+
+func claudeCodeManagedPolicyLockState(settings map[string]interface{}) (bool, error) {
+	raw, exists := settings[claudeCodeManagedHooksOnlyKey]
+	if !exists {
+		return false, nil
+	}
+	if locked, ok := raw.(bool); ok && locked {
+		return true, nil
+	}
+	return false, fmt.Errorf(
+		"Claude Code managed hook policy %s must be true or absent, got %v",
+		claudeCodeManagedHooksOnlyKey,
+		raw,
+	)
+}
+
+// VerifyManagedHookPolicy verifies that data is one of the two canonical
+// DefenseClaw managed-policy forms for opts: with allowManagedHooksOnly=true
+// (default) or without it (administrator opt-out). It deliberately accepts
+// either form so read-only runtime and identity checks, which have no access
+// to the administrator's configuration, keep working after an opt-out;
+// enterprise verify compares the exact bytes against the configured form.
 func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpts) error {
 	settings := map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -1171,6 +1247,11 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 	if !ok {
 		return fmt.Errorf("Claude Code managed hook policy hooks have unsupported type %T", settings["hooks"])
 	}
+	locked, err := claudeCodeManagedPolicyLockState(settings)
+	if err != nil {
+		return err
+	}
+	opts.ClaudeCodeAllowUnmanagedHooks = !locked
 	hookCommand, hookArgs := claudeCodeManagedHookInvocation(
 		opts,
 		filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"),
@@ -2284,6 +2365,17 @@ func claudeCodeHookInteger(value interface{}) (int, bool) {
 	case float64:
 		converted := int(typed)
 		return converted, float64(converted) == typed
+	case json.Number:
+		// Policy sources decoded with UseNumber (decodeClaudeCodeSettings).
+		if integer, err := typed.Int64(); err == nil {
+			return int(integer), int64(int(integer)) == integer
+		}
+		value, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		converted := int(value)
+		return converted, float64(converted) == value
 	default:
 		return 0, false
 	}

@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -54,6 +55,17 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 // Tests replace it.
 var enterpriseHookManifestCatchUpAllowed = func() bool {
 	return cfg != nil && cfg.StandaloneEnterprise()
+}
+
+// enterpriseHookWatchStopContext returns parent unchanged: the native
+// Windows service host cancels the command context on SERVICE_CONTROL_STOP
+// and SERVICE_CONTROL_SHUTDOWN, which already runs the watch loop's
+// deferred readiness retraction.
+func enterpriseHookWatchStopContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return parent, func() {}
 }
 
 func enterpriseHookTargetSessionAvailable(
