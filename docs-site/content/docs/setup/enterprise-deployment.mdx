@@ -1355,6 +1355,37 @@ as a conflict, and install and verify fail until the file is changed or the
 opt-out is set. A managed file that sets `disableAllHooks: true` is always
 reported.
 
+Cursor has no managed-hooks-only setting. On managed Windows endpoints,
+DefenseClaw scans user, workspace, and plugin hooks before each `preToolUse`
+or `workspaceOpen` invocation and denies unapproved handlers. The scan covers
+Cursor and imported Claude-format files, plugin manifests, marketplace entries,
+and nested plugin folders. It denies if a hook source cannot be checked, if
+there are more than 32 workspace roots or 4096 plugin directories, or if a
+plugin folder link cannot be resolved. Hook files are reread for every
+invocation. The denial names the source and approval digest; the user message
+also shows the handler command, while the agent message omits it.
+
+An administrator can add a digest to
+`connector_hooks.cursor.approved_foreign_hooks`. The digest covers the handler
+registration, event, scope, and matcher. It does not cover the contents of a
+script that the command runs. Approve only absolute commands whose executable
+and script cannot be modified by standard users. Existing per-user DefenseClaw
+hook entries require the cleanup in #917 and #918 before enabling this guard
+on an enrolled profile.
+
+During a managed Cursor install or repair, the guardian removes only the
+exact per-user DefenseClaw registrations it recognizes in that target user's
+`.cursor/hooks.json`. It keeps a backup and logs the removals. It leaves other
+hooks and unrelated file content in place, and skips a file it cannot edit
+safely; the managed hook still denies any unsafe entry left behind. Uninstall
+does not restore these per-user registrations. The same install or repair also
+removes exact DefenseClaw per-user Claude Code hook handlers from that user's
+`.claude/settings.json`, preserving unrelated handlers and settings. It backs
+up the previous file as `settings.json.defenseclaw-backup` and leaves files it
+cannot safely edit unchanged with a warning. It does not edit
+`settings.local.json` or a folder set with `CLAUDE_CONFIG_DIR`. Uninstall does
+not restore those handlers.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as

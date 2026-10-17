@@ -237,6 +237,7 @@ func installWindowsCursorManagedResult(
 		}
 		return InstallResult{}, err
 	}
+	cleanupWindowsCursorPerUserHookRegistrations(target)
 	return InstallResult{
 		Connector:                  "cursor",
 		UserHome:                   target.home,
@@ -276,6 +277,9 @@ func verifyWindowsCursorManagedResult(
 		return InstallResult{}, err
 	}
 	if err := verifyWindowsCursorMachineTarget(target); err != nil {
+		return InstallResult{}, err
+	}
+	if err := verifyWindowsCursorPublishedApprovedForeignHooks(opts.CursorApprovedForeignHooks); err != nil {
 		return InstallResult{}, err
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)

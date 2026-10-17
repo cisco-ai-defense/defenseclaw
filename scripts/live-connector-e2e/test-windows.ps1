@@ -987,7 +987,7 @@ $payload = [ordered]@{
     $renderedCopilotAdapter = $copilotAdapterSource.Replace(
         '{{.HookBinaryPS}}',
         'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe'
-    ).Replace('{{.CopilotHookTimeoutMS}}', '25000')
+    ).Replace('{{.CopilotHookTimeoutMS}}', '20000')
     [IO.File]::WriteAllText(
         $copilotAdapter,
         $renderedCopilotAdapter,
@@ -2924,9 +2924,9 @@ connection.close()
         'Copilot wizard validation treats omitted disableAllHooks as enabled while rejecting explicit true'
     Assert-True ($wizardHookValidation -match '\[regex\]::Matches\(' -and
         $wizardHookValidation -match '\$hookMatches\.Count -ne 1' -and
-        $wizardHookValidation -match "\`$timeoutMS = 25000" -and
-        $wizardHookValidation -match 'exactly one 25000ms timeout assignment') `
-        'Copilot wizard validation requires exactly one bound hook executable and a 25000ms timeout'
+        $wizardHookValidation -match "\`$timeoutMS = 20000" -and
+        $wizardHookValidation -match 'exactly one 20000ms timeout assignment') `
+        'Copilot wizard validation requires exactly one bound hook executable and a 20000ms timeout'
     Assert-True ($nativeHarnessText -match 'function Assert-CopilotAdapterConcurrentStdin\b' -and
         $nativeHarnessText -match 'Copilot adapter concurrent stdin probe timed out' -and
         $nativeHarnessText -match "'x' \* 65536") `
