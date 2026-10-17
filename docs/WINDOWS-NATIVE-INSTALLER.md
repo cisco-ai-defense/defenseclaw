@@ -307,6 +307,36 @@ owned services restart. Downgrades are rejected by both the CLI and setup.
 Machine-scope state and the HKLM policy
 `SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1` disable self-update.
 Those installations must be serviced by the enterprise deployment channel.
+A production Windows managed-enterprise deployment sets this policy itself
+unless the value already exists, and removes it on uninstall (including the
+`Uninstall -Purge` exact-scope recovery when StateRoot is gone) only if it
+still carries the deployment's owner marker.
+
+While a managed-enterprise deployment is installed (its `DefenseClawGateway`
+Windows service exists), per-user releases that include the enterprise
+coexistence check refuse to run beside it. The refusal covers `install.ps1`,
+Setup install, upgrade, and repair, and the per-user gateway `start`,
+`restart`, and foreground run. Both products serve hooks on the same local
+port. A per-user gateway from this release that is already running when the
+service appears checks every five seconds and stops itself. Setup rollback
+and interrupted-operation recovery restore files while leaving that runtime
+stopped and logon auto-start disabled. Setup uninstall stays available, so an
+existing per-user copy can be removed.
+
+A per-user install from an earlier release has no such check. Its logon helper
+and hook cold-start recovery still start the per-user gateway, the enterprise
+deployment does not detect or remove it, and the owned self-update policy
+keeps it on its release. Uninstall every pre-existing per-user copy, as each
+affected user, before or after deploying the enterprise product:
+
+```powershell
+& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /uninstall /quiet
+```
+
+A per-user copy registers the `DefenseClawGateway` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. While a per-user
+gateway holds the port, the enterprise managed hooks fail closed with
+`enterprise_managed_gateway_peer_unverified`.
 
 ## Release gate
 
