@@ -223,15 +223,26 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	// One configuration snapshot decides both whether hook traffic goes to
+	// AI Defense (scan_hook_surface) and what happens when it cannot be
+	// inspected (unavailable_action), so a reload cannot pair one setting's
+	// old value with the other's new one.
+	policy := a.managedAIDPolicyConfig()
+	surfaceEnabled := policy != nil && policy.CiscoAIDefense.HookSurfaceEnabled()
 	failOpenReason := aidFailOpenUnavailable
 	if !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
-		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	} else if a == nil || a.currentCiscoInspector() == nil || a.scannerCfg == nil || !surfaceEnabled {
 		failOpenReason = aidFailOpenUnwired
 	}
-	aid := a.hookAIDInspect(ctx, toolName, content)
+	aid := a.hookAIDInspectSurface(ctx, toolName, content, surfaceEnabled)
 	if aid == nil {
+		// cisco_ai_defense.unavailable_action=block: the administrator
+		// chose enforcement over availability for requests AI Defense
+		// should have inspected but could not.
+		if blocked := a.managedAIDUnavailableHookVerdict(policy, failOpenReason); blocked != nil {
+			return blocked
+		}
 		// Fail-open surface: managed_enterprise's local detectors are
 		// demoted, so a nil AID verdict means this inspection ends
 		// with no enforceable decision. Every occurrence must be
@@ -366,10 +377,19 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	return a.hookAIDInspectSurface(ctx, toolName, content,
+		a != nil && a.scannerCfg != nil && a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled())
+}
+
+// hookAIDInspectSurface is hookAIDInspect with scan_hook_surface resolved by
+// the caller: the managed lane reads it from the same snapshot as
+// unavailable_action (inspectManagedAIDOnly).
+func (a *APIServer) hookAIDInspectSurface(ctx context.Context, toolName string, content string, surfaceEnabled bool) *ScanVerdict {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
-	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	if !surfaceEnabled {
 		return nil
 	}
 	if !managedAIDHookContentIsInspectable(toolName, content) {
@@ -385,7 +405,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+	return inspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the

@@ -16,9 +16,9 @@
 # Contract:
 #   - The file at $1 MUST carry a valid Authenticode signature
 #     (osslsigncode verify exit 0, no chain error).
-#   - The signer certificate's Subject Common Name MUST be exactly
-#     "Cisco Systems, Inc." — same string the pwsh helper's
-#     GetNameInfo(SimpleName) returns.
+#   - The signer certificate's subject MUST carry exactly one Common Name
+#     attribute, and it MUST be exactly "Cisco Systems, Inc." — the same
+#     rule the pwsh helper (Get-CiscoSignatureCommonName) applies.
 #   - Any deviation calls `die <code> <msg>` (a function the caller —
 #     assemble.sh — must define). Signature/verify failures pass code 4;
 #     missing tools (osslsigncode/openssl) pass code 6. The caller
@@ -154,15 +154,26 @@ ${verify_output}"
                 printf "%s", content > out
                 close(out)
                 cmd = "openssl x509 -in " out " -noout -subject -nameopt multiline 2>/dev/null"
+                # Line shape:  "    commonName                = Cisco Systems, Inc."
+                # Anchor on the attribute name, so another attribute whose
+                # value merely contains "commonName" is not read as the CN,
+                # and require exactly one CN, as the pwsh helper and the
+                # endpoint pins do.
+                cn = ""
+                count = 0
                 while ((cmd | getline line) > 0) {
-                    if (line ~ /commonName/) {
-                        # Line shape:  "    commonName                = Cisco Systems, Inc."
-                        sub(/.*commonName[[:space:]]*=[[:space:]]*/, "", line)
-                        print line
-                        break
+                    if (line ~ /^[[:space:]]*commonName[[:space:]]*=/) {
+                        sub(/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*/, "", line)
+                        cn = line
+                        count++
                     }
                 }
                 close(cmd)
+                if (count == 1) {
+                    print cn
+                } else if (count > 1) {
+                    print "(more than one commonName)"
+                }
                 inblock=0
             }
         ' "${certs_pem}"

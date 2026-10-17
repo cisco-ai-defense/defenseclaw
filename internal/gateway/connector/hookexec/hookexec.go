@@ -190,6 +190,25 @@ type Options struct {
 	// root-owned runtime descriptor.
 	ManagedServiceUID int
 
+	// ApprovedForeignHooks is the administrator allowlist (sha256 handler
+	// digests) for the managed Cursor foreign-hook guard, read from protected
+	// machine state. It is ignored outside ManagedEnterprise mode.
+	ApprovedForeignHooks []string
+	// ForeignHookTrustedExecutable is the administrator-owned hook executable
+	// running this invocation; an exact DefenseClaw registration of it in a
+	// user or project hook file is not foreign.
+	ForeignHookTrustedExecutable string
+	// ForeignHookHomes overrides the user profile directories the guard scans
+	// (default: os.UserHomeDir). Tests use it; production leaves it empty.
+	ForeignHookHomes []string
+	// ForeignHookProfileHome is the profile directory resolved from the
+	// process token and protected machine state. The guard scans it in
+	// addition to ForeignHookHomes, so the scan does not depend on the
+	// profile environment variables alone.
+	ForeignHookProfileHome string
+	// Getenv overrides os.Getenv for the guard's vendor directory lookups.
+	Getenv func(string) string
+
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
 
@@ -324,6 +343,14 @@ func Run(ctx context.Context, opts Options) int {
 		// registration. This is a local integration failure, so Copilot must
 		// receive its documented fail-open result.
 		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
+	}
+	if cursorForeignHookGuardApplies(opts) {
+		// Cursor has no managed-hooks-only setting. Deny before gateway
+		// contact while an unapproved user or project preToolUse hook is
+		// registered.
+		if findings := evaluateCursorForeignHooks(opts, payload); len(findings) > 0 {
+			return denyCursorForeignHooks(opts, sp, findings)
+		}
 	}
 	requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
 	if requestTimeout <= 0 {

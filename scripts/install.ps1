@@ -150,6 +150,31 @@ function Remove-Tree([string]$Path) {
     }
 }
 
+function Assert-NoEnterpriseDeployment {
+    param([string]$ServiceName = "DefenseClawGateway")
+
+    # A per-user gateway must not compete with the managed service for the
+    # local hook listener. The service name is administrator controlled.
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($null -eq $service) { return }
+    $imagePath = ""
+    try {
+        $imagePath = [string](Get-ItemProperty `
+            -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$ServiceName" `
+            -Name ImagePath -ErrorAction Stop).ImagePath
+    } catch {
+        $imagePath = ""
+    }
+    if (-not [string]::IsNullOrWhiteSpace($imagePath) -and
+        $imagePath.IndexOf("\defenseclaw-gateway.exe", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return
+    }
+    Die ("An administrator-managed DefenseClaw enterprise deployment is installed on this computer " +
+        "(Windows service $ServiceName); the per-user DefenseClaw cannot be installed beside it. " +
+        "The enterprise service already protects every user's agents on this computer, and a " +
+        "per-user gateway would take the port its managed hooks use. Contact your administrator.")
+}
+
 function New-InstallDirectory([string]$Path) {
     # A fresh directory for the venv or install machinery (staging, the
     # rollback slot) that does not inherit the data dir's permissions.
@@ -1124,6 +1149,7 @@ Environment:
 # -- Main ---------------------------------------------------------------------
 
 function Invoke-Rollback {
+    Assert-NoEnterpriseDeployment
     Write-Step "Rolling back"
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Die "No previous install to roll back to ($Previous is missing)" }
@@ -1162,6 +1188,7 @@ function Invoke-Rollback {
 
 function Invoke-Install {
     if ($Help) { Show-Usage; return 0 }
+    Assert-NoEnterpriseDeployment
     foreach ($argument in $UnknownArguments) { Write-Warn "Ignoring unknown option: $argument" }
     $Connector = $Connector.Trim().ToLowerInvariant()
     if ($Connector -and $ConnectorChoices -notcontains $Connector) {
