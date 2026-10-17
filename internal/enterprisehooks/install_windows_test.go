@@ -471,7 +471,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 	windowsEnterpriseTargetImpersonation = func(_ *windows.SID, _ string, fn func() error) error {
 		return runWindowsTestThreadImpersonatedAsSelf(fn)
 	}
-	windowsClaudeHigherPolicyCheck = func() error { return nil }
+	windowsClaudeHigherPolicyCheck = func(connector.SetupOpts) error { return nil }
 	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
 	windowsManagedPolicyDirTrustCheck = func(path string) error {
 		return validateWindowsTestManagedPolicyProtection(path, targetSID, true)
@@ -2540,7 +2540,7 @@ func TestRejectWindowsClaudeRegistryPolicyWriteACEs(t *testing.T) {
 func TestInstallWindowsClaudeRejectsHigherPriorityAndDisabledPolicy(t *testing.T) {
 	t.Run("higher priority MDM", func(t *testing.T) {
 		fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
-		windowsClaudeHigherPolicyCheck = func() error { return errors.New("HKLM policy wins") }
+		windowsClaudeHigherPolicyCheck = func(connector.SetupOpts) error { return errors.New("HKLM policy wins") }
 		_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
 		if err == nil || !strings.Contains(err.Error(), "HKLM policy wins") {
 			t.Fatalf("Install error = %v", err)

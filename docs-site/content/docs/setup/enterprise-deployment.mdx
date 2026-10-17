@@ -630,8 +630,23 @@ WDAC or AppLocker is an optional defense-in-depth layer. Pass
 `--attest-agent-application-control`) only after it allows approved signed
 clients and blocks explicitly tested old and unsigned clients. Omitting the
 attestation does not block either connector's managed hooks. The current
-minimum Claude version is 2.1.152. An enabled Codex target is complete when its
-protected managed hook policy is installed and verified.
+minimum Claude version is 2.1.154, the first Claude hook contract. A
+`targets.yaml` row that an earlier release recorded at 2.1.152 or 2.1.153
+(often its placeholder for a user with no detected client) still loads, so
+Upgrade, Repair, Uninstall and the enumerator keep working. That one target
+fails enrollment until a `Repair -Mode` or `-Manifest` records 2.1.154 or newer
+for it, or the row is disabled. The DefenseClaw Claude policy is one
+machine-wide file rendered from the Claude hook contract of each enrolled row,
+so the `-Mode`/`-Connector` renderer records a user who has no Claude client
+yet at the minimum of the newest contract a detected client on the endpoint
+uses: 2.1.219 beside a client at 2.1.219 or newer (a pre-release or build
+suffix is ignored, as it is for contract selection), otherwise 2.1.154. Rows on
+different contracts, such as clients at 2.1.200 and 2.1.250 on one endpoint,
+still render different policies and leave the Claude effective-policy
+evidence stale after each enrollment, so keep an endpoint's Claude clients in
+one contract range. An enabled
+Codex target is complete when its protected managed hook policy is installed
+and verified.
 
 Install is intentionally only phase one. Even when the protected services,
 files, ACLs, and any optional application-control evidence are structurally
@@ -1340,6 +1355,37 @@ as a conflict, and install and verify fail until the file is changed or the
 opt-out is set. A managed file that sets `disableAllHooks: true` is always
 reported.
 
+Cursor has no managed-hooks-only setting. On managed Windows endpoints,
+DefenseClaw scans user, workspace, and plugin hooks before each `preToolUse`
+or `workspaceOpen` invocation and denies unapproved handlers. The scan covers
+Cursor and imported Claude-format files, plugin manifests, marketplace entries,
+and nested plugin folders. It denies if a hook source cannot be checked, if
+there are more than 32 workspace roots or 4096 plugin directories, or if a
+plugin folder link cannot be resolved. Hook files are reread for every
+invocation. The denial names the source and approval digest; the user message
+also shows the handler command, while the agent message omits it.
+
+An administrator can add a digest to
+`connector_hooks.cursor.approved_foreign_hooks`. The digest covers the handler
+registration, event, scope, and matcher. It does not cover the contents of a
+script that the command runs. Approve only absolute commands whose executable
+and script cannot be modified by standard users. Existing per-user DefenseClaw
+hook entries require the cleanup in #917 and #918 before enabling this guard
+on an enrolled profile.
+
+During a managed Cursor install or repair, the guardian removes only the
+exact per-user DefenseClaw registrations it recognizes in that target user's
+`.cursor/hooks.json`. It keeps a backup and logs the removals. It leaves other
+hooks and unrelated file content in place, and skips a file it cannot edit
+safely; the managed hook still denies any unsafe entry left behind. Uninstall
+does not restore these per-user registrations. The same install or repair also
+removes exact DefenseClaw per-user Claude Code hook handlers from that user's
+`.claude/settings.json`, preserving unrelated handlers and settings. It backs
+up the previous file as `settings.json.defenseclaw-backup` and leaves files it
+cannot safely edit unchanged with a warning. It does not edit
+`settings.local.json` or a folder set with `CLAUDE_CONFIG_DIR`. Uninstall does
+not restore those handlers.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as
@@ -1357,13 +1403,29 @@ policy under `C:\Program Files\ClaudeCode`, so no user or project environment
 can redirect this managed registration.
 
 DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
-policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
-a file policy superseded by `policyHelper`. It also refuses installation when
-an HKLM `Settings` policy has higher precedence. In those environments, merge
-the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
-local file installation cannot override it. Remotely delivered policy is an
-external management boundary and must likewise include the hook matrix at its
-authoritative source.
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or a
+file policy superseded by `policyHelper`. An HKLM `Settings` policy outranks the
+DefenseClaw drop-in. Enrollment accepts it when it sets
+`"managedSourcesBehavior": "merge"` (honored by Claude Code 2.1.242 and newer,
+which then becomes the approved-client floor) or already carries the
+DefenseClaw hook entries exactly (same matcher, timeout, `async` flag and
+arguments, one copy of each), which the installed CLI prints with `enterprise
+windows export-claude-policy --agent-version <x.y.z>`, where `<x.y.z>` is the
+`agent_version` recorded for the target (the version its enrollment refusal
+names); any other HKLM policy is refused with both fixes named, and the
+refusal names the export command for its target. Without `--agent-version` the
+export prints the oldest supported hook contract. A policy that registers a
+DefenseClaw hook outside the target's hook contract, or anywhere but in the
+exported entry, is refused either way: Claude Code runs one copy of a repeated
+hook whatever its timeout or `async` flag, so a changed copy could replace the
+exported one.
+Claude loads only an HKLM policy that carries the
+matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
+and while the lock is enforced no HKLM policy may set it to `false`; setting
+`claude_code.allow_unmanaged_hooks: true` waives both. Status reports
+`claude_policy_shadowed_by_hklm`, `claude_minimum_client_version`, and
+`claude_policy_hklm_merge_pending_targets` for this case. Remotely delivered policy is an external management
+boundary and must likewise include the hook matrix at its authoritative source.
 
 Claude managed-source precedence is server-managed, then HKLM/MDM, then the
 Program Files policy, then HKCU; the first authoritative source wins.

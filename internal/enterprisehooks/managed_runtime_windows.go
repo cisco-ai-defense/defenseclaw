@@ -40,6 +40,11 @@ type WindowsManagedHookRuntime struct {
 	GatewayServiceName string `json:"gateway_service_name"`
 	ScopedToken        string `json:"-"`
 	GenerationID       string `json:"generation_id"`
+	// ApprovedForeignHooks is the administrator allowlist for the managed
+	// hook's foreign-hook guard, read from protected machine state, as
+	// comma-separated canonical sha256 digests. A string keeps the runtime
+	// value comparable.
+	ApprovedForeignHooks string `json:"approved_foreign_hooks,omitempty"`
 }
 
 // String deliberately omits ScopedToken so diagnostic formatting cannot
@@ -132,6 +137,7 @@ func resolveWindowsCursorManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.ApprovedForeignHooks = strings.Join(target.approvedForeign, ",")
 	result.Registered = true
 	return result, nil
 }
