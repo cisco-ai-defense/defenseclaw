@@ -1439,15 +1439,97 @@ function Restore-ExternalConfig([string]$Slot) {
     if ($config) { Copy-Kept (Join-Path $Slot "config\$(Split-Path -Leaf $config)") (Split-Path -Parent $config) }
 }
 
+function Test-ConnectorRecoveryArtifactName([string]$Name) {
+    # Keep the reserved namespace opaque: a malformed or future receipt is
+    # evidence too, never an instruction for the installer to replay.
+    return $Name -like ".defenseclaw-cas-*" -or $Name -like ".tmp-cas-*"
+}
+
+function Save-FailedConnectorRecovery([string]$Failed) {
+    # The gateway can fail after changing an agent config outside DataDir.
+    # Its private CAS receipts are the ownership evidence for the retained
+    # external artifacts. They must outlive cleanup of a failed environment.
+    $data = Join-Path $Failed "data"
+    if (-not (Test-Path -LiteralPath $Failed)) { return }
+    $root = Get-Item -LiteralPath $Failed -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery cleanup through $Failed; the failed copy was kept"
+    }
+    if (-not (Test-Path -LiteralPath $data)) { return }
+    $source = Get-Item -LiteralPath $data -Force -ErrorAction Stop
+    if (-not $source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery cleanup through $data; the failed copy was kept"
+    }
+    $evidence = @(Get-ChildItem -LiteralPath $data -Force -ErrorAction Stop | Where-Object {
+        Test-ConnectorRecoveryArtifactName $_.Name
+    } | Sort-Object Name)
+    if (-not $evidence.Count) { return }
+    foreach ($entry in $evidence) {
+        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Connector recovery evidence is not a regular file: $($entry.FullName); the failed copy was kept"
+        }
+    }
+
+    $backups = Join-Path $DataDir "backups"
+    if (-not (Test-Path -LiteralPath $backups)) { New-Item -ItemType Directory -Path $backups -ErrorAction Stop | Out-Null }
+    $parent = Get-Item -LiteralPath $backups -Force -ErrorAction Stop
+    if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery archive through $backups; the failed copy was kept"
+    }
+    $keep = Join-Path $backups ("connector-recovery-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $keep -ErrorAction Stop | Out-Null
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $secure = New-Object Security.AccessControl.DirectorySecurity
+    $secure.SetOwner($user)
+    $secure.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $secure.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"))
+    }
+    Set-DirectoryAcl $keep $secure
+    $note = @"
+These opaque connector transaction files came from the failed install at $Failed.
+Their original stable state directory is $DataDir. They are not active recovery state.
+Keep the corresponding external .tmp-cas-* files beside the agent configuration.
+Do not copy these receipts into the restored data directory or replace agent settings by hand.
+Recovery must validate the recorded directory, file identities and metadata before changing anything.
+"@
+    [IO.File]::WriteAllText((Join-Path $keep "README.txt"), $note)
+    Write-Warn "Keeping failed connector transaction evidence in $keep; external agent settings may still need recovery"
+    try {
+        # Rename on the same volume: retain receipt file identities and ACLs.
+        foreach ($entry in $evidence) { Move-Path $entry.FullName (Join-Path $keep $entry.Name) }
+    } catch {
+        throw "Could not preserve all connector recovery evidence in $keep; keep that archive and $Failed. $($_.Exception.Message)"
+    }
+    Write-Info "The archived receipts are inactive; keep external .tmp-cas-* artifacts and do not restore receipts or agent settings by hand"
+}
+
+function Remove-FailedInstall([string]$Failed) {
+    # On any preservation failure, do not reach the destructive cleanup.
+    Save-FailedConnectorRecovery $Failed
+    Remove-Tree $Failed
+}
+
+function New-FailedInstallDirectory {
+    # A retained failed copy may have the same second-resolution timestamp.
+    # Never let the destructive initializer reuse it, even after archiving
+    # its evidence failed. Create-new also refuses a pre-existing leaf.
+    $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss") + "-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $failed -ErrorAction Stop | Out-Null
+    $acl = Get-Acl -LiteralPath $failed
+    $acl.SetAccessRuleProtection($true, $true)
+    Set-DirectoryAcl $failed $acl
+    return $failed
+}
+
 function Restore-Slot([string]$Slot) {
     # Put the install saved in $Slot back; what it replaces goes to .failed-<time>.
     # Only the latest failed install is kept: with a large audit database
     # each copy holds gigabytes, and an earlier one is not used again.
     foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)) {
-        Invoke-Quietly { Remove-Tree $old.FullName }
+        Invoke-Quietly { Remove-FailedInstall $old.FullName }
     }
-    $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss"))
-    New-InstallDirectory $failed
+    $failed = New-FailedInstallDirectory
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
     Invoke-Quietly { Restore-BinDir (Join-Path $Slot "bin") }
     foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
@@ -1455,10 +1537,22 @@ function Restore-Slot([string]$Slot) {
         Invoke-Quietly { if (Test-Path -LiteralPath (Join-Path $Slot $part[1])) { Move-Path (Join-Path $Slot $part[1]) $part[0] 60 } }
     }
     foreach ($entry in Get-DataEntries) {
-        Invoke-Quietly { try { Move-Path $entry.FullName (Join-Path $failed "data\$($entry.Name)") } catch { Remove-Tree $entry.FullName } }
+        if (Test-ConnectorRecoveryArtifactName $entry.Name) {
+            # A failed move must retain the live receipt and rollback slot,
+            # rather than delete the evidence of an external config change.
+            Move-Path $entry.FullName (Join-Path $failed "data\$($entry.Name)")
+        } else {
+            Invoke-Quietly { try { Move-Path $entry.FullName (Join-Path $failed "data\$($entry.Name)") } catch { Remove-Tree $entry.FullName } }
+        }
     }
     foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force)) {
-        Invoke-Quietly { Move-Path $entry.FullName (Join-Path $DataDir $entry.Name) }
+        if (Test-ConnectorRecoveryArtifactName $entry.Name) {
+            # Keep a prior receipt in the marked rollback slot if it cannot
+            # be restored; the slot must not then be silently removed.
+            Move-Path $entry.FullName (Join-Path $DataDir $entry.Name)
+        } else {
+            Invoke-Quietly { Move-Path $entry.FullName (Join-Path $DataDir $entry.Name) }
+        }
     }
     Invoke-Quietly { Restore-ExternalConfig $Slot }
     Invoke-Quietly { Remove-Tree $Slot }
@@ -1470,7 +1564,7 @@ function Clear-SetupDataDir([string]$Failed) {
     # folder before it starts and gives its child 5 seconds, so the failed
     # copy and uv's cache (about 28,000 files) kept it from starting after a
     # restore (GAP-1839). Setup cannot use either of them.
-    Invoke-Quietly { Remove-Tree $Failed }
+    Invoke-Quietly { Remove-FailedInstall $Failed }
     Invoke-Quietly { Remove-Tree (Join-Path $DataDir ".uv") }
 }
 
@@ -1486,17 +1580,21 @@ function Restore-Snapshot {
     } elseif (-not $PrevVersion) {
         # A first install has nothing to look back at, and the copy it kept
         # (about 2 GB) held a full disk full for every account (GAP-1883).
-        Invoke-Quietly { Remove-Tree $failed }
+        Invoke-Quietly { Remove-FailedInstall $failed }
     }
     Restart-Old
     if (-not $PrevVersion) { Write-KeptUvCache; return }
     if ($Setup) {
-        Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
+        if (Test-Path -LiteralPath $failed) {
+            Write-Warn "The failed install copy remains at $failed; keep it until connector recovery evidence is safely preserved"
+        } else {
+            Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
+        }
         return
     }
     $bytes = Get-TreeSize $failed
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
-    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
+    Write-Info "Your previous install and its data are back; keep this copy until any connector recovery is complete"
 }
 
 function Save-RolledBackData {
@@ -1584,7 +1682,7 @@ function Resume-InterruptedRun {
             $setupBack = $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))
             if ($setupBack) { Clear-SetupDataDir $failed }
             # Nothing was installed before, so the copy holds nothing to go back to.
-            if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }
+            if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }
             if ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {

@@ -165,9 +165,10 @@ func atomicTransformBoundStateFromOpen(
 		exists: true, data: data, info: info, digest: atomicTransformDigest(data),
 		size: int64(len(data)), protectionDigest: protection, identity: identity,
 		metadataDigest: metadata.digest, preservedMetadataDigest: metadata.preservedDigest,
-		stageOwnedMetadataDigest: metadata.stageOwnedDigest,
-		ownerGroupDigest:         metadata.ownerGroupDigest,
-		creationTime:             metadata.creationTime, lastWriteTime: metadata.lastWriteTime,
+		canonicalEAMetadataDigest: metadata.canonicalEADigest,
+		stageOwnedMetadataDigest:  metadata.stageOwnedDigest,
+		ownerGroupDigest:          metadata.ownerGroupDigest,
+		creationTime:              metadata.creationTime, lastWriteTime: metadata.lastWriteTime,
 		linkCount: linkCount,
 	}, nil
 }

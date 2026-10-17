@@ -414,6 +414,12 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		result.ExitCode = -1
 		return result, err
 	}
+	binary, err := resolveDefaultSkillScanner(s.Config.Binary, s.SecureClient)
+	if err != nil {
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
 	if s.Config.UseLLM {
 		if j, ok := s.judge(); ok {
 			result.JudgeModel = j.model
@@ -442,7 +448,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(scanPath, policy)...)
+	cmd := processutil.CommandContext(ctx, binary, s.commandArgs(scanPath, policy)...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer

@@ -224,6 +224,15 @@ check always fails; that does not mean the file was changed.
 Run the install command again. Reinstalling the same version rebuilds the
 program files and keeps your configuration, data, and the rollback copy.
 
+If an upgrade fails after updating an agent's settings, the installer preserves
+its connector recovery receipts in a private
+`%USERPROFILE%\.defenseclaw\backups\connector-recovery-<id>` folder and prints
+the location. Keep that folder and any temporary files beside the agent's
+settings until the failed update has been investigated. The archive belongs
+to the failed version: do not copy its receipts into the restored installation
+or delete the agent's temporary files to force a retry. Recovery must still
+verify the original file identities, content, and permissions.
+
 ## Uninstall and preserved state
 
 ```powershell

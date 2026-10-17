@@ -55,20 +55,21 @@ type atomicTransformResult struct {
 }
 
 type atomicFileSnapshot struct {
-	writePath                string
-	exists                   bool
-	data                     []byte
-	info                     os.FileInfo
-	identity                 string
-	parentIdentity           string
-	protectionDigest         string
-	metadataDigest           string
-	preservedMetadataDigest  string
-	stageOwnedMetadataDigest string
-	ownerGroupDigest         string
-	creationTime             uint64
-	lastWriteTime            uint64
-	linkCount                uint32
+	writePath                 string
+	exists                    bool
+	data                      []byte
+	info                      os.FileInfo
+	identity                  string
+	parentIdentity            string
+	protectionDigest          string
+	metadataDigest            string
+	preservedMetadataDigest   string
+	canonicalEAMetadataDigest string
+	stageOwnedMetadataDigest  string
+	ownerGroupDigest          string
+	creationTime              uint64
+	lastWriteTime             uint64
+	linkCount                 uint32
 }
 
 type atomicTransformIntent struct {
@@ -92,29 +93,31 @@ type atomicTransformIntent struct {
 }
 
 type atomicTransformArtifactState struct {
-	exists                   bool
-	data                     []byte
-	info                     os.FileInfo
-	digest                   string
-	size                     int64
-	protectionDigest         string
-	identity                 string
-	metadataDigest           string
-	preservedMetadataDigest  string
-	stageOwnedMetadataDigest string
-	ownerGroupDigest         string
-	creationTime             uint64
-	lastWriteTime            uint64
-	linkCount                uint32
+	exists                    bool
+	data                      []byte
+	info                      os.FileInfo
+	digest                    string
+	size                      int64
+	protectionDigest          string
+	identity                  string
+	metadataDigest            string
+	preservedMetadataDigest   string
+	canonicalEAMetadataDigest string
+	stageOwnedMetadataDigest  string
+	ownerGroupDigest          string
+	creationTime              uint64
+	lastWriteTime             uint64
+	linkCount                 uint32
 }
 
 type atomicTransformPlatformMetadata struct {
-	digest           string
-	preservedDigest  string
-	stageOwnedDigest string
-	ownerGroupDigest string
-	creationTime     uint64
-	lastWriteTime    uint64
+	digest            string
+	preservedDigest   string
+	canonicalEADigest string
+	stageOwnedDigest  string
+	ownerGroupDigest  string
+	creationTime      uint64
+	lastWriteTime     uint64
 }
 
 type atomicTransformLoadedIntent struct {
@@ -323,6 +326,7 @@ func readAtomicFileSnapshot(path string) (atomicFileSnapshot, error) {
 		snapshot.protectionDigest = protectionDigest
 		snapshot.metadataDigest = metadata.digest
 		snapshot.preservedMetadataDigest = metadata.preservedDigest
+		snapshot.canonicalEAMetadataDigest = metadata.canonicalEADigest
 		snapshot.stageOwnedMetadataDigest = metadata.stageOwnedDigest
 		snapshot.ownerGroupDigest = metadata.ownerGroupDigest
 		snapshot.creationTime = metadata.creationTime

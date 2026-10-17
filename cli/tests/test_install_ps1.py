@@ -278,7 +278,12 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
-    assert text.count('cmd /c rd /s /q `"') == 3
+    assert text.count('cmd /c rd /s /q `"') == 2
+    # A failed install can own unresolved external connector transactions;
+    # its troubleshooting copy must not be advertised as safe to delete.
+    failed = _ps1_function("Restore-Snapshot")
+    assert "keep this copy until any connector recovery is complete" in failed
+    assert "cmd /c rd /s /q" not in failed
     # The installer's own cleanup deletes through .NET first, which is also much
     # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
     body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
@@ -621,7 +626,7 @@ def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> No
     assert "$free -ge 300MB" in full and "then run the installer again" in full
     restore = _ps1_function("Restore-Snapshot")
     first = restore[restore.index("if (-not $PrevVersion) {") :]
-    assert first.index("Remove-Tree $failed") < first.index("return") < first.index("was kept in $failed")
+    assert first.index("Remove-FailedInstall $failed") < first.index("return") < first.index("was kept in $failed")
     assert 'if (-not $PrevVersion) { return "Nothing was left installed." }' in _ps1_function("Get-RestoredNote")
 
 
@@ -640,8 +645,8 @@ def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_d
     # GAP-1839: the failed 1.0 copy and the uv cache stayed in Setup's data
     # dir, and Setup's gateway, which walks it all before it starts, then
     # timed out on every start.
-    clear = _text()[_text().index("function Clear-SetupDataDir(") :][:600]
-    assert "Remove-Tree $Failed" in clear
+    clear = _ps1_function("Clear-SetupDataDir")
+    assert "Remove-FailedInstall $Failed" in clear
     assert 'Remove-Tree (Join-Path $DataDir ".uv")' in clear
     restore = _ps1_function("Restore-Snapshot")
     assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
@@ -833,7 +838,7 @@ def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> No
     assert first < resume.index("$failed = Restore-Slot $slot")
     assert "An earlier first install was interrupted; removing what it had copied" in resume
     assert resume.index("$failed = Restore-Slot $slot") < resume.index(
-        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
+        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }"
     )
     assert 'Write-Info "Nothing was left installed"' in resume
 
