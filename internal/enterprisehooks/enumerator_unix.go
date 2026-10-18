@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -1556,9 +1557,13 @@ func WriteUnixTargetsManifestAtomic(path string, m Manifest) (bool, error) {
 }
 
 // validateRootOwnedDirChain requires dir and every ancestor to be a real
-// directory owned by root and not group/other writable.
+// directory owned by root and not group/other writable. A group/other
+// writable ancestor inside the platform installer's tree (/opt/cisco belongs
+// to Cisco Secure Client and is 0775) is an advisory, as in every managed
+// trust walk (AIFW-34262); dir itself stays fatal.
 func validateRootOwnedDirChain(dir string) error {
-	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+	leaf := filepath.Clean(dir)
+	for current := leaf; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: inspect manifest directory %s: %w", current, err)
@@ -1567,7 +1572,11 @@ func validateRootOwnedDirChain(dir string) error {
 			return fmt.Errorf("enterprise hooks: manifest directory element %s is not a real directory", current)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)
+			advisory := current != leaf && managed.PlatformInstallerOwnedPath(current)
+			if err := managed.RelaxAncestorTrustVerdict(advisory, current, "hook guardian manifest",
+				fmt.Errorf("enterprise hooks: manifest directory element %s is group/other writable", current)); err != nil {
+				return err
+			}
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || (st.Uid != 0 && !unixManifestTestOwnerAllowed(st.Uid)) {
