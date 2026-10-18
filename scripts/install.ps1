@@ -71,6 +71,8 @@ try {
 } catch { }
 
 $DcVersion = "__DEFENSECLAW_VERSION__"
+# This installer checks active recovery before snapshots in both version directions.
+$DcVersionChangeGuard = 1
 $DefaultRepo = "cisco-ai-defense/defenseclaw"
 $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo }
 # DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
@@ -523,6 +525,15 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
     # `defenseclaw upgrade`, so the installer it runs removes it.
+    $installed = Get-InstalledVersion
+    $target = $ReleaseVersion.TrimStart("v")
+    $versionChange = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -ne [version]$installed
+    if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
+    $downgrade = $versionChange -and [version]$target -lt [version]$installed
+    $restartCurrent = $false
+    $childCode = $null
+    $restartFailed = $false
+    $restartCode = 0
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-upgrade-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
@@ -555,6 +566,20 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         if ($stamped.TrimStart("v") -ne $ReleaseVersion.TrimStart("v")) {
             Die "The installer served for $ReleaseVersion is release $(if ($stamped) { $stamped } else { 'unknown' }); refusing a mismatched release"
         }
+        # Trust this capability only in the verified, correctly stamped script.
+        # Unknown or duplicate declarations take the conservative legacy path.
+        $guard = @(Select-String -LiteralPath "$tmp\install.ps1" -Pattern '^\s*\$DcVersionChangeGuard\b')
+        $childGuardsVersionChanges = $guard.Count -eq 1 -and $guard[0].Line -ceq '$DcVersionChangeGuard = 1'
+        if ($versionChange -and ($downgrade -or -not $childGuardsVersionChanges)) {
+            # A verified newer child with the guard owns stopping and startup
+            # rollback. Older/unrecognized installers need this outer check.
+            Wait-VenvFree
+            $restartCurrent = [bool](Get-GatewayProcess)
+            if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
+            Stop-Watchdog
+            Assert-GatewayQuiescent "Version change to $target"
+            Assert-NoActiveConnectorRecovery "Version change to $target"
+        }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
         # output and prompts reach the user and only its exit code is returned.
@@ -564,10 +589,33 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             -ArgumentList @($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
         $null = $child.Handle
         $child.WaitForExit()
-        return $child.ExitCode
+        $childCode = $child.ExitCode
     } finally {
+        if ($restartCurrent) {
+            $restartIssue = ""
+            try {
+                if (-not (Get-GatewayProcess)) {
+                    $restartCode = Start-Gateway
+                    if ($restartCode -notin @(0, 3)) { $restartIssue = "exit $restartCode" }
+                }
+            } catch { $restartIssue = $_.Exception.Message }
+            if ($restartIssue) {
+                $restartFailed = $true
+                Write-Warn "The installed gateway could not restart ($restartIssue)"
+                Write-Info "Retry the installed version with 'defenseclaw-gateway start' and check its log."
+                if ($null -ne $childCode) {
+                    Write-Info "To undo a completed version change, run 'defenseclaw rollback', then 'defenseclaw-gateway start'."
+                }
+            }
+        }
         Invoke-Quietly { Remove-Tree $tmp }
     }
+    # A wrapped child saw a stopped gateway, so it may have committed without
+    # checking startup. Keep its failure/attention code, but never report its
+    # success when the gateway that was running could not be brought back.
+    if ($restartFailed -and $childCode -eq 0) { return 1 }
+    if ($childCode -eq 0 -and $restartCode -eq 3) { return 3 }
+    return $childCode
 }
 
 function Initialize-Native {
@@ -682,6 +730,30 @@ function Get-InstalledVersion {
     return ""
 }
 
+function Assert-NoActiveConnectorRecovery([string]$Operation, [string]$Root = $DataDir) {
+    # Inspect names only: phase and GC records (including malformed names)
+    # still need the current protocol. Archives and publication temps are not
+    # active receipts; the permanent protocol lock is not a receipt either.
+    try {
+        $ancestor = New-Object IO.DirectoryInfo ([IO.Path]::GetFullPath($Root))
+        while ($ancestor) {
+            $directory = Get-Item -LiteralPath $ancestor.FullName -Force -ErrorAction Stop
+            if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "not a regular directory: $($ancestor.FullName)"
+            }
+            $ancestor = $ancestor.Parent
+        }
+        $pending = @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction Stop |
+            Where-Object { $_.Name -like ".defenseclaw-cas-v2-*" })
+    } catch {
+        throw "${Operation} refused: cannot inspect connector recovery in $Root ($($_.Exception.Message))"
+    }
+    if ($pending.Count) {
+        throw ("${Operation} refused: active connector recovery remains in $Root. " +
+            "Resolve it with the current DefenseClaw version before retrying; do not remove or replay its receipts.")
+    }
+}
+
 function Get-GatewayProcess {
     # gateway.pid is JSON ({"pid": N, "executable": ...}); accept a bare number too.
     $file = Join-Path $DataDir "gateway.pid"
@@ -741,6 +813,13 @@ function Stop-Watchdog {
         Start-Sleep -Seconds 1
     }
     Write-Warn "The previous watchdog is still running; stop it with: defenseclaw-gateway watchdog stop"
+}
+
+function Assert-GatewayQuiescent([string]$Operation) {
+    $image = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if ((Get-GatewayProcess) -or @(Get-ProcessesUnder @($image)).Count) {
+        throw "${Operation} refused: the current gateway or watchdog is still running; stop it before retrying"
+    }
 }
 
 # A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
@@ -1439,25 +1518,137 @@ function Restore-ExternalConfig([string]$Slot) {
     if ($config) { Copy-Kept (Join-Path $Slot "config\$(Split-Path -Leaf $config)") (Split-Path -Parent $config) }
 }
 
+function Test-ConnectorRecoveryArtifactName([string]$Name) {
+    # Keep the reserved namespace opaque: a malformed or future receipt is
+    # evidence too, never an instruction for the installer to replay.
+    return $Name -like ".defenseclaw-cas-*" -or $Name -like ".tmp-cas-*"
+}
+
+function Save-FailedConnectorRecovery([string]$Failed) {
+    # The gateway can fail after changing an agent config outside DataDir.
+    # Its private CAS receipts are the ownership evidence for the retained
+    # external artifacts. They must outlive cleanup of a failed environment.
+    $data = Join-Path $Failed "data"
+    if (-not (Test-Path -LiteralPath $Failed)) { return }
+    $root = Get-Item -LiteralPath $Failed -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery cleanup through $Failed; the failed copy was kept"
+    }
+    if (-not (Test-Path -LiteralPath $data)) { return }
+    $source = Get-Item -LiteralPath $data -Force -ErrorAction Stop
+    if (-not $source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery cleanup through $data; the failed copy was kept"
+    }
+    $evidence = @(Get-ChildItem -LiteralPath $data -Force -ErrorAction Stop | Where-Object {
+        Test-ConnectorRecoveryArtifactName $_.Name
+    } | Sort-Object Name)
+    if (-not $evidence.Count) { return }
+    foreach ($entry in $evidence) {
+        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Connector recovery evidence is not a regular file: $($entry.FullName); the failed copy was kept"
+        }
+    }
+
+    $backups = Join-Path $DataDir "backups"
+    if (-not (Test-Path -LiteralPath $backups)) { New-Item -ItemType Directory -Path $backups -ErrorAction Stop | Out-Null }
+    $parent = Get-Item -LiteralPath $backups -Force -ErrorAction Stop
+    if (-not $parent.PSIsContainer -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing connector recovery archive through $backups; the failed copy was kept"
+    }
+    $keep = Join-Path $backups ("connector-recovery-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $keep -ErrorAction Stop | Out-Null
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $secure = New-Object Security.AccessControl.DirectorySecurity
+    $secure.SetOwner($user)
+    $secure.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $secure.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"))
+    }
+    Set-DirectoryAcl $keep $secure
+    $note = @"
+These opaque connector transaction files came from the failed install at $Failed.
+Their original stable state directory is $DataDir. They are not active recovery state.
+Keep the corresponding external .tmp-cas-* files beside the agent configuration.
+Do not copy these receipts into the restored data directory or replace agent settings by hand.
+Recovery must validate the recorded directory, file identities and metadata before changing anything.
+"@
+    [IO.File]::WriteAllText((Join-Path $keep "README.txt"), $note)
+    Write-Warn "Keeping failed connector transaction evidence in $keep; external agent settings may still need recovery"
+    try {
+        # Rename on the same volume: retain receipt file identities and ACLs.
+        foreach ($entry in $evidence) { Move-Path $entry.FullName (Join-Path $keep $entry.Name) }
+    } catch {
+        throw "Could not preserve all connector recovery evidence in $keep; keep that archive and $Failed. $($_.Exception.Message)"
+    }
+    Write-Info "The archived receipts are inactive; keep external .tmp-cas-* artifacts and do not restore receipts or agent settings by hand"
+}
+
+function Remove-FailedInstall([string]$Failed) {
+    # On any preservation failure, do not reach the destructive cleanup.
+    Save-FailedConnectorRecovery $Failed
+    Remove-Tree $Failed
+}
+
+function New-FailedInstallDirectory {
+    # A retained failed copy may have the same second-resolution timestamp.
+    # Never let the destructive initializer reuse it, even after archiving
+    # its evidence failed. Create-new also refuses a pre-existing leaf.
+    $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss") + "-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $failed -ErrorAction Stop | Out-Null
+    $acl = Get-Acl -LiteralPath $failed
+    $acl.SetAccessRuleProtection($true, $true)
+    Set-DirectoryAcl $failed $acl
+    return $failed
+}
+
+function Move-RestoreConnectorRecovery([string]$Slot, [string]$Failed) {
+    # Receipt moves can refuse. Finish both directions before changing any
+    # live runtime or ordinary data, and undo completed renames on refusal so
+    # retrying the marked snapshot does not exchange the install twice.
+    $moved = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($entry in @(Get-DataEntries | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
+            $to = Join-Path $Failed "data\$($entry.Name)"
+            Move-Path $entry.FullName $to
+            $moved.Add(@{ From = $entry.FullName; To = $to })
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force | Where-Object { Test-ConnectorRecoveryArtifactName $_.Name })) {
+            $to = Join-Path $DataDir $entry.Name
+            Move-Path $entry.FullName $to
+            $moved.Add(@{ From = $entry.FullName; To = $to })
+        }
+    } catch {
+        $failure = $_.Exception.Message
+        $retained = @()
+        for ($index = $moved.Count - 1; $index -ge 0; $index--) {
+            $entry = $moved[$index]
+            try { Move-Path $entry.To $entry.From } catch { $retained += $entry.To }
+        }
+        if ($retained.Count) {
+            throw "$failure; connector receipt moves could not all be undone; keep $Slot and $Failed (retained: $($retained -join ', '))"
+        }
+        throw $failure
+    }
+}
+
 function Restore-Slot([string]$Slot) {
     # Put the install saved in $Slot back; what it replaces goes to .failed-<time>.
-    # Only the latest failed install is kept: with a large audit database
-    # each copy holds gigabytes, and an earlier one is not used again.
-    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)) {
-        Invoke-Quietly { Remove-Tree $old.FullName }
-    }
-    $failed = Join-Path $DataDir (".failed-" + (Get-Date -Format "yyyyMMddTHHmmss"))
-    New-InstallDirectory $failed
+    $olderFailed = @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction SilentlyContinue)
+    $failed = New-FailedInstallDirectory
     New-Item -ItemType Directory -Path (Join-Path $failed "data") | Out-Null
+    Move-RestoreConnectorRecovery $Slot $failed
+    # Only the latest failed install is kept. Do not prune an earlier copy
+    # until the strict receipt phase succeeds; archive its evidence first.
+    foreach ($old in $olderFailed) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
     Invoke-Quietly { Restore-BinDir (Join-Path $Slot "bin") }
     foreach ($part in @(@($Venv, "venv"), @($InstallerDir, "installer"))) {
         Invoke-Quietly { if (Test-Path -LiteralPath $part[0]) { Move-Path $part[0] (Join-Path $failed $part[1]) 60 } }
         Invoke-Quietly { if (Test-Path -LiteralPath (Join-Path $Slot $part[1])) { Move-Path (Join-Path $Slot $part[1]) $part[0] 60 } }
     }
-    foreach ($entry in Get-DataEntries) {
+    foreach ($entry in @(Get-DataEntries | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
         Invoke-Quietly { try { Move-Path $entry.FullName (Join-Path $failed "data\$($entry.Name)") } catch { Remove-Tree $entry.FullName } }
     }
-    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force)) {
+    foreach ($entry in @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
         Invoke-Quietly { Move-Path $entry.FullName (Join-Path $DataDir $entry.Name) }
     }
     Invoke-Quietly { Restore-ExternalConfig $Slot }
@@ -1470,7 +1661,7 @@ function Clear-SetupDataDir([string]$Failed) {
     # folder before it starts and gives its child 5 seconds, so the failed
     # copy and uv's cache (about 28,000 files) kept it from starting after a
     # restore (GAP-1839). Setup cannot use either of them.
-    Invoke-Quietly { Remove-Tree $Failed }
+    Invoke-Quietly { Remove-FailedInstall $Failed }
     Invoke-Quietly { Remove-Tree (Join-Path $DataDir ".uv") }
 }
 
@@ -1486,17 +1677,21 @@ function Restore-Snapshot {
     } elseif (-not $PrevVersion) {
         # A first install has nothing to look back at, and the copy it kept
         # (about 2 GB) held a full disk full for every account (GAP-1883).
-        Invoke-Quietly { Remove-Tree $failed }
+        Invoke-Quietly { Remove-FailedInstall $failed }
     }
     Restart-Old
     if (-not $PrevVersion) { Write-KeptUvCache; return }
     if ($Setup) {
-        Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
+        if (Test-Path -LiteralPath $failed) {
+            Write-Warn "The failed install copy remains at $failed; keep it until connector recovery evidence is safely preserved"
+        } else {
+            Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
+        }
         return
     }
     $bytes = Get-TreeSize $failed
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
-    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
+    Write-Info "Your previous install and its data are back; keep this copy until any connector recovery is complete"
 }
 
 function Save-RolledBackData {
@@ -1584,7 +1779,7 @@ function Resume-InterruptedRun {
             $setupBack = $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))
             if ($setupBack) { Clear-SetupDataDir $failed }
             # Nothing was installed before, so the copy holds nothing to go back to.
-            if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }
+            if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-FailedInstall $failed } }
             if ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
@@ -1813,19 +2008,53 @@ Environment:
 
 # -- Main ---------------------------------------------------------------------
 
+function Test-HookRollbackRestoreAvailable {
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    # A missing reader cannot convert anything; keep that existing repair path.
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return $false }
+    $global:LASTEXITCODE = $null
+    $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
+    if ($global:LASTEXITCODE -ne 0 -or $help -notmatch '(?m)^[ \t]+--restore(?:[ \t]|$)') {
+        throw ("The current gateway cannot safely restore converted rollback hooks. " +
+            "Repair this DefenseClaw version first, then retry rollback; nothing was changed")
+    }
+    return $true
+}
+
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     # A hook entry this install wrote in a shape the older release does not
     # recognise (the per-user Claude Code cmd.exe launcher guard, GAP-1284)
     # outlived that release's uninstall. This install's gateway rewrites those
     # entries in the shape every earlier release removes; rolling forward runs
-    # setup, which writes the current shape again. A failure does not stop the
-    # rollback, but says what may be left behind.
+    # setup, which writes the current shape again. A failure warns; pending
+    # connector recovery below prevents the version swap.
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway)) { return }
     if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
         Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
+    }
+}
+
+function Restore-HooksAfterAbortedRollback {
+    # Only the current reader may recover a published conversion and restore
+    # its exact owned hooks. A saved settings copy is not overwrite authority.
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $failure = ""
+    try {
+        if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+            throw "the current gateway executable is unavailable"
+        }
+        # A failed native launch must not inherit a previous command's success.
+        $global:LASTEXITCODE = $null
+        $restored = Invoke-Native $gateway @("connector", "prepare-rollback", "--restore", "--data-dir", $DataDir)
+        if ($null -eq $restored -or $restored -ne 0) { throw "the current reader did not verify hook restoration" }
+    } catch { $failure = $_.Exception.Message }
+    if ($failure) {
+        Write-Warn "Current hook protection is unverified after the aborted rollback ($failure)"
+        Write-Info "Keep the connector recovery receipts and repair with the current DefenseClaw release before continuing agent tool calls."
+        Write-Info "Retry the current reader: & `"$gateway`" connector prepare-rollback --restore --data-dir `"$DataDir`""
     }
 }
 
@@ -1846,7 +2075,7 @@ function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
     }
 }
 
-function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
+function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined, [bool]$RestoreHooks = $false) {
     # Put back the install the rollback replaced, and return 1 (GAP-1388): a
     # restored 0.x release whose gateway is not running leaves agents
     # unguarded, and it has no rollback command to come back with.
@@ -1862,6 +2091,7 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
         }
         return 1
     }
+    if ($RestoreHooks) { Restore-HooksAfterAbortedRollback }
     # previous\ is again the install this rollback started from, as it was.
     foreach ($marker in @("ROLLED_BACK", "START_AFTER")) { Remove-Item -LiteralPath (Join-Path $Previous $marker) -Force -ErrorAction SilentlyContinue }
     $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
@@ -1890,7 +2120,7 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
         }
     }
     if ((Start-Gateway) -in @(0, 3)) {
-        Write-Ok "DefenseClaw $forward is back, with its gateway and agent hooks"
+        Write-Ok "DefenseClaw $forward is back, with its gateway"
     } else {
         Write-Warn "DefenseClaw $forward is back, but its gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
@@ -1919,9 +2149,15 @@ function Invoke-Rollback {
         Write-Step "Rolling back to DefenseClaw $backTo"
         $question = "Replace DefenseClaw $currentLabel with the previous install ($backTo)?"
     }
+    Assert-NoActiveConnectorRecovery "Rollback to $backTo"
+    if (-not $rollForward) {
+        Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+    }
     if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
     }
+    $canConvertHooks = $false
+    if (-not $rollForward) { $canConvertHooks = Test-HookRollbackRestoreAvailable }
     Wait-VenvFree
     # GAP-1388: check the saved data before anything of this install changes.
     $toLegacy = [version]$backTo -lt [version]"1.0.0"
@@ -1930,10 +2166,35 @@ function Invoke-Rollback {
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
-    if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
+    $conversionAttempted = $false
+    try {
+        Stop-Watchdog
+        Assert-GatewayQuiescent "Rollback to $backTo"
+        Assert-NoActiveConnectorRecovery "Rollback to $backTo"
+        if (-not $rollForward) {
+            Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+        }
+        if ($canConvertHooks) {
+            $conversionAttempted = $true
+            Convert-HooksForRollback $currentLabel $backTo
+        }
+        # Conversion can itself leave recovery work even when it only warns.
+        if (-not $rollForward) {
+            Assert-NoActiveConnectorRecovery "Rollback to $backTo"
+            Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+        }
+    } catch {
+        $abort = $_
+        if ($conversionAttempted) { Restore-HooksAfterAbortedRollback }
+        if ($wasRunning) {
+            try { [void](Start-Gateway) } catch { Write-Warn "The current gateway could not restart: $($_.Exception.Message)" }
+        }
+        throw $abort
+    }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
     if ($swapped -ne 0) {
         # 1: the swap undid itself, so this install is back and may run again.
+        if ($swapped -eq 1 -and $conversionAttempted) { Restore-HooksAfterAbortedRollback }
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
@@ -1946,12 +2207,12 @@ function Invoke-Rollback {
     if ($auditDamaged) {
         try { $quarantined = Move-DamagedAuditStore $backTo } catch {
             $why = "The damaged audit store of DefenseClaw $backTo could not be moved aside ($($_.Exception.Message))"
-            return Undo-Rollback $why $current $backTo $savedWasRunning ""
+            return Undo-Rollback $why $current $backTo $savedWasRunning "" $conversionAttempted
         }
     }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
         # A 0.x release has no rollback command: never leave it down.
-        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined }
+        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined $conversionAttempted }
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }
@@ -2109,6 +2370,16 @@ function Invoke-Install {
             return Invoke-ReleaseInstaller $target $Forward
         }
     }
+    if ($LocalDir -and $TargetVersion -and (Test-Version $Ver) -and [version]$TargetVersion -lt [version]$Ver -and -not $Rollback) {
+        # A saved current controller also owns local downgrades. Select only
+        # the explicitly requested wheel; all assets and runtime versions are
+        # verified below before this controller can replace anything live.
+        $targetWheel = Join-Path $LocalDir "defenseclaw-$TargetVersion-py3-none-any.whl"
+        if (-not (Test-Path -LiteralPath $targetWheel -PathType Leaf)) {
+            Die "-Local $LocalDir has no wheel for the requested DefenseClaw $TargetVersion"
+        }
+        $Ver = $TargetVersion
+    }
     if ($TargetVersion -and $TargetVersion -ne $Ver -and -not $Rollback) {
         if ($LocalDir) { Die "-Local $LocalDir holds $Ver, not $TargetVersion" }
         return Invoke-ReleaseInstaller $TargetVersion $Forward
@@ -2161,6 +2432,8 @@ function Invoke-Install {
     } elseif (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw.cmd")) {
         Write-Warn "Found a broken DefenseClaw install ($BinDir\defenseclaw.cmd without its venv); repairing it"
     }
+    $versionChange = (Test-Version $PrevVersion) -and [version]$Ver -ne [version]$PrevVersion
+    if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $Ver" }
 
     # Before anything is created (the uv folder, uv itself), so a refusal
     # really changes nothing (GAP-2614).
@@ -2285,6 +2558,15 @@ function Invoke-Install {
         }
     }
     Stop-Watchdog
+    if ($versionChange) {
+        try {
+            Assert-GatewayQuiescent "Version change to $Ver"
+            Assert-NoActiveConnectorRecovery "Version change to $Ver"
+        } catch {
+            Restart-Old
+            throw
+        }
+    }
     if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }

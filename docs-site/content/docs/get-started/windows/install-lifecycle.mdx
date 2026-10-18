@@ -224,6 +224,38 @@ check always fails; that does not mean the file was changed.
 Run the install command again. Reinstalling the same version rebuilds the
 program files and keeps your configuration, data, and the rollback copy.
 
+If an upgrade fails after updating an agent's settings, the installer preserves
+its connector recovery receipts in a private
+`%USERPROFILE%\.defenseclaw\backups\connector-recovery-<id>` folder and prints
+the location. Keep that folder and any temporary files beside the agent's
+settings until the failed update has been investigated. The archive belongs
+to the failed version: do not copy its receipts into the restored installation
+or delete the agent's temporary files to force a retry. Recovery must still
+verify the original file identities, content, and permissions.
+
+Before capturing rollback data or switching versions, an upgrade, downgrade,
+or rollback refuses active connector transactions in the current data.
+Rollback to an older version also checks its saved data. Complete recovery
+with the current version before retrying; do not delete receipts to force a
+version change. Same-version repair remains available. Rolling forward to a
+saved newer version can restore that version's own recovery records.
+Windows CLI downgrades use the current installation's saved installer for
+these checks. If that installer is missing or unsafe, repair the current
+installation first. Rollback also requires the current gateway to support
+verified hook restoration before converting hooks for an older release.
+
+If rollback stops after converting agent hooks for the older version, the
+installer attempts to restore the current hook form through verified recovery,
+including when the gateway was already stopped or the older installation failed
+and the current installation was restored. It restores the hooks before restarting
+the current gateway. If it cannot verify or restore the settings, it retains the
+recovery evidence and reports that hook protection needs repair before retrying.
+
+An installer handoff that cannot restart a previously running gateway reports
+failure and prints recovery instructions. If the version change has already
+completed, the previous install remains available through the printed rollback
+and start commands.
+
 ## Uninstall and preserved state
 
 ```powershell

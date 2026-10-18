@@ -185,6 +185,35 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 	if err != nil {
 		return 0, fmt.Errorf("read Claude Code settings %s: %w", settingsPath, err)
 	}
+	convert := claudeCodeRollbackConversion(opts, settingsPath)
+	if _, changed, err := convert(data); err != nil || changed == 0 {
+		return 0, err
+	}
+	converted := 0
+	err = withFileLock(settingsPath, func() error {
+		return transformClaudeCodeRollback(settingsPath, opts,
+			func(current []byte, exists bool) (atomicTransformResult, error) {
+				if !exists {
+					return atomicTransformResult{Remove: true}, nil
+				}
+				out, changed, err := convert(current)
+				if err != nil || changed == 0 {
+					return atomicTransformResult{Data: current}, err
+				}
+				if err := writeClaudeCodeRollbackBackup(opts.DataDir, current); err != nil {
+					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
+				}
+				converted = changed
+				return atomicTransformResult{Data: out}, nil
+			})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
+	}
+	return converted, nil
+}
+
+func claudeCodeRollbackConversion(opts SetupOpts, settingsPath string) func([]byte) ([]byte, int, error) {
 	launcher := strings.TrimSpace(opts.HookExecutable)
 	if launcher == "" {
 		launcher = defenseclawHookBinary()
@@ -193,7 +222,7 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 		return pathidentity.Same(path, launcher) || isDefenseClawHookExecutable(path)
 	}
 	script := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-	convert := func(data []byte) ([]byte, int, error) {
+	return func(data []byte) ([]byte, int, error) {
 		if len(bytes.TrimSpace(data)) == 0 {
 			return nil, 0, nil
 		}
@@ -208,35 +237,6 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 		out, err := json.MarshalIndent(settings, "", "  ")
 		return out, changed, err
 	}
-	if _, changed, err := convert(data); err != nil || changed == 0 {
-		return 0, err
-	}
-	converted := 0
-	err = withFileLock(settingsPath, func() error {
-		return atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600,
-			func(current []byte, exists bool) (atomicTransformResult, error) {
-				if !exists {
-					return atomicTransformResult{Remove: true}, nil
-				}
-				out, changed, err := convert(current)
-				if err != nil || changed == 0 {
-					return atomicTransformResult{Data: current}, err
-				}
-				backupDir := filepath.Join(opts.DataDir, "backups")
-				if err := os.MkdirAll(backupDir, 0o700); err != nil {
-					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
-				}
-				if err := atomicWriteFile(filepath.Join(backupDir, claudeCodeRollbackBackupName), current, 0o600); err != nil {
-					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
-				}
-				converted = changed
-				return atomicTransformResult{Data: out}, nil
-			})
-	})
-	if err != nil {
-		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
-	}
-	return converted, nil
 }
 
 // claudeCodeHooksInEarlierReleaseForm rewrites in place every handler under

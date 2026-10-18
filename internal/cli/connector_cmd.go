@@ -71,6 +71,7 @@ var (
 	connectorFlagDataDir              string
 	connectorFlagConfigHome           string
 	connectorFlagHookExe              string
+	connectorRollbackRestore          bool
 	connectorVerifySetupParent        string
 	connectorVerifySetupStartIdentity string
 	connectorVerifyCleanupRecord      string
@@ -213,6 +214,8 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 }
 
 func init() {
+	connectorPrepareRollbackCmd.Flags().BoolVar(&connectorRollbackRestore, "restore", false,
+		"Restore authenticated current-release hooks after an aborted rollback")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -1103,6 +1106,19 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 	failed := map[string]string{}
 	for _, name := range names {
 		conn, _ := reg.Get(name)
+		if connectorRollbackRestore {
+			restorer, ok := conn.(connector.HookRollbackRestorer)
+			if !ok {
+				continue
+			}
+			count, err := restorer.RestoreHooksAfterRollback(opts)
+			if err != nil {
+				failed[name] = err.Error()
+			} else if count > 0 {
+				converted[name] = count
+			}
+			continue
+		}
 		converter, ok := conn.(connector.HookRollbackConverter)
 		if !ok {
 			continue
@@ -1123,12 +1139,20 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			"converted": converted,
 			"failed":    failed,
 		}
+		if connectorRollbackRestore {
+			payload["restored"] = converted
+			delete(payload, "converted")
+		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
 		}
 	} else {
 		for _, name := range names {
 			if count := converted[name]; count > 0 {
+				if connectorRollbackRestore {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: restored %d authenticated current-release hook entries\n", name, count)
+					continue
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: rewrote %d hook entries in the form earlier releases remove\n",
 					Style(glyph("✓", "OK"), "fg=green", "bold"), name, count)
 			}
@@ -1143,6 +1167,10 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if _, ok := failed[name]; ok {
 				failedNames = append(failedNames, name)
 			}
+		}
+		if connectorRollbackRestore {
+			return fmt.Errorf("connector prepare-rollback --restore: protection could not be verified or restored for %s; recovery evidence retained",
+				strings.Join(failedNames, ", "))
 		}
 		return fmt.Errorf("connector prepare-rollback: could not rewrite the hook entries of %s",
 			strings.Join(failedNames, ", "))
