@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // The Secure Client guardian publishes the GitHub Copilot drop-in only while
@@ -51,6 +53,9 @@ func TestPublishWindowsSecureClientCopilot(t *testing.T) {
 	if err := os.WriteFile(admin, []byte(`{"version": 1, "hooks": {}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// An administrator deploys it: Administrators own it, as on a managed
+	// host (a file the test account owns is moved aside as untrusted).
+	ownAs(t, admin, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
 
 	if _, err := PublishWindowsSecureClientCopilot(opts, false); err != nil {
 		t.Fatal(err)
