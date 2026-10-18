@@ -52,7 +52,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
+const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -606,14 +606,20 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{end}}    const out = data && data.hook_output;
+{{else}}{{if and .Managed (not .SecureClient)}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
+    }
+{{end}}{{end}}    const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
 {{if .Sandbox}}    if (data.action === "block") {
       return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
+{{else}}{{if and .Managed (not .SecureClient)}}    if (data.action === "block") {
+      return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
+    }
+{{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.

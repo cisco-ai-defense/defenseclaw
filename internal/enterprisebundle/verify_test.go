@@ -112,7 +112,7 @@ func (f *fixture) signed(t *testing.T, raw []byte) *enterprisebundle.Bundle {
 func (f *fixture) input(t *testing.T, b *enterprisebundle.Bundle, a *enterprisebundle.Anchors) enterprisebundle.VerifyInput {
 	return enterprisebundle.VerifyInput{
 		Bundle: b, Anchors: a, Platform: enterprisebundle.PlatformLinux, Now: verifyAt,
-		ProductVersion: "1.0.2", HostPlatform: runtime.GOOS, Digester: digester,
+		ProductVersion: "1.0.2", Digester: digester,
 		Stage: func(b *enterprisebundle.Bundle) (string, error) {
 			root := t.TempDir()
 			for name, data := range b.Files {
@@ -310,6 +310,61 @@ func TestVerifyTamperMatrix(t *testing.T) {
 	res, err = enterprisebundle.Verify(ctx, in)
 	if err != nil || res.DigestVerified || len(res.Warnings) == 0 || res.Warnings[0].Code != enterprisebundle.WarnDigestUnverifiable {
 		t.Fatalf("other product version: %+v %v", res, err)
+	}
+}
+
+// GAP-0113: a signer that ran this product version computes the device's
+// digest on any OS, so every signer and device platform pair compares the
+// signed digest. An equal digest verifies; a device that computes another
+// digest refuses the validly signed bundle with digest_mismatch and names the
+// signed component that differs, the compiled-in builtin component too. Only
+// another signer product version leaves the digest unverifiable.
+func TestVerifyComparesSignedDigestOnEverySignerPlatform(t *testing.T) {
+	const signed = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const device = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	reporting := func(digest string, components map[string]string) enterprisebundle.PolicyDigester {
+		return func(ctx context.Context, _ *config.Config, _ []byte, _, _ string) (string, error) {
+			enterprisebundle.ReportPolicyComponents(ctx, components)
+			return digest, nil
+		}
+	}
+	for _, signer := range enterprisebundle.Platforms {
+		for _, target := range enterprisebundle.Platforms {
+			t.Run(signer+"-signs-"+target, func(t *testing.T) {
+				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+					in.Platforms = []string{target}
+					in.HostPlatform = signer
+					in.Digester = reporting(signed, map[string]string{"builtin": signed, "config": signed})
+				})
+				in := f.input(t, f.bundle, anchors(t, "acme", []string{"eng"}, 0, activeKey("k1", f.key.Public())))
+				in.Platform = target
+				in.Digester = reporting(signed, map[string]string{"builtin": signed, "config": signed})
+				if res, err := enterprisebundle.Verify(context.Background(), in); err != nil || !res.DigestVerified || res.DigestUnverifiable {
+					t.Fatalf("equal digest = %+v, %v", res, err)
+				}
+				for component, local := range map[string]map[string]string{
+					"config":  {"builtin": signed, "config": device},
+					"builtin": {"builtin": device, "config": signed},
+				} {
+					in.Digester = reporting(device, local)
+					res, err := enterprisebundle.Verify(context.Background(), in)
+					if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDigestMismatch || res.DigestVerified || res.DigestUnverifiable ||
+						!strings.Contains(err.Error(), "component "+component+" differs") ||
+						!strings.Contains(err.Error(), "the signer computed the digest on "+signer) {
+						t.Fatalf("%s differs: %+v, %v", component, res, err)
+					}
+					if (component == "builtin") != strings.Contains(err.Error(), "sign with the build the devices run") {
+						t.Fatalf("%s differs: builtin hint in %v", component, err)
+					}
+				}
+				in.ProductVersion = "1.0.3"
+				res, err := enterprisebundle.Verify(context.Background(), in)
+				if err != nil || res.DigestVerified || !res.DigestUnverifiable || len(res.Warnings) == 0 ||
+					res.Warnings[0].Code != enterprisebundle.WarnDigestUnverifiable || !strings.Contains(res.Warnings[0].Message, "product version 1.0.2") {
+					t.Fatalf("other product version = %+v, %v", res, err)
+				}
+			})
+		}
 	}
 }
 

@@ -249,6 +249,7 @@ function Invoke-DefenseClawNative {
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
@@ -259,10 +260,29 @@ function Invoke-DefenseClawNative {
     }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        # End the CLI and its PowerShell child before reporting the timeout.
+        # Process.Kill() alone leaves the child holding the lifecycle lock.
+        try {
+            $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = "/PID $($process.Id) /T /F"
+            $killInfo.UseShellExecute = $false
+            $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true
+            $killInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killInfo)
+            if (-not $killer.WaitForExit(10000)) { $killer.Kill() }
+            $killer.Dispose()
+        } catch { $null = $_ }
         try { $process.Kill() } catch { $null = $_ }
+        [void]$process.WaitForExit(5000)
         throw "native_timeout: $FilePath did not finish within $TimeoutSeconds seconds"
     }
-    $process.WaitForExit()
+    $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+        throw "native_timeout: $FilePath output did not close within $TimeoutSeconds seconds"
+    }
     return New-Object -TypeName PSObject -Property @{
         ExitCode = $process.ExitCode; StdOut = $stdout.Result; StdErr = $stderr.Result
     }
@@ -604,7 +624,8 @@ function Write-LifecycleResult {
     }
     if ($code -eq 0) { $code = $script:ExitFailure }
     $stderr = ConvertTo-WrapperPublicText -Text ([string]$Run.StdErr) -Staged $script:StagedConfig -Public $ConfigPath
-    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($text + ' ' + $stderr).Trim()) }
+    $stderr = [regex]::Replace($stderr, '(?m)^DC_LIFECYCLE_PHASE: [^\r\n]*(?:\r?\n)?', '')
+    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($stderr + ' ' + $text).Trim()) }
     if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $code -Code 'mdm_lifecycle_no_result' -Message "$Label printed no lifecycle result: $detail"
     [Console]::Out.WriteLine($json)

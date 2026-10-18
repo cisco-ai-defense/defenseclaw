@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import http.client
 import json
@@ -876,21 +877,125 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
     return 0
 
 
+def _inline_wrapper_block(content: bytes, function: bytes, marker: bytes) -> bytes | None:
+    match = re.search(
+        rb"(?ms)^" + re.escape(function) + rb"\(\) \{\n\s*cat <<'" + re.escape(marker)
+        + rb"'\n(.*?)^" + re.escape(marker) + rb"$",
+        content,
+    )
+    return match.group(1) if match else None
+
+
+def _wrapper_setting(content: bytes, name: bytes) -> bytes:
+    match = re.search(
+        rb"(?m)^" + re.escape(name) + rb"=(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s#\n]*))[ \t]*(?:#.*)?$",
+        content,
+    )
+    return next((value for value in match.groups() if value is not None), b"") if match else b""
+
+
 def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     if args.retries is not None and not 0 <= args.retries <= 3:
         raise SystemExit("error: --retries must be between 0 and 3")
     content = read_script(args.file, SHELL_SCRIPT_MAX_BYTES)
+    converted_crlf = b"\r\n" in content
+    if converted_crlf:
+        content = content.replace(b"\r\n", b"\n")
+    if b"\r" in content:
+        raise SystemExit("error: save the macOS wrapper with LF line endings")
     if not content.startswith(b"#!"):
         raise SystemExit("error: macOS script must start with a #! interpreter line")
-    settings = re.search(
-        # Accept CRLF: a wrapper saved by a Windows editor must not skip the empty-block check.
-        rb"(?ms)^dc_inline_config\(\) \{\r?\n\s*cat <<'DEFENSECLAW_CONFIG'\r?\n(.*?)^DEFENSECLAW_CONFIG\r?$",
-        content,
-    )
-    if settings is not None and not settings.group(1).strip():
-        raise SystemExit("error: fill in the macOS wrapper settings block before upload")
+    config = _inline_wrapper_block(content, b"dc_inline_config", b"DEFENSECLAW_CONFIG")
+    bundle = _inline_wrapper_block(content, b"dc_inline_bundle", b"DC_BUNDLE_BASE64")
+    anchors = _inline_wrapper_block(content, b"dc_inline_trust_anchors", b"DC_TRUST_ANCHORS_JSON")
+    if any(block is not None for block in (config, bundle, anchors)):
+        has_config = bool(config and config.strip())
+        has_bundle = bool(bundle and bundle.strip())
+        has_anchors = bool(anchors and anchors.strip())
+        action = _wrapper_setting(content, b"DC_ACTION")
+        output_format = _wrapper_setting(content, b"DC_FORMAT")
+        source = _wrapper_setting(content, b"DC_SOURCE")
+        source_url = _wrapper_setting(content, b"DC_SOURCE_URL")
+        source_sha256 = _wrapper_setting(content, b"DC_SOURCE_SHA256")
+        trust_mode = _wrapper_setting(content, b"DC_TRUST_MODE")
+        allowed_team_ids = _wrapper_setting(content, b"DC_ALLOWED_TEAM_IDS")
+        config_file = _wrapper_setting(content, b"DC_CONFIG_FILE")
+        bundle_file = _wrapper_setting(content, b"DC_BUNDLE_FILE")
+        anchor_file = _wrapper_setting(content, b"DC_TRUST_ANCHOR_FILE")
+        secret_name = _wrapper_setting(content, b"DC_SECRET_NAME")
+        secret_file = _wrapper_setting(content, b"DC_SECRET_FILE")
+        product_version = _wrapper_setting(content, b"DC_PRODUCT_VERSION")
+        staging_dir = _wrapper_setting(content, b"DC_STAGING_DIR")
+        script_os = _wrapper_setting(content, b"DC_SCRIPT_OS")
+        refuse_capability_loss = _wrapper_setting(content, b"DC_REFUSE_CAPABILITY_LOSS") == b"1"
+        if script_os and script_os != b"darwin":
+            raise SystemExit(
+                f"error: this copy of the wrapper is for {script_os.decode('utf-8', 'replace')}, not darwin"
+            )
+        if output_format not in (b"json", b"jamf"):
+            raise SystemExit("error: --format must be json or jamf")
+        if action not in (b"ensure", b"status", b"verify"):
+            raise SystemExit("error: --action must be ensure, status or verify (use uninstall.sh to remove)")
+        if trust_mode not in (b"hash_pinned", b"signed"):
+            raise SystemExit("error: --trust-mode must be hash_pinned or signed")
+        if source and source_url:
+            raise SystemExit("error: --source and --source-url are exclusive")
+        if source_sha256 and not re.fullmatch(rb"[0-9a-fA-F]{64}", source_sha256):
+            raise SystemExit("error: --sha256 must be 64 hexadecimal characters")
+        if (source or source_url) and trust_mode == b"hash_pinned" and not source_sha256:
+            raise SystemExit("error: hash_pinned trust requires --sha256 for the source")
+        if secret_name:
+            if not re.fullmatch(rb"[a-z0-9][a-z0-9-]*", secret_name):
+                raise SystemExit("error: --secret-name must be lowercase letters, digits and dashes")
+            if not secret_file:
+                raise SystemExit("error: --secret-name needs --secret-file or --secret-stdin")
+        elif secret_file:
+            raise SystemExit("error: a secret value needs --secret-name")
+        if action != b"ensure":
+            if any((source, source_url, config_file, bundle_file, anchor_file,
+                    secret_name, secret_file)) or refuse_capability_loss:
+                raise SystemExit(
+                    f"error: --action {action.decode('utf-8', 'replace')} is read-only and takes no source, "
+                    "config, secret, bundle or trust anchor file"
+                )
+        elif refuse_capability_loss and not (bundle_file or has_bundle):
+            raise SystemExit("error: --refuse-capability-loss requires a bundle")
+        for path in (bundle_file, anchor_file):
+            if path and not path.startswith(b"/"):
+                raise SystemExit(
+                    "error: --bundle-file and --trust-anchor-file take absolute paths: "
+                    f"{path.decode('utf-8', 'replace')}"
+                )
+        if action == b"ensure" and has_bundle and not bundle_file:
+            try:
+                base64.b64decode(re.sub(rb"[ \t\r\n]", b"", bundle), validate=True)
+            except (ValueError, binascii.Error):
+                raise SystemExit("error: the inline bundle is not valid base64") from None
+        if secret_file and not secret_file.startswith(b"/"):
+            raise SystemExit("error: secret must be an absolute path")
+        if config_file and not config_file.startswith(b"/"):
+            raise SystemExit("error: config must be an absolute path")
+        if source and not source.startswith(b"/"):
+            raise SystemExit("error: source must be an absolute path")
+        if source_url and not source_url.startswith(b"https://"):
+            raise SystemExit("error: download URLs must use https://")
+        if trust_mode == b"signed" and not allowed_team_ids.strip() and (source or source_url):
+            raise SystemExit("error: signed trust on macOS needs --allowed-team-id")
+        source_name = (source_url or source).split(b"?", 1)[0].rsplit(b"/", 1)[-1]
+        if source_name.endswith(b".deb"):
+            raise SystemExit("error: .deb sources are Linux packages")
+        if source_name.endswith(b".rpm"):
+            raise SystemExit("error: .rpm sources are Linux packages")
+        if staging_dir and not staging_dir.startswith(b"/"):
+            raise SystemExit("error: --staging-dir must be an absolute path")
+        if action == b"ensure" and not any((has_config, has_bundle, has_anchors, source, source_url,
+                                            config_file, bundle_file, anchor_file, secret_name, secret_file,
+                                            product_version)):
+            raise SystemExit("error: fill in the macOS wrapper settings block before upload")
     if args.frequency is not None and not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
         raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
+    if converted_crlf:
+        print("Converted CRLF line endings to LF for upload; source file unchanged.")
     print(f"script: {args.file} ({len(content)} bytes, sha256 {hashlib.sha256(content).hexdigest()[:16]}...)")
     create_body = {
         "@odata.type": "#microsoft.graph.deviceShellScript",

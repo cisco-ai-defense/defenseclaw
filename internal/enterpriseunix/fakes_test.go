@@ -151,6 +151,20 @@ func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	return nil
 }
 
+// StopTogether stops the units in one request, as systemctl stop does
+// with several names.
+func (f *fakeServices) StopTogether(_ context.Context, units []Unit) error {
+	for _, u := range units {
+		f.record("stop " + u.Name)
+	}
+	f.mu.Lock()
+	for _, u := range units {
+		f.active[u.Name] = false
+	}
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

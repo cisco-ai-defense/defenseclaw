@@ -1050,6 +1050,143 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.T) {
+	previousTimeout := windowsEnterpriseEnsureTimeout
+	previousRestore := windowsEnterpriseRestoreStartModes
+	windowsEnterpriseEnsureTimeout = 30 * time.Millisecond
+	t.Cleanup(func() {
+		windowsEnterpriseEnsureTimeout = previousTimeout
+		windowsEnterpriseRestoreStartModes = previousRestore
+	})
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	restored := false
+	windowsEnterpriseRestoreStartModes = func(report *windowsEnterpriseInstallerReport) error {
+		restored = true
+		if report.ServiceStartModes["DefenseClawGateway"] != "auto" ||
+			report.ServiceStartModes["DefenseClawHookGuardian"] != "auto" ||
+			report.ServiceStartModes["DefenseClawHookEnumerator"] != "auto" {
+			t.Fatalf("lost service startup preimage: %+v", report.ServiceStartModes)
+		}
+		return errors.New("SCM refused startup-mode restore")
+	}
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		if windowsEnterpriseInstallerAction(args) == "Status" {
+			body, err := json.Marshal(map[string]any{
+				"schema_version": 1, "ok": true, "action": "status", "installed": true,
+				"transaction_pending": true, "gateway_service": "DefenseClawGateway",
+				"guardian_service": "DefenseClawHookGuardian", "enumerator_service": "DefenseClawHookEnumerator",
+				"service_start_modes": map[string]string{
+					"DefenseClawGateway": "auto", "DefenseClawHookGuardian": "auto", "DefenseClawHookEnumerator": "auto",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return windowsEnterpriseStandaloneRun{Output: body}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return windowsEnterpriseStandaloneRun{}, fmt.Errorf("lifecycle_timeout: repair exceeded ensure deadline: %w", ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+			return windowsEnterpriseStandaloneRun{}, errors.New("installer did not receive an ensure deadline")
+		}
+	}
+	command := &cobra.Command{}
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&bytes.Buffer{})
+	started := time.Now()
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
+		t.Fatalf("ensure exceeded its deadline: %s", elapsed)
+	}
+	if commandExitCode(err) != 1603 || !restored {
+		t.Fatalf("ensure error = %v, restored = %v", err, restored)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) == 0 || result.Errors[0].Code != "lifecycle_timeout" {
+		t.Fatalf("ensure result lacks timeout diagnostic: %+v", result.Errors)
+	}
+	if len(result.Errors) < 2 || result.Errors[1].Code != "startup_mode_restore_failed" ||
+		!strings.Contains(result.Errors[1].Message, "SCM refused startup-mode restore") {
+		t.Fatalf("ensure JSON lacks failed restore: %+v", result.Errors)
+	}
+}
+
+// A bundle refusal that a retry of the same delivery cannot get past exits
+// 1603 even with the bundle_apply_failed after it; a transient cause keeps
+// 1618, so the MDM retries only what can still succeed.
+func TestWindowsBundleApplyFailureExitFollowsItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		cause string
+		want  int
+	}{
+		{"fleet_setup_required", enterprisestatus.WindowsExitFailure},
+		{"bundle_config_validation_failed", enterprisestatus.WindowsExitFailure},
+		{"bundle_install_options_changed", enterprisestatus.WindowsExitFailure},
+		{"bundle_hot_apply_unavailable", enterprisestatus.WindowsExitBusy},
+		{"bundle_policy_not_adopted", enterprisestatus.WindowsExitBusy},
+		{"lifecycle_busy", enterprisestatus.WindowsExitBusy},
+	} {
+		result := &enterprisestatus.Result{}
+		result.AddError(tc.cause, "cause")
+		result.AddError("bundle_apply_failed", "the policy bundle apply did not complete")
+		if got := windowsEnterpriseFailureCodeFor(result); got != tc.want {
+			t.Errorf("%s then bundle_apply_failed exits %d, want %d", tc.cause, got, tc.want)
+		}
+	}
+}
+
+// A pending-transaction repair that ends with a report, even a failed one,
+// made its own decision about the services: a recovery that could not
+// reactivate the restored release leaves it stopped and disabled on purpose.
+// Only an installer that ended without a report (timed out or killed) has
+// its startup modes put back.
+func TestWindowsEnterpriseEnsureFailedRepairReportKeepsServiceStartModes(t *testing.T) {
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	previousRestore := windowsEnterpriseRestoreStartModes
+	t.Cleanup(func() { windowsEnterpriseRestoreStartModes = previousRestore })
+	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error {
+		t.Fatal("a repair that returned its report had its service startup modes restored")
+		return nil
+	}
+	repairs := 0
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		reply := map[string]any{
+			"schema_version": 1, "ok": true, "action": "status", "installed": true,
+			"transaction_pending": true, "installed_version": "1.4.0", "gateway_service": "DefenseClawGateway",
+			"service_start_modes": map[string]string{"DefenseClawGateway": "auto"},
+		}
+		run := windowsEnterpriseStandaloneRun{}
+		if windowsEnterpriseInstallerAction(args) == "Repair" {
+			repairs++
+			reply = map[string]any{
+				"schema_version": 1, "ok": false, "action": "repair", "transaction_pending": true,
+				"error": "the restored release could not be reactivated", "errors": []string{"the restored release could not be reactivated"},
+			}
+			run.ExitCode = 1
+		}
+		body, err := json.Marshal(reply)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Output = body
+		return run, nil
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if err == nil || repairs != 1 {
+		t.Fatalf("ensure error = %v after %d repairs, want a failed repair", err, repairs)
+	}
+}
+
 func TestParseWindowsEnterpriseInstallerReportMarksStatelessFailures(t *testing.T) {
 	for _, body := range []string{
 		`{"schema_version":1,"ok":false,"action":"status","error":"x","errors":["x"]}`,
@@ -2549,6 +2686,12 @@ func TestWindowsEnterpriseDirectUpgradeRefusesAnAPIPortChange(t *testing.T) {
 // planner found identical to the recorded one, so the missing file comes
 // back; a pending-transaction repair still takes no sources.
 func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testing.T) {
+	originalRestore := windowsEnterpriseRestoreStartModes
+	t.Cleanup(func() { windowsEnterpriseRestoreStartModes = originalRestore })
+	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error {
+		t.Fatal("committed repair must not restore pre-transaction service modes")
+		return nil
+	}
 	failed := installedStatus("verify")
 	failed["ok"] = false
 	failed["errors"] = []string{`managed path is missing: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}

@@ -281,6 +281,28 @@ func (m *systemdManager) Stop(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "stop", unit.Name)
 }
 
+// groupStopper is implemented by service managers that can stop several
+// units in one request.
+type groupStopper interface {
+	StopTogether(ctx context.Context, units []Unit) error
+}
+
+// StopTogether stops the units with one systemctl call, which queues every
+// stop job before any of them runs. A socket unit with a stop job queued no
+// longer starts its service on a connection. Stopped one by one, a hook call
+// on the hook socket started the gateway again after its API socket was
+// stopped, and the gateway's Requires= started that socket again: the
+// uninstall left it listening after the package removed its unit file
+// (GAP-0112).
+func (m *systemdManager) StopTogether(ctx context.Context, units []Unit) error {
+	args := make([]string, 0, len(units)+1)
+	args = append(args, "stop")
+	for _, unit := range units {
+		args = append(args, unit.Name)
+	}
+	return m.run(ctx, args...)
+}
+
 func (m *systemdManager) Enable(ctx context.Context, unit Unit) error {
 	return m.run(ctx, "enable", unit.Name)
 }

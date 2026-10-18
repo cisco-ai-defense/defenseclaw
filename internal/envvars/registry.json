@@ -5712,7 +5712,7 @@
     {
       "name": "DEFENSECLAW_TEST_PWSH",
       "category": "test_fixture",
-      "purpose": "Names the PowerShell executable the MDM kit tests run the Intune remediation scripts with, when pwsh is not on PATH.",
+      "purpose": "Names the PowerShell 7 executable the MDM kit tests run the Intune remediation, uninstall-retry and rule-pack scripts with, when pwsh is not on PATH; the tests skip when neither exists.",
       "default": "unset (pwsh or pwsh.exe from PATH)",
       "accepted_values": [
         "path to a pwsh executable",
@@ -5729,6 +5729,14 @@
         {
           "location": "cli/tests/test_mdm_kit_remediation.py",
           "description": "Intune Remediate-Detect/Remediate-Fix fixtures; never read by production runtime paths"
+        },
+        {
+          "location": "cli/tests/test_intune_remediation_bundle.py",
+          "description": "Runs Remediate-Detect.ps1 and Remediate-Fix.ps1 against the stand-in CLI in signed-bundle mode; never read by production runtime paths"
+        },
+        {
+          "location": "cli/tests/test_mdm_intune_uninstall_retry.py",
+          "description": "Runs the Intune uninstall launcher retry path against a stand-in Setup; never read by production runtime paths"
         }
       ],
       "since": "1.0.2"

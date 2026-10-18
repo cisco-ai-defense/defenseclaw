@@ -25,7 +25,7 @@ func TestManagedHookDeliveryUsesAuthenticatedGenerationPolicy(t *testing.T) {
 				})
 				t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
 				t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "0")
-				if enterpriseManagedHookRuntimeNoop(agent) {
+				if prepareEnterpriseManagedHookRuntime(agent) {
 					t.Fatal("active authenticated generation no-opped")
 				}
 				opts := buildHookOptionsForRuntime(agent, "PreToolUse", "", "open", true)

@@ -187,8 +187,9 @@ type Receipt struct {
 	ErrorCode      Code         `json:"error_code,omitempty"`
 	ErrorMessage   string       `json:"error_message,omitempty"`
 	ExpectedDigest string       `json:"expected_digest,omitempty"`
-	// DigestComparable records that verify compared the signed digest on
-	// this same product version and platform.
+	// DigestComparable records that verify compared the signed digest and
+	// found it equal: the signer ran this product version and the device
+	// layout is standard.
 	DigestComparable      bool     `json:"digest_comparable,omitempty"`
 	WarningCodes          []string `json:"warning_codes,omitempty"`
 	DisabledByBundle      []string `json:"disabled_by_bundle,omitempty"`
@@ -213,9 +214,9 @@ type Receipt struct {
 
 // SetDigestComparison replaces any digest classification from an earlier
 // receipt write with the verification result for this delivery.
-func (r *Receipt) SetDigestComparison(verified, crossVersionOrPlatform, nonstandardLayout bool) {
+func (r *Receipt) SetDigestComparison(verified, otherProductVersion, nonstandardLayout bool) {
 	r.DigestComparable = verified
-	r.SetDigestUnverifiable(crossVersionOrPlatform)
+	r.SetDigestUnverifiable(otherProductVersion)
 	r.WarningCodes = slices.DeleteFunc(r.WarningCodes, func(code string) bool { return code == WarnDigestLayoutUnverifiable })
 	if nonstandardLayout {
 		r.WarningCodes = append(r.WarningCodes, WarnDigestLayoutUnverifiable)
@@ -224,9 +225,9 @@ func (r *Receipt) SetDigestComparison(verified, crossVersionOrPlatform, nonstand
 
 // SetDigestUnverifiable replaces the signed-manifest classification without
 // changing whether verification compared and confirmed the digest strings.
-func (r *Receipt) SetDigestUnverifiable(crossVersionOrPlatform bool) {
+func (r *Receipt) SetDigestUnverifiable(otherProductVersion bool) {
 	r.WarningCodes = slices.DeleteFunc(r.WarningCodes, func(code string) bool { return code == WarnDigestUnverifiable })
-	if crossVersionOrPlatform {
+	if otherProductVersion {
 		r.WarningCodes = append(r.WarningCodes, WarnDigestUnverifiable)
 	}
 }

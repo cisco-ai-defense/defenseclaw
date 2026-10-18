@@ -12,7 +12,6 @@ package enterprisepolicy
 
 import (
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -86,29 +85,5 @@ func TestMachinePolicyPresentTracksOwnedEntries(t *testing.T) {
 		if present, err := MachinePolicyPresent(opts, name); err != nil || present {
 			t.Fatalf("%s after removal: present=%v err=%v", name, present, err)
 		}
-	}
-}
-
-func TestMachinePolicyMayRemainFailsClosedOnLeftovers(t *testing.T) {
-	opts := testOptions(t)
-	if MachinePolicyMayRemain(opts, "codex") || MachinePolicyMayRemain(opts, "amp") {
-		t.Fatal("a clean host has no leftover machine policy")
-	}
-	path, _ := CodexRequirementsPath(opts)
-	writeFile(t, path, "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"'"+testHookBinary+"' hook --connector codex\"\ntimeout = 1\n")
-	if present, _ := MachinePolicyPresent(opts, "codex"); present {
-		t.Fatal("a drifted entry is not an exact DefenseClaw registration")
-	}
-	if !MachinePolicyMayRemain(opts, "codex") {
-		t.Fatal("a drifted entry naming the hook binary must keep the hook fail-closed")
-	}
-	writeFile(t, path, "[hooks\n")
-	if !MachinePolicyMayRemain(opts, "codex") {
-		t.Fatal("an unparsable requirements file must keep the hook fail-closed")
-	}
-	dir, _ := CopilotPolicyDir(opts)
-	writeFile(t, filepath.Join(dir, DefenseClawDropInName), "{}")
-	if !MachinePolicyMayRemain(opts, "copilot") {
-		t.Fatal("DefenseClaw's own drop-in, even emptied, is DefenseClaw policy")
 	}
 }

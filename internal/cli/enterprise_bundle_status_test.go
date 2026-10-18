@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -63,6 +64,35 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_admin"`) ||
 		strings.Contains(out, `"bundle_mode"`) || strings.Contains(out, `"current"`) {
 		t.Fatalf("privilege refusal exit=%d: %s", code, out)
+	}
+}
+
+// A Windows receipt that recorded an unfinished session scan must not be
+// reported as a digest mismatch (GAP-0104).
+func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
+	got := bundleReceiptWarningMessage("sessions_scan_unknown", &enterprisebundle.Receipt{})
+	if strings.Contains(got, "digest") || !strings.Contains(got, "sessions could not be checked") {
+		t.Fatalf("sessions_scan_unknown message = %q", got)
+	}
+	if got := bundleReceiptWarningMessage(string(enterprisebundle.CodeDigestMismatch), nil); !strings.Contains(got, "differs from the signed expected digest") {
+		t.Fatalf("digest mismatch message = %q", got)
+	}
+}
+
+func TestConfirmedSignerRevocationIsReported(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	bundleDevice(t, e)
+	raw, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBundleTestFile(t, e.anchors, bytes.Replace(raw, []byte(`"status":"active"`), []byte(`"status":"revoked"`), 1))
+	warning := bundleCurrentSignerWarning(e.anchors, "k1")
+	// The warning names the signer, so an anchor-only run that revoked it
+	// says which key no longer vouches for the enforcing bundle.
+	if warning == nil || warning.Code != string(enterprisebundle.CodeKeyRevoked) || !strings.Contains(warning.Message, "signer k1 is revoked") {
+		t.Fatalf("revoked confirmed signer warning = %+v", warning)
 	}
 }
 
@@ -422,4 +452,74 @@ func hasBundleWarning(warnings []enterprisebundle.Warning, code string) bool {
 		}
 	}
 	return false
+}
+
+// A device whose managed layout changed its digest (digest_layout_unverifiable)
+// enforces its own digest, not the signed standard-layout one, so status must
+// not report digest_differs for it even when the signer ran this build; a
+// receipt that verified the signed digest still reports a gateway that
+// enforces another (GAP-0113 verifier finding 3).
+func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T) {
+	for _, layoutDependent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("layout_unverifiable=%t", layoutDependent), func(t *testing.T) {
+			e := newBundleCLIEnv(t)
+			e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+			signed := filepath.Join(e.dir, "v5.dcbundle")
+			if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+				t.Fatalf("sign exit %d: %s", code, out)
+			}
+			b, err := readBundleInput(signed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisebundle.DecodeManifest(b.Manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := manifest.EffectivePolicy.Digests[runtime.GOOS]
+			if expected == "" || !enterprisebundle.DigestComparable(manifest, appVersion) {
+				t.Fatalf("signed manifest for %s is not comparable on this build: %+v", runtime.GOOS, manifest.EffectivePolicy)
+			}
+			device := "sha256:" + strings.Repeat("8", 64)
+			store := bundleDevice(t, e)
+			r, err := store.Receive(manifest.BundleID, manifest.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Stage(r, b); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+				r.ManifestSHA256, r.ExpectedDigest = strings.Repeat("f", 64), expected
+				r.SetDigestComparison(!layoutDependent, false, layoutDependent)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Promote(r); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = device }); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Confirm(r); err != nil {
+				t.Fatal(err)
+			}
+			bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+				return &enterprisestatus.PolicyState{EffectiveDigest: device, GatewayReportedDigest: device, Applied: true}
+			}
+			out, code := runBundle(t, "status", "--json")
+			if code != 0 {
+				t.Fatalf("status exit %d: %s", code, out)
+			}
+			var status bundleStatusResult
+			if err := json.Unmarshal([]byte(out), &status); err != nil {
+				t.Fatal(err)
+			}
+			if !status.Applied || hasBundleWarning(status.Warnings, enterprisebundle.WarnDigestDiffers) == layoutDependent ||
+				hasBundleWarning(status.Warnings, enterprisebundle.WarnDigestLayoutUnverifiable) != layoutDependent ||
+				hasBundleWarning(status.Warnings, enterprisebundle.WarnDigestUnverifiable) {
+				t.Fatalf("layout_unverifiable=%t status: %s", layoutDependent, out)
+			}
+		})
+	}
 }

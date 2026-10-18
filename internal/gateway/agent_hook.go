@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -1497,6 +1498,14 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
 // Sandbox ingress has its own mandatory closed verdict and is rendered once.
+//
+// A recovered error produced no policy verdict. On a standalone managed
+// device it is answered like every other missing verdict there (gateway
+// unreachable, invalid response): the administrator-owned hook fails closed
+// whatever the guardrail mode or hook_fail_mode says, so a blockable tool or
+// prompt event gets the connector's native deny in observe mode too, and a
+// stop or session-end event keeps its neutral allow. Per-user installs and
+// the Secure Client profile keep the configured mode and fail mode.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1518,22 +1527,35 @@ func (a *APIServer) hookPanicResponse(
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
+	cfg := a.decisionConfig(ctx)
+	standalone := cfg != nil && cfg.StandaloneEnterprise()
+	lifecycle := standalone && hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
+	if standalone && action == "block" && !lifecycle {
+		// Observe mode lets policy verdicts through; it does not let a
+		// missing verdict through on a managed device.
+		mode = "action"
+	}
 	if mode != "action" {
 		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
 	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
-	if mode != "action" {
+	switch {
+	case mode != "action":
 		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
-	} else {
-		cfg := a.decisionConfig(ctx)
-		if cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open") {
-			action, wouldBlock = "allow", true
-			plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
-		} else if action != "block" {
-			plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
-		} else {
-			plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
-		}
+	case !standalone && cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"):
+		action, wouldBlock = "allow", true
+		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+	case action != "block":
+		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
+	case lifecycle:
+		// A denied stop or session-end event keeps the session running
+		// instead of stopping a tool call. Standalone managed hooks answer
+		// it neutrally, with the exact event set the native hook runner
+		// uses for foreign-hook failures and invalid gateway actions.
+		action, wouldBlock = "allow", true
+		plain += "The event was allowed because it ends the session, and a denial would keep the session running. Ask your administrator to review the hook and audit log."
+	default:
+		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	}
 	resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: mode, WouldBlock: wouldBlock, Reason: plain, SourceReason: base.Reason, AdditionalContext: base.AdditionalContext}
 	// A connector-owned response renderer can be the source of the original

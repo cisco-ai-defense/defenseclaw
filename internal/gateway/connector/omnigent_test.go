@@ -760,7 +760,7 @@ func TestOmnigentSecureClientPolicyDoesNotRetryBusyGateway(t *testing.T) {
 	path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
 	rendered := renderOmnigentPolicyFull(
 		string(templateBytes), strings.TrimPrefix(server.URL, "http://"),
-		"", "closed", "", 0, "", true,
+		"", "closed", "", 0, "", false, true,
 	)
 	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 		t.Fatal(err)
@@ -1977,5 +1977,31 @@ func TestRemoveOmnigentConfigEntriesKeepsOperatorComments(t *testing.T) {
 	}
 	if strings.Contains(string(body), omnigentPolicyModuleName) {
 		t.Fatalf("managed entries remain: %s", body)
+	}
+}
+
+func TestOmnigentManagedOpenRenderPinsClosed(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	tmpl, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		managed, secureClient bool
+		want                  string
+	}{{true, false, "closed"}, {false, false, "open"}, {true, true, "open"}} {
+		body := renderOmnigentPolicyFull(string(tmpl), "127.0.0.1:18970", "", "open", "", 0, "", tc.managed, tc.secureClient)
+		path := filepath.Join(t.TempDir(), "policy.py")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code := "import importlib.util,sys; s=importlib.util.spec_from_file_location('policy',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m._FAIL_MODE)"
+		got, err := exec.Command(python, "-c", code, path).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(got)) != tc.want {
+			t.Errorf("managed=%v secureClient=%v: mode=%q err=%v, want %s", tc.managed, tc.secureClient, got, err, tc.want)
+		}
 	}
 }

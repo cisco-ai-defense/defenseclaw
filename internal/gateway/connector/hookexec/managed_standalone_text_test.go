@@ -168,6 +168,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 			HookDir:                   filepath.Join(home, "hooks"),
 			FailMode:                  failMode,
 			ManagedEnterprise:         true,
+			SecureClient:              !explain,
 			ExplainUnenrolledAccount:  explain,
 			AuthenticatedManagedToken: &token,
 			Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),

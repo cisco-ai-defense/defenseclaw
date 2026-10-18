@@ -915,8 +915,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 7501,
-      "sha256": "220602c6e41f3682f3da7ef33ed4030649c8974d66044d8cce088767557339e3"
+      "size": 9743,
+      "sha256": "a8f040dec2c80cfb7d1288190a7d9d2e0301b4e1ee4c91954dc08ef3784c01c2"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1660,6 +1660,13 @@
       "sha256": "214bd1f6c5eb17f7e87ff8df4383134eb717f84613d295d382587f6ee8512366"
     }
   },
+  "plugin/amp-plugin.ts/managed=1/fail=open": {
+    "amp-plugin.ts": {
+      "mode": "-rw-------",
+      "size": 32296,
+      "sha256": "214bd1f6c5eb17f7e87ff8df4383134eb717f84613d295d382587f6ee8512366"
+    }
+  },
   "plugin/opencode-plugin.js/managed=0/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
@@ -1677,8 +1684,15 @@
   "plugin/opencode-plugin.js/managed=1/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 32850,
-      "sha256": "f5dd686c18b4488b369571b5b6bd49cbac0ee313e92d5d4c784408d2934dff00"
+      "size": 33183,
+      "sha256": "4c556b85c34f3d427741bef054c8fc88b7edf92fbe8d0f58b6f3b152e1789e25"
+    }
+  },
+  "plugin/opencode-plugin.js/managed=1/fail=open": {
+    "opencode-plugin.js": {
+      "mode": "-rw-------",
+      "size": 33183,
+      "sha256": "4c556b85c34f3d427741bef054c8fc88b7edf92fbe8d0f58b6f3b152e1789e25"
     }
   }
 }

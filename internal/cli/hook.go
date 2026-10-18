@@ -88,7 +88,7 @@ func newHookCmd() *cobra.Command {
 			if !enterpriseManaged && implicitEnterpriseManagedHook() {
 				enterpriseManaged = true
 			}
-			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
+			if enterpriseManaged && prepareEnterpriseManagedHookRuntime(connector) {
 				return nil
 			}
 			if copilotCLIRunsVSCodeLocalHook(connector, hookSurface, enterpriseManaged) {

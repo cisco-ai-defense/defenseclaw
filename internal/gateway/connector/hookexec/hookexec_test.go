@@ -2767,3 +2767,71 @@ func TestSecureClientHookDoesNotRetry429(t *testing.T) {
 		t.Fatalf("Secure Client: %d requests, code %d, stdout %q, stderr %q", rt.requests, result.code, result.stdout, result.stderr)
 	}
 }
+
+func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
+	for _, tc := range []struct {
+		connector, event, nativeDeny string
+		closedCode                   int
+	}{
+		{"cursor", "beforeShellExecution", `"permission":"deny"`, 0},
+		{"copilot", "preToolUse", `"permissionDecision":"deny"`, 0},
+		{"devin", "PreToolUse", "DefenseClaw blocked this tool call", 2},
+		{"kiro", "PreToolUse", "DefenseClaw blocked this tool call", 2},
+		{"opencode", "tool.execute.before", `"decision":"deny"`, 2},
+	} {
+		for _, body := range []string{`{}`, `{"action":"unexpected","hook_output":{"decision":"allow"}}`, `{"action":"block"}`} {
+			t.Run(tc.connector+"/"+body, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				opts := Options{Connector: tc.connector, Event: tc.event, ManagedEnterprise: true,
+					ManagedStandalone: true, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
+				code := specs[tc.connector].decide(opts, []byte(body))
+				got := stdout.String()
+				if tc.connector == "kiro" {
+					got = stderr.String()
+				}
+				if code != tc.closedCode || !strings.Contains(got, tc.nativeDeny) {
+					t.Fatalf("managed code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+			})
+		}
+	}
+}
+
+func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		connector, event, body, wantOutput string
+	}{
+		{"cursor", "beforeShellExecution", `{}`, `{"permission":"allow"}` + "\n"},
+		{"copilot", "preToolUse", `{}`, ""},
+		{"devin", "PreToolUse", `{}`, ""},
+		{"kiro", "PreToolUse", `{}`, ""},
+		{"opencode", "tool.execute.before", `{}`, "{}\n"},
+		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
+		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
+		{"devin", "PreToolUse", `{"action":"allow"}`, ""},
+		{"kiro", "PreToolUse", `{"action":"allow"}`, ""},
+		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
+	} {
+		var stdout, stderr bytes.Buffer
+		opts := Options{Connector: tc.connector, Event: tc.event, Stdout: &stdout, Stderr: &stderr}
+		code := specs[tc.connector].decide(opts, []byte(tc.body))
+		if code != 0 || stdout.String() != tc.wantOutput {
+			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)
+		}
+	}
+}
+
+func TestManagedNativeDecisionAcceptsExplicitAllowWithoutNativeOutput(t *testing.T) {
+	for _, tc := range []struct{ connector, event string }{
+		{"copilot", "preToolUse"}, {"devin", "PreToolUse"},
+		{"kiro", "PreToolUse"}, {"opencode", "tool.execute.before"},
+	} {
+		var stdout, stderr bytes.Buffer
+		opts := Options{Connector: tc.connector, Event: tc.event, ManagedEnterprise: true,
+			ManagedStandalone: true, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
+		if code := specs[tc.connector].decide(opts, []byte(`{"action":"allow"}`)); code != 0 ||
+			strings.Contains(stdout.String(), `"deny"`) || strings.Contains(stderr.String(), "failed closed") {
+			t.Errorf("%s explicit allow: code=%d stdout=%q stderr=%q", tc.connector, code, stdout.String(), stderr.String())
+		}
+	}
+}

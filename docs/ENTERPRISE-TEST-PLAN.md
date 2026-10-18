@@ -528,8 +528,15 @@ For offline bundle signing on Windows, an omitted `data_dir` is modeled as
 `C:\ProgramData\Cisco\DefenseClaw\runtime`. An explicit `data_dir` is accepted
 only when it equals that standard runtime path; signing refuses any other
 value with `config_invalid`. A device registered under another ProgramData root
-reports `digest_unverifiable` for the signed digest while still checking its
-installed and gateway digests against each other.
+also computes the digest for the standard layout and refuses a signed digest
+that differs from it (`digest_mismatch`). It reports
+`digest_layout_unverifiable` only when the signed digest equals that
+standard-layout digest but its own root changes its digest (for example with an
+explicit standard `data_dir`), and still checks its installed and gateway
+digests against each other. A device
+on the signer's product version refuses a signed digest it computes differently
+(`digest_mismatch`) whatever OS signed the bundle; only a signer of another
+product version leaves the digest `digest_unverifiable`.
 Quote `ownership: "off"` (YAML reads a bare `off` as false).
 
 Minimal config (Linux; the enterprise overview page has the same config per
@@ -1046,6 +1053,7 @@ engine (`System32\WindowsPowerShell\v1.0\powershell.exe`).
 | MDM-W-07 Remediation fix | `"$ps51x86" ... -File $sim\Remediate-Fix.ps1` | Runs the installed CLI's `enterprise windows ensure --profile standalone --json` and exits with its code, with one short line; no `mdm_untrusted_install` |
 | MDM-W-11 Intune package | On the admin workstation run the packager command below with a new `$sim\intune` output directory, then copy its `content` directory to the test host under the same protected `$sim\intune` path | `content\` holds the Setup, config, launcher and `intune-package.json`; a reused output directory is refused |
 | MDM-W-08 Intune launcher | From a 32-bit cmd parent, `cd /d $sim\intune\content && %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` after MDM-W-11 | Exit is Setup's code. With a changed byte in `content\`: `mdm_hash_mismatch` or `mdm_package_incomplete` (`1603`) |
+| MDM-W-08b Intune bundle package | Build a second app with `-BundlePath -TrustAnchorPath -RequireBundle`, then run its launcher on the installed computer | Setup receives `BUNDLE=` and `TRUSTANCHORS=`; `detect-bundle.ps1` detects the applied version. Tampering one byte before launch returns `mdm_hash_mismatch` (`1603`) without starting Setup. |
 | MDM-W-09 Removal | `"$ps51x86" ... -File $sim\uninstall.ps1`, then again, then `-Purge` on a separate cycle | One result document each; the second is a no-op. `mdm_untrusted_install` (`1603`) if the installed CLI or its folders are not admin-only |
 | MDM-W-10 No user signed in | MDM-W-01 with every user signed out | Install succeeds; per-user writes wait for sessions (R17); an uninstall as SYSTEM with users signed out leaves their registrations and warns `user_registrations_pending` |
 
@@ -1074,6 +1082,14 @@ that the 64-bit view is read:
   -OutputDirectory "$sim\intune" `
   -ProductVersion 9.9.9
 # optional: -IntuneWinAppUtil <path to IntuneWinAppUtil.exe> builds the .intunewin
+
+# after the base app is installed, build a separate dependent bundle app:
+./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<setup sha256>' -BundlePath .\policy.dcbundle `
+  -TrustAnchorPath .\bundle-anchors.json -RequireBundle 7 `
+  -BaseConfigPath .\config.yaml `
+  -ProductVersion 9.9.9 -OutputDirectory "$sim\intune-bundle"
 ```
 
 In Intune the install command is
@@ -1893,7 +1909,9 @@ has found a regression.
   back after a rejected edit supersedes the rejection. Code.
 - **REG-1-1-14** **[L] Package steps wait for the lock.** Remove or upgrade the package while an apply run
   holds the lock. Expect: the package scripts wait (`--lock-wait 8m`); the removal fails on a
-  busy lock instead of deleting files under a live deployment. Code.
+  busy lock instead of deleting files under a live deployment. When the run it waited for was
+  an uninstall or MDM purge that removed the deployment and its lock, the package uninstall is a
+  `not_installed` no-op (exit 0) and the removal completes (GAP-0112). Code.
 - **REG-1-1-15** **[U] Non-purge uninstall can be retried.** Make an uninstall hit one error, then retry and
   reinstall. Expect: the deployment record is kept until an uninstall fully succeeds, so the
   retry and a package reinstall work (no `unmanaged_layout_present`). Code.

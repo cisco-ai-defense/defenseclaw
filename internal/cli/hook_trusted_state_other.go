@@ -7,13 +7,13 @@ package cli
 
 import "github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 
-func trustedNativeHookHome() (string, bool)         { return "", false }
-func NativeHookRuntimeNoop() bool                   { return false }
-func NativeConnectorHookNoop([]string) bool         { return false }
-func enterpriseManagedHookRuntimeNoop(string) bool  { return false }
-func enterpriseManagedHookRuntimeForceClosed() bool { return false }
-func implicitEnterpriseManagedHook() bool           { return false }
-func enterpriseManagedHookRuntimeFailMode() string  { return "closed" }
+func trustedNativeHookHome() (string, bool)           { return "", false }
+func NativeHookRuntimeNoop() bool                     { return false }
+func NativeConnectorHookNoop([]string) bool           { return false }
+func prepareEnterpriseManagedHookRuntime(string) bool { return false }
+func enterpriseManagedHookRuntimeForceClosed() bool   { return false }
+func implicitEnterpriseManagedHook() bool             { return false }
+func enterpriseManagedHookRuntimeFailMode() string    { return "closed" }
 func enterpriseManagedHookRuntimeFailureReason() string {
 	return ""
 }

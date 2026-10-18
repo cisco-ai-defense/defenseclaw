@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -62,6 +63,60 @@ func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	)
 	if len(panicMetrics) != 1 {
 		t.Fatalf("generated panic metrics=%d; recovered hook must not require a legacy Provider", len(panicMetrics))
+	}
+}
+
+func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	// The default observe mode: a missing verdict still fails closed on a
+	// managed device.
+	cfg.Guardrail.Mode = "observe"
+	api := &APIServer{scannerCfg: cfg}
+	for _, tc := range []struct {
+		connector, toolEvent, nativeField string
+	}{
+		{"cursor", "beforeShellExecution", "permission"},
+		{"copilot", "preToolUse", "permissionDecision"},
+		{"devin", "PreToolUse", "decision"},
+		{"kiro", "PreToolUse", "decision"},
+		{"opencode", "tool.execute.before", "decision"},
+	} {
+		req := agentHookRequest{ConnectorName: tc.connector, HookEventName: tc.toolEvent}
+		resp, panicked := api.safeEvaluateHook(context.Background(), tc.connector, req, nil, nil, hookProfileRuntime{
+			Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+				panic("managed evaluator panic")
+			},
+		})
+		if !panicked || resp.Action != "block" || resp.WouldBlock || len(resp.HookOutput) == 0 {
+			t.Errorf("%s: panic response = %+v, panicked=%v", tc.connector, resp, panicked)
+			continue
+		}
+		if _, ok := resp.HookOutput[tc.nativeField]; !ok {
+			t.Errorf("%s: native output = %+v, missing %s", tc.connector, resp.HookOutput, tc.nativeField)
+		}
+		for _, event := range hookexec.NeutralLifecycleEvents(tc.connector) {
+			stop := api.hookPanicResponse(context.Background(), tc.connector,
+				agentHookRequest{HookEventName: event}, nil, nil)
+			if stop.Action != "allow" {
+				t.Errorf("%s %s: lifecycle panic action = %q, want allow", tc.connector, event, stop.Action)
+			}
+		}
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		for _, event := range hookexec.NeutralLifecycleEvents(connectorName) {
+			resp := api.hookPanicResponse(context.Background(), connectorName,
+				agentHookRequest{HookEventName: event}, nil, nil)
+			if resp.Action != "allow" {
+				t.Errorf("%s %s: lifecycle panic action = %q, want allow", connectorName, event, resp.Action)
+			}
+		}
+	}
+	kiro := api.hookPanicResponse(context.Background(), "kiro",
+		agentHookRequest{HookEventName: "UserPromptSubmit"}, nil, nil)
+	if kiro.Action != "block" || kiro.WouldBlock {
+		t.Errorf("Kiro UserPromptSubmit panic = %+v, want native block", kiro)
 	}
 }
 
@@ -627,5 +682,113 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 	row := soleHookDecisionForTest(t, store)
 	if row.Action != string(audit.ActionConnectorHook) || row.Enforced {
 		t.Fatalf("audit=%+v, want one non-enforcing connector-hook row", row)
+	}
+}
+
+// TestHookPanicResponseFailModeMatrix pins the recovered-evaluation verdict
+// for every registered connector that can block, in every guardrail mode and
+// for each place hook_fail_mode: open can come from. A standalone managed
+// device fails closed for every tool and prompt event whatever the mode or
+// fail mode says, and answers a stop or session-end event neutrally.
+// Per-user installs and the Secure Client profile keep their fail-mode
+// verdict.
+func TestHookPanicResponseFailModeMatrix(t *testing.T) {
+	type deployment int
+	const (
+		perUser deployment = iota
+		standalone
+		secureClient
+	)
+	deployments := map[deployment]string{perUser: "per-user", standalone: "standalone", secureClient: "secure-client"}
+	failSources := []string{"closed", "global-open", "connector-open", "app-protection-open"}
+	newConfig := func(t *testing.T, d deployment, mode, failSource, connectorName string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.DataDir = t.TempDir()
+		switch d {
+		case standalone:
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+		case secureClient:
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileSecureClient
+		}
+		cfg.Guardrail.Mode = mode
+		cfg.Guardrail.HookFailMode = "closed"
+		switch failSource {
+		case "global-open":
+			cfg.Guardrail.HookFailMode = "open"
+		case "connector-open":
+			cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{connectorName: {HookFailMode: "open"}}
+		case "app-protection-open":
+			cfg.ApplicationProtection.Enabled = true
+			cfg.ApplicationProtection.Guardrail = config.PerConnectorGuardrailConfig{Mode: mode, HookFailMode: "open"}
+		}
+		return cfg
+	}
+	panicking := hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+		panic("injected evaluator error")
+	}}
+
+	covered := map[string]bool{}
+	for _, connectorName := range sharedDefaultRegistry().Names() {
+		profile := (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector(connectorName)
+		if !profile.Capabilities.CanBlock {
+			continue
+		}
+		var blocking []string
+		for _, event := range profile.Capabilities.BlockEvents {
+			action, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
+			if action == "block" && !hookexec.NeutralLifecycleEvent(connectorName, event) {
+				blocking = append(blocking, event)
+			}
+		}
+		if len(blocking) == 0 {
+			continue
+		}
+		covered[connectorName] = true
+		lifecycle := hookexec.NeutralLifecycleEvents(connectorName)
+		for d, dName := range deployments {
+			for _, mode := range []string{"observe", "action"} {
+				for _, failSource := range failSources {
+					cfg := newConfig(t, d, mode, failSource, connectorName)
+					api := &APIServer{scannerCfg: cfg}
+					// Cursor fails closed in action mode off Secure Client
+					// whatever hook_fail_mode says.
+					open := d == secureClient || (failSource != "closed" && connectorName != "cursor")
+					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
+						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
+						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
+						resp, panicked := api.safeEvaluateHook(t.Context(), connectorName, req, nil, nil, panicking)
+						if !panicked || resp.RawAction != "block" {
+							t.Errorf("%s: panicked=%v response=%+v", name, panicked, resp)
+							continue
+						}
+						isLifecycle := hookexec.NeutralLifecycleEvent(connectorName, event)
+						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
+						wantAction, wantMode := "allow", mode
+						switch {
+						case d == standalone && !isLifecycle:
+							wantAction, wantMode = "block", "action"
+						case d == standalone, mode != "action":
+						case open:
+						case capable == "block":
+							wantAction = "block"
+						}
+						if resp.Action != wantAction || resp.Mode != wantMode || resp.WouldBlock != (wantAction != "block") {
+							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)
+						}
+						// Amp and Omnigent plugins read the action field itself.
+						if wantAction == "block" && len(resp.HookOutput) == 0 && connectorName != "amp" && connectorName != "omnigent" {
+							t.Errorf("%s: block without the connector's native output: %+v", name, resp)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, name := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "openhands", "opencode"} {
+		if !covered[name] {
+			t.Errorf("connector %s has no blockable panic event in the matrix (covered: %v)", name, covered)
+		}
 	}
 }

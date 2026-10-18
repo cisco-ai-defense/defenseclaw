@@ -238,7 +238,6 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
         ([wrapper, "--secret-name", "Bad_Name", "--secret-stdin"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--action", "status", "--config-stdin"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--action", "verify", "--trust-anchor-file", "/a.json"], 2, "mdm_invalid_arguments"),
-        ([wrapper, "--bundle-file", "/b.dcbundle", "--config-file", "/c.yaml"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--bundle-file", "b.dcbundle"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--refuse-capability-loss"], 2, "mdm_invalid_arguments"),
         ([wrapper, "--source-url", "http://example.com/x.tar.gz", "--sha256", "0" * 64], 2 if os.geteuid() == 0 else 1, None),
@@ -648,6 +647,162 @@ echo installed-ok
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("source", ["defenseclaw-enterprise.rpm", "defenseclaw-enterprise.deb"])
+@pytest.mark.parametrize("applied", [False, True])
+def test_linux_wrapper_reports_the_postinstall_result_when_no_deployment_came_up(
+    source: str, applied: bool, tmp_path: Path
+) -> None:
+    # The deb/rpm postinstall never fails the package transaction. When its
+    # lifecycle run rolled back (units shipped group-writable, GAP-0108)
+    # there was no deployment record, so every binary read as damaged and
+    # the wrapper reported mdm_binaries_damaged. It now reports the result
+    # the postinstall wrote, which names the unit files and their mode; a
+    # postinstall that succeeded leaves the wrapper's own checks in charge.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_package_release_version", "dc_package_step",
+                     "dc_lifecycle_lock_held", "dc_package_script_result", "dc_package_apply_failed",
+                     "dc_install_package")
+    )
+    message = ("unit files the package installed are writable by group or other: "
+               "/usr/lib/systemd/system/defenseclaw-gateway.service (0664)")
+    document = json.dumps({"ok": applied, "errors": [] if applied else [{"code": "verify_failed", "message": message}],
+                           "exit_code": 0 if applied else 1}, indent=2)
+    stubs = dict(_PACKAGE_TOOL_STUBS)
+    # The package manager runs the postinstall, which writes its result.
+    stubs["rpm"] = stubs["rpm"].replace('-U) echo "rpm -U" >>"$DC_TEST_LOG" ;;',
+                                        '-U) printf "%s\\n" "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT" ;;')
+    stubs["dpkg"] = stubs["dpkg"].replace('-i) echo "dpkg -i" >>"$DC_TEST_LOG" ;;',
+                                          '-i) printf "%s\\n" "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT" ;;')
+    assert stubs["rpm"] != _PACKAGE_TOOL_STUBS["rpm"] and stubs["dpkg"] != _PACKAGE_TOOL_STUBS["dpkg"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    result_file = tmp_path / "last-package-result.json"
+    script = f"""
+DC_SCRIPT_OS=linux
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
+DC_PRODUCT_VERSION='' DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / source}'
+DC_PACKAGE_RESULT='{result_file}' DC_RESULT='' DC_PACKAGE_ACTION=''
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+{functions}
+dc_install_package
+dc_package_apply_failed
+echo own-checks
+"""
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_VERSION": "1.5.0", "DC_TEST_LOG": str(tmp_path / "log"),
+           "DC_TEST_RESULT": str(result_file), "DC_TEST_DOCUMENT": document}
+    for shell in ("sh", "bash"):
+        result_file.unlink(missing_ok=True)
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert result_file.is_file(), (shell, result.stdout, result.stderr)
+        if applied:
+            assert result.returncode == 0, (shell, result.stdout, result.stderr)
+            assert result.stdout.strip() == "own-checks", (shell, result.stdout)
+            continue
+        assert result.returncode == 1, (shell, result.stdout, result.stderr)
+        assert "own-checks" not in result.stdout, (shell, result.stdout)
+        assert json.loads(result.stdout)["errors"][0]["message"] == message, (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("applied", [False, True])
+def test_wrapper_main_reports_the_package_result_instead_of_binaries_damaged(
+    os_dir: str, applied: bool, tmp_path: Path
+) -> None:
+    # dc_main itself, in both copies: when this run installed the package and
+    # its postinstall did not bring a deployment up, every binary reads as
+    # damaged, and the dc_binaries_damaged branch must report the result the
+    # postinstall wrote instead of mdm_binaries_damaged (GAP-0108). After a
+    # postinstall that succeeded the branch still reports mdm_binaries_damaged,
+    # which proves the run reached it.
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    message = ("unit files the package installed are writable by group or other: "
+               "/usr/lib/systemd/system/defenseclaw-gateway.service (0664)")
+    document = json.dumps({"ok": applied, "errors": [] if applied else [{"code": "verify_failed", "message": message}],
+                           "exit_code": 0 if applied else 1}, indent=2)
+    result_file = tmp_path / "last-package-result.json"
+    stage_parent = tmp_path / "stage"
+    stage_parent.mkdir()
+    # Stand-ins for the root, platform and package-manager steps; the
+    # branch and dc_package_apply_failed run as shipped.
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{tmp_path}/bin/defenseclaw-gateway'
+    DC_PACKAGE_RESULT='{result_file}'
+    DC_OS_GROUP=linux
+    DC_LOG=''
+}}
+dc_parse_args() {{ DC_SOURCE='{tmp_path}/defenseclaw-enterprise.rpm'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{
+    : >"$DC_STAGE/package.started"
+    printf '%s\\n' "$DC_TEST_DOCUMENT" >"$DC_PACKAGE_RESULT"
+    dc_package_step "" 1.5.0
+}}
+dc_trusted_path() {{ return 0; }}
+dc_binaries_damaged() {{ return 0; }}
+dc_main
+"""
+    script = text[: -len(entry)] + "\n" + overrides
+    env = {"PATH": "/usr/bin:/bin", "DC_TEST_DOCUMENT": document}
+    for shell in ("sh", "bash"):
+        result_file.unlink(missing_ok=True)
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert result_file.is_file(), (shell, result.stdout, result.stderr)
+        assert result.returncode == 1, (shell, result.stdout, result.stderr)
+        error = json.loads(result.stdout)["errors"][0]
+        if applied:
+            assert error["code"] == "mdm_binaries_damaged", (shell, result.stdout)
+            continue
+        assert "mdm_binaries_damaged" not in result.stdout, (shell, result.stdout)
+        assert error == {"code": "verify_failed", "message": message}, (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: str, tmp_path: Path) -> None:
+    # dc_package_apply_failed reads DC_PACKAGE_RESULT: unless the Linux layout
+    # names the file packaging/linux/postinstall.sh writes, the wrapper falls
+    # back to mdm_binaries_damaged (GAP-0108).
+    postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
+    state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
+    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    assert len(state) == 1 and len(written) == 1, (state, written)
+    expected = f"{state[0]}/{written.pop()}"
+    assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    script = f"""
+DC_SCRIPT_OS=linux DC_LOG='{tmp_path}/mdm.log' DC_PACKAGE_RESULT=''
+{_shell_function(text, "dc_layout")}
+dc_layout
+printf '%s\\n' "$DC_PACKAGE_RESULT"
+"""
+    for shell in ("sh", "bash"):
+        result = subprocess.run([shell, "-c", script], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+                                timeout=30)
+        assert result.returncode == 0, (shell, result.stdout, result.stderr)
+        assert result.stdout == f"{expected}\n", (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
         pytest.skip("a deployment is installed on this host")
@@ -796,6 +951,445 @@ echo "changed=$DC_ANCHORS_CHANGED"
     assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
 
 
+_PARITY_BUNDLE_CONFIG = """config_version: 9
+deployment_mode: managed_enterprise
+guardrail:
+  enabled: true
+  mode: action
+  block_at: HIGH
+  rule_pack: p2int
+  custom_packs:
+    p2int:
+      path: policies/guardrail/p2int
+      digest: sha256:{digest}
+  connectors:
+    claudecode:
+      enabled: true
+"""
+_PARITY_DIGEST = "8" * 64
+
+
+def _parity_bundle(path: Path, config: str, packs: tuple[str, ...] = ("p2int",), pin: str | None = None) -> Path:
+    """A .dcbundle (tar.gz) with manifest.json, config.yaml and one rule file per pack."""
+    import io
+    import tarfile
+
+    raw = config.encode("utf-8")
+    files = [{"path": "config.yaml", "sha256": pin or hashlib.sha256(raw).hexdigest(), "size": len(raw)}]
+    members = {"config.yaml": raw}
+    for pack in packs:
+        rule = f"rules: [{pack}]\n".encode()
+        name = f"policies/guardrail/{pack}/rules/marker.yaml"
+        files.append({"path": name, "sha256": hashlib.sha256(rule).hexdigest(), "size": len(rule)})
+        members[name] = rule
+    manifest = json.dumps({"schema_version": 1, "version": 1, "files": files}, indent=2).encode()
+    with tarfile.open(path, "w:gz") as archive:
+        for name, data in (("manifest.json", manifest), ("manifest.sig", b"sig"), *members.items()):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return path
+
+
+def _parity_script() -> str:
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_bytes",
+             "dc_plain_yaml", "dc_check_base_config")
+    return "DC_SCRIPT_OS=linux\n" + "\n".join(_shell_function(text, name) for name in names) + '''
+DC_STAGE=$1
+reason=$(dc_check_base_config "$2" "$3") || { echo "refused: $reason"; exit 1; }
+echo ok
+'''
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_carry_the_bundle_guardrail_policy(tmp_path: Path, shell: str) -> None:
+    # GAP-0090: a base config delivered with a signed bundle is what the
+    # hooks answer under until the bundle applies, so its guardrail block must
+    # be the bundle's, apart from where each custom pack is preinstalled.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", 'path: "/Library/Application Support/DefenseClaw-RulePacks/p2int"')
+
+    def check(base: str, bundle_path: Path = bundle) -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base.encode("utf-8"))
+        result = subprocess.run([shell, "-c", _parity_script(), "t", str(stage), str(config), str(bundle_path)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    assert check(base_ok) == "ok", shell
+    assert check(base_ok.replace("\n", "\r\n")) == "ok", shell
+    assert check(base_ok.replace('"/Library', "'/Library").replace('p2int"', "p2int'")) == "ok", shell
+    assert check("# administrator copy\n" + base_ok + "ai_discovery:\n  enabled: true\n") == "ok", shell
+    # The live1 Linux base: claudecode protected with HIGH but no pack.
+    no_pack = bundle_config.replace("  rule_pack: p2int\n", "").split("  custom_packs:\n")[0] + (
+        "  connectors:\n    claudecode:\n      enabled: true\n")
+    assert check(no_pack) == "refused: the base config must select the bundle rule pack p2int", shell
+    assert check(base_ok.replace("block_at: HIGH", "block_at: CRITICAL")).startswith(
+        "refused: the base config guardrail: block differs from the signed bundle's"), shell
+    assert check(base_ok.replace("mode: action", "mode: observe")).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    assert check(base_ok.replace(_PARITY_DIGEST, "9" * 64)).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    assert check(base_ok.replace("      enabled: true\n", "      enabled: true\n    codex: {}\n")).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    assert check(bundle_config) == (
+        "refused: the base config must name an absolute, preinstalled path for bundle rule pack p2int"), shell
+    assert check(base_ok.replace("    p2int:\n", "    other:\n")) == "refused: the base config must define custom_packs.p2int", shell
+    assert check(base_ok + "guardrail:\n  enabled: false\n") == (
+        "refused: the base config and the bundle config must each have one plain guardrail: block"), shell
+    assert check(base_ok.replace("guardrail:\n", "")) == (
+        "refused: the base config and the bundle config must each have one plain guardrail: block"), shell
+    tampered = _parity_bundle(tmp_path / "tampered.dcbundle", bundle_config, pin="0" * 64)
+    assert check(base_ok, tampered) == "refused: the bundle config.yaml does not match the signed manifest files[] pin", shell
+    relative = _parity_bundle(tmp_path / "relative.dcbundle", bundle_config.replace("policies/guardrail/p2int", "/opt/p2int"))
+    assert check(base_ok, relative) == (
+        "refused: the bundle config.yaml must name policies/guardrail/p2int as custom_packs.p2int.path"), shell
+    (tmp_path / "junk.dcbundle").write_bytes(b"not a bundle")
+    assert check(base_ok, tmp_path / "junk.dcbundle") == "refused: the bundle has no readable manifest.json"
+    # The 256 KiB cap holds even when the oversized config.yaml matches its pin.
+    padded = bundle_config + "# " + "x" * 262144 + "\n"
+    padded_bundle = _parity_bundle(tmp_path / "padded.dcbundle", padded)
+    assert check(padded.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int"), padded_bundle) == (
+        "refused: the bundle config.yaml is larger than 262144 bytes"), shell
+    # A pack folder name that is not a plain name is refused as such.
+    odd_bundle = _parity_bundle(tmp_path / "odd.dcbundle", bundle_config, packs=("p2int", "p2;int"))
+    assert check(base_ok, odd_bundle) == "refused: the bundle names a rule pack folder that is not a plain name", shell
+    # custom_packs ends where the guardrail block's next key starts.
+    assert check(base_ok.replace("    p2int:\n", "    other:\n").replace(
+        "  connectors:\n", "  connectors:\n    p2int:\n      path: /etc/dc-packs/p2int\n")) == (
+        "refused: the base config must define custom_packs.p2int"), shell
+    # Blank lines that end the guardrail block are not part of it.
+    assert check(base_ok + "\n\n" + "ai_discovery:\n  enabled: true\n") == "ok", shell
+    # A full-line comment, even at column 0, does not end the guardrail
+    # block: the keys after it are compared, and comments are not.
+    commented = _parity_bundle(tmp_path / "commented.dcbundle", bundle_config.replace("  connectors:\n", "# agents\n  connectors:\n"))
+    commented_base = base_ok.replace("  connectors:\n", "# agents\n  connectors:\n")
+    assert check(commented_base, commented) == "ok", shell
+    assert check(commented_base.replace("      enabled: true\n", "      enabled: false\n"), commented).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    assert check(base_ok.replace("  connectors:\n", "  # agents\n  connectors:\n")) == "ok", shell
+    # A bundle on a built-in pack needs an identical guardrail block.
+    builtin = "guardrail:\n  enabled: true\n  mode: action\n  block_at: HIGH\n  rule_pack: default\n"
+    builtin_bundle = _parity_bundle(tmp_path / "builtin.dcbundle", "config_version: 9\n" + builtin, packs=())
+    assert check("config_version: 9\n" + builtin, builtin_bundle) == "ok", shell
+    assert check("config_version: 9\n" + builtin.replace("HIGH", "MEDIUM"), builtin_bundle).startswith(
+        "refused: the base config guardrail: block differs"), shell
+    # Every pack the bundle ships is compared.
+    two = bundle_config.replace("  connectors:\n", "    extra:\n      path: policies/guardrail/extra\n  connectors:\n")
+    two_bundle = _parity_bundle(tmp_path / "two.dcbundle", two, packs=("p2int", "extra"))
+    two_base = two.replace("policies/guardrail/p2int", "/etc/dc-packs/p2int").replace("policies/guardrail/extra", "/etc/dc-packs/extra")
+    assert check(two_base, two_bundle) == "ok", shell
+    assert check(two_base.replace("/etc/dc-packs/extra", "packs/extra"), two_bundle) == (
+        "refused: the base config must name an absolute, preinstalled path for bundle rule pack extra"), shell
+
+
+_HOOK_MODE_REFUSAL = {
+    "claude_code": "claude_code.mode overrides the guardrail mode for Claude Code",
+    "codex": "codex.mode overrides the guardrail mode for Codex",
+    "connector_hooks": "connector_hooks.<connector>.mode overrides the guardrail mode for that connector",
+    "application_protection": "it sets the guardrail policy of automatically protected agents",
+}
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_carry_the_bundle_hook_modes(tmp_path: Path, shell: str) -> None:
+    # GAP-0090 verify r1: hookModeForConfig takes claude_code.mode,
+    # codex.mode and connector_hooks.<c>.mode before the guardrail mode, and
+    # application_protection is part of the guardrail policy, so a base
+    # config with the bundle's exact guardrail block but its own value for
+    # any of them gave 6 marker ALLOW live. Those blocks must be the bundle's,
+    # or absent from both.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int")
+
+    def check(base: str, bundle_path: Path = bundle) -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base.encode("utf-8"))
+        result = subprocess.run([shell, "-c", _parity_script(), "t", str(stage), str(config), str(bundle_path)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    def refused(key: str) -> str:
+        return (f"refused: the base config {key}: block differs from the signed bundle's ({_HOOK_MODE_REFUSAL[key]}); "
+                f"use the bundle's {key}: block, or leave it out of both")
+
+    assert check(base_ok) == "ok", shell
+    rows = {
+        "claude_code": ("claude_code: {mode: observe}\n", "claude_code:\n  enabled: true\n  mode: observe\n",
+                        '"claude_code":\n  mode: observe\n', "'claude_code' : {mode: observe}\n"),
+        "codex": ("codex:\n  mode: observe\n", "codex: {mode: observe}\n"),
+        "connector_hooks": ("connector_hooks:\n  claudecode:\n    mode: observe\n",
+                            "connector_hooks: {claudecode: {mode: observe}}\n"),
+        "application_protection": ("application_protection:\n  enabled: true\n  guardrail:\n    mode: observe\n",
+                                   "application_protection: {enabled: true}\n"),
+    }
+    for key, blocks in rows.items():
+        for block in blocks:
+            assert check(base_ok + block) == refused(key), (shell, block)
+    # The key is found at the top of a file with a byte order mark and CRLF.
+    assert check("\ufeffclaude_code: {mode: observe}\r\n" + base_ok) == refused("claude_code"), shell
+    # The same blocks in both pass; comments, blank lines and CRLF do not count.
+    modes = ("claude_code:\n  enabled: true\n  mode: action\ncodex:\n  mode: action\n"
+             "connector_hooks:\n  claudecode:\n    mode: action\napplication_protection:\n  enabled: false\n")
+    modes_bundle = _parity_bundle(tmp_path / "modes.dcbundle", bundle_config + modes)
+    with_modes = base_ok + "# hook modes, copied from the bundle\n" + modes.replace(
+        "  enabled: true\n  mode: action\ncodex", "  enabled: true\n  # as in the bundle\n\n# note\n  mode: action\n\ncodex")
+    assert check(with_modes, modes_bundle) == "ok", shell
+    assert check(with_modes.replace("\n", "\r\n"), modes_bundle) == "ok", shell
+    # A block the bundle sets and the base config leaves out is refused too.
+    assert check(base_ok, modes_bundle) == refused("claude_code"), shell
+    assert check(with_modes.replace("codex:\n  mode: action\n", ""), modes_bundle) == refused("codex"), shell
+    assert check(with_modes.replace("    mode: action\n", "    mode: observe\n"), modes_bundle) == refused("connector_hooks"), shell
+    assert check(with_modes.replace("  enabled: false\n", "  enabled: true\n"), modes_bundle) == (
+        refused("application_protection")), shell
+
+
+_NOT_PLAIN = ("is not a plain top-level key; write each top-level key in lowercase letters, digits and underscores, "
+              "plain or in quotes, without an escape, tag, anchor, alias, merge key, complex key or {...} or [...]")
+_OPEN_QUOTE = "leaves a quoted value open; end each quoted value on the line it starts on"
+_OPEN_FLOW = "leaves a {...} or [...] open; end each one on the line it starts on"
+
+
+def _other_letters(key: str) -> str:
+    return f"writes the top-level key {key} in other letters; write it in lowercase"
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_be_written_plainly(tmp_path: Path, shell: str) -> None:
+    # GAP-0090 verify r2: the compare finds a key by its text. The product's
+    # loader also read "claude_code":, !!str claude_code: and
+    # ? claude_code as claude_code (5-6 marker ALLOW live), and a quoted value
+    # that runs on to the next line hid the whole guardrail block.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int")
+    after = base_ok.count("\n") + 1
+    head, rest = base_ok.split("guardrail:\n")
+    guardrail = "guardrail:\n" + rest
+
+    def check(base: str) -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base.encode("utf-8"))
+        result = subprocess.run([shell, "-c", _parity_script(), "t", str(stage), str(config), str(bundle)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    def refused(line: int, why: str) -> str:
+        return f"refused: the base config line {line} {why}"
+
+    for block in ('"claude\\u005fcode":\n  mode: observe\n', "!!str claude_code: {mode: observe}\n",
+                  "? claude_code\n: {mode: observe}\n", "&cc claude_code: {mode: observe}\n",
+                  "<<: {claude_code: {mode: observe}}\n", "*cc : {mode: observe}\n", "...\n",
+                  "---\nclaude_code: {mode: observe}\n"):
+        assert check(base_ok + block) == refused(after, _NOT_PLAIN), (shell, block)
+    assert check("{config_version: 9}\n") == refused(1, _NOT_PLAIN), shell
+    assert check("%YAML 1.2\n---\n" + base_ok) == refused(1, _NOT_PLAIN), shell
+    assert check(base_ok + "Claude_Code: {mode: observe}\n") == refused(after, _other_letters("claude_code")), shell
+    assert check(base_ok + '"CODEX":\n  mode: observe\n') == refused(after, _other_letters("codex")), shell
+    assert check(base_ok.replace("guardrail:\n", "Guardrail:\n")) == refused(3, _other_letters("guardrail")), shell
+    # A quoted value or a [...] that runs on hides the guardrail block from
+    # the loader (it reads tenant_id "t guardrail: enabled: true ...").
+    assert check(head + 'tenant_id: "t\n' + guardrail + 'workspace_id: w"\n') == refused(3, _OPEN_QUOTE), shell
+    assert check(head + "tenant_id: 't\n" + guardrail + "workspace_id: w'\n") == refused(3, _OPEN_QUOTE), shell
+    assert check(head + 'tenant_id: "t\\"\n' + guardrail + 'workspace_id: w"\n') == refused(3, _OPEN_QUOTE), shell
+    assert check(head + "tenant_id: [t,\n" + guardrail + "workspace_id: w]\n") == refused(3, _OPEN_FLOW), shell
+    # Lines of a block scalar are skipped only while they are deeper than the
+    # key (or the - item) that owns it.
+    nested = head + 'ai_discovery:\n  items:\n    - note: |\n        say "hi\n      other: "t\n' + guardrail + 'w: v"\n'
+    assert check(nested) == refused(7, _OPEN_QUOTE), shell
+    dashes = head + 'ai_discovery:\n  items:\n  - - |\n      text\n    - "t\n' + guardrail + 'w: v"\n'
+    assert check(dashes) == refused(7, _OPEN_QUOTE), shell
+    # Plain spellings, comments, one-line quoted values and flows, plain
+    # values with quote characters and block scalars all pass.
+    plain = (base_ok + "# it's \"fine\n" + '"ai_discovery":\n  enabled: true\n' + "scanners:\n"
+             "  note: it's a \"plain\" value # with a 'comment\n  url: http://127.0.0.1:1/x\n"
+             "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n    it's: 'open\n\n"
+             "  more: >-\n    a \"b\n  'quoted': 'it''s'\n  list:\n  - |\n    x \"y\n  - z\n")
+    assert check(plain) == "ok", shell
+    assert check("---\n" + base_ok) == "ok", shell
+    assert check("\ufeff" + base_ok) == "ok", shell
+
+
+def _not_ascii(what: str) -> str:
+    return f"has {what}; write the base config in plain ASCII with LF or CRLF line ends"
+
+
+_LONE_CR = "a carriage return (CR) that is not followed by a line feed (LF)"
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
+@pytest.mark.parametrize("shell", [s for s in ("sh", "bash", "dash") if shutil.which(s)])
+def test_unix_wrapper_base_config_must_be_plain_ascii(tmp_path: Path, shell: str) -> None:
+    # GAP-0090 verify r3: the loader also starts a new line at a lone CR, NEL,
+    # LS and PS, but the text checks split only at LF, so a top-level key
+    # after one passed the compare (6 marker ALLOW live), and a comment line
+    # ending in CR could open a quote that hides the guardrail block. Every
+    # byte must be printable ASCII or LF, a CR only before an LF, and a byte
+    # order mark only first.
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    base_ok = bundle_config.replace("path: policies/guardrail/p2int", "path: /etc/dc-packs/p2int").encode()
+    after = base_ok.count(b"\n") + 1
+    head, rest = base_ok.split(b"guardrail:\n")
+    guardrail = b"guardrail:\n" + rest
+    hidden = b"claude_code: {mode: observe}\n"
+
+    def check(base: bytes, prelude: str = "") -> str:
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        config = tmp_path / "base.yaml"
+        config.write_bytes(base)
+        result = subprocess.run([shell, "-c", prelude + _parity_script(), "t", str(stage), str(config), str(bundle)],
+                                capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() + (f" rc={result.returncode}" if result.returncode not in (0, 1) else "")
+
+    def refused(line: int, what: str) -> str:
+        return f"refused: the base config line {line} {_not_ascii(what)}"
+
+    rows = {
+        b"ai_discovery:\n  enabled: true\r" + hidden: (after + 1, _LONE_CR),
+        b"# administrator note\r" + hidden: (after, _LONE_CR),
+        b"ai_discovery:\n  enabled: true\xc2\x85" + hidden: (after + 1, "a NEL (U+0085) line break"),
+        b"ai_discovery:\n  enabled: true\xe2\x80\xa8" + hidden: (after + 1, "an LS (U+2028) line break"),
+        b"ai_discovery:\n  enabled: true\xe2\x80\xa9" + hidden: (after + 1, "a PS (U+2029) line break"),
+        b"ai_discovery:\n  enabled: true\x00\n": (after + 1, "a NUL byte"),
+        b"ai_discovery:\n  enabled:\ttrue\n": (after + 1, "a tab"),
+        b"\tclaude_code: {mode: observe}\n": (after, "a tab"),
+        b"ai_discovery:\n  enabled: true\x0b\n": (after + 1, "a vertical tab"),
+        b"ai_discovery:\n  enabled: true\x0c\n": (after + 1, "a form feed"),
+        b"ai_discovery:\n  enabled: true\x7f\n": (after + 1, "a control character (0x7F)"),
+        "# caf\u00e9\n".encode(): (after, "a non-ASCII byte (0xC3)"),
+        b"\xef\xbb\xbf# a second byte order mark\n": (after, "a byte order mark that is not at the start of the file"),
+        b"ai_discovery:\n  enabled: true\r": (after + 1, _LONE_CR),
+        b"# cut off \xe2\x80": (after, "a non-ASCII byte (0xE2)"),
+    }
+    for extra, (line, what) in rows.items():
+        assert check(base_ok + extra) == refused(line, what), (shell, extra)
+        # The first fault is the one named.
+        assert check(base_ok + extra + b"\t\x00\n") == refused(line, what), (shell, extra)
+    # A comment line that ends in CR opens a quote the loader reads as
+    # tenant_id "t guardrail: ...", hiding the guardrail block.
+    assert check(head + b"# note\rtenant_id: \"t\n" + guardrail + b"workspace_id: w\"\n") == refused(3, _LONE_CR), shell
+    assert check(b"\xef\xbb" + base_ok) == refused(1, "a non-ASCII byte (0xEF)"), shell
+    # Plain ASCII with LF or CRLF, with or without a byte order mark, passes.
+    assert check(base_ok) == "ok", shell
+    assert check(base_ok.replace(b"\n", b"\r\n")) == "ok", shell
+    assert check(b"\xef\xbb\xbf" + base_ok) == "ok", shell
+    assert check(b"\xef\xbb\xbf" + base_ok.replace(b"\n", b"\r\n")) == "ok", shell
+    # A file od does not read in full is refused.
+    assert check(base_ok, prelude="od() { :; }\n") == "refused: the base config could not be read byte by byte", shell
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("sha256sum") is None, reason="POSIX shell scripts; needs sha256sum")
+def test_unix_wrapper_applies_the_base_config_before_the_anchors_and_the_bundle(tmp_path: Path) -> None:
+    # GAP-0090: with a base config and a bundle, the wrapper refuses a
+    # mismatch before the package step, applies the base config before the
+    # trust anchors (so the hooks never answer under a weaker policy), and
+    # skips it once the device is in bundle mode.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    names = ("dc_sha256", "dc_guardrail_block", "dc_custom_pack_path", "dc_top_block", "dc_plain_bytes",
+             "dc_plain_yaml", "dc_check_base_config", "dc_main")
+    bundle_config = _PARITY_BUNDLE_CONFIG.format(digest=_PARITY_DIGEST)
+    bundle = _parity_bundle(tmp_path / "v1.dcbundle", bundle_config)
+    good = tmp_path / "base.yaml"
+    good.write_text(bundle_config.replace("policies/guardrail/p2int", "/etc/dc-packs/p2int"), encoding="utf-8")
+    weak = tmp_path / "weak.yaml"
+    weak.write_text(bundle_config.replace("block_at: HIGH", "block_at: CRITICAL").replace(
+        "policies/guardrail/p2int", "/etc/dc-packs/p2int"), encoding="utf-8")
+    # GAP-0090 verify r3: a key after a lone CR is a top-level key for the loader.
+    hidden = tmp_path / "hidden.yaml"
+    hidden.write_bytes(good.read_bytes() + b"ai_discovery:\n  enabled: true\rclaude_code: {mode: observe}\n")
+    (tmp_path / "anchors.json").write_text('{"schema_version": 1}\n', encoding="utf-8")
+    calls = tmp_path / "calls.log"
+    script = "\n".join(_shell_function(text, name) for name in names) + f'''
+DC_SCRIPT_OS=linux DC_ACTION=ensure DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_REFUSE_CAPABILITY_LOSS=0
+DC_MAX_CONFIG_BYTES=1048576 DC_MAX_BUNDLE_BYTES=4194304 DC_MAX_ANCHORS_BYTES=65536 DC_MAX_SECRET_BYTES=16384
+DC_CONFIG_STDIN=0 DC_SECRET_STDIN=0 DC_SECRET_NAME="" DC_SOURCE_URL="" DC_TRUST_ACL=""
+DC_SOURCE=/staged/defenseclaw-enterprise.rpm DC_CONFIG_FILE="" DC_BUNDLE_FILE={bundle}
+DC_T_CONFIG=$1 DC_T_VIA=$3
+case "$DC_T_VIA" in
+    file) DC_CONFIG_FILE=$DC_T_CONFIG ;;
+    stdin) DC_CONFIG_STDIN=1 ;;
+esac
+DC_TRUST_ANCHOR_FILE={tmp_path / "anchors.json"} DC_ANCHORS=$2 DC_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
+DC_OS_GROUP=linux DC_PRODUCT_VERSION="" DC_RESULT=""
+call() {{ printf '%s\\n' "$*" >>"{calls}"; }}
+dc_layout() {{ :; }}; dc_log() {{ :; }}; dc_parse_args() {{ :; }}; dc_validate_args() {{ :; }}
+dc_platform() {{ echo linux; }}; id() {{ echo 0; }}; dc_stat_uid() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT={tmp_path}; }}; dc_sweep_stages() {{ :; }}
+dc_stage_file() {{ cp "$1" "$2"; }}; dc_read_bounded() {{ cat >"$1"; }}
+dc_inline_config() {{ [ "$DC_T_VIA" != inline ] || cat "$DC_T_CONFIG"; }}
+dc_inline_bundle() {{ :; }}; dc_inline_trust_anchors() {{ :; }}
+dc_trusted_path() {{ :; }}; dc_binaries_damaged() {{ return 1; }}
+dc_stage_source() {{ :; }}; dc_install_package() {{ call package; }}
+dc_run_lifecycle_retry() {{ shift; call "$@"; }}
+dc_install_anchors() {{ call anchors; }}; dc_restore_anchors() {{ call restore; }}
+dc_annotate_package_step() {{ :; }}; dc_emit_result() {{ :; }}
+dc_fail_result() {{ call "fail $2"; exit "$1"; }}
+dc_cleanup() {{ rm -rf "$DC_STAGE"; }}; dc_stop_child() {{ :; }}
+dc_main
+'''
+
+    # PATH without tar: every other command the stubs leave to the system.
+    no_tar = tmp_path / "no-tar-bin"
+    no_tar.mkdir()
+    for folder in dict.fromkeys(os.environ.get("PATH", "").split(os.pathsep)):
+        if not folder or not os.path.isdir(folder):
+            continue
+        for name in os.listdir(folder):
+            target = no_tar / name
+            if name not in ("tar", "gtar", "bsdtar") and not target.exists() and os.access(os.path.join(folder, name), os.X_OK):
+                target.symlink_to(os.path.join(folder, name))
+
+    def run(config: Path, anchors: str = "absent", via: str = "file", path: str | None = None) -> tuple[int, list[str]]:
+        calls.unlink(missing_ok=True)
+        installed = tmp_path / "etc-trust-bundle-anchors.json"
+        installed.unlink(missing_ok=True)
+        if anchors == "present":
+            installed.write_text("{}", encoding="utf-8")
+        elif anchors == "dangling":
+            installed.symlink_to(tmp_path / "missing-anchors.json")
+        env = dict(os.environ, PATH=path) if path else None
+        with config.open("rb") as stdin:
+            result = subprocess.run(["sh", "-c", script, "t", str(config), str(installed), via],
+                                    stdin=stdin, capture_output=True, text=True, timeout=60, env=env)
+        lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+        return result.returncode, [line.split(" --config=")[0] + (" --config" if "--config=" in line else "")
+                                   for line in lines]
+
+    # --config-file, --config-stdin and the inline config are all checked and
+    # applied before the anchors (the Intune scripts use the inline config).
+    for via in ("file", "stdin", "inline"):
+        code, order = run(good, via=via)
+        assert code == 0, (via, order)
+        assert order[:3] == ["package", "linux ensure --reason mdm --lock-wait 10m --config", "anchors"], (via, order)
+        assert len(order) == 4 and order[3].startswith("bundle apply --bundle "), (via, order)
+        assert order[3].endswith(" --reason mdm --lock-wait 10m"), (via, order)
+        code, order = run(weak, via=via)
+        assert (code, order) == (2, ["fail mdm_base_config_mismatch"]), (via, order)
+        code, order = run(hidden, via=via)
+        assert (code, order) == (2, ["fail mdm_base_config_mismatch"]), (via, order)
+        code, order = run(good, via=via, path=str(no_tar))
+        assert (code, order) == (1, ["fail mdm_tar_missing"]), (via, order)
+    # In bundle mode (anchors installed, even as a link) the base config is not used.
+    for anchors in ("present", "dangling"):
+        code, order = run(good, anchors=anchors)
+        assert code == 0 and order[:2] == ["package", "anchors"] and order[2].startswith("bundle apply"), (anchors, order)
+        assert not any("ensure" in line for line in order), (anchors, order)
+
+
 def test_bundle_capability_loss_flag_reaches_apply() -> None:
     for platform in ("linux", "macos"):
         script = _text(MDM / platform / "defenseclaw-enterprise.sh")
@@ -893,6 +1487,34 @@ dc_report 1 1.2.3 ""
         assert bad.returncode == 2 and bad.stderr, args
     if os.geteuid() != 0:
         assert _run([detect, "--bundle-status", "--format", "jamf"]).stdout == "<result>none 0 unknown</result>\n"
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_keeps_product_version_with_required_bundle(tmp_path: Path, platform: str) -> None:
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f'  "enterprise {platform} status --json") echo \'{{"installed":true,"installed_version":"9.9.9"}}\' ;;\n'
+        f'  "enterprise bundle status --json") echo \'{{"current":{{"bundle_id":"{_BUNDLE_ID}","version":1}},"applied":true}}\' ;;\n'
+        '  *) exit 9 ;;\nesac\n',
+        encoding="ascii",
+    )
+    gateway.chmod(0o755)
+    source = _text(MDM / platform / "detect.sh")
+    source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', '[ 1 = 1 ]', 1)
+    source = source.replace('[ "$(id -u)" = 0 ]', '[ 1 = 1 ]', 1)
+    original = ("gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux" if platform == "linux"
+                else "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos")
+    assert original in source
+    source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
+    source = source.replace('dc_trusted_path "$gateway" ||', '[ -f "$gateway" ] ||', 1)
+    detect = tmp_path / "detect.sh"
+    detect.write_text(source, encoding="ascii")
+    result = subprocess.run(["sh", str(detect), "--require-bundle", "1"], capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        0, f"DefenseClaw Enterprise 9.9.9, policy bundle {_BUNDLE_ID} version 1\n", ""
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -1064,7 +1686,15 @@ PS7_ONLY = [
 ]
 
 
-@pytest.mark.parametrize("path", WINDOWS_51, ids=lambda p: p.name)
+# The reference rule-pack app scripts run before DefenseClaw is installed, so
+# they carry their own helper region, not the MDM shared one.
+RULE_PACK_51 = [
+    MDM / "intune" / "windows" / "Install-DefenseClawRulePack.ps1",
+    MDM / "intune" / "windows" / "Detect-DefenseClawRulePack.ps1",
+]
+
+
+@pytest.mark.parametrize("path", WINDOWS_51 + RULE_PACK_51, ids=lambda p: p.name)
 def test_intune_facing_windows_scripts_run_in_powershell_51(path: Path) -> None:
     text = _text(path)
     for pattern, label in PS7_ONLY:
@@ -1384,3 +2014,45 @@ def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() ->
     assert "$_.code -eq 'scanner_runtime_unavailable'" in block
     assert block.index("$code = 1603") < block.index("$recovered =")
     assert "not repaired (scanner_runtime_unavailable)" in block
+
+
+# Timeout and recovery wiring of the Windows MDM scripts (formerly
+# packaging/mdm/intune/windows/test_remediate_timeout.py, which pytest never
+# collected: testpaths is cli/tests).
+def test_native_helper_has_a_bounded_process_and_pipe_wait_in_every_upload() -> None:
+    # The copies are identical (test_copied_helpers_are_identical); check one.
+    helper = _shared_region(_text(WINDOWS_SHARED[0]))
+    assert "$process.WaitForExit($TimeoutSeconds * 1000)" in helper
+    assert "taskkill.exe" in helper and "/T /F" in helper
+    assert "[System.Threading.Tasks.Task]::WaitAll(" in helper
+    assert "$process.WaitForExit()" not in helper
+
+
+def test_remediation_bounds_ensure_and_restores_start_modes_on_failure() -> None:
+    script = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text()
+    assert "Get-DefenseClawRemediationStartModes" in script
+    assert "Restore-DefenseClawRemediationStartModes -PriorModes $priorModes" in script
+    assert "$modes[$name] = if ($mode -in @(2, 3)) { $mode } else { -1 }" in script
+    assert "if ([int]$PriorModes[$name] -notin @(2, 3)) { continue }" in script
+    assert "if ($current -ne 4) { continue }" in script
+    assert "$committed = [bool]$ensureDocument.ok -and -not [bool]$ensureDocument.transaction_pending" in script
+    # A parsed ensure report is the lifecycle's decision: only an ensure that
+    # ended without one has its startup modes put back.
+    assert "if (-not $committed -and $null -eq $ensureDocument -and ($ensureFailure -or" in script
+    assert "$run.ExitCode -notin @(0, 3010, 1618)" in script
+    assert "4 { 'disabled' }" not in script
+    assert "-TimeoutSeconds 840 -ArgumentList @(" in script
+    assert "startup-mode restore failed" in script
+    assert "_.code -eq 'startup_mode_restore_failed'" in script
+
+
+def test_standalone_installer_binds_native_output_to_the_process_deadline() -> None:
+    module = (MDM.parent / "windows" / "DefenseClawEnterprise.psm1").read_text()
+    native = module.split("function Invoke-DefenseClawProcess {", 1)[1].split(
+        "function Invoke-DefenseClawNative {", 1
+    )[0]
+    assert "if (Test-DefenseClawStandaloneProfile)" in native
+    assert "[Threading.Tasks.Task]::WaitAll(" in native
+    assert "native process output timed out" in native
+    assert "DC_LIFECYCLE_PHASE:" in module
+    assert "transaction quiesce stop services" in module

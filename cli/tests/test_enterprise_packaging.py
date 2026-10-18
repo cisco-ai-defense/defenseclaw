@@ -268,6 +268,51 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
     assert payload.get("KeepAlive") is True
 
 
+# GAP-0108: nfpm copies the builder's file mode for an entry without
+# file_info, so a checkout made under umask 0002 shipped every systemd unit
+# 0664 and the first install rolled back (verify refuses group-writable
+# units). Every entry the package installs pins its owner and mode.
+_NFPM_DIR_MODE, _NFPM_FILE_MODE = 0o755, 0o644
+_NFPM_EXECUTABLES = {"/usr/lib/defenseclaw-enterprise/apt-downgrade-guard"}
+
+
+def _enterprise_nfpm_contents() -> list[dict]:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    return nfpm["contents"]
+
+
+def test_enterprise_package_pins_owner_and_mode_of_every_entry() -> None:
+    contents = _enterprise_nfpm_contents()
+    checked, problems = 0, []
+    for entry in contents:
+        if entry.get("type") == "symlink":
+            continue
+        checked += 1
+        info = entry.get("file_info") or {}
+        if entry.get("type") == "dir" or entry["dst"] in _NFPM_EXECUTABLES:
+            want = _NFPM_DIR_MODE
+        else:
+            want = _NFPM_FILE_MODE
+        if info.get("mode") != want or info.get("owner") != "root" or info.get("group") != "root":
+            problems.append(f"{entry['dst']}: file_info {info!r}, want mode {want:04o} owner root group root")
+    assert not problems, "\n".join(problems)
+    assert checked >= 20, f"only {checked} package entries were checked"
+
+
+def test_enterprise_package_ships_every_systemd_unit_at_0644() -> None:
+    units = {
+        p.relative_to(ROOT).as_posix()
+        for pattern in ("*.service", "*.socket", "*.timer", "*.path")
+        for p in [*SYSTEMD.glob(pattern), *(SYSTEMD / "user").glob(pattern)]
+    }
+    shipped = {c["src"]: c for c in _enterprise_nfpm_contents() if "src" in c}
+    assert len(units) >= 14 and units <= set(shipped), sorted(units - set(shipped))
+    for src in sorted(units):
+        assert shipped[src]["file_info"]["mode"] == 0o644, src
+        assert shipped[src]["dst"].startswith(("/usr/lib/systemd/system/", "/usr/lib/systemd/user/")), src
+
+
 def test_enterprise_rpm_owns_its_doc_directory():
     # An rpm erase removes only the directories the package lists; without
     # the entry /usr/share/doc/defenseclaw-enterprise stays behind, empty.
@@ -288,6 +333,58 @@ def test_enterprise_package_ships_the_managed_opencode_plugin():
     plugin = shipped.get("/opt/defenseclaw/share/opencode/defenseclaw.js")
     assert plugin is not None and plugin["src"] == "internal/enterprisepolicy/opencode_managed_plugin.js"
     assert plugin.get("file_info", {}).get("mode") == 0o644
+
+
+# GAP-0108: the archives take each file's mode from the checkout. The
+# before hook drops the group and other write bits of every archived tree,
+# so a builder under umask 0002 archives the modes CI's umask 0022 gives,
+# and the binaries are root-owned 0755 (a root `tar -x` keeps the owner, and
+# `enterprise <os> install --payload` refuses binaries another uid owns).
+_ARCHIVE_MODE_HOOK = "chmod -R go-w packaging edge-connector LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md"
+
+
+def test_release_archives_do_not_take_the_builders_modes() -> None:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    assert _ARCHIVE_MODE_HOOK in config["before"]["hooks"]
+    covered = set(_ARCHIVE_MODE_HOOK.split()[3:])
+    for archive in config["archives"]:
+        assert archive.get("builds_info") == {"mode": 0o755, "owner": "root", "group": "root"}, archive["id"]
+        for pattern in archive["files"]:
+            matched = {p.relative_to(ROOT).parts[0] for p in ROOT.glob(pattern)}
+            assert matched and matched <= covered, (archive["id"], pattern, sorted(matched - covered))
+    assert "\numask 022\n" in (ROOT / "scripts" / "build-release-assets.sh").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_archive_mode_hook_gives_umask_0002_checkouts_the_ci_modes(tmp_path: Path) -> None:
+    files = {
+        "packaging/systemd/defenseclaw-gateway.service": 0o664,
+        "packaging/systemd/user/defenseclaw-sandbox.socket": 0o664,
+        "packaging/linux/postinstall.sh": 0o775,
+        "edge-connector/tools/policy_compiler.py": 0o664,
+        "LICENSE": 0o664,
+        "NOTICE": 0o664,
+        "THIRD_PARTY_LICENSES.txt": 0o664,
+        "README.md": 0o664,
+        "CHANGELOG.md": 0o664,
+    }
+    for name, mode in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+        path.chmod(mode)
+    for directory in (tmp_path / "packaging").rglob("*"):
+        if directory.is_dir():
+            directory.chmod(0o775)
+    completed = subprocess.run(
+        ["sh", "-c", _ARCHIVE_MODE_HOOK], cwd=tmp_path, capture_output=True, text=True, timeout=30
+    )
+    assert completed.returncode == 0, completed.stderr
+    for name, mode in files.items():
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == mode & ~0o022, name
+    for directory in (tmp_path / "packaging").rglob("*"):
+        if directory.is_dir():
+            assert stat.S_IMODE(directory.stat().st_mode) == 0o755, directory
 
 
 def test_release_archives_ship_enterprise_packaging_assets():
@@ -949,11 +1046,60 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
     host = _Host(tmp_path, gateway_rc=rc)
     result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
     assert result.returncode == exit_code, (result.stdout, result.stderr)
-    assert host.calls() == ["gateway enterprise linux uninstall --json --lock-wait 8m"]
+    assert [c for c in host.calls() if c.startswith("gateway ")] == ["gateway enterprise linux uninstall --json --lock-wait 8m"]
     if rc == 75:
         assert "nothing was removed" in result.stderr
+        # A refused removal keeps the package, so its units keep running.
+        assert not [c for c in host.calls() if c.startswith("systemctl ")]
     elif rc:
         assert "uninstall reported a problem" in result.stderr
+
+
+# GAP-0112: the preremove's uninstall waited on the lock of a concurrent MDM
+# purge, which removed the deployment and the lock with it. That uninstall
+# now reports a not_installed no-op and exits 0 (it exited busy 75, and the
+# preremove aborted the rpm or deb removal after the purge had removed
+# everything): the removal goes on, stops the package units and keeps no
+# result.
+@pytest.mark.parametrize("argument", ["remove", "0"])
+def test_linux_preremove_goes_on_when_a_concurrent_purge_removed_the_deployment(tmp_path: Path, argument: str) -> None:
+    noop = {
+        "schema_version": 2,
+        "action": "uninstall",
+        "ok": True,
+        "exit_code": 0,
+        "noop": True,
+        "noop_reason": "not_installed",
+        "warnings": [
+            {
+                "code": "not_installed",
+                "message": "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove",
+            }
+        ],
+    }
+    host = _Host(tmp_path, gateway_rc=0, gateway_out=json.dumps(noop))
+    result = host.run(_linux_scriptlet(host, "preremove.sh").replace("${TMPDIR:-/tmp}", str(tmp_path)), argument)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "nothing was removed" not in result.stderr
+    assert "reported a problem" not in result.stderr
+    assert not host.state.exists()
+    assert list(tmp_path.glob("defenseclaw-preremove.*")) == []
+    calls = host.calls()
+    assert calls[0] == "gateway enterprise linux uninstall --json --lock-wait 8m"
+    assert any(call.startswith("systemctl stop ") for call in calls), calls
+
+
+# The preremove aborts the package removal only on a busy lock (75), a
+# refused hook-removal precheck and an uninstall that stopped before removing
+# the binaries (uninstall_incomplete, GAP-1519); every other uninstall
+# outcome, the not_installed no-op above included, lets the removal go on.
+def test_linux_preremove_aborts_only_on_busy_a_refused_precheck_or_an_incomplete_uninstall() -> None:
+    text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    aborts = [line.strip() for line in text.splitlines() if re.match(r"\s*exit [1-9]", line)]
+    assert aborts == ["exit 1", "exit 1", "exit 1"], aborts  # busy, precheck, incomplete
+    assert 'if [ "$status" = 75 ]; then' in text
+    assert 'if [ "$precheck_refused" = 1 ]; then' in text
+    assert 'if [ "$incomplete" = 1 ]; then' in text
 
 
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
@@ -1312,6 +1458,136 @@ def test_linux_postremove_keeps_the_vendor_policies_while_the_deployment_stays(t
     assert (pack / "pack.yaml").is_file() is deployment_kept
 
 
+# GAP-0112: the package removal deleted the unit files of units that were
+# still running. Under hook traffic the gateway's API socket stayed
+# "not-found active (listening)" after the MDM purge. The preremove now stops
+# and disables every unit the package ships, after the lifecycle uninstall
+# and only on a removal.
+def _package_system_units() -> set[str]:
+    return {
+        Path(c["dst"]).name
+        for c in _enterprise_nfpm_contents()
+        if c.get("dst", "").startswith("/usr/lib/systemd/system/") and c.get("type") != "dir"
+    }
+
+
+def _preremove_units(name: str) -> list[str]:
+    text = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    match = re.search(rf'^{name}="([^"]*)"', text, re.M)
+    assert match, f"{name} is not set in preremove.sh"
+    return match.group(1).split()
+
+
+def test_enterprise_package_scripts_are_the_linux_scriptlets() -> None:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    assert nfpm["scripts"]["preremove"] == "packaging/linux/preremove.sh"
+    assert nfpm["scripts"]["postremove"] == "packaging/linux/postremove.sh"
+
+
+def test_linux_preremove_names_every_unit_the_package_ships() -> None:
+    shipped = _package_system_units()
+    assert len(shipped) >= 11 and {"defenseclaw-gateway-api.socket", "defenseclaw-gateway-hook.socket"} <= shipped
+    assert set(_preremove_units("package_units")) == shipped
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("argument", ["remove", "0"])
+@pytest.mark.parametrize("gateway", [True, False])
+def test_linux_preremove_stops_and_disables_every_package_unit_on_removal(tmp_path: Path, argument: str, gateway: bool) -> None:
+    host = _Host(tmp_path)
+    if not gateway:
+        host.gateway.unlink()
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), argument)
+    assert result.returncode == 0, result.stderr
+    calls = host.calls()
+    units = _preremove_units("package_units")
+    stops = [c.split()[2:] for c in calls if c.startswith("systemctl stop ")]
+    # One request for all of them, after the lifecycle uninstall.
+    assert stops == [[*units, "defenseclaw-enterprise-apply-recovery.timer"]], calls
+    assert [c.split()[2:] for c in calls if c.startswith("systemctl disable ")] == [units]
+    if gateway:
+        assert calls.index("gateway enterprise linux uninstall --json --lock-wait 8m") < calls.index(
+            "systemctl stop " + " ".join(stops[0])
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("arguments", [("upgrade", "9.9.10"), ("1",), ("deconfigure",), ("failed-upgrade", "9.9.8")])
+def test_linux_preremove_leaves_the_units_alone_on_an_upgrade(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    host = _Host(tmp_path, apply_path_active=True)
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), *arguments)
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in host.calls() if c.startswith(("systemctl stop", "systemctl disable", "gateway "))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+def test_linux_preremove_stops_again_while_a_unit_still_runs(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    log = host.log
+    _write_stub(host.bin, "systemctl", f"""echo "systemctl $*" >>'{log}'
+case "$1" in
+    is-active) [ "$3" = defenseclaw-gateway-api.socket ] ;;
+esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "0")
+    assert result.returncode == 0, result.stderr
+    assert len([c for c in host.calls() if c.startswith("systemctl stop ")]) == 3
+    assert "could not stop defenseclaw-gateway-api.socket" in result.stderr
+
+
+def _postremove(host: _Host, tmp_path: Path) -> str:
+    _write_stub(host.bin, "flock", f"echo \"flock $*\" >>'{host.log}'\nshift 3\nexec \"$@\"")
+    return _rooted(
+        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
+        {
+            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
+            "/etc/defenseclaw": str(tmp_path / "etc-defenseclaw"),
+            "/var/lib/defenseclaw ": str(tmp_path / "var-lib-defenseclaw") + " ",
+            "/var/lib/defenseclaw-hook-guardian": str(tmp_path / "guardian"),
+            "/var/log/defenseclaw": str(tmp_path / "log"),
+            "/opt/defenseclaw": str(tmp_path / "opt"),
+            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
+            "/run/systemd/system": str(host.run_systemd),
+        },
+    )
+
+
+# GAP-0112: the purge left root-only /var/lib/defenseclaw-enterprise with its
+# lifecycle.lock. A removal drops the lock, under its own flock, and the
+# directory once nothing else is in it; an upgrade keeps both.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize(("argument", "gone"), [("remove", True), ("0", True), ("purge", True), ("1", False), ("upgrade", False)])
+def test_linux_postremove_removes_the_lone_lifecycle_lock(tmp_path: Path, argument: str, gone: bool) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    lock = host.state / "lifecycle.lock"
+    lock.write_text("", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), argument)
+    assert result.returncode == 0, result.stderr
+    assert host.state.exists() is not gone
+    if gone:
+        assert f"flock -w 10 {lock} rm -f {lock}" in host.calls()
+        assert "systemctl reset-failed defenseclaw-*" in host.calls()
+    else:
+        assert lock.is_file()
+        assert "systemctl reset-failed defenseclaw-*" not in host.calls()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+def test_linux_postremove_keeps_the_lock_with_a_kept_result(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "lifecycle.lock").write_text("", encoding="utf-8")
+    (host.state / "last-package-result.json").write_text("{}\n", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), "remove")
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in host.state.iterdir()) == ["last-package-result.json", "lifecycle.lock"]
+    # A deb purge removes the kept result too, and then the lock.
+    result = host.run(_postremove(host, tmp_path), "purge")
+    assert result.returncode == 0, result.stderr
+    assert not host.state.exists()
+
+
 # GAP-0706: the Fleet compiler ships under share/fleet, so a Fleet-off
 # package removal left share/fleet, share and the install root behind.
 def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
@@ -1319,16 +1595,7 @@ def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
     opt = tmp_path / "opt"
     for sub in ("share/fleet", "share/opencode", "bin"):
         (opt / sub).mkdir(parents=True)
-    script = _rooted(
-        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
-        {
-            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
-            "/opt/defenseclaw": str(opt),
-            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
-            "/run/systemd/system": str(host.run_systemd),
-        },
-    )
-    result = host.run(script, "remove")
+    result = host.run(_postremove(host, tmp_path), "remove")
     assert result.returncode == 0, result.stderr
     assert not opt.exists()
 

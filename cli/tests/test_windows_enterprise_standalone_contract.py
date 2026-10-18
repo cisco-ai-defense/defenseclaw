@@ -345,6 +345,29 @@ def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:
     assert "-TimeoutSeconds $TimeoutSeconds" in gateway
 
 
+def test_standalone_purge_refuses_open_data_files_before_teardown() -> None:
+    """GAP-0136: a read-only reader of runtime\\audit.db made the purge fail
+    after it had removed the binaries and the hook wiring. The purge checks
+    the files it deletes before the uninstall transaction starts, and the
+    deletion after the services stopped retries a file in use before it
+    refuses with uninstall_in_use (behaviour in
+    enterprise-standalone-state-files-in-use-smoke.ps1)."""
+
+    module = _text(MODULE)
+    body = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    tree = body.index("Assert-DefenseClawStandaloneInstallTreeNotInUse")
+    data = body.index("Assert-DefenseClawStandaloneStateFilesNotInUse")
+    assert tree < data < body.index("$snapshot = New-DefenseClawTransaction")
+    assert "if ($Purge) {" in body[tree:data]
+    purge = _function_body(module, "Complete-DefenseClawStatePurge")
+    assert "Remove-DefenseClawPurgedStateRoot -Layout $Layout" in purge
+    assert "Remove-DefenseClawManagedTree" not in purge
+    assert "$script:StateRootRemovalRetryMilliseconds = 15000" in module
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    for name in ("RmStartSession", "RmRegisterResources", "RmGetList", "RmEndSession"):
+        assert 'DllImport("rstrtmgr.dll"' in native and name in native
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).
@@ -366,6 +389,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-secrets-acl-smoke.ps1",
     "enterprise-standalone-service-logged-error-smoke.ps1",
     "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
+    "enterprise-standalone-state-files-in-use-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 

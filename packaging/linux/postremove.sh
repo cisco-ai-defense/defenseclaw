@@ -4,11 +4,13 @@
 #
 # defenseclaw-enterprise package: the preremove uninstall already removed the
 # administrator config, protected credentials, state and the service
-# account; a deb purge also removes what a failed or skipped uninstall left
-# of the machine directories, except for the persistent lifecycle lock. Each enrolled account's ~/.defenseclaw and
-# per-user binaries stay, since the gateway that removes them as each account
-# is gone by now. Run `enterprise linux uninstall --purge` before the package
-# removal to remove those too.
+# account, and stopped the package's units; a deb purge also removes what a
+# failed or skipped uninstall left of the machine directories. A removal
+# drops the lifecycle lock and its directory once nothing else is in it.
+# Each enrolled account's ~/.defenseclaw and per-user binaries stay, since
+# the gateway that removes them as each account is gone by now. Run
+# `enterprise linux uninstall --purge` before the package removal to remove
+# those too.
 
 set -u
 lifecycle=/var/lib/defenseclaw-enterprise
@@ -27,8 +29,7 @@ esac
 if [ "${1:-}" = purge ]; then
     rm -rf /etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian \
         /var/log/defenseclaw
-    # Keep lifecycle.lock at its original inode: a waiting lifecycle run can
-    # already have it open when the package removal finishes.
+    # The lock goes below, under its own flock.
     find "$lifecycle" -mindepth 1 -maxdepth 1 ! -name lifecycle.lock -exec rm -rf -- {} + 2>/dev/null || true
 fi
 # deb passes "remove"/"purge", rpm passes 0 when the package is erased (and 1
@@ -53,9 +54,30 @@ case "${1:-}" in
         if head -n 1 /etc/tmpfiles.d/defenseclaw.conf 2>/dev/null | grep -qx '# defenseclaw-uninstall-override'; then
             rm -f /etc/tmpfiles.d/defenseclaw.conf
         fi
+        # The lifecycle uninstall removes the lock with the last lifecycle
+        # state; this covers a removal whose uninstall did not run (no
+        # gateway binary). A kept result (a failed uninstall) keeps the
+        # directory and its lock. The lock is removed while flock holds it:
+        # a lifecycle run that waited on it finds the path gone and stops
+        # instead of running beside a new lock (GAP-0112).
+        lock="$lifecycle/lifecycle.lock"
+        only_lock=1
+        for entry in "$lifecycle"/* "$lifecycle"/.[!.]* "$lifecycle"/..?*; do
+            [ -e "$entry" ] || [ -L "$entry" ] || continue
+            [ "$entry" = "$lock" ] || only_lock=0
+        done
+        if [ "$only_lock" = 1 ] && [ -f "$lock" ] && [ ! -L "$lock" ] && command -v flock >/dev/null 2>&1; then
+            flock -w 10 "$lock" rm -f "$lock" >/dev/null 2>&1 || true
+        fi
+        rmdir "$lifecycle" >/dev/null 2>&1 || true
         ;;
 esac
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
+    case "${1:-}" in
+        # A unit that failed before the removal stays listed "not-found
+        # failed" until its state is reset.
+        remove|purge|0) systemctl reset-failed 'defenseclaw-*' >/dev/null 2>&1 || true ;;
+    esac
 fi
 exit 0

@@ -58,6 +58,41 @@ Run `python3 intune_tenant.py COMMAND --help` for the options. Python 3.9 or lat
 | `remediation` | with `--apply` | Create or update a Remediations package from `../windows/Remediate-*.ps1` (run as SYSTEM) and assign it on a daily schedule |
 | `macos-script` | with `--apply` | Create or update a macOS shell script from a file (run as root) and assign it |
 
+For the kit's macOS wrapper, set an inline config or `DC_CONFIG_FILE`, or use
+`dc_inline_bundle` (base64) or `DC_BUNDLE_FILE` for a signed bundle. The bundle
+carries its own config; a config set next to it is the base config, which the
+wrapper compares with the bundle's `guardrail:` block and hook mode blocks on
+the device before it installs anything (`mdm_base_config_mismatch`). Trust
+anchors can already be installed on the device, supplied by
+`DC_TRUST_ANCHOR_FILE`, or pasted into `dc_inline_trust_anchors` (JSON). The
+helper also accepts source-only installs, read-only `status` and `verify` actions,
+secret rotation with both `DC_SECRET_NAME` and `DC_SECRET_FILE`, and an ensure
+run with only `DC_PRODUCT_VERSION` set. An ensure wrapper without config,
+bundle, trust anchors, source, a secret name and file, or product version is
+refused, even when a device already has settings. Before any Graph call, the
+helper checks UTF-8 without a byte-order mark, the 204,800-byte file limit,
+the interpreter line, retries from 0 through 3, and the supported frequency
+syntax. For a recognizable kit wrapper it also checks:
+
+- `DC_SCRIPT_OS=darwin`; `DC_ACTION` is `ensure`, `status` or `verify`;
+  `DC_FORMAT` is `json` or `jamf`; and `DC_TRUST_MODE` is `hash_pinned` or `signed`.
+- Source exclusivity, a 64-character hexadecimal SHA-256 pin (required for a
+  hash-pinned source), an absolute `DC_SOURCE` path, an `https://`
+  `DC_SOURCE_URL`, no `.deb` or `.rpm` macOS source, and at least one
+  `DC_ALLOWED_TEAM_IDS` value for a signed macOS source.
+- Absolute `DC_CONFIG_FILE`, `DC_BUNDLE_FILE`, `DC_TRUST_ANCHOR_FILE`,
+  `DC_SECRET_FILE` and `DC_STAGING_DIR` paths; a valid lowercase/digit/dash
+  secret name paired with a secret file; and no secret file without a name.
+- No source, config, bundle, trust anchor, secret or capability-loss option for
+  read-only actions; a bundle when
+  capability-loss refusal is requested; valid inline bundle base64 on an
+  `ensure` run; and at least one input setting on an `ensure` run.
+
+These checks run before Graph calls, including in preview mode. CRLF line
+endings are converted to LF for upload without changing the local file; the
+printed SHA-256 prefix is for the uploaded bytes. Do not put credentials in
+any inline block.
+
 Rules: credentials only from the environment; every command that changes the tenant prints a
 plan until you pass `--apply` (and `--dry-run` is accepted); objects are found by exact display
 name, created when missing and updated when present. Repeating `--apply` may update

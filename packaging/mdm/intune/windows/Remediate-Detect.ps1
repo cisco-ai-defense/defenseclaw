@@ -14,6 +14,8 @@
 
     Exit 0 = compliant (nothing to do). Exit 1 = run Remediate-Fix.ps1. A host
     without the deployment is compliant here; the Win32 app installs it.
+    On a device that takes signed policy bundles, compliant also means the
+    running gateway enforces the confirmed bundle (bundle status applied).
 #>
 [CmdletBinding()]
 param()
@@ -200,6 +202,7 @@ function Invoke-DefenseClawNative {
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
@@ -210,10 +213,29 @@ function Invoke-DefenseClawNative {
     }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        # End the CLI and its PowerShell child before reporting the timeout.
+        # Process.Kill() alone leaves the child holding the lifecycle lock.
+        try {
+            $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = "/PID $($process.Id) /T /F"
+            $killInfo.UseShellExecute = $false
+            $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true
+            $killInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killInfo)
+            if (-not $killer.WaitForExit(10000)) { $killer.Kill() }
+            $killer.Dispose()
+        } catch { $null = $_ }
         try { $process.Kill() } catch { $null = $_ }
+        [void]$process.WaitForExit(5000)
         throw "native_timeout: $FilePath did not finish within $TimeoutSeconds seconds"
     }
-    $process.WaitForExit()
+    $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+        throw "native_timeout: $FilePath output did not close within $TimeoutSeconds seconds"
+    }
     return New-Object -TypeName PSObject -Property @{
         ExitCode = $process.ExitCode; StdOut = $stdout.Result; StdErr = $stderr.Result
     }
@@ -252,6 +274,102 @@ function ConvertTo-DefenseClawResultJson {
     return $json
 }
 # endregion DefenseClaw MDM shared helpers
+
+function Test-DefenseClawLifecycleRunning {
+    # True while a DefenseClaw lifecycle run (Setup, ensure, a bundle apply
+    # or an uninstall) holds lifecycle.lock. The script then starts no
+    # installed CLI: a CLI running from the install folder makes a running
+    # uninstall refuse with uninstall_in_use (GAP-0126). A missing lock, or
+    # one this account cannot open, is not a running lifecycle. The probe
+    # holds the lock file for an instant; a lifecycle that opens it at that
+    # moment waits (Setup) or reports a retryable lifecycle_busy. Identical
+    # in detect.ps1, Remediate-Detect.ps1 and Remediate-Fix.ps1 (a test
+    # enforces it).
+    $key = Get-DefenseClawRegistryKey64 -SubKey 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders'
+    if ($null -eq $key) { return $false }
+    try {
+        $programData = [string]$key.GetValue('Common AppData', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally { $key.Dispose() }
+    if (-not $programData -or $programData.Contains('%') -or $programData -notmatch '^[A-Za-z]:\\[^/]*$') { return $false }
+    $lock = $programData.TrimEnd('\') + '\Cisco\DefenseClaw-Lifecycle\lifecycle.lock'
+    try {
+        $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stream.Dispose()
+        return $false
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $false
+    } catch [System.IO.IOException] {
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-DefenseClawBundleEnforcement {
+    # A bundle-mode device is compliant only while the running gateway
+    # enforces its confirmed signed policy bundle: `enterprise bundle status`
+    # reports the marker's bundle as current with applied true (GAP-0114: a
+    # config.yaml edited outside the lifecycle verified healthy while the
+    # gateway enforced the edit). $null when the marker names no confirmed
+    # bundle: without one the installed config is the policy and
+    # verify covers it. Identical in Remediate-Detect.ps1 and
+    # Remediate-Fix.ps1 (a test enforces it).
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    $key = Get-DefenseClawRegistryKey64 -SubKey $script:DefenseClawMarkerKey
+    if ($null -eq $key) { return $null }
+    try {
+        if ([string]$key.GetValue('BundleState') -ne 'confirmed') { return $null }
+        $id = [string]$key.GetValue('BundleId')
+        $version = [string]$key.GetValue('BundleVersion')
+    } finally { $key.Dispose() }
+    $label = "signed policy bundle $id version $version"
+    $verdict = New-Object -TypeName PSObject -Property @{ Applied = $false; Line = '' }
+    $field = {
+        param($Object, [string]$Name)
+        if ($null -eq $Object) { return $null }
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -eq $property) { return $null }
+        return $property.Value
+    }
+    $short = {
+        param([string]$Digest)
+        if (-not $Digest) { return 'none' }
+        if ($Digest.Length -gt 19) { return $Digest.Substring(0, 19) }
+        return $Digest
+    }
+    try {
+        $run = Invoke-DefenseClawNative -FilePath $Cli -TimeoutSeconds 300 -ArgumentList @(
+            'enterprise', 'bundle', 'status', '--json')
+        $status = $null
+        if ([string]$run.StdOut) { $status = ([string]$run.StdOut) | ConvertFrom-Json }
+    } catch {
+        $verdict.Line = "$label is confirmed, but bundle status could not be read: $($_.Exception.Message)"
+        return $verdict
+    }
+    if ($run.ExitCode -ne 0 -or $null -eq $status) {
+        $verdict.Line = "$label is confirmed, but bundle status exited $($run.ExitCode)"
+        return $verdict
+    }
+    $current = & $field $status 'current'
+    if ($null -eq $current -or [string](& $field $current 'bundle_id') -ne $id) {
+        $verdict.Line = "$label is confirmed in the enterprise marker but is not the current bundle in the bundle store"
+        return $verdict
+    }
+    if (-not [bool](& $field $status 'applied')) {
+        $detail = 'the running gateway policy could not be checked'
+        if ([bool](& $field $status 'gateway_checked')) {
+            $detail = 'the gateway enforces ' + (& $short ([string](& $field $status 'gateway_digest'))) +
+                ', not ' + (& $short ([string](& $field $current 'effective_policy_digest')))
+        }
+        $verdict.Line = "$label is confirmed but not applied: $detail"
+        return $verdict
+    }
+    $verdict.Applied = $true
+    $verdict.Line = "$label is applied"
+    return $verdict
+}
 
 function Format-DefenseClawVerifyFailure {
     # The one line Intune shows for a failed verify: the error codes, then
@@ -304,6 +422,12 @@ if ($null -eq $deployment) {
     [Console]::Out.WriteLine('DefenseClaw: not installed (the Win32 app installs it)')
     exit 0
 }
+if (Test-DefenseClawLifecycleRunning) {
+    # Starting the CLI now would only wait on the same lock, and would make
+    # a running uninstall refuse (GAP-0126). The next scheduled run checks.
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): another DefenseClaw lifecycle run is in progress; checked again at the next run")
+    exit 0
+}
 try {
     $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 900 -ArgumentList @(
         'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
@@ -312,7 +436,26 @@ try {
     exit 1
 }
 if ($run.ExitCode -eq 0) {
-    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy")
+    # Health covers the deployment, and on a bundle-mode device the policy:
+    # compliant only while the gateway enforces the confirmed bundle
+    # (GAP-0114). The line names the policy source.
+    $policy = 'no signed policy bundle is confirmed; the installed config enforces'
+    try {
+        $bundle = Get-DefenseClawBundleEnforcement -Cli $deployment.Cli
+    } catch {
+        [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): the signed policy bundle could not be checked: $($_.Exception.Message)")
+        exit 1
+    }
+    if ($null -ne $bundle) {
+        if (-not $bundle.Applied) {
+            $line = "DefenseClaw $($deployment.Version): $($bundle.Line); the remediation re-applies it from the bundle store"
+            if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
+            [Console]::Out.WriteLine($line)
+            exit 1
+        }
+        $policy = "$($bundle.Line) (the gateway enforces it)"
+    }
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy; $policy")
     exit 0
 }
 $summary = Format-DefenseClawVerifyFailure -Json ([string]$run.StdOut)

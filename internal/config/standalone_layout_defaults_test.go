@@ -162,3 +162,34 @@ func TestManagedStandaloneLoaderIgnoresPerUserLLMEnvironment(t *testing.T) {
 		t.Fatalf("host environment changed managed defaults: before=%+v after=%+v", baseline.LLM, changed.LLM)
 	}
 }
+
+// A config loaded for another platform's layout takes that platform's
+// defaults, not the loading host's: offline bundle signing digests the
+// target's effective policy (GAP-0107, notifications.enabled).
+func TestLayoutLoadUsesTargetPlatformDefaults(t *testing.T) {
+	t.Setenv(managed.ConfigPathEnv, "")
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	const minimal = "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"
+	for goos, want := range map[string]bool{"linux": false, "darwin": true, "windows": true} {
+		t.Run(goos, func(t *testing.T) {
+			var layout managed.StandaloneLayout
+			var err error
+			if goos == "windows" {
+				layout, err = managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
+			} else {
+				layout, err = managed.StandaloneLayoutFor(goos)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, []byte(minimal), layout.DataDir, goos)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Notifications.Enabled != want {
+				t.Fatalf("notifications.enabled = %t for %s on a %s host, want %t", cfg.Notifications.Enabled, goos, runtime.GOOS, want)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,15 @@ func TestOpenCodeManagedPluginContract(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("managed OpenCode plugin contract failed: %v\n%s", err, out)
+	}
+	// The uninstall branch of an empty exit-0 answer (defenseclawSend) must
+	// have run, not only the fail-closed branch before it.
+	for _, marker := range []string{
+		"case ok: empty exit-0 answer after the plugin file is removed allows",
+		"managed OpenCode plugin contract: ok",
+	} {
+		if !strings.Contains(string(out), marker) {
+			t.Fatalf("managed OpenCode plugin contract did not report %q:\n%s", marker, out)
+		}
 	}
 }

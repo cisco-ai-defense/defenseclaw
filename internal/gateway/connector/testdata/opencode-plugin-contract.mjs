@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { unlink } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const [openPluginPath, closedPluginPath] = process.argv.slice(2);
+const [openPluginPath, closedPluginPath, removedManagedPluginPath] = process.argv.slice(2);
 if (!openPluginPath || !closedPluginPath) {
   throw new Error("expected rendered fail-open and fail-closed OpenCode plugins");
 }
@@ -29,6 +30,7 @@ async function runScenario({
   mcp = {},
   tool = "bash",
   laterPlugin = false,
+  removePluginAfterImport = false,
   response = { action: "allow", mode, would_block: false },
   failure,
   expectBlocked = false,
@@ -61,6 +63,7 @@ async function runScenario({
 
   const moduleURL = `${pathToFileURL(pluginPath).href}?scenario=${serial++}`;
   const module = await import(moduleURL);
+  if (removePluginAfterImport) await unlink(pluginPath);
   const hooks = await module.DefenseClaw({ directory: "fixture workspace" });
   const origins = [{ spec: moduleURL }];
   if (laterPlugin) origins.push({ spec: "file:///fixture-later-plugin.mjs" });
@@ -182,6 +185,13 @@ try {
       pluginPath: closedPluginPath,
       failure,
       expectBlocked: true,
+    });
+  }
+  if (removedManagedPluginPath) {
+    await runScenario({
+      name: "removed-managed-plugin-empty-foreign-check",
+      pluginPath: removedManagedPluginPath,
+      removePluginAfterImport: true,
     });
   }
 } finally {

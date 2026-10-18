@@ -64,31 +64,60 @@ type lifecycleLock struct {
 	file *os.File
 }
 
+// errLockRemoved reports that the uninstall this run waited for removed the
+// lifecycle lock, and the lifecycle directory with it, while it held it. An
+// uninstall then has nothing left to do and is a no-op; any other action
+// reports busy.
+var errLockRemoved = errors.New("DefenseClaw enterprise was uninstalled while this run waited for the lifecycle lock, so nothing was changed")
+
 // acquireLock takes the exclusive lifecycle lock, polling until timeout.
+//
+// An uninstall that leaves nothing else in the lifecycle directory removes
+// the lock file while it holds it (GAP-0112, GAP-0101). A run that opened
+// the file before that wakes up holding a removed inode, which no longer
+// excludes anybody: it opens the path again, and when the directory is gone
+// it stops with errLockRemoved instead of creating the lock again.
 func (e *Env) acquireLock(ctx context.Context) (*lifecycleLock, error) {
 	path := filepath.Join(e.P(e.Layout.LifecycleDir), lockFileName)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lifecycle lock %s: %w", path, err)
-	}
 	deadline := e.Now().Add(e.LockTimeout)
+	for reopened := false; ; reopened = true {
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			if reopened && errors.Is(err, os.ErrNotExist) {
+				return nil, errLockRemoved
+			}
+			return nil, fmt.Errorf("open lifecycle lock %s: %w", path, err)
+		}
+		if err := e.flockUntil(ctx, file, path, deadline); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		held, statErr := file.Stat()
+		named, lstatErr := os.Lstat(path)
+		if statErr == nil && lstatErr == nil && os.SameFile(held, named) {
+			return &lifecycleLock{file: file}, nil
+		}
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}
+}
+
+// flockUntil takes an exclusive flock on file, polling until deadline.
+func (e *Env) flockUntil(ctx context.Context, file *os.File, path string, deadline time.Time) error {
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return &lifecycleLock{file: file}, nil
+			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			_ = file.Close()
-			return nil, fmt.Errorf("lock %s: %w", path, err)
+			return fmt.Errorf("lock %s: %w", path, err)
 		}
 		if !e.Now().Before(deadline) {
-			_ = file.Close()
-			return nil, errLockBusy
+			return errLockBusy
 		}
 		select {
 		case <-ctx.Done():
-			_ = file.Close()
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-time.After(e.PollInterval):
 		}
 	}

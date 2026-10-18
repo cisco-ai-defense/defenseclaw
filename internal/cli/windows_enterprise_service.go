@@ -147,6 +147,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// ensure. They go to the lifecycle log, not next to the JSON result an
 	// MDM parses.
 	diagnostics []string
+	// Set by a standalone PowerShell run whose own exit succeeded while a
+	// descendant still held an inherited output pipe.
+	powerShellPipeWaitDelayed bool
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
@@ -178,8 +181,9 @@ type windowsEnterpriseLifecyclePreflightFailure struct {
 }
 
 type windowsEnterpriseOutputCapture struct {
-	buffer    bytes.Buffer
-	truncated bool
+	buffer          bytes.Buffer
+	truncated       bool
+	pipeWaitDelayed bool
 }
 
 func (capture *windowsEnterpriseOutputCapture) Write(body []byte) (int, error) {
@@ -1155,6 +1159,22 @@ func runWindowsEnterprisePowerShellEngine(
 	stdout io.Writer,
 	stderr io.Writer,
 ) (*windowsEnterpriseOutputCapture, error) {
+	return runWindowsEnterprisePowerShellEngineWithRunner(ctx, cmd, powerShell, environment, script, args,
+		stdout, stderr, false, (*exec.Cmd).Run)
+}
+
+func runWindowsEnterprisePowerShellEngineWithRunner(
+	ctx context.Context,
+	cmd *cobra.Command,
+	powerShell string,
+	environment func(string) ([]string, error),
+	script string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	standalone bool,
+	runner func(*exec.Cmd) error,
+) (*windowsEnterpriseOutputCapture, error) {
 	commandArgs := []string{
 		"-NoLogo",
 		"-NoProfile",
@@ -1188,10 +1208,17 @@ func runWindowsEnterprisePowerShellEngine(
 	childOutput := &windowsEnterpriseOutputCapture{}
 	child.Stdout = io.MultiWriter(stdout, childOutput)
 	child.Stderr = stderr
-	runErr := child.Run()
+	runErr := runner(child)
+	if standalone && errors.Is(runErr, exec.ErrWaitDelay) && child.ProcessState != nil && child.ProcessState.Success() {
+		childOutput.pipeWaitDelayed = true
+		runErr = nil
+	}
 	cleanupErr := cleanupTemp()
 	cleanupPending = false
 	if runErr != nil || cleanupErr != nil {
+		if standalone && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return childOutput, fmt.Errorf("lifecycle_timeout: Windows enterprise installer did not finish before the ensure deadline: %w", ctx.Err())
+		}
 		var failures []error
 		if runErr != nil {
 			// The child's own code is the first thing an operator needs, and
@@ -1393,10 +1420,18 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 			}
 			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
 		}
-		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		for attempt := 0; ; attempt++ {
+			err := ops.removeAll(path)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if attempt == 2 || (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
+				!errors.Is(err, windows.ERROR_ACCESS_DENIED)) {
+				return err
+			}
+			// A just-terminated descendant can briefly retain a temp file.
+			time.Sleep(50 * time.Millisecond)
 		}
-		return nil
 	}
 	return filepath.Clean(path), cleanup, nil
 }

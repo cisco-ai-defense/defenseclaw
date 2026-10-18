@@ -68,7 +68,13 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						if blocked {
 							want = "fail_closed"
 						}
-						if record["connector"] != connector || record["fail_mode"] != mode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") == blocked {
+						// A managed standalone hook runs closed whatever the
+						// connector or environment asks for.
+						wantMode := mode
+						if scenario == "managed-missing-token" {
+							wantMode = "closed"
+						}
+						if record["connector"] != connector || record["fail_mode"] != wantMode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") == blocked {
 							t.Fatalf("wrong diagnostic: record=%+v stderr=%s", record, r.stderr)
 						}
 						for _, secret := range []string{"private-payload-marker", "private-response-marker", "tkn"} {

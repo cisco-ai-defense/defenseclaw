@@ -13,6 +13,8 @@ or a password that was expanded a second time would only show up on a Linux host
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -22,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 from email.message import Message
@@ -37,6 +40,208 @@ OKTA_INSTALL = OKTA.parent / "install-sssd-okta.sh"
 KIT_DIRS = (ENTRA.parent, INTUNE.parent, OKTA.parent)
 REGION_BEGIN = "# region graph client"
 REGION_END = "# endregion graph client"
+
+
+def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
+    script = (ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1").read_text()
+    assert "if ($BundlePath -and -not $BaseConfigPath)" in script
+    assert "base CONFIG= guardrail policy differs from the signed bundle's" in script
+    assert script.index("($baseLines -join \"`n\") -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
+    assert "it must equal config_sha256 in the base app's intune-package.json" in script
+    detect = (ROOT / "packaging/mdm/intune/windows/Remediate-Detect.ps1").read_text()
+    # A config-only deployment is healthy too; the line names the policy source.
+    assert "no signed policy bundle is confirmed; the installed config enforces" in detect
+    assert "base-only" not in detect
+    # No marker or no confirmed bundle: the bundle check passes over it, and
+    # only a confirmed bundle has to be applied (GAP-0114).
+    assert "if ($null -eq $key) { return $null }" in detect
+    assert "if ($null -ne $bundle) {" in detect
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")
+def test_intune_bundle_package_refuses_weak_base_and_accepts_matching_pack(tmp_path: Path) -> None:
+    packager = ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1"
+    setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+    setup.write_bytes(b"packager-only stub")
+    bundle_config = (
+        "guardrail:\n  block_at: HIGH\n  rule_pack: testpack\n  custom_packs:\n"
+        "    testpack:\n      path: policies/guardrail/testpack\n"
+        "      digest: sha256:" + "a" * 64 + "\n"
+    )
+    config_bytes = bundle_config.encode()
+    manifest = {"files": [
+        {"path": "config.yaml", "sha256": hashlib.sha256(config_bytes).hexdigest()},
+        {"path": "policies/guardrail/testpack/rules.yaml", "sha256": "b" * 64},
+    ]}
+    bundle = tmp_path / "policy.dcbundle"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, data in (("manifest.json", json.dumps(manifest).encode()),
+                           ("config.yaml", config_bytes)):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+    base = tmp_path / "base.yaml"
+
+    def package(output: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(packager),
+             "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+             "-BundlePath", str(bundle), "-BaseConfigPath", str(base),
+             "-RequireBundle", "1", "-OutputDirectory", str(tmp_path / output)],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    base.write_text(bundle_config.replace("  rule_pack: testpack", "  rule_pack: default"))
+    refused = package("weak")
+    assert refused.returncode != 0 and "must select the bundle rule pack testpack" in refused.stderr
+    assert not (tmp_path / "weak/content").exists()
+    base.write_text(bundle_config.replace("block_at: HIGH", "block_at: CRITICAL")
+                    .replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"))
+    weaker = package("weaker-threshold")
+    assert weaker.returncode != 0 and "guardrail policy differs" in weaker.stderr
+    assert not (tmp_path / "weaker-threshold/content").exists()
+    base.write_text(bundle_config.replace("policies/guardrail/testpack", r"C:\ProgramData\DefenseClaw-RulePacks\testpack"))
+    accepted = package("matching")
+    assert accepted.returncode == 0, accepted.stderr
+    assert (tmp_path / "matching/content/policy.dcbundle").exists()
+    assert hashlib.sha256(base.read_bytes()).hexdigest() in accepted.stdout
+
+
+def _intune_bundle(tmp_path: Path, config: str, packs: tuple[str, ...]) -> Path:
+    data = config.encode()
+    files = [{"path": "config.yaml", "sha256": hashlib.sha256(data).hexdigest()}]
+    files += [{"path": f"policies/guardrail/{pack}/rules.yaml", "sha256": "b" * 64} for pack in packs]
+    bundle = tmp_path / "policy.dcbundle"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, body in (("manifest.json", json.dumps({"files": files}).encode()), ("config.yaml", data)):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(body)
+            archive.addfile(entry, io.BytesIO(body))
+    return bundle
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7.4 is required for the Intune packager")
+@pytest.mark.parametrize(
+    ("bundle_config", "packs", "base_config", "refusal"),
+    [
+        # A built-in pack: the base block must be identical.
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (), "guardrail:\n  block_at: HIGH\n  rule_pack: default\n", ""),
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (), "guardrail:\n  block_at: CRITICAL\n  rule_pack: default\n",
+         "guardrail policy differs"),
+        # Two custom packs (one per connector), with a blank line in the block.
+        ("guardrail:\n  rule_pack: a\n\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n"
+         "    b:\n      path: policies/guardrail/b\n  connectors:\n    codex:\n      rule_pack: b\n", ("a", "b"),
+         "guardrail:\n  rule_pack: a\n\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n"
+         "    b:\n      path: 'C:\\Packs\\b'\n  connectors:\n    codex:\n      rule_pack: b\n", ""),
+        ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n"
+         "    b:\n      path: policies/guardrail/b\n", ("a", "b"),
+         "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: C:\\Packs\\a\n", "must define custom_packs.b"),
+        ("guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: policies/guardrail/a\n", ("a",),
+         "guardrail:\n  rule_pack: a\n  custom_packs:\n    a:\n      path: packs/a\n", "absolute, preinstalled path"),
+        # A full-line comment, even at column 0, does not end the guardrail
+        # block: the keys after it are compared, and comments are not.
+        ("guardrail:\n  rule_pack: default\n# threshold\n  block_at: HIGH\n", (),
+         "guardrail:\n  rule_pack: default\n# threshold\n  block_at: CRITICAL\n", "guardrail policy differs"),
+        ("guardrail:\n  block_at: HIGH\n  rule_pack: default\n", (),
+         "guardrail:\n  # threshold\n  block_at: HIGH\n# pack\n  rule_pack: default\n", ""),
+        # GAP-0090: the hook modes the hooks take before the guardrail mode,
+        # and application_protection, must be the bundle's or absent from both.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra, f"base CONFIG= {key}: block differs")
+          for key, extra in (("claude_code", "claude_code: {mode: observe}\n"), ("codex", "codex:\n  mode: observe\n"),
+                             ("connector_hooks", "connector_hooks:\n  claudecode:\n    mode: observe\n"),
+                             ("application_protection", "application_protection:\n  guardrail:\n    mode: observe\n"))],
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (), "guardrail:\n  block_at: HIGH\n",
+         "base CONFIG= claude_code: block differs"),
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (),
+         "# base\nclaude_code:\n\n  mode: action\nguardrail:\n  block_at: HIGH\n", ""),
+        # GAP-0090 verify r2: a quoted key, CRLF and a byte order mark in the
+        # hook mode blocks are compared like the plain spelling.
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n\"claude_code\":\n  mode: observe\n",
+         "base CONFIG= claude_code: block differs"),
+        ("guardrail:\n  block_at: HIGH\nclaude_code:\n  mode: action\n", (),
+         "guardrail:\r\n  block_at: HIGH\r\nclaude_code:\r\n  mode: action\r\n", ""),
+        ("\ufeffclaude_code:\n  mode: action\nguardrail:\n  block_at: HIGH\n", (),
+         "claude_code:\n  mode: action\nguardrail:\n  block_at: HIGH\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffclaude_code: {mode: observe}\r\nguardrail:\r\n  block_at: HIGH\r\n",
+         "base CONFIG= claude_code: block differs"),
+        # The loader reads these spellings as claude_code; the packager
+        # refuses them before it compares.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra, "base CONFIG= line 3 " + why)
+          for extra, why in (('"claude\\u005fcode":\n  mode: observe\n', "is not a plain top-level key"),
+                             ("!!str claude_code: {mode: observe}\n", "is not a plain top-level key"),
+                             ("? claude_code\n: {mode: observe}\n", "is not a plain top-level key"),
+                             ("Claude_Code: {mode: observe}\n", "writes the top-level key claude_code in"))],
+        # A quoted value or a {...} that runs on hides the guardrail block.
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: \"t\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: 't\nguardrail:\n  block_at: HIGH\nworkspace_id: w'\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "tenant_id: \"t\\\"\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (), "scanners: {a: [b,\nguardrail:\n  block_at: HIGH\nw: c]}\n",
+         "base CONFIG= line 1 leaves a {...} or [...] open"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "scanners:\n  - note: |\n      say \"hi\n    other: \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
+         "base CONFIG= line 4 leaves a quoted value open"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "scanners:\n  x:\n  - - |\n      text\n    - \"t\nguardrail:\n  block_at: HIGH\nw: v\"\n",
+         "base CONFIG= line 5 leaves a quoted value open"),
+        # GAP-0090 verify r3: the loader also starts a line at a lone CR, NEL,
+        # LS and PS, so only printable ASCII, LF, CRLF and one leading byte
+        # order mark pass, even in a comment.
+        *[("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n" + extra,
+           f"base CONFIG= line {line} has {what}; write the base config in plain ASCII with LF or CRLF line ends")
+          for extra, line, what in (
+              ("x:\n  y: 1\rclaude_code: {mode: observe}\n", 4, "a carriage return (CR) that is not followed by a line feed (LF)"),
+              ("# note\rclaude_code: {mode: observe}\n", 3, "a carriage return (CR) that is not followed by a line feed (LF)"),
+              ("x:\n  y: 1\u0085claude_code: {mode: observe}\n", 4, "a NEL (U+0085) line break"),
+              ("x:\n  y: 1\u2028claude_code: {mode: observe}\n", 4, "an LS (U+2028) line break"),
+              ("x:\n  y: 1\u2029claude_code: {mode: observe}\n", 4, "a PS (U+2029) line break"),
+              ("x:\n  y: 1\x00\n", 4, "a NUL byte"), ("x:\n  y:\t1\n", 4, "a tab"),
+              ("x:\n  y: 1\x0c\n", 4, "a form feed"), ("x:\n  y: 1\x0b\n", 4, "a vertical tab"),
+              ("x:\n  y: 1\x7f\n", 4, "a control character (0x7F)"),
+              ("# caf\u00e9\n", 3, "a non-ASCII byte (0xC3)"),
+              ("\ufeff# again\n", 3, "a byte order mark that is not at the start of the file"),
+              ("x: 1\r", 3, "a carriage return (CR) that is not followed by a line feed (LF)"))],
+        # A comment line ending in CR opens a quote that hides the guardrail block.
+        ("guardrail:\n  block_at: HIGH\n", (), "# note\rtenant_id: \"t\nguardrail:\n  block_at: HIGH\nworkspace_id: w\"\n",
+         "base CONFIG= line 1 has a carriage return (CR) that is not followed by a line feed (LF)"),
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\r\n  block_at: HIGH\r\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffguardrail:\n  block_at: HIGH\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffguardrail:\r\n  block_at: HIGH\r\n", ""),
+        ("guardrail:\n  block_at: HIGH\n", (), "\ufeffapi_key: x\nguardrail:\n  block_at: HIGH\n",
+         "base config contains an inline api_key"),
+        # Only a leading --- is allowed; a second document is refused.
+        ("guardrail:\n  block_at: HIGH\n", (), "guardrail:\n  block_at: HIGH\n---\nclaude_code: {mode: observe}\n",
+         "base CONFIG= line 3 is not a plain top-level key"),
+        ("guardrail:\n  block_at: HIGH\n", (),
+         "---\n# it's \"fine\nguardrail:\n  block_at: HIGH\nscanners:\n  note: it's a \"plain\" value # 'x\n"
+         "  tags: [a, 'b', \"c\\\"d\", {e: 'f'}]\n  text: |\n    say \"hi\n    it's: 'open\n\n  more: >-\n    a \"b\n  'q': 'it''s'\n", ""),
+    ],
+)
+def test_intune_bundle_package_compares_every_pack(
+    tmp_path: Path, bundle_config: str, packs: tuple[str, ...], base_config: str, refusal: str
+) -> None:
+    packager = ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1"
+    setup = tmp_path / "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+    setup.write_bytes(b"packager-only stub")
+    bundle = _intune_bundle(tmp_path, bundle_config, packs)
+    base = tmp_path / "base.yaml"
+    base.write_bytes(base_config.encode())
+    run = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(packager),
+         "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+         "-BundlePath", str(bundle), "-BaseConfigPath", str(base),
+         "-RequireBundle", "1", "-OutputDirectory", str(tmp_path / "out")],
+        capture_output=True, text=True, timeout=30,
+    )
+    if refusal:
+        # PowerShell colours the error and wraps it at the console width.
+        message = " ".join(line.rsplit("| ", 1)[-1].strip() for line in re.sub(r"\x1b\[[0-9;]*m", "", run.stderr).splitlines())
+        assert run.returncode != 0 and refusal in message, run.stderr
+        assert not (tmp_path / "out/content").exists()
+    else:
+        assert run.returncode == 0, run.stderr
 
 
 def _load(path: Path):
@@ -642,22 +847,101 @@ def test_intune_read_script_accepts_utf8_without_bom(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path, newline: str) -> None:
-    # CRLF covers a wrapper saved by a Windows editor; the empty-block check must still run.
+@pytest.mark.parametrize(
+    ("settings", "config", "bundle", "anchors", "error"),
+    [
+        ({}, "config_version: 9\n", "", "", None),
+        ({}, "", "YQ==\n", "", None),
+        ({"DC_TRUST_ANCHOR_FILE": "/etc/anchors.json"}, "", "YQ==\n", "", None),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "", "", "", None),
+        ({"DC_CONFIG_FILE": "/etc/config.yaml"}, "", "", "", None),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
+        ({"DC_SOURCE_URL": "https://example.test/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", None),
+        ({"DC_TRUST_MODE": "signed", "DC_ALLOWED_TEAM_IDS": "TEAMID", "DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", None),
+        ({"DC_CONFIG_FILE": "config.yaml"}, "", "", "", "config must be an absolute path"),
+        ({"DC_SOURCE": "defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", "source must be an absolute path"),
+        ({"DC_SOURCE_URL": "http://example.test/defenseclaw.pkg", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", "download URLs must use https://"),
+        ({"DC_TRUST_MODE": "signed", "DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", "signed trust on macOS needs --allowed-team-id"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.deb", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", ".deb sources are Linux packages"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.rpm", "DC_SOURCE_SHA256": "a" * 64}, "", "", "", ".rpm sources are Linux packages"),
+        ({"DC_STAGING_DIR": "staging"}, "config_version: 9\n", "", "", "--staging-dir must be an absolute path"),
+        ({"DC_SCRIPT_OS": "linux"}, "config_version: 9\n", "", "", "this copy of the wrapper is for linux, not darwin"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg"}, "", "", "", "hash_pinned trust requires --sha256 for the source"),
+        ({"DC_SOURCE": "/tmp/defenseclaw.pkg", "DC_SOURCE_URL": "https://example.test/pkg"}, "", "", "", "--source and --source-url are exclusive"),
+        ({"DC_ACTION": "status"}, "", "", "", None),
+        ({"DC_ACTION": "verify"}, "", "", "", None),
+        ({"DC_ACTION": "verify"}, "", "YQ==\n", "", None),
+        ({"DC_ACTION": "status"}, "config_version: 9\n", "not-base64!\n", "", None),
+        ({"DC_ACTION": ""}, "config_version: 9\n", "", "", "--action must be ensure, status or verify (use uninstall.sh to remove)"),
+        ({"DC_ACTION": "remove"}, "", "", "", "--action must be ensure, status or verify (use uninstall.sh to remove)"),
+        ({"DC_FORMAT": "jamf"}, "config_version: 9\n", "", "", None),
+        ({"DC_FORMAT": "xml"}, "config_version: 9\n", "", "", "--format must be json or jamf"),
+        ({"DC_TRUST_MODE": ""}, "config_version: 9\n", "", "", "--trust-mode must be hash_pinned or signed"),
+        ({}, "", "", "{}\n", None),
+        ({"DC_SECRET_NAME": "ai-defense-api-key", "DC_SECRET_FILE": "/etc/defenseclaw/secret"}, "", "", "", None),
+        ({"DC_SECRET_NAME": "ai-defense-api-key"}, "", "", "", "--secret-name needs --secret-file or --secret-stdin"),
+        ({"DC_SECRET_FILE": "/etc/defenseclaw/secret"}, "", "", "", "a secret value needs --secret-name"),
+        ({"DC_SECRET_NAME": "Bad_Name", "DC_SECRET_FILE": "/etc/defenseclaw/secret"}, "", "", "", "--secret-name must be lowercase letters, digits and dashes"),
+        ({"DC_SECRET_NAME": "-bad", "DC_SECRET_FILE": "/etc/defenseclaw/secret"}, "", "", "", "--secret-name must be lowercase letters, digits and dashes"),
+        ({"DC_SECRET_NAME": "good-name", "DC_SECRET_FILE": "secret.txt"}, "", "", "", "secret must be an absolute path"),
+        ({"DC_PRODUCT_VERSION": "1.2.3"}, "", "", "", None),
+        ({"DC_REFUSE_CAPABILITY_LOSS": "1"}, "", "", "", "--refuse-capability-loss requires a bundle"),
+        ({"DC_BUNDLE_FILE": "policy.dcbundle"}, "", "", "", "--bundle-file and --trust-anchor-file take absolute paths: policy.dcbundle"),
+        ({"DC_TRUST_ANCHOR_FILE": "anchors.json"}, "", "", "", "--bundle-file and --trust-anchor-file take absolute paths: anchors.json"),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "config_version: 9\n", "", "", None),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle", "DC_CONFIG_FILE": "/etc/config.yaml"}, "", "", "", None),
+        ({"DC_CONFIG_FILE": "/etc/config.yaml"}, "", "YQ==\n", "", None),
+        ({}, "config_version: 9\n", "YQ==\n", "", None),
+        ({}, "", "not-base64!\n", "", "the inline bundle is not valid base64"),
+        ({"DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "", "not-base64!\n", "", None),
+        ({"DC_ACTION": "status", "DC_BUNDLE_FILE": "/etc/policy.dcbundle"}, "", "", "", "--action status is read-only and takes no source, config, secret, bundle or trust anchor file"),
+        ({}, "", "", "", "fill in the macOS wrapper settings block before upload"),
+    ],
+)
+def test_intune_macos_script_validates_before_graph_calls(
+    tmp_path: Path, newline: str, settings: dict[str, str], config: str, bundle: str,
+    anchors: str, error: str | None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The helper follows the wrapper's settings and config/bundle precedence before Graph calls.
     intune = _load(INTUNE)
     script = tmp_path / "wrapper.sh"
-    script.write_bytes(
-        "#!/bin/sh\ndc_inline_config() {\n    cat <<'DEFENSECLAW_CONFIG'\nDEFENSECLAW_CONFIG\n}\n"
-        .replace("\n", newline)
-        .encode()
-    )
+    template = (ROOT / "packaging/mdm/macos/defenseclaw-enterprise.sh").read_text(encoding="ascii")
     args = argparse.Namespace(file=str(script), name="test", frequency="PT1H", retries=3, group=None, apply=False)
-    with pytest.raises(SystemExit, match="settings block"):
-        intune.cmd_macos_script(object(), args)
-    script.write_bytes("#!/bin/sh\necho ok\n".replace("\n", newline).encode())
-    args.frequency = "bad"
-    with pytest.raises(SystemExit, match="frequency"):
-        intune.cmd_macos_script(object(), args)
+
+    calls: list[tuple] = []
+
+    class Graph:
+        def get_all(self, path: str) -> list[dict]:
+            calls.append(("GET", path))
+            return []
+
+        def request(self, method: str, path: str, body: dict) -> dict:
+            calls.append((method, path, body))
+            return {"id": "created-script"}
+
+    content = template
+    for name, value in settings.items():
+        content = re.sub(rf"(?m)^{name}=[^\n]*$", lambda _: f'{name}="{value}"', content, count=1)
+    for marker, value in (("DEFENSECLAW_CONFIG", config), ("DC_BUNDLE_BASE64", bundle),
+                          ("DC_TRUST_ANCHORS_JSON", anchors)):
+        content = content.replace(f"\n{marker}\n", f"\n{value}{marker}\n", 1)
+    script.write_bytes(content.replace("\n", newline).encode("ascii"))
+    if error:
+        with pytest.raises(SystemExit, match=re.escape(error)):
+            intune.cmd_macos_script(Graph(), args)
+        assert capsys.readouterr().out == ""
+        assert calls == []
+    else:
+        args.apply = True
+        assert intune.cmd_macos_script(Graph(), args) == 0
+        output = capsys.readouterr().out
+        uploaded = base64.b64decode(calls[-1][2]["scriptContent"])
+        assert calls[-1][:2] == ("POST", f"{intune.BETA}/deviceManagement/deviceShellScripts")
+        assert uploaded == script.read_bytes().replace(b"\r\n", b"\n")
+        assert b"\r" not in uploaded
+        assert f"sha256 {hashlib.sha256(uploaded).hexdigest()[:16]}" in output
+        assert output.count("Converted CRLF line endings to LF for upload") == (newline == "\r\n")
+        assert "created macOS shell script" in output
 
 
 def test_okta_assign_posix_rejects_taken_name_before_writes(monkeypatch: pytest.MonkeyPatch) -> None:

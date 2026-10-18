@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
@@ -205,7 +207,7 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 			GenerationID:       "0123456789abcdef0123456789abcdef",
 		}, nil
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("registered enterprise runtime was treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
@@ -216,6 +218,29 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 		*opts.AuthenticatedManagedToken != "authenticated-generation-token" ||
 		opts.FailMode != "closed" {
 		t.Fatalf("enterprise runtime options = %+v", opts)
+	}
+}
+
+func TestForeignHookSessionPreparesWindowsManagedGeneration(t *testing.T) {
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{
+			Connector: "opencode", PolicyActive: true, Registered: true,
+			GatewayAddr: "127.0.0.1:1", GatewayServiceName: "DefenseClawGateway",
+			ScopedToken: "fixture-scoped-token", GenerationID: "0123456789abcdef0123456789abcdef",
+		}, nil
+	})
+	if before := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true); before.ManagedRuntimeFailure == "" {
+		t.Fatal("test must start without an authenticated Windows generation")
+	}
+	_, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
+	if err == nil || strings.Contains(err.Error(), "managed hook runtime unavailable") || strings.Contains(err.Error(), "retired") {
+		t.Fatalf("exchange should reach the authenticated transport, got %v", err)
+	}
+	opts := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true)
+	if opts.ManagedRuntimeFailure != "" || opts.AuthenticatedManagedToken == nil ||
+		*opts.AuthenticatedManagedToken != "fixture-scoped-token" || opts.APIAddr != "127.0.0.1:1" {
+		t.Fatalf("foreign exchange did not bind authenticated Windows generation: failure=%q tokenBound=%v addr=%q",
+			opts.ManagedRuntimeFailure, opts.AuthenticatedManagedToken != nil, opts.APIAddr)
 	}
 }
 
@@ -253,7 +278,7 @@ func TestBuildHookOptionsEnterpriseManagedRejectsIncompleteAuthenticatedGenerati
 					GenerationID:       tc.generationID,
 				}, nil
 			})
-			if enterpriseManagedHookRuntimeNoop("codex") {
+			if prepareEnterpriseManagedHookRuntime("codex") {
 				t.Fatal("incomplete authenticated generation was treated as a no-op")
 			}
 			opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
@@ -291,7 +316,7 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 			PolicyActive: true,
 		}, errors.New("tampered managed ownership state")
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("invalid enterprise runtime was allowed to no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -310,7 +335,7 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 			PolicyActive: true,
 		}, errors.New(enterprisehooks.WindowsManagedSIDUnregisteredReason)
 	})
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("unregistered SID was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -332,7 +357,7 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 				enterprisehooks.ErrWindowsManagedRuntimeGenerationPending,
 			)
 		})
-		if enterpriseManagedHookRuntimeNoop("claudecode") {
+		if prepareEnterpriseManagedHookRuntime("claudecode") {
 			t.Fatal("a registered account without a runtime was treated as a no-op")
 		}
 		opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -379,8 +404,12 @@ func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *te
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if !enterpriseManagedHookRuntimeNoop("codex") {
+	if !prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("recognized per-user launcher with clean absent policy plus trusted disabled state did not no-op")
+	}
+	_, err := exchangeForeignHookSession("codex", "PreToolUse", time.Now().Add(time.Second), enterprisepolicy.SessionExchange{})
+	if err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("foreign session exchange with a retired launcher = %v, want an error", err)
 	}
 }
 
@@ -414,7 +443,7 @@ func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if enterpriseManagedHookRuntimeNoop("claudecode") {
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("de-enrolled active runtime was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
@@ -461,7 +490,7 @@ func TestEnterpriseProgramFilesCommandDoesNotClaimPerUserTombstoneNoop(t *testin
 		nativeHookRuntimeSnapshot.Unlock()
 	})
 
-	if enterpriseManagedHookRuntimeNoop("codex") {
+	if prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("managed-enterprise Program Files command incorrectly inherited the per-user tombstone no-op")
 	}
 }
@@ -474,7 +503,7 @@ func TestCodexManagedActiveMissingStateFailsClosed(t *testing.T) {
 			PolicyActive: true,
 		}, errors.New("active Codex machine requirements are missing protected managed runtime state")
 	})
-	if enterpriseManagedHookRuntimeNoop("codex") {
+	if prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("active Codex policy with missing state was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)

@@ -227,6 +227,7 @@ function Invoke-DefenseClawNative {
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
@@ -237,10 +238,29 @@ function Invoke-DefenseClawNative {
     }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        # End the CLI and its PowerShell child before reporting the timeout.
+        # Process.Kill() alone leaves the child holding the lifecycle lock.
+        try {
+            $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = "/PID $($process.Id) /T /F"
+            $killInfo.UseShellExecute = $false
+            $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true
+            $killInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killInfo)
+            if (-not $killer.WaitForExit(10000)) { $killer.Kill() }
+            $killer.Dispose()
+        } catch { $null = $_ }
         try { $process.Kill() } catch { $null = $_ }
+        [void]$process.WaitForExit(5000)
         throw "native_timeout: $FilePath did not finish within $TimeoutSeconds seconds"
     }
-    $process.WaitForExit()
+    $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$elapsed.ElapsedMilliseconds)
+    if (-not [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdout, $stderr), $remaining)) {
+        throw "native_timeout: $FilePath output did not close within $TimeoutSeconds seconds"
+    }
     return New-Object -TypeName PSObject -Property @{
         ExitCode = $process.ExitCode; StdOut = $stdout.Result; StdErr = $stderr.Result
     }
@@ -279,6 +299,38 @@ function ConvertTo-DefenseClawResultJson {
     return $json
 }
 # endregion DefenseClaw MDM shared helpers
+
+function Test-DefenseClawLifecycleRunning {
+    # True while a DefenseClaw lifecycle run (Setup, ensure, a bundle apply
+    # or an uninstall) holds lifecycle.lock. The script then starts no
+    # installed CLI: a CLI running from the install folder makes a running
+    # uninstall refuse with uninstall_in_use (GAP-0126). A missing lock, or
+    # one this account cannot open, is not a running lifecycle. The probe
+    # holds the lock file for an instant; a lifecycle that opens it at that
+    # moment waits (Setup) or reports a retryable lifecycle_busy. Identical
+    # in detect.ps1, Remediate-Detect.ps1 and Remediate-Fix.ps1 (a test
+    # enforces it).
+    $key = Get-DefenseClawRegistryKey64 -SubKey 'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders'
+    if ($null -eq $key) { return $false }
+    try {
+        $programData = [string]$key.GetValue('Common AppData', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally { $key.Dispose() }
+    if (-not $programData -or $programData.Contains('%') -or $programData -notmatch '^[A-Za-z]:\\[^/]*$') { return $false }
+    $lock = $programData.TrimEnd('\') + '\Cisco\DefenseClaw-Lifecycle\lifecycle.lock'
+    try {
+        $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stream.Dispose()
+        return $false
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $false
+    } catch [System.IO.IOException] {
+        return $true
+    } catch {
+        return $false
+    }
+}
 
 function ConvertTo-DefenseClawComparableVersion {
     # [version] plus a prerelease flag: 1.4.0-rc1 sorts before 1.4.0.
@@ -327,6 +379,11 @@ if ($MinimumVersion) {
         Exit-NotDetected -Reason "installed version $($deployment.Version) is older than $MinimumVersion"
     }
 }
+if (($RequireHealthy -or $RequireBundle -or $RequireSessionsProtected) -and (Test-DefenseClawLifecycleRunning)) {
+    # The checks below run the installed CLI, which would make a running
+    # uninstall refuse (GAP-0126). Intune detects again later.
+    Exit-NotDetected -Reason 'another DefenseClaw lifecycle run is in progress; detection runs again later'
+}
 if ($RequireHealthy) {
     try {
         $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
@@ -372,6 +429,11 @@ if ($RequireBundle) {
     }
     if (-not $byVersion -and $bundleId -ne $wanted) {
         Exit-NotDetected -Reason "the confirmed policy bundle is $bundleId, not $wanted"
+    }
+    # A revoked signer is reported, not hidden: the bundle still enforces,
+    # but detection fails until a bundle signed by an active key applies.
+    if (@($status.warnings | Where-Object { [string]$_.code -eq 'key_revoked' }).Count -gt 0) {
+        Exit-NotDetected -Reason "the signer of policy bundle $bundleId is revoked in the installed trust anchors; deliver a newer bundle signed by an active key"
     }
     if ($null -eq $status.current -or [string]$status.current.bundle_id -ne $bundleId -or -not $status.applied) {
         Exit-NotDetected -Reason "the running gateway does not enforce policy bundle $bundleId; run: `"$($deployment.Cli)`" enterprise bundle status"

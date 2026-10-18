@@ -64,9 +64,9 @@ _BRIDGE_PUBLICATION_SCHEMA = {
         "digest_filename": "opencode-plugin.js",
     },
 }
-# SHA-256 of each bridge template: the current one's host bytes (its
-# OpenShell sandbox branches resolved, internal/gateway/connector/testdata/
-# bridge_host) and the copy the Secure Client profile renders
+# SHA-256 of each bridge template: the current host bytes, its managed
+# standalone variant when distinct (internal/gateway/connector/testdata/
+# bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
@@ -78,6 +78,7 @@ _BRIDGE_TEMPLATE_DIGESTS = {
     "opencode": frozenset(
         {
             "49a906d87c109131b5fa645e06cf745bc752bea31ed79829f55c99c91cf0f6df",  # opencode-plugin.js
+            "86fd5fe8cfd5358b9529694af8ad65f6ba5b23321fa09187c749d316798b904c",  # opencode-plugin-managed.js
             "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
         }
     ),

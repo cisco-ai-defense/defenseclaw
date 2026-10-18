@@ -36,10 +36,16 @@ def _run_script(pwsh: str, tmp_path: Path, script: str, document: dict, exit_cod
 def _fix_script() -> str:
     source = (SCRIPTS / "Remediate-Fix.ps1").read_text(encoding="utf-8")
     block = "$code = $run.ExitCode" + source.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
+    # The block ends with the signed-bundle re-check (GAP-0114) and the
+    # startup-mode restore report; a device without a confirmed bundle and a
+    # run without a restore failure leave the summary as it is.
     return (
         "Set-StrictMode -Version 2.0\n"
         "$run = [pscustomobject]@{ ExitCode = [int]$env:DC_TEST_EXIT_CODE; "
         "StdOut = Get-Content -LiteralPath $env:DC_TEST_DOCUMENT -Raw }\n"
+        "$deployment = [pscustomobject]@{ Cli = 'defenseclaw.exe'; Version = '9.9.9' }\n"
+        "$restoreFailure = $null\n"
+        "function Get-DefenseClawBundleEnforcement { param([string]$Cli) $null }\n"
         + block + '\n[Console]::Out.WriteLine("$code|$summary")\n'
     )
 

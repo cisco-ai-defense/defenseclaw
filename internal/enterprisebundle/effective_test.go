@@ -425,10 +425,10 @@ func TestBundleDeviceLayoutDigestParity(t *testing.T) {
 					if err != nil || !equal.DigestVerified || equal.DigestUnverifiable || equal.EffectivePolicyDigest != equal.ExpectedDigest {
 						t.Fatalf("matching digest on non-standard ProgramData layout: %+v, %v", equal, err)
 					}
+					// A digest the D: layout changes, whose standard-layout
+					// digest is the signed one: layout-unverifiable.
 					layoutSensitive := in
-					layoutSensitive.Digester = func(context.Context, *config.Config, []byte, string, string) (string, error) {
-						return gatewayDigest, nil
-					}
+					layoutSensitive.Digester = onDriveD(gatewayDigest)
 					unverifiable, err := enterprisebundle.Verify(context.Background(), layoutSensitive)
 					if err != nil || unverifiable.DigestVerified || unverifiable.DigestUnverifiable || !unverifiable.DigestLayoutUnverifiable {
 						t.Fatalf("different digest on non-standard ProgramData layout: %+v, %v", unverifiable, err)
@@ -454,6 +454,137 @@ func TestBundleDeviceLayoutDigestParity(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// onDriveD is a digester whose result on a ProgramData relocated to D: is
+// layoutDigest; on every other layout it is the real digest.
+func onDriveD(layoutDigest string) enterprisebundle.PolicyDigester {
+	return func(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
+		if strings.HasPrefix(strings.ToUpper(cfg.DataDir), `D:\`) {
+			return layoutDigest, nil
+		}
+		return digester(ctx, cfg, raw, goos, root)
+	}
+}
+
+// GAP-0113 verifier finding 1: a Windows device whose ProgramData is on D:
+// must still refuse a signed digest it disproves, for every signer OS. The
+// device recomputes the digest for the standard layout the signer models;
+// only when that digest equals the signed one does the layout difference
+// downgrade to digest_layout_unverifiable.
+func TestVerifyNonStandardLayoutRefusesDisprovedDigest(t *testing.T) {
+	standard, err := enterprisebundle.StandardDeviceLayout(enterprisebundle.PlatformWindows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveD := enterprisebundle.DeviceLayout{
+		ConfigPath: strings.Replace(standard.ConfigPath, `C:\`, `D:\`, 1),
+		DataDir:    strings.Replace(standard.DataDir, `C:\`, `D:\`, 1),
+		PolicyDir:  strings.Replace(standard.PolicyDir, `C:\`, `D:\`, 1),
+	}
+	if driveD.IsStandard(enterprisebundle.PlatformWindows) {
+		t.Fatal("D: layout treated as standard")
+	}
+	// An explicit standard data_dir is signable, but the D: layout still
+	// supplies the defaults of the other runtime paths, so it changes the
+	// real device digest (follow-up probe layout-probe.log).
+	explicitDataDir := bundleConfigBase + fmt.Sprintf("data_dir: %q\n", standard.DataDir)
+	for _, signer := range enterprisebundle.Platforms {
+		t.Run(signer, func(t *testing.T) {
+			// sign returns the consistent bundle, one re-signed with a
+			// wrong windows digest, and the true digest.
+			sign := func(configYAML string) (*fixture, *enterprisebundle.Bundle, *enterprisebundle.Bundle, string) {
+				f := newFixture(t, configYAML, func(in *enterprisebundle.ComposeInput) {
+					in.Platforms = []string{enterprisebundle.PlatformWindows}
+					in.HostPlatform = signer
+				})
+				m, err := enterprisebundle.DecodeManifest(f.raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual := m.EffectivePolicy.Digests[enterprisebundle.PlatformWindows]
+				flip := "0"
+				if actual[7] == '0' {
+					flip = "1"
+				}
+				m.EffectivePolicy.Digests[enterprisebundle.PlatformWindows] = actual[:7] + flip + actual[8:]
+				wrong, err := m.Marshal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return f, f.bundle, f.signed(t, wrong), actual
+			}
+			f, good, bad, actual := sign(bundleConfig(t))
+			fd, goodD, badD, actualD := sign(explicitDataDir)
+			for _, tc := range []struct {
+				name     string
+				f        *fixture
+				bundle   *enterprisebundle.Bundle
+				digester enterprisebundle.PolicyDigester
+				want     string // "verified", "layout" or a refusal detail
+			}{
+				{"consistent", f, good, digester, "verified"},
+				{"disproved", f, bad, digester, "this host computes " + actual + " for windows; the signer computed the digest on " + signer},
+				{"layout changed the digest", f, good, onDriveD(gatewayDigest), "layout"},
+				{"layout changed the digest, standard digest disproves", f, bad, onDriveD(gatewayDigest),
+					"this host computes " + gatewayDigest + " for windows (" + actual + " for the standard managed layout)"},
+				{"explicit standard data_dir", fd, goodD, digester, "layout"},
+				{"explicit standard data_dir, disproved", fd, badD, digester, "(" + actualD + " for the standard managed layout); the signer computed the digest on " + signer},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					in := tc.f.input(t, tc.bundle, anchors(t, "acme", []string{"eng"}, 0, activeKey("k1", tc.f.key.Public())))
+					in.Platform, in.DeviceLayout, in.Digester = enterprisebundle.PlatformWindows, &driveD, tc.digester
+					res, err := enterprisebundle.Verify(context.Background(), in)
+					switch tc.want {
+					case "verified":
+						if err != nil || !res.DigestVerified || res.DigestLayoutUnverifiable || res.EffectivePolicyDigest != actual {
+							t.Fatalf("consistent bundle on D: = %+v, %v", res, err)
+						}
+					case "layout":
+						if err != nil || res.DigestVerified || res.DigestUnverifiable || !res.DigestLayoutUnverifiable || res.EffectivePolicyDigest == res.ExpectedDigest {
+							t.Fatalf("layout-dependent digest on D: = %+v, %v", res, err)
+						}
+					default:
+						if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDigestMismatch || res.DigestVerified || res.DigestLayoutUnverifiable ||
+							!strings.Contains(err.Error(), tc.want) {
+							t.Fatalf("disproved digest on D: = %+v, %v; want digest_mismatch with %q", res, err, tc.want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// A signer computes each target platform's digest with that platform's
+// defaults, never its own host's. notifications.enabled defaulted from the
+// signing host: a Linux signer digested every Windows bundle with false while
+// the Windows device resolves true, so no Windows receipt ever verified its
+// signed digest (GAP-0107). An omitted default digests like the target's
+// explicit default, and the opposite explicit value is another policy.
+func TestBundleDigestUsesTargetPlatformDefaults(t *testing.T) {
+	targetDefault := map[string]bool{"linux": false, "darwin": true, "windows": true}
+	for _, platform := range enterprisebundle.Platforms {
+		t.Run(platform, func(t *testing.T) {
+			digest := func(extra string) string {
+				t.Helper()
+				root, bundle := writeBundle(t, bundleConfigBase+extra)
+				got, err := enterprisebundle.EffectivePolicyDigests(context.Background(), bundle, root, []string{platform}, digester)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got[platform]
+			}
+			want := targetDefault[platform]
+			omitted := digest("")
+			if same := digest(fmt.Sprintf("notifications:\n  enabled: %t\n", want)); omitted != same {
+				t.Fatalf("omitted notifications.enabled digests %s, the %s default (%t) digests %s", omitted, platform, want, same)
+			}
+			if other := digest(fmt.Sprintf("notifications:\n  enabled: %t\n", !want)); omitted == other {
+				t.Fatalf("notifications.enabled %t digests like the %s default", !want, platform)
+			}
+		})
 	}
 }
 

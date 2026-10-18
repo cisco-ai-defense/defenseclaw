@@ -82,7 +82,7 @@ call through unchecked because the gateway is down.
 | Gateway returns 4xx, malformed JSON, or no action | Allow, warn, and record the response failure. | Block with the connector's response shape and record the failure. |
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
-| Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. | Block when the event supports a block response; otherwise allow with `would_block`. Record an audit row with result `panic` and telemetry either way. Secure Client allows and audits recovered errors. |
+| Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. A standalone managed host blocks instead, as for `closed`. | Block when the event supports a block response; otherwise allow with `would_block`. Record an audit row with result `panic` and telemetry either way. Secure Client allows and audits recovered errors. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
 Fail mode applies only to a hook the agent can start. A hook script that is
@@ -113,7 +113,12 @@ A recovered hook evaluation error now honours the fail mode. In action mode,
 `closed` blocks an event that supports a block response; `open` allows it and
 records `would_block` and an audit row. An event that cannot block allows and
 records `would_block`. Observe mode never enforces, and Secure Client allows
-and audits recovered errors regardless of its configured fail mode. The block
+and audits recovered errors regardless of its configured fail mode. A
+standalone managed host is the exception: a recovered error gives no verdict,
+so the call is blocked as when the gateway is down, in observe mode too and
+whatever `hook_fail_mode` says, for every event that supports a block
+response. A stop or session-end event is allowed there, because a block would
+keep the agent running. The block
 is a fail-closed answer without a policy finding. Treat
 the condition as a degraded security incident: alert on the
 `defenseclaw.panics.total` counter and on audit rows with result `panic`, and

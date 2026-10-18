@@ -376,6 +376,12 @@ func Run(ctx context.Context, opts Options) int {
 		return blockExit
 	}
 	failMode := normalizeFailMode(opts.FailMode)
+	if managedNativeDecision(opts) {
+		// The protected managed profile cannot inherit an open availability
+		// setting from a connector or the caller's environment.
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
@@ -1040,7 +1046,7 @@ func validCopilotEvent(event string) bool {
 func (sp spec) decide(opts Options, body []byte) int {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+		return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
 	}
 	if sp.connector == "hermes" {
 		return decideHermes(opts, sp, fields)
@@ -1048,13 +1054,28 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
-			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
+		// Only the managed standalone profiles keep a lifecycle event neutral
+		// here. Per-user and Secure Client hooks keep their fail path: a
+		// Claude Code or Codex Stop still fails with the fail mode it has.
+		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
+		if !lifecycle &&
+			(sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts)) {
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
 		}
 		action = "allow"
+		if lifecycle && sp.style == stylePluginBridge {
+			// The plugin reads the echoed response itself; make the neutral
+			// lifecycle allow explicit instead of handing it an invalid verdict.
+			body = []byte(`{"action":"allow"}`)
+		}
 	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
+	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
+		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
+		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
+		return failResponse(opts, sp, "closed", "missing native output in gateway response")
+	}
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -1169,7 +1190,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 		// (compacted onto one line).
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, body); err != nil {
-			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid JSON response")
 		}
 		fmt.Fprintln(opts.Stdout, compact.String())
 		return 0
@@ -1177,6 +1198,36 @@ func (sp spec) decide(opts Options, body []byte) int {
 	default:
 		return 0
 	}
+}
+
+func managedNativeDecision(opts Options) bool {
+	return opts.ManagedEnterprise && !opts.SecureClient
+}
+
+func managedDecisionFailMode(opts Options) string {
+	if managedNativeDecision(opts) {
+		return "closed"
+	}
+	return normalizeFailMode(opts.FailMode)
+}
+
+func managedNativeBlockableEvent(connector, event string) bool {
+	switch connector {
+	case "cursor":
+		switch strings.ToLower(strings.TrimSpace(event)) {
+		case "beforesubmitprompt", "pretooluse", "beforereadfile", "beforetabfileread", "beforeshellexecution", "beforemcpexecution":
+			return true
+		}
+	case "copilot":
+		return event == "preToolUse" || event == "permissionRequest"
+	case "devin":
+		return event == "PreToolUse"
+	case "kiro":
+		return event == "PreToolUse" || event == "UserPromptSubmit"
+	case "opencode":
+		return event == "tool.execute.before"
+	}
+	return false
 }
 
 func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int {
@@ -1717,7 +1768,7 @@ const ForeignHookBlockedReasonPrefix = "enterprise_foreign_hook_blocked:"
 // administrator would use. Only the standalone guard sets this reason; the
 // gateway's surface refusal (SurfaceUnverifiedReason) is delivered the
 // same way. A
-// stop or session-end event (foreignHookStopEvent) gets the connector's
+// stop or session-end event (NeutralLifecycleEvent) gets the connector's
 // neutral allow instead, because a block there would keep the agent running;
 // the block is still logged. Every other event gets a block. Commands that do
 // not bind their event (the Cursor, Claude Code and Devin hooks) take it from
@@ -1734,7 +1785,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 			}
 		}
 	}
-	if foreignHookStopEvent(sp.connector, opts.Event) {
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
 		logDeliberateAllow(opts, sp, reason, "policy")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
@@ -1797,53 +1848,8 @@ func foreignHookCursorOpenEvent(connector, event string) bool {
 	return false
 }
 
-// foreignHookStopEvent reports the stop and session-end events of the
-// connectors the foreign-hook guard covers. A block on a stop event denies
-// nothing; it makes the agent go on: Claude Code (Stop, SubagentStop, and
-// TeammateIdle for an agent-team teammate), Codex (Stop, SubagentStop),
-// Devin (Stop) and Copilot (agentStop, subagentStop) continue the turn, and
-// Cursor submits a stop hook's followup_message as the next prompt. So a
-// session the guard blocks would loop until the agent restarts. The
-// session-end events, and Claude Code's StopFailure, cannot be blocked at
-// all. The names are the vendors' exact event names; Cursor's match
-// case-insensitively, like its responses (cursorActionOutput). OpenCode and
-// Amp run the guard on tool calls only.
-func foreignHookStopEvent(connector, event string) bool {
-	event = strings.TrimSpace(event)
-	switch connector {
-	case "claudecode":
-		switch event {
-		case "Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd":
-			return true
-		}
-	case "codex":
-		switch event {
-		case "Stop", "SubagentStop", "SessionEnd":
-			return true
-		}
-	case "cursor":
-		switch strings.ToLower(event) {
-		case "stop", "subagentstop", "sessionend":
-			return true
-		}
-	case "devin":
-		switch event {
-		case "Stop", "SessionEnd":
-			return true
-		}
-	case "copilot":
-		switch event {
-		case "agentStop", "subagentStop", "sessionEnd",
-			// VS Code Local harness (--hook-surface vscode-local).
-			"Stop", "SubagentStop":
-			return true
-		}
-	}
-	return false
-}
-
 // managedStandaloneStopEvent reports a stop or session-end event
-// (foreignHookStopEvent) of a Unix standalone managed hook. Failing such an
+// (NeutralLifecycleEvent) of a Unix standalone managed hook. Failing such an
 // event closed denies nothing; it keeps the agent running, and every later
 // turn fails closed and stops again, so the agent loops on model turns until
 // DefenseClaw is back. On the standalone profile every fail-closed reason
@@ -1853,7 +1859,7 @@ func foreignHookStopEvent(connector, event string) bool {
 // closed. Per-user hooks and the Secure Client profile never set
 // ManagedStandalone and keep their results.
 func managedStandaloneStopEvent(opts Options, sp spec) bool {
-	return opts.ManagedEnterprise && opts.ManagedStandalone && foreignHookStopEvent(sp.connector, opts.Event)
+	return opts.ManagedEnterprise && opts.ManagedStandalone && NeutralLifecycleEvent(sp.connector, opts.Event)
 }
 
 // logDeliberateAllow records a failure that a reviewed rule answers with the

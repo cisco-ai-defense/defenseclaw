@@ -14,7 +14,9 @@
 #     (uninstall_incomplete): it started the services again (GAP-1519).
 # Removing the files then would leave machine policy or per-user hooks
 # naming a deleted binary. Other lifecycle problems are reported without
-# stopping the package transaction.
+# stopping the package transaction. When the run it waited for was an
+# uninstall (an MDM purge, say) that removed the deployment and its lock, the
+# uninstall is a no-op and exits 0, and the removal goes on (GAP-0112).
 #
 # To finish a removal that stopped, fix the cause the result names (a
 # read-only or immutable vendor policy or hook config file, for example; the
@@ -61,6 +63,15 @@ state=/var/lib/defenseclaw-enterprise
 helper=/opt/defenseclaw/bin/defenseclaw-sensor-helper
 sensor_state=/var/lib/defenseclaw-sensor
 policy_names='defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}'
+# Every systemd unit the package ships in /usr/lib/systemd/system (the
+# packaging tests compare the list with .goreleaser.yaml).
+package_units="defenseclaw-enterprise-apply.path defenseclaw-enterprise-verify.timer
+defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service
+defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket defenseclaw-gateway.service
+defenseclaw-sensor-helper.service defenseclaw-enterprise-apply.service
+defenseclaw-enterprise-verify.service defenseclaw-hook-guardian-reconcile.service"
+# The transient timer the preinstall starts to recover the apply trigger.
+recovery_timer=defenseclaw-enterprise-apply-recovery.timer
 
 # recorded_policies prints the DefenseClaw policy names the sensor helper
 # recorded loading, one per line.
@@ -182,5 +193,37 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     fi
     [ "$status" = 0 ] ||
         echo "defenseclaw-enterprise: uninstall reported a problem; see $state/last-package-result.json" >&2
+fi
+
+# The package's files go next, whatever the uninstall did: an uninstall that
+# reported a problem starts the services again, and one that did not run
+# (no gateway binary) stopped nothing. A unit left running after its file is
+# gone stays loaded "not-found" and keeps listening until a reboot: the
+# gateway API socket did (GAP-0112). Stop and disable every unit the package
+# ships, in one systemctl call (systemd queues every stop job first, so a
+# socket cannot start the gateway again in between), and repeat while one
+# still runs. Only a removal gets here; an upgrade left above.
+if [ -d /run/systemd/system ]; then
+    units="$package_units $recovery_timer"
+    tries=0
+    while :; do
+        # shellcheck disable=SC2086 # unit names have no spaces or globs
+        systemctl stop $units >/dev/null 2>&1
+        running=""
+        for unit in $units; do
+            if systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+                running="$running $unit"
+            fi
+        done
+        tries=$((tries + 1))
+        if [ -z "$running" ] || [ "$tries" -ge 3 ]; then
+            break
+        fi
+    done
+    # shellcheck disable=SC2086
+    systemctl disable $package_units >/dev/null 2>&1 || true
+    if [ -n "$running" ]; then
+        echo "defenseclaw-enterprise: could not stop$running; stop them with \`systemctl stop$running\` after the removal" >&2
+    fi
 fi
 exit 0

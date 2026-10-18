@@ -93,7 +93,7 @@ func newImpostorListener(t *testing.T, recorder *listenerProofRecorder) *httptes
 		case "/api/v1/amp/hook":
 			_, _ = io.WriteString(w, `{"action":"allow"}`)
 		default:
-			_, _ = io.WriteString(w, `{"hook_output":{"decision":"allow"}}`)
+			_, _ = io.WriteString(w, `{"action":"allow","hook_output":{"decision":"allow"}}`)
 		}
 	}))
 	t.Cleanup(server.Close)

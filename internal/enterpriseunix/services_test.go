@@ -61,6 +61,31 @@ func TestActivationStagesFollowDependencies(t *testing.T) {
 	}
 }
 
+// The uninstall stops a unit group with StopTogether (GAP-0112). It must
+// reach systemd as ONE systemctl stop naming every unit of the group, in
+// order: systemd queues all the stop jobs before any runs, so no socket can
+// start the gateway again in between. A stop of only some units, or one
+// call per unit, brings back the API socket left listening after the purge.
+// The lifecycle tests use fakeServices, so only this test sees the argv.
+func TestSystemdStopTogetherIsOneSystemctlStopOfTheWholeGroup(t *testing.T) {
+	runner := &fakeRunner{}
+	manager := &systemdManager{env: &Env{GOOS: "linux", Runner: runner}}
+	if len(linuxUnits) < 3 {
+		t.Fatalf("expected the full linux unit list, got %d units", len(linuxUnits))
+	}
+	names := make([]string, 0, len(linuxUnits))
+	for _, unit := range linuxUnits {
+		names = append(names, unit.Name)
+	}
+	if err := manager.StopTogether(context.Background(), linuxUnits); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"systemctl stop " + strings.Join(names, " ")}
+	if !slices.Equal(runner.calls, want) {
+		t.Fatalf("systemctl calls\n%q\nwant\n%q", runner.calls, want)
+	}
+}
+
 // launchctlPrintRunner answers `launchctl print system/<label>` with the
 // canned state of each label.
 type launchctlPrintRunner struct{ states map[string]string }

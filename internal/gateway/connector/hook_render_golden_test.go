@@ -23,8 +23,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -131,7 +133,7 @@ func hostHookGoldenCases() []hostHookGoldenCase {
 		for _, v := range []struct {
 			managed  bool
 			failMode string
-		}{{false, "closed"}, {false, "open"}, {true, "closed"}} {
+		}{{false, "closed"}, {false, "open"}, {true, "closed"}, {true, "open"}} {
 			asset, v := asset, v
 			label := "plugin/" + asset + "/managed=" + boolLabel(v.managed) + "/fail=" + v.failMode
 			add(label, func(t *testing.T, dir string) {
@@ -272,7 +274,7 @@ var bridgeHostTemplateFields = []string{
 // the host ones and leaves bridgeHostTemplateFields as placeholders. It
 // renders from a map because some fields (ServiceUID) are not strings in
 // templateData; a field missing from the list fails the render.
-func renderBridgeHostTemplate(asset string) ([]byte, error) {
+func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	content, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
 		return nil, err
@@ -281,7 +283,7 @@ func renderBridgeHostTemplate(asset string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"Sandbox": false}
+	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false}
 	for _, field := range bridgeHostTemplateFields {
 		data[field] = "{{." + field + "}}"
 	}
@@ -289,32 +291,96 @@ func renderBridgeHostTemplate(asset string) ([]byte, error) {
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, err
 	}
-	return out.Bytes(), nil
+	if !managed {
+		return out.Bytes(), nil
+	}
+	// The scanner normalizes this rendered field before hashing. Keep its
+	// canonical placeholder in both host template variants.
+	line := `DC_FAIL_MODE = "closed"`
+	if asset == "amp-plugin.ts" {
+		line = `DC_FAIL_MODE: string = "closed"`
+	}
+	canonical := strings.Replace(line, `"closed"`, `"{{.FailMode}}"`, 1)
+	if strings.Count(out.String(), line) != 1 {
+		return nil, fmt.Errorf("managed bridge %s has no unique fail mode", asset)
+	}
+	return []byte(strings.Replace(out.String(), line, canonical, 1)), nil
 }
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		got, err := renderBridgeHostTemplate(asset)
-		if err != nil {
-			t.Fatalf("render %s: %v", asset, err)
+		variants := []bool{false}
+		if asset == "opencode-plugin.js" {
+			variants = append(variants, true)
 		}
-		path := filepath.Join(bridgeHostTemplateDir, asset)
-		if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
-			if err := os.MkdirAll(bridgeHostTemplateDir, 0o755); err != nil {
+		for _, managed := range variants {
+			got, err := renderBridgeHostTemplate(asset, managed)
+			if err != nil {
+				t.Fatalf("render %s managed=%v: %v", asset, managed, err)
+			}
+			name := asset
+			if managed {
+				name = strings.TrimSuffix(asset, filepath.Ext(asset)) + "-managed" + filepath.Ext(asset)
+			}
+			path := filepath.Join(bridgeHostTemplateDir, name)
+			if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+				if err := os.MkdirAll(bridgeHostTemplateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", path, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s is out of date: regenerate it with DEFENSECLAW_UPDATE_GOLDEN=1 and update "+
+					"_BRIDGE_TEMPLATE_DIGESTS in cli/defenseclaw/scanner/plugin_scanner/self_identity.py", path)
+			}
+		}
+	}
+}
+
+func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
+	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
+		for _, tc := range []struct {
+			managed, secureClient bool
+			wantClosed            bool
+		}{{true, false, true}, {false, false, false}, {true, true, false}} {
+			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
+			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, got, 0o644); err != nil {
-				t.Fatal(err)
+			closed := bytes.Contains(body, []byte(`DC_FAIL_MODE = "closed"`)) ||
+				bytes.Contains(body, []byte(`DC_FAIL_MODE: string = "closed"`))
+			if closed != tc.wantClosed {
+				t.Errorf("%s managed=%v secureClient=%v closed=%v", asset, tc.managed, tc.secureClient, closed)
 			}
-			continue
 		}
-		want, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", path, err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s is out of date: regenerate it with DEFENSECLAW_UPDATE_GOLDEN=1 and update "+
-				"_BRIDGE_TEMPLATE_DIGESTS in cli/defenseclaw/scanner/plugin_scanner/self_identity.py", path)
+	}
+}
+
+func TestManagedCopilotShellClosesWhenUnavailable(t *testing.T) {
+	sh, err := renderHookTemplate("copilot-hook.sh", templateData{Managed: true, FailMode: "open", TokenFile: ".token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "copilot-hook.sh")
+	if err := os.WriteFile(path, sh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ event, nativeDeny string }{
+		{"preToolUse", `"permissionDecision":"deny"`},
+		{"permissionRequest", `"behavior":"deny"`},
+	} {
+		cmd := exec.Command("bash", path, "--event", tc.event)
+		output, err := cmd.Output()
+		if err != nil || !bytes.Contains(output, []byte(tc.nativeDeny)) {
+			t.Fatalf("managed Copilot shell %s missing-helper result: %q, %v", tc.event, output, err)
 		}
 	}
 }

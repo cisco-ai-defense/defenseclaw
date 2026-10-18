@@ -319,8 +319,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
 
-	// Keep the lock inode for the lifetime of the host. A waiter may have
-	// opened it before this run, even if this run commits no deployment.
+	// The lock stays at one inode while anything is in the lifecycle
+	// directory; only an uninstall that leaves it empty removes it (see
+	// removeLockWithLastState), and acquireLock lets no waiter run on the
+	// removed file.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
 		return 0
@@ -329,6 +331,25 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		if errors.Is(err, errLockRemoved) {
+			if l.opts.Action == ActionUninstall {
+				// Only an uninstall that left the lifecycle directory empty
+				// removes the lock: the run this one waited for removed the
+				// deployment, so there is nothing left to remove. A busy exit
+				// here aborted the rpm or deb removal whose preremove waited
+				// for a concurrent MDM purge, after the purge had removed
+				// everything (GAP-0112).
+				r.Noop, r.NoopReason = true, "not_installed"
+				message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
+				if l.opts.Purge {
+					message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
+				}
+				r.AddWarning(codeNotInstalled, message)
+				return 0
+			}
+			r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
@@ -454,7 +475,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	case ActionRotateCredentials:
 		return l.rotateCredentials(ctx, record)
 	case ActionUninstall:
-		return l.uninstall(ctx, record)
+		code := l.uninstall(ctx, record)
+		l.removeLockWithLastState(record)
+		return code
 	}
 	return 0
 }
@@ -520,11 +543,12 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 }
 
 // removeLifecycleStateKeepingLock clears transaction state without replacing
-// the lock inode. Waiters can have the file open before this run acquired it.
-// The deployment record stays too: the uninstall removes it last, once
-// everything else is gone. Removed here, an uninstall that then failed to
-// remove another state folder left no record, so its rerun was a
-// not_installed no-op and the leftovers needed --adopt-existing (GAP-1440).
+// the lock inode, which this run still holds. Waiters can have the file open
+// before this run acquired it. The deployment record stays too: the
+// uninstall removes it last, once everything else is gone. Removed here, an
+// uninstall that then failed to remove another state folder left no record,
+// so its rerun was a not_installed no-op and the leftovers needed
+// --adopt-existing (GAP-1440).
 func (e *Env) removeLifecycleStateKeepingLock() error {
 	dir := e.P(e.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
@@ -540,6 +564,44 @@ func (e *Env) removeLifecycleStateKeepingLock() error {
 		}
 	}
 	return nil
+}
+
+// removeLockWithLastState removes the lifecycle lock, and the lifecycle
+// directory with it, when an uninstall left nothing else there. A purge
+// left the root-only lock and its directory behind on every host
+// (GAP-0112, GAP-0101), and the package removal's own uninstall run, a no-op
+// after the MDM purge, created them again. This run still holds the lock:
+// a run that waits for it wakes on the removed file, and acquireLock stops
+// it instead of creating the directory again. On macOS the lifecycle
+// directory is in the install root, which goes once it is empty, and then
+// the parents the deployment created and left empty.
+func (l *lifecycle) removeLockWithLastState(record *Deployment) {
+	env := l.env
+	dir := env.P(env.Layout.LifecycleDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName || !entries[0].Type().IsRegular() {
+		return
+	}
+	if err := os.Remove(filepath.Join(dir, lockFileName)); err != nil {
+		return
+	}
+	if err := os.Remove(dir); err != nil {
+		return
+	}
+	if filepath.Dir(env.Layout.LifecycleDir) != env.Layout.InstallRoot {
+		return
+	}
+	_ = removeDirIfEmpty(env.P(env.Layout.InstallRoot))
+	if record != nil {
+		dirs := append([]string(nil), record.CreatedDirs...)
+		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+		for _, created := range dirs {
+			_ = removeDirIfEmpty(env.P(created))
+		}
+	}
+	if env.GOOS == "darwin" {
+		_ = removeDirIfEmpty(env.P("/opt/cisco"))
+	}
 }
 
 // removeInstallRootKeepingLock preserves the lock when macOS stores its
@@ -2902,14 +2964,49 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
-	stopUnit := func(unit Unit) {
-		_ = env.Services.Stop(ctx, unit)
+	// stopUnits stops a group of units and returns the ones still running.
+	// systemd stops the group in one request, so a socket cannot start the
+	// service again while the rest of the group stops, and the group is
+	// stopped again while one is still running (GAP-0112).
+	stopUnits := func(group []Unit) []string {
+		stopper, together := env.Services.(groupStopper)
+		var running []string
+		for attempt := 0; attempt < 3; attempt++ {
+			if together {
+				_ = stopper.StopTogether(ctx, group)
+			} else {
+				for _, unit := range group {
+					_ = env.Services.Stop(ctx, unit)
+				}
+			}
+			running = running[:0]
+			for _, unit := range group {
+				if env.Services.Active(ctx, unit) {
+					running = append(running, unit.Name)
+				}
+			}
+			if len(running) == 0 || !together {
+				break
+			}
+		}
 		// On macOS launchctl disable writes an override into launchd's
 		// database that no command can delete (GAP-1443). The definitions
 		// are removed below; one that stays is disabled there.
-		if unit.Activate && env.GOOS != "darwin" {
-			_ = env.Services.Disable(ctx, unit)
+		for _, unit := range group {
+			if unit.Activate && env.GOOS != "darwin" {
+				_ = env.Services.Disable(ctx, unit)
+			}
 		}
+		return running
+	}
+	stopGroup := func(registrations bool) []string {
+		var group []Unit
+		for _, unit := range ordered {
+			if repairsRegistrations(unit) == registrations {
+				group = append(group, unit)
+			}
+		}
+		return stopUnits(group)
 	}
 	disableKeptDefinitions := func() {
 		if env.GOOS != "darwin" {
@@ -2943,11 +3040,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		wasActive[unit.Name] = unitStarted(ctx, env.Services, unit)
 		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
 	}
-	for _, unit := range ordered {
-		if repairsRegistrations(unit) {
-			stopUnit(unit)
-		}
-	}
+	stillRunning := stopGroup(true)
 	// The accounts of the sandbox subsystem are read before the per-user
 	// removal below deletes the records that name some of them.
 	sandboxAccounts := l.sandboxAccounts(ctx)
@@ -2995,10 +3088,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
-	for _, unit := range ordered {
-		if !repairsRegistrations(unit) {
-			stopUnit(unit)
-		}
+	stillRunning = append(stillRunning, stopGroup(false)...)
+	if len(stillRunning) > 0 {
+		errs = append(errs, fmt.Errorf("could not stop %s; stop them with %s and rerun `%s`",
+			strings.Join(stillRunning, ", "), env.stopCommands(stillRunning), l.uninstallCommand()))
 	}
 	// The sensor helper is stopped. The Tetragon policies it loaded outlive
 	// it and would keep enforcing with frozen anchors: remove them with the
@@ -3634,6 +3727,20 @@ func purgedUserChange(user string, detail *purgedUserDetail) string {
 }
 
 // uninstallCommand is this run's uninstall command line, for a rerun.
+// stopCommands is what an administrator runs to stop the named units by
+// hand: one systemctl stop for all of them, or on macOS one launchctl
+// bootout per launchd job.
+func (e *Env) stopCommands(units []string) string {
+	if e.GOOS != "darwin" {
+		return "`systemctl stop " + strings.Join(units, " ") + "`"
+	}
+	commands := make([]string, 0, len(units))
+	for _, unit := range units {
+		commands = append(commands, "`launchctl bootout system/"+unit+"`")
+	}
+	return strings.Join(commands, ", ")
+}
+
 func (l *lifecycle) uninstallCommand() string {
 	command := l.env.lifecycleCommand(ActionUninstall)
 	if l.opts.Purge {

@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -157,6 +158,27 @@ func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions
 		strings.TrimSpace(opts.gatewayServiceName) == "" && strings.TrimSpace(opts.guardianServiceName) == ""
 }
 
+// windowsEnterpriseInstallOptionsChanged is the hot-path refusal of a run
+// that also changes the install options. A bundle has no transaction
+// fallback, and a retry of the same delivery is refused the same way, so it
+// has its own code that exits 1603, not 1618.
+const windowsEnterpriseInstallOptionsChanged = "the run also changes the install options (manifest, mode, connector, roots or service names)"
+
+// windowsEnterpriseHotConfigUnavailable names the candidate condition a
+// bundle delivery failed: the hot path needs an elevated, healthy, idle
+// deployment.
+func windowsEnterpriseHotConfigUnavailable(status *windowsEnterpriseInstallerReport) string {
+	switch {
+	case !windowsEnterpriseIsElevated():
+		return "the lifecycle is not elevated"
+	case status == nil:
+		return "the installed deployment status could not be read"
+	case !windowsEnterpriseVerifyAcceptable(status):
+		return "the installed deployment did not verify healthy and idle: " + windowsEnterpriseVerifyFailureDetail(status, "")
+	}
+	return windowsEnterpriseInstallOptionsChanged
+}
+
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
 // gateway and fills result from a verify of the host. For a signed bundle,
 // start-only keys restart only the gateway. It returns false after attempting
@@ -170,32 +192,54 @@ func windowsEnterpriseHotConfigApply(
 	status *windowsEnterpriseInstallerReport,
 	result *enterprisestatus.Result,
 ) (bool, []string) {
-	if !windowsEnterpriseHotConfigCandidate(opts, status) {
+	// A signed bundle has no transaction fallback: the caller fails it with
+	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
+	// first apply names its cause and a held lock is retried (GAP-0104).
+	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	failBundle := func(code, message string) {
+		if bundleChange {
+			result.AddError(code, message)
+		}
+	}
+	unavailable := func(reason string) (bool, []string) {
+		failBundle("bundle_hot_apply_unavailable", "the policy bundle could not be applied to the running deployment: "+windowsEnterpriseBoundedDiagnostic(reason))
 		return false, nil
+	}
+	if !windowsEnterpriseHotConfigCandidate(opts, status) {
+		reason := windowsEnterpriseHotConfigUnavailable(status)
+		if reason == windowsEnterpriseInstallOptionsChanged {
+			failBundle("bundle_install_options_changed", "the policy bundle could not be applied to the running deployment: "+reason+"; deliver the bundle without the install option change")
+			return false, nil
+		}
+		return unavailable(reason)
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
-		return false, nil
+		return unavailable("cannot resolve the standalone layout: " + err.Error())
 	}
 	// An untrusted source goes to the transaction, which refuses it and
 	// says why.
-	if windowsEnterpriseHotConfigSourceCheck(opts.configPath) != nil {
-		return false, nil
+	if err := windowsEnterpriseHotConfigSourceCheck(opts.configPath); err != nil {
+		return unavailable("the staged config failed its source check: " + err.Error())
 	}
 	next, err := readWindowsEnterpriseBoundedFile(opts.configPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return false, nil
+		return unavailable("cannot read the staged config: " + err.Error())
 	}
 	if config.NeedsMigrationV9(next) {
-		return false, nil
+		return unavailable("the staged config needs a config_version migration")
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
-		return false, nil
+		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		return false, nil
+		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			failBundle("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock; the policy bundle was not applied and the run can be retried")
+			return false, nil
+		}
+		return unavailable("cannot open lifecycle.lock: " + err.Error())
 	}
 	defer release()
 
@@ -204,13 +248,16 @@ func windowsEnterpriseHotConfigApply(
 	// restore the configuration this attempt actually replaced (GAP-0492,
 	// GAP-0493).
 	previous, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
-	if err != nil || config.NeedsMigrationV9(previous) {
-		return false, nil
+	if err != nil {
+		return unavailable("cannot read the installed config: " + err.Error())
+	}
+	if config.NeedsMigrationV9(previous) {
+		return unavailable("the installed config needs a config_version migration")
 	}
 	previousFleet, previousFleetErr := config.FleetEnabledFromSource(layout.ConfigPath, previous)
 	nextFleet, nextFleetErr := config.FleetEnabledFromSource(opts.configPath, next)
-	if previousFleetErr != nil || nextFleetErr != nil {
-		return false, nil
+	if err := errors.Join(previousFleetErr, nextFleetErr); err != nil {
+		return unavailable("cannot read the Fleet setting of the staged or installed config: " + err.Error())
 	}
 	if previousFleet != nextFleet {
 		// Fleet enablement changes the installed compiler as well as the
@@ -224,8 +271,11 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	changed, err := configwrite.ChangedPaths(previous, next)
-	if err != nil || bytes.Equal(previous, next) {
-		return false, nil
+	if err != nil {
+		return unavailable("cannot compare the staged and installed configs: " + err.Error())
+	}
+	if bytes.Equal(previous, next) {
+		return unavailable("the staged config is byte-identical to the installed config")
 	}
 	// A file that changes no setting (line endings, comments, formatting)
 	// is installed the same way: the gateway reloads it to the same policy
@@ -234,7 +284,7 @@ func windowsEnterpriseHotConfigApply(
 	// refreshed below (GAP-0716).
 	restart, err := configwrite.ManagedConfigRestartRequired(previous, next)
 	if err != nil {
-		return false, nil
+		return unavailable("cannot classify the config change: " + err.Error())
 	}
 	refreshTargets := false
 	var startOnly []string
@@ -244,12 +294,6 @@ func windowsEnterpriseHotConfigApply(
 			continue
 		}
 		refreshTargets = true
-	}
-	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
-	failBundle := func(code, message string) {
-		if bundleChange {
-			result.AddError(code, message)
-		}
 	}
 	if len(startOnly) > 0 && !bundleChange {
 		return false, startOnly
@@ -265,6 +309,7 @@ func windowsEnterpriseHotConfigApply(
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	connectorChangeStartedAt := time.Now().UTC()
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, windowsHotConfigWriteOptions(opts, configwrite.SHA256Hex(previous))); err != nil {
+		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
 	}
 	// Undoing puts the config back. A config the record named is recorded
@@ -306,6 +351,11 @@ func windowsEnterpriseHotConfigApply(
 		}
 		if restartErr != nil || !restarted {
 			undo()
+			message := "the gateway did not restart on the bundle config"
+			if restartErr != nil {
+				message += ": " + windowsEnterpriseBoundedDiagnostic(restartErr.Error())
+			}
+			failBundle("bundle_gateway_restart_failed", message)
 			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered {
 				opts.bundle.gatewayRestarted = true
 			}
