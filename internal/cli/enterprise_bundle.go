@@ -246,6 +246,9 @@ type bundleSignResult struct {
 	Errors           []bundleError                     `json:"errors"`
 }
 
+// bundleVerifyResult is the bundle verify --json document. SecretRefsMissing
+// is set when the presence of every secret_refs credential was checked;
+// RestartPrediction for a verified bundle on this device.
 type bundleVerifyResult struct {
 	SchemaVersion         int                        `json:"schema_version"`
 	Command               string                     `json:"command"`
@@ -262,6 +265,8 @@ type bundleVerifyResult struct {
 	EffectivePolicyDigest string                     `json:"effective_policy_digest,omitempty"`
 	ExpectedDigest        string                     `json:"expected_digest,omitempty"`
 	DigestVerified        bool                       `json:"digest_verified"`
+	SecretRefsMissing     *[]string                  `json:"secret_refs_missing,omitempty"`
+	RestartPrediction     *bundleRestartPrediction   `json:"restart_prediction,omitempty"`
 	Warnings              []enterprisebundle.Warning `json:"warnings"`
 	Errors                []bundleError              `json:"errors"`
 }
@@ -573,12 +578,20 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	res.FloorSource = out.FloorSource
 	res.EffectivePolicyDigest, res.ExpectedDigest, res.DigestVerified = out.EffectivePolicyDigest, out.ExpectedDigest, out.DigestVerified
 	res.Warnings = append(res.Warnings, out.Warnings...)
+	if out.SecretRefsMissing != nil {
+		missing := out.SecretRefsMissing
+		res.SecretRefsMissing = &missing
+	}
 	if err != nil {
 		return err
 	}
 	res.Result = "verified"
 	if out.AlreadyApplied {
 		res.Result = "already_applied"
+	}
+	// An apply on this device runs for its own platform only.
+	if device && opts.platform == runtime.GOOS {
+		res.RestartPrediction = bundleVerifyRestartPrediction(opts.platform, out)
 	}
 	return nil
 }
@@ -627,6 +640,9 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 	for _, warning := range res.Warnings {
 		fmt.Fprintf(w, "warning: %s: %s\n", warning.Code, warning.Message)
 	}
+	if res.SecretRefsMissing != nil && len(*res.SecretRefsMissing) > 0 {
+		fmt.Fprintf(w, "Credentials missing: %s (store them with enterprise secret set before the apply).\n", strings.Join(*res.SecretRefsMissing, ", "))
+	}
 	if !res.OK {
 		return
 	}
@@ -637,6 +653,16 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 		fmt.Fprintf(w, "Bundle %s version %d verified for %s (key %s, floor %d).\n", res.Bundle.BundleID, res.Bundle.Version, res.Platform, res.SignerKeyID, res.Floor)
 	}
 	fmt.Fprintf(w, "Effective policy digest: %s\n", res.EffectivePolicyDigest)
+	if p := res.RestartPrediction; p != nil {
+		line := "Gateway restart on apply: " + p.GatewayRestart
+		if len(p.ReasonCodes) > 0 {
+			line += " (" + strings.Join(p.ReasonCodes, ", ") + ")"
+		}
+		if len(p.Settings) > 0 {
+			line += "; settings: " + strings.Join(p.Settings, ", ")
+		}
+		fmt.Fprintln(w, line)
+	}
 }
 
 func bundleDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
@@ -755,25 +781,6 @@ func readBundlePublicKey(path string) (crypto.PublicKey, error) {
 		return nil, bundleUsage("--public-key: %v", err)
 	}
 	return public, nil
-}
-
-// managedBundleSecretPresent looks a credential up in the standalone
-// enterprise secret store. The value is dropped at once and never printed.
-// An unreadable store (a standard account) is reported as an error, so
-// verify warns instead of refusing.
-func managedBundleSecretPresent(name string) (bool, error) {
-	layout, err := enterprisebundle.Layout(runtime.GOOS)
-	if err != nil {
-		return false, err
-	}
-	value, _, err := managed.ResolveServiceCredential(name, layout.SecretsDir)
-	for i := range value {
-		value[i] = 0
-	}
-	if errors.Is(err, fs.ErrPermission) {
-		return false, err
-	}
-	return err == nil, nil
 }
 
 func bundleContext(cmd *cobra.Command) context.Context {

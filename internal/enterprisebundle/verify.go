@@ -151,6 +151,17 @@ type VerifyResult struct {
 	DigestUnverifiable       bool
 	DigestLayoutUnverifiable bool
 	Warnings                 []Warning
+	// SecretRefsMissing names, in manifest order, every secret_refs entry
+	// (required or optional) the device does not hold. It is nil unless the
+	// presence of every reference was checked: off a device, with a store
+	// that could not be read, or on a refusal before that step.
+	SecretRefsMissing []string
+	// Rendered is the config.yaml Verify validated, rendered for the device
+	// layout against the private stage directory. The apply renders the
+	// same file against its version directory, so the two differ only in
+	// the bundle-relative values, which differ from the installed config in
+	// either rendering; nil before the config loads.
+	Rendered []byte
 }
 
 // Verify runs every bundle check in the order of spec section 4: anchor,
@@ -225,15 +236,27 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		return res, err
 	}
 	if in.SecretPresent != nil {
-		unchecked := false
+		// Every reference is looked up, so a refusal names the first
+		// required credential missing and the result lists all of them: the
+		// caller stores them in one pass.
+		unchecked, missing, required := false, []string{}, ""
 		for _, ref := range m.SecretRefs {
 			present, err := in.SecretPresent(ref.Name())
 			switch {
 			case err != nil:
 				unchecked = true
-			case !present && ref.Required:
-				return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(ref.Name()))
+			case !present:
+				missing = append(missing, ref.Name())
+				if ref.Required && required == "" {
+					required = ref.Name()
+				}
 			}
+		}
+		if !unchecked {
+			res.SecretRefsMissing = missing
+		}
+		if required != "" {
+			return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(required))
 		}
 		if unchecked {
 			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
@@ -254,6 +277,7 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if err != nil {
 		return res, err
 	}
+	res.Rendered = rendered
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {
 		return res, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))

@@ -295,15 +295,7 @@ func windowsEnterpriseHotConfigApply(
 	if err != nil {
 		return unavailable("cannot classify the config change: " + err.Error())
 	}
-	refreshTargets := false
-	var startOnly []string
-	for _, path := range restart {
-		if !windowsEnterpriseHotTargetsPath(path) {
-			startOnly = append(startOnly, path)
-			continue
-		}
-		refreshTargets = true
-	}
+	startOnly, refreshTargets := windowsBundleStartOnlyPaths(restart)
 	if len(startOnly) > 0 && !bundleChange {
 		return false, startOnly
 	}
@@ -456,26 +448,6 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
 	}
 	return true, nil
-}
-
-// windowsEnterpriseHotTargetsPath reports a restart-required change
-// (configwrite.ManagedRestartRequired) that the Windows hot path applies
-// all the same: an enrollment list (enterprise.enrollment include_users,
-// exclude_users, include_groups, exclude_groups, exempt_users) or the
-// connector set (guardrail.connectors.<name>[.enabled]). The gateway reads
-// neither at start here, the enumerator reads config.yaml on every cycle,
-// and the guardian reloads a changed config before it reconciles. Every
-// other enterprise key still goes through the upgrade transaction.
-func windowsEnterpriseHotTargetsPath(path string) bool {
-	switch path {
-	case "enterprise.enrollment.include_users", "enterprise.enrollment.exclude_users",
-		"enterprise.enrollment.include_groups", "enterprise.enrollment.exclude_groups",
-		"enterprise.enrollment.exempt_users":
-		return true
-	}
-	parts := strings.Split(path, ".")
-	return len(parts) >= 3 && len(parts) <= 4 && parts[0] == "guardrail" && parts[1] == "connectors" &&
-		(len(parts) == 3 || parts[3] == "enabled")
 }
 
 // windowsEnterpriseHotConfigRefreshTargets runs one enumerator cycle with

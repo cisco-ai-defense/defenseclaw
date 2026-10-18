@@ -379,7 +379,8 @@ Exit 0.
   includes the confirmed bundle and the credential check can read the store
   (otherwise it warns `floor_unchecked` and `secret_presence_unchecked`).
 - Preconditions: none; it is the dry run of apply.
-- Lock: none. Changes nothing (it stages into a private temporary folder).
+- Lock: none. Changes nothing (it stages into a private temporary folder
+  and reads the credential store listing and the installed config.yaml).
 - Idempotency: pure; repeat freely.
 - stdout: `bundle-verify.schema.json`. `result` is `verified`,
   `already_applied` (the bytes are the confirmed bundle: apply would be a
@@ -389,6 +390,45 @@ Exit 0.
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
   `version_not_newer`, `product_too_old`, `secret_ref_missing`,
   `digest_mismatch`, `config_invalid`); 2 / 1639 `invalid_arguments`.
+- Missing credentials, `secret_refs_missing` (absent on builds before
+  1.0.3): as root or SYSTEM on a device, the names of every `secret_refs`
+  credential the device does not hold, required and optional, in manifest
+  order; `[]` when all are stored. A `secret_ref_missing` refusal lists all
+  of them, not only the first. Absent off a device, when the store could
+  not be read (`secret_presence_unchecked`) and on a refusal before the
+  credential check. Names only, never a value.
+- Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
+  on a device, for `verified` and `already_applied`, whether the apply
+  restarts the gateway, from the installed config.yaml and the bundle
+  config, with the classifier the apply uses on that OS:
+  - `required`: the apply restarts the gateway and managed hooks fail closed
+    while it restarts. `reason_codes` `restart_settings` (`settings` names the
+    restart-required settings as patterns such as `guardrail.hook_self_heal`
+    or `guardrail.connectors.*.enabled`, never a profile, group or connector
+    name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
+    off: every DefenseClaw service restarts, 4.3).
+  - `not_required`: no changed setting needs a restart, so the gateway keeps
+    running (`already_applied`: the apply changes nothing). The apply still
+    restarts a gateway that is down or does not report the new policy in
+    time.
+  - `unknown`: `installed_config_unreadable` (run as root or SYSTEM) or, on
+    Windows, `fleet_setup_required` (the bundle changes `fleet.enabled`; the
+    apply refuses it, deliver it with signed Setup).
+
+  The prediction holds for the installed config verify read. Another apply
+  or an MDM `ensure` before this apply can change it; the receipt's
+  `restart` is what happened.
+- Preflight before an apply:
+  1. Run verify. `already_applied`: done.
+  2. `refused` with `secret_ref_missing`: store every name in
+     `secret_refs_missing` (4.7), then run verify again. The refusal is
+     final until the credentials change (2.2). A `verified` result can list
+     optional names: the apply succeeds and what needs them stays off until
+     they are stored.
+  3. `verified` with `gateway_restart` `required` or `unknown`: apply only in
+     the device's maintenance window. `not_required`: apply at any time.
+     There is no `--defer-restart` in this version: the agent defers a
+     restart by not running the apply.
 
 ```sh
 "$GW" enterprise bundle verify --bundle /var/lib/<vendor>/inbox/v13.dcbundle --json
