@@ -152,7 +152,16 @@ transport, timeout, and malformed-response failures always return empty stdout
 and exit 0; an inherited closed/strict setting cannot manufacture a Copilot
 deny.
 `userPromptTransformed` is mutation-only, so DefenseClaw observes its
-`transformedPrompt` but returns no modification. `notification` is explicitly
+`transformedPrompt` but returns no modification. The one exception is the
+Windows Secure Client profile: Copilot drops the output of a config-file
+`userPromptSubmitted` hook, so a prompt the guardrail blocks in action mode
+would reach the model. There the gateway answers `userPromptTransformed` for
+a blocked prompt with `modifiedTransformedPrompt`, which tells the model to
+reply only with DefenseClaw's notice ("DefenseClaw blocked this prompt. Cisco
+AI Defense: <categories>."). The categories are fixed display labels; any
+other finding keeps a generic notice. The verdict is still recorded as a raw
+block with an effective allow (`would_block`), and Copilot's own timeline
+keeps the user's prompt. `notification` is explicitly
 asynchronous and fire-and-forget upstream; the other registered command hooks
 are synchronously awaited under the event-specific output and exit rules.
 
