@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Installer recovery and downgrade must preserve external connector evidence."""
+"""Installer version changes must preserve external connector recovery evidence."""
 
 from __future__ import annotations
 
@@ -195,7 +195,11 @@ try {{ Assert-NoActiveConnectorRecovery 'Downgrade' {_literal(root)}; throw 'gua
         assert (external / "unchanged").read_bytes() == b"external"
 
 
-def _handoff_stubs(version: str, exit_code: int) -> str:
+def _handoff_stubs(version: str, exit_code: int, marker: str | None = "1") -> str:
+    installer = '$DcVersion = "1.0.1"'
+    if marker is not None:
+        installer += f"\n$DcVersionChangeGuard = {marker}"
+    installer_literal = "'" + installer.replace("'", "''") + "'"
     return f"""
 {_function('Test-Version')}
 {_function('Invoke-ReleaseInstaller')}
@@ -210,7 +214,7 @@ function Die([string]$Message) {{ throw $Message }}
 function Get-InstalledVersion {{ return '{version}' }}
 function Save-Url([string]$Url, [string]$To) {{
     $script:events += 'fetch'
-    [IO.File]::WriteAllText($To, '$DcVersion = "1.0.1"')
+    [IO.File]::WriteAllText($To, {installer_literal})
     return $true
 }}
 function Get-ListedSha256 {{ return 'verified' }}
@@ -237,15 +241,16 @@ function Start-Process {{
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("exit_code", [0, 1, 3])
 @pytest.mark.parametrize("restart", [0, 3, 1, "throw"])
-def test_older_installer_handoff_combines_child_and_restart_results_after_verified_quiescence(
-    tmp_path, exit_code, restart
+@pytest.mark.parametrize("installed", ["1.0.0", "1.0.2"])
+def test_wrapped_installer_handoff_combines_child_and_restart_results_after_verified_quiescence(
+    tmp_path, exit_code, restart, installed
 ) -> None:
     expected = exit_code if exit_code else (1 if restart in (1, "throw") else restart)
     result = "throw 'injected restart failure'" if restart == "throw" else f"return {restart}"
     output = _run(
         tmp_path,
         f"""
-{_handoff_stubs('1.0.2', exit_code)}
+{_handoff_stubs(installed, exit_code, None if installed == '1.0.0' else '1')}
 function Start-Gateway {{
     $script:events += 'restart'
     $script:starts++
@@ -293,7 +298,7 @@ if ($script:children -ne 0 -or $script:starts -ne 1) {{ throw 'Refused handoff c
     assert receipt.read_bytes() == b"pending recovery"
     assert "could not restart" in output
     assert "Retry the installed version with 'defenseclaw-gateway start'" in output
-    assert "To undo a completed downgrade" not in output
+    assert "To undo a completed version change" not in output
 
 
 @WINDOWS_POWERSHELL
@@ -333,8 +338,11 @@ if ($script:starts -ne 0 -or $script:children -ne 1) {{ throw 'Stopped gateway w
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
-@pytest.mark.parametrize("phase", ["early", "stop", "watchdog"])
-def test_older_installer_never_launches_after_recovery_is_pending(tmp_path, phase: str) -> None:
+@pytest.mark.parametrize(
+    ("installed", "phase"),
+    [("1.0.0", "early"), ("1.0.2", "early"), ("1.0.2", "stop"), ("1.0.2", "watchdog")],
+)
+def test_version_change_handoff_never_launches_after_recovery_is_pending(tmp_path, phase: str, installed: str) -> None:
     receipt = tmp_path / ".defenseclaw-cas-v2-injected.intent"
     if phase == "early":
         receipt.write_bytes(b"pending recovery")
@@ -352,12 +360,12 @@ function Stop-Gateway {{
     _run(
         tmp_path,
         f"""
-{_handoff_stubs('1.0.2', 0)}
+{_handoff_stubs(installed, 0)}
 {injection}
 try {{ Invoke-ReleaseInstaller '1.0.1' @('-Yes'); throw 'handoff unexpectedly passed' }} catch {{
     if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
 }}
-if ($script:children -ne 0) {{ throw 'Older installer launched' }}
+if ($script:children -ne 0) {{ throw 'Release installer launched' }}
 if ($script:starts -ne {0 if phase == 'early' else 1}) {{ throw 'Wrong restart behavior' }}
 if ('{phase}' -eq 'early' -and $script:events.Count -ne 0) {{ throw 'Early refusal fetched or stopped anything' }}
 """,
@@ -368,19 +376,97 @@ if ('{phase}' -eq 'early' -and $script:events.Count -ne 0) {{ throw 'Early refus
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("installed", ["1.0.0", "1.0.1"])
-def test_forward_and_same_version_handoffs_do_not_block_active_recovery(tmp_path, installed: str) -> None:
+def test_clean_forward_handoff_and_same_version_repair_remain_allowed(tmp_path, installed: str) -> None:
     receipt = tmp_path / ".defenseclaw-cas-v2-active"
-    receipt.write_bytes(b"keep current protocol recovery")
+    if installed == "1.0.1":
+        receipt.write_bytes(b"keep current protocol recovery")
     _run(
         tmp_path,
         f"""
 {_handoff_stubs(installed, 3)}
 if ((Invoke-ReleaseInstaller '1.0.1' @('-Yes')) -ne 3) {{ throw 'Child exit code changed' }}
 if ($script:children -ne 1 -or $script:starts -ne 0) {{ throw 'Upgrade or repair routing changed' }}
-if (($script:events -join ',') -ne 'fetch,fetch,child') {{ throw 'Forward handoff was quiesced' }}
+if (-not $script:running) {{ throw 'Forward installer lost the running gateway state needed for startup rollback' }}
+if (($script:events -join ',') -ne 'fetch,fetch,child') {{ throw 'Forward or same-version handoff was quiesced' }}
 """,
     )
-    assert receipt.read_bytes() == b"keep current protocol recovery"
+    if installed == "1.0.1":
+        assert receipt.read_bytes() == b"keep current protocol recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("marker", [None, "2", '"1"', "1\n$DcVersionChangeGuard = 2", "1\n  $DcVersionChangeGuard = 2"])
+@pytest.mark.parametrize("phase", ["fetch", "watchdog"])
+def test_legacy_or_unknown_forward_installer_cannot_snapshot_late_recovery(tmp_path, marker, phase) -> None:
+    receipt = tmp_path / ".defenseclaw-cas-v2-during-fetch.intent"
+    injection = f"function Stop-Watchdog {{ [IO.File]::WriteAllText({_literal(receipt)}, 'pending recovery') }}"
+    if phase == "fetch":
+        injection = f"""
+$script:saveUrl = (Get-Item Function:Save-Url).ScriptBlock
+function Save-Url([string]$Url, [string]$To) {{
+    $saved = & $script:saveUrl $Url $To
+    [IO.File]::WriteAllText({_literal(receipt)}, 'pending recovery')
+    return $saved
+}}
+"""
+    _run(
+        tmp_path,
+        f"""
+{_handoff_stubs('1.0.0', 0, marker)}
+{injection}
+try {{ Invoke-ReleaseInstaller '1.0.1' @('-Yes'); throw 'legacy forward handoff unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+if ($script:children -ne 0 -or $script:starts -ne 1) {{ throw 'Legacy forward dispatch or restart was unsafe' }}
+""",
+    )
+    assert receipt.read_bytes() == b"pending recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("failure", ["none", "checksum", "signature", "stamp"])
+def test_forward_capability_is_read_only_after_checksum_signature_and_stamp_verification(tmp_path, failure) -> None:
+    _run(
+        tmp_path,
+        f"""
+{_handoff_stubs('1.0.0', 0)}
+$script:capabilityReads = 0
+function Get-ListedSha256 {{ $script:events += 'checksum'; return 'verified' }}
+function Get-Sha256 {{ return '{'wrong' if failure == 'checksum' else 'verified'}' }}
+function Get-Cosign {{ return 'fixture-cosign' }}
+function Test-ReleaseSignature {{ $script:events += 'signature'; return {1 if failure == 'signature' else 0} }}
+function Select-String([string]$LiteralPath, [string]$Pattern) {{
+    if ($Pattern -like '*DcVersionChangeGuard*') {{
+        $script:events += 'capability'
+        $script:capabilityReads++
+    }} else {{
+        $script:events += 'stamp'
+        if ('{failure}' -eq 'stamp') {{
+            return [pscustomobject]@{{ Matches = @([pscustomobject]@{{ Groups = @($null, [pscustomobject]@{{ Value = '9.9.9' }}) }}) }}
+        }}
+    }}
+    & (Get-Command Select-String -CommandType Cmdlet) -LiteralPath $LiteralPath -Pattern $Pattern
+}}
+try {{
+    $code = Invoke-ReleaseInstaller '1.0.1' @('-Yes')
+    if ('{failure}' -ne 'none') {{ throw 'Unverified forward child unexpectedly launched' }}
+    if ($code -ne 0) {{ throw 'Verified marked forward child failed' }}
+}} catch {{
+    if ('{failure}' -eq 'none' -or $_.Exception.Message -notmatch 'does not match|did not verify|mismatched release') {{ throw }}
+}}
+if ($script:capabilityReads -ne {1 if failure == 'none' else 0}) {{ throw 'Trusted capability before verification' }}
+if ($script:children -ne {1 if failure == 'none' else 0} -or $script:starts -ne 0) {{
+    throw 'Verification changed dispatch or gateway state'
+}}
+if ('{failure}' -eq 'none') {{
+    $trace = $script:events -join ','
+    if ($trace -notlike '*checksum*signature*stamp*capability*child') {{ throw ('Wrong verification order: ' + $trace) }}
+    if (-not $script:running) {{ throw 'Marked forward child lost its startup/rollback state' }}
+}}
+""",
+    )
 
 
 def _rollback_stubs(data: Path, current: str = "1.0.2") -> str:
@@ -468,13 +554,43 @@ if ($script:conversions -ne {1 if phase == 'conversion' else 0}) {{ throw 'Recov
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
-def test_roll_forward_keeps_current_protocol_recovery_allowed(tmp_path) -> None:
+@pytest.mark.parametrize("phase", ["early", "watchdog"])
+def test_roll_forward_refuses_current_recovery_without_stranding_it_in_previous(tmp_path, phase) -> None:
     previous = tmp_path / "previous"
     (previous / "data").mkdir(parents=True)
     (previous / "VERSION").write_text("1.0.2", encoding="ascii")
-    receipt = tmp_path / ".defenseclaw-cas-v2-active"
-    receipt.write_bytes(b"current protocol")
-    (previous / "data" / receipt.name).write_bytes(b"incoming protocol")
+    receipt = tmp_path / ".defenseclaw-cas-v2-current"
+    incoming = previous / "data" / ".defenseclaw-cas-v2-incoming"
+    incoming.write_bytes(b"newer reader recovery")
+    if phase == "early":
+        receipt.write_bytes(b"current recovery")
+    injection = "" if phase == "early" else (
+        f"function Stop-Watchdog {{ [IO.File]::WriteAllText({_literal(receipt)}, 'current recovery') }}"
+    )
+    _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path, '1.0.1')}
+{injection}
+try {{ Invoke-Rollback; throw 'roll forward unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+if ($script:swaps -ne 0 -or $script:conversions -ne 0) {{ throw 'Roll forward moved pending recovery' }}
+if ($script:starts -ne {0 if phase == 'early' else 1}) {{ throw 'Wrong current runtime restart behavior' }}
+""",
+    )
+    assert receipt.read_bytes() == b"current recovery"
+    assert incoming.read_bytes() == b"newer reader recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_roll_forward_allows_incoming_recovery_for_the_newer_reader(tmp_path) -> None:
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "VERSION").write_text("1.0.2", encoding="ascii")
+    receipt = previous / "data" / ".defenseclaw-cas-v2-active"
+    receipt.write_bytes(b"incoming protocol")
     _run(
         tmp_path,
         f"""
@@ -483,13 +599,13 @@ if ((Invoke-Rollback) -ne 0) {{ throw 'Roll forward failed' }}
 if ($script:swaps -ne 1 -or $script:conversions -ne 0) {{ throw 'Roll forward routing changed' }}
 """,
     )
-    assert receipt.read_bytes() == b"current protocol"
+    assert receipt.read_bytes() == b"incoming protocol"
 
 
-def test_direct_installer_guards_downgrade_before_staging_and_after_quiescence() -> None:
+def test_direct_installer_guards_version_changes_before_staging_and_after_quiescence() -> None:
     install = _function("Invoke-Install")
-    early = install.index('if ($downgrade) { Assert-NoActiveConnectorRecovery "Downgrade to $Ver" }')
-    late = install.index('            Assert-NoActiveConnectorRecovery "Downgrade to $Ver"')
+    early = install.index('if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $Ver" }')
+    late = install.index('            Assert-NoActiveConnectorRecovery "Version change to $Ver"')
     assert early < install.index('Assert-InstallRoom $InstallRoom') < install.index('New-InstallDirectory $Staging')
     assert install.index('Wait-VenvFree', early) < install.index('Stop-Watchdog', early) < late
     assert late < install.index('Save-Snapshot')
@@ -498,8 +614,8 @@ def test_direct_installer_guards_downgrade_before_staging_and_after_quiescence()
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
-@pytest.mark.parametrize("downgrade", [False, True])
-def test_direct_installer_late_guard_runs_after_watchdog_and_before_snapshot(tmp_path, downgrade: bool) -> None:
+@pytest.mark.parametrize("version_change", [False, True])
+def test_direct_installer_late_guard_runs_after_watchdog_and_before_snapshot(tmp_path, version_change: bool) -> None:
     install = _function("Invoke-Install")
     start = install.index('    Assert-InstallRoom $FinalEnvRoom')
     end = install.index('    $Snap =', start)
@@ -508,7 +624,7 @@ def test_direct_installer_late_guard_runs_after_watchdog_and_before_snapshot(tmp
     _run(
         tmp_path,
         f"""
-$downgrade = ${str(downgrade).lower()}
+$versionChange = ${str(version_change).lower()}
 $Setup = $null
 $Ver = '1.0.1'
 $script:starts = 0
@@ -527,12 +643,12 @@ function Save-Snapshot {{ $script:snapshots++ }}
 try {{
 {phase}
     Save-Snapshot
-    if ($downgrade) {{ throw 'downgrade unexpectedly passed' }}
+    if ($versionChange) {{ throw 'version change unexpectedly passed' }}
 }} catch {{
-    if (-not $downgrade -or $_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+    if (-not $versionChange -or $_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
 }}
-if ($script:starts -ne {1 if downgrade else 0}) {{ throw 'Wrong current gateway restart behavior' }}
-if ($script:snapshots -ne {0 if downgrade else 1}) {{ throw 'Wrong snapshot behavior' }}
+if ($script:starts -ne {1 if version_change else 0}) {{ throw 'Wrong current gateway restart behavior' }}
+if ($script:snapshots -ne {0 if version_change else 1}) {{ throw 'Wrong snapshot behavior' }}
 """,
     )
     assert receipt.read_bytes() == b"pending recovery"
@@ -559,7 +675,7 @@ def test_a_surviving_watchdog_refuses_older_readers_and_restarts_the_current_gat
         end = install.index("    $Snap =", start)
         call = install[start:end] + "\n$script:snapshots++"
         stubs = """
-$downgrade = $true
+$versionChange = $true
 $Setup = $null
 $Ver = '1.0.1'
 $BinDir = Join-Path $DataDir 'bin'
@@ -592,7 +708,7 @@ if ($script:starts -ne 1) {{ throw 'Current gateway was not restarted' }}
     )
 
 
-def _local_install_stubs(data: Path, assets: Path, target: str) -> str:
+def _local_install_stubs(data: Path, assets: Path, target: str, installed: str = "1.0.2") -> str:
     functions = (
         "Test-Version",
         "Test-SamePath",
@@ -639,7 +755,7 @@ $script:migrations = 0
 function Die([string]$Message) {{ throw $Message }}
 function Stop-Usage([string]$Message) {{ throw $Message }}
 function Get-OSArchitectureName {{ return 'X64' }}
-function Get-InstalledVersion {{ return '1.0.2' }}
+function Get-InstalledVersion {{ return '{installed}' }}
 function Find-SetupInstall {{ return $null }}
 function Write-Step([string]$Message) {{}}
 function Write-Ok([string]$Message) {{}}
@@ -671,16 +787,8 @@ function Invoke-Native([string]$Path, [string[]]$Arguments) {{
 """
 
 
-@WINDOWS_POWERSHELL
-@pytest.mark.allow_subprocess
-@pytest.mark.parametrize("case", ["verified", "missing", "mismatched", "tampered", "pending", "newer_target"])
-def test_current_stamped_controller_verifies_explicit_older_local_assets_before_downgrade(tmp_path, case) -> None:
-    data = tmp_path / "home"
-    (data / "bin").mkdir(parents=True)
-    (data / "bin" / "uv.exe").write_bytes(b"fixture UV; never executed")
-    assets = tmp_path / "assets"
+def _local_assets(assets: Path, target: str) -> Path:
     assets.mkdir()
-    target = "1.0.3" if case == "newer_target" else "1.0.1"
     archive = assets / f"defenseclaw-{target}-windows-amd64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("defenseclaw-gateway.exe", b"fixture gateway; never executed")
@@ -692,6 +800,19 @@ def test_current_stamped_controller_verifies_explicit_older_local_assets_before_
         "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in (archive, wheel, requirements)),
         encoding="ascii",
     )
+    return wheel
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("case", ["verified", "missing", "mismatched", "tampered", "pending", "newer_target"])
+def test_current_stamped_controller_verifies_explicit_older_local_assets_before_downgrade(tmp_path, case) -> None:
+    data = tmp_path / "home"
+    (data / "bin").mkdir(parents=True)
+    (data / "bin" / "uv.exe").write_bytes(b"fixture UV; never executed")
+    assets = tmp_path / "assets"
+    target = "1.0.3" if case == "newer_target" else "1.0.1"
+    wheel = _local_assets(assets, target)
     expected = "verified local target ready"
     if case == "missing":
         wheel.unlink()
@@ -725,6 +846,117 @@ if ($script:gatewayChecks -ne {1 if case == 'verified' else 0} -or
         assert not (data / ".staging").exists()
     if case == "pending":
         assert (data / ".defenseclaw-cas-v2-pending").read_bytes() == b"pending recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("phase", ["early", "watchdog"])
+def test_forward_upgrade_refuses_active_recovery_before_a_snapshot_can_copy_it(tmp_path, phase) -> None:
+    data = tmp_path / "home"
+    (data / "bin").mkdir(parents=True)
+    (data / "bin" / "uv.exe").write_bytes(b"fixture UV; never executed")
+    assets = tmp_path / "assets"
+    _local_assets(assets, "1.0.2")
+    receipt = data / ".defenseclaw-cas-v2-forward.intent"
+    if phase == "early":
+        receipt.write_bytes(b"pending recovery")
+    injection = "" if phase == "early" else (
+        f"function Stop-Watchdog {{ [IO.File]::WriteAllText({_literal(receipt)}, 'pending recovery') }}"
+    )
+    _run(
+        data,
+        f"""
+{_local_install_stubs(data, assets, '1.0.2', '1.0.1')}
+$script:snapshots = 0
+$script:starts = 0
+$script:running = $true
+function Assert-InstallRoom {{}}
+function Get-UtcClock {{ return 'test-clock' }}
+function Wait-VenvFree {{}}
+function Get-GatewayProcess {{ return $script:running }}
+function Get-ProcessesUnder {{ return @() }}
+function Stop-Gateway {{ $script:running = $false; return $true }}
+function Stop-Watchdog {{}}
+function Restart-Old {{ $script:starts++; $script:running = $true }}
+function Save-Snapshot {{ $script:snapshots++; throw 'regression: copied active recovery into previous' }}
+function Write-Err([string]$Message) {{ throw $Message }}
+{injection}
+try {{ Invoke-Install; throw 'forward upgrade unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+if ($script:snapshots -ne 0) {{ throw 'Upgrade copied a receipt that the new gateway could consume only in live data' }}
+if ($script:starts -ne {0 if phase == 'early' else 1}) {{ throw 'Wrong current runtime restart behavior' }}
+""",
+    )
+    assert receipt.read_bytes() == b"pending recovery"
+    assert not (data / "previous.new").exists()
+    assert not (data / "previous").exists()
+    assert (data / ".staging").exists() == (phase != "early")
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_snapshot_receipt_copy_would_block_rollback_after_live_recovery(tmp_path) -> None:
+    receipt = tmp_path / ".defenseclaw-cas-v2-forward.intent"
+    receipt.write_bytes(b"opaque recovery")
+    _run(
+        tmp_path,
+        f"""
+{_function('New-InstallDirectory')}
+{_function('Save-Snapshot')}
+$Previous = Join-Path $DataDir 'previous'
+$Snap = $Previous
+$PrevVersion = '1.0.1'
+$WasRunning = $true
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$NotData = @('previous')
+function Get-TreeSize {{ return 0 }}
+function Copy-BinDir {{}}
+function Save-ExternalConfig {{}}
+function Copy-Kept([string]$Source, [string]$To) {{ Copy-Item -LiteralPath $Source -Destination $To }}
+if (-not (Save-Snapshot)) {{ throw 'Fixture snapshot failed' }}
+# Model the newer gateway finishing live recovery after an unguarded copy.
+[IO.File]::Delete({_literal(receipt)})
+Assert-NoActiveConnectorRecovery 'Current live state'
+try {{
+    Assert-NoActiveConnectorRecovery 'Rollback' (Join-Path $Previous 'data')
+    throw 'Stale snapshot receipt was not recognized'
+}} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+""",
+    )
+    assert not receipt.exists()
+    assert (tmp_path / "previous" / "data" / receipt.name).read_bytes() == b"opaque recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("installed", ["1.0.1", "1.0.2"])
+def test_clean_forward_install_and_active_same_version_repair_pass_preflight(tmp_path, installed) -> None:
+    data = tmp_path / "home"
+    (data / "bin").mkdir(parents=True)
+    (data / "bin" / "uv.exe").write_bytes(b"fixture UV; never executed")
+    assets = tmp_path / "assets"
+    _local_assets(assets, "1.0.2")
+    receipt = data / ".defenseclaw-cas-v2-repair.intent"
+    if installed == "1.0.2":
+        receipt.write_bytes(b"same protocol recovery")
+    _run(
+        data,
+        f"""
+{_local_install_stubs(data, assets, '1.0.2', installed)}
+try {{ Invoke-Install; throw 'fixture ran past preflight' }} catch {{
+    if ($_.Exception.Message -ne 'verified local target ready') {{ throw }}
+}}
+if ($script:gatewayChecks -ne 1 -or $script:cliChecks -ne 1 -or $script:migrations -ne 1) {{
+    throw 'Permitted install did not finish verification'
+}}
+""",
+    )
+    if installed == "1.0.2":
+        assert receipt.read_bytes() == b"same protocol recovery"
 
 
 @WINDOWS_POWERSHELL

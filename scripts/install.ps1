@@ -71,6 +71,8 @@ try {
 } catch { }
 
 $DcVersion = "__DEFENSECLAW_VERSION__"
+# This installer checks active recovery before snapshots in both version directions.
+$DcVersionChangeGuard = 1
 $DefaultRepo = "cisco-ai-defense/defenseclaw"
 $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo }
 # DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
@@ -525,8 +527,9 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # `defenseclaw upgrade`, so the installer it runs removes it.
     $installed = Get-InstalledVersion
     $target = $ReleaseVersion.TrimStart("v")
-    $downgrade = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -lt [version]$installed
-    if ($downgrade) { Assert-NoActiveConnectorRecovery "Downgrade to $target" }
+    $versionChange = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -ne [version]$installed
+    if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
+    $downgrade = $versionChange -and [version]$target -lt [version]$installed
     $restartCurrent = $false
     $childCode = $null
     $restartFailed = $false
@@ -563,15 +566,19 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         if ($stamped.TrimStart("v") -ne $ReleaseVersion.TrimStart("v")) {
             Die "The installer served for $ReleaseVersion is release $(if ($stamped) { $stamped } else { 'unknown' }); refusing a mismatched release"
         }
-        if ($downgrade) {
-            # Verify the child first, then stop this version while it can still
-            # recognize recovery receipts. The older child cannot enforce this.
+        # Trust this capability only in the verified, correctly stamped script.
+        # Unknown or duplicate declarations take the conservative legacy path.
+        $guard = @(Select-String -LiteralPath "$tmp\install.ps1" -Pattern '^\s*\$DcVersionChangeGuard\b')
+        $childGuardsVersionChanges = $guard.Count -eq 1 -and $guard[0].Line -ceq '$DcVersionChangeGuard = 1'
+        if ($versionChange -and ($downgrade -or -not $childGuardsVersionChanges)) {
+            # A verified newer child with the guard owns stopping and startup
+            # rollback. Older/unrecognized installers need this outer check.
             Wait-VenvFree
             $restartCurrent = [bool](Get-GatewayProcess)
-            if (-not (Stop-Gateway)) { Die "The gateway did not stop; the older installer was not started" }
+            if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
-            Assert-GatewayQuiescent "Downgrade to $target"
-            Assert-NoActiveConnectorRecovery "Downgrade to $target"
+            Assert-GatewayQuiescent "Version change to $target"
+            Assert-NoActiveConnectorRecovery "Version change to $target"
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
@@ -597,13 +604,13 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
                 Write-Warn "The installed gateway could not restart ($restartIssue)"
                 Write-Info "Retry the installed version with 'defenseclaw-gateway start' and check its log."
                 if ($null -ne $childCode) {
-                    Write-Info "To undo a completed downgrade, run 'defenseclaw rollback', then 'defenseclaw-gateway start'."
+                    Write-Info "To undo a completed version change, run 'defenseclaw rollback', then 'defenseclaw-gateway start'."
                 }
             }
         }
         Invoke-Quietly { Remove-Tree $tmp }
     }
-    # The older child saw a stopped gateway, so it may have committed without
+    # A wrapped child saw a stopped gateway, so it may have committed without
     # checking startup. Keep its failure/attention code, but never report its
     # success when the gateway that was running could not be brought back.
     if ($restartFailed -and $childCode -eq 0) { return 1 }
@@ -2107,8 +2114,8 @@ function Invoke-Rollback {
         Write-Step "Rolling back to DefenseClaw $backTo"
         $question = "Replace DefenseClaw $currentLabel with the previous install ($backTo)?"
     }
+    Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
-        Assert-NoActiveConnectorRecovery "Rollback to $backTo"
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
     }
     if (-not (Confirm-Step $question)) {
@@ -2124,9 +2131,9 @@ function Invoke-Rollback {
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
     try {
         Stop-Watchdog
+        Assert-GatewayQuiescent "Rollback to $backTo"
+        Assert-NoActiveConnectorRecovery "Rollback to $backTo"
         if (-not $rollForward) {
-            Assert-GatewayQuiescent "Rollback to $backTo"
-            Assert-NoActiveConnectorRecovery "Rollback to $backTo"
             Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         }
         if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
@@ -2379,8 +2386,8 @@ function Invoke-Install {
     } elseif (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw.cmd")) {
         Write-Warn "Found a broken DefenseClaw install ($BinDir\defenseclaw.cmd without its venv); repairing it"
     }
-    $downgrade = (Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion
-    if ($downgrade) { Assert-NoActiveConnectorRecovery "Downgrade to $Ver" }
+    $versionChange = (Test-Version $PrevVersion) -and [version]$Ver -ne [version]$PrevVersion
+    if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $Ver" }
 
     # Before anything is created (the uv folder, uv itself), so a refusal
     # really changes nothing (GAP-2614).
@@ -2505,10 +2512,10 @@ function Invoke-Install {
         }
     }
     Stop-Watchdog
-    if ($downgrade) {
+    if ($versionChange) {
         try {
-            Assert-GatewayQuiescent "Downgrade to $Ver"
-            Assert-NoActiveConnectorRecovery "Downgrade to $Ver"
+            Assert-GatewayQuiescent "Version change to $Ver"
+            Assert-NoActiveConnectorRecovery "Version change to $Ver"
         } catch {
             Restart-Old
             throw
