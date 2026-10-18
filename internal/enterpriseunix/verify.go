@@ -162,6 +162,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
+	l.describeStatusV2(record)
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
@@ -1170,7 +1171,6 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
 
-const codeProfileAssignments = "profile_assignment_unmatched"
 const codeOptionalDestination = "optional_destination_failing"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
@@ -1182,6 +1182,7 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 // that fail: the accounts without cached facts then run under the default
 // guardrail profile, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
+	l.noteIdentityHealth(body)
 	var health struct {
 		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
 		// The number of the warnings /health lists only to root on the
@@ -1225,13 +1226,13 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
 	}
 	for _, warning := range health.ProfileAssignmentWarnings {
-		l.result.AddWarning(codeProfileAssignments, warning)
+		l.result.AddWarning(codeProfileAssignment, warning)
 	}
 	if withheld := max(health.ProfileAssignmentWarningCount, health.ProfileWarningCount); withheld > 0 &&
 		len(health.ProfileAssignmentWarnings)+len(health.ProfileWarnings) == 0 {
 		// Fail closed: a /health read other than root on the hook socket
 		// (the TCP fallback) carries only their number.
-		l.result.AddWarning(codeProfileAssignments, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
+		l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
 			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
 			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
 	}

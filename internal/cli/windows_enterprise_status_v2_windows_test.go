@@ -1,0 +1,143 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/contracttest"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+func fakeWindowsStatusV2(t *testing.T, in windowsEnterpriseStatusV2Inputs) {
+	t.Helper()
+	previous := windowsEnterpriseStatusV2Read
+	windowsEnterpriseStatusV2Read = func() windowsEnterpriseStatusV2Inputs { return in }
+	t.Cleanup(func() { windowsEnterpriseStatusV2Read = previous })
+}
+
+func windowsStatusV2Config() *config.Config {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Mode: "action"}, "amp": {HookFailMode: "open"}, "hermes": {}, "copilot": {},
+	}
+	return cfg
+}
+
+// A standalone Windows status reports the three blocks from the files Go
+// reads; the fail mode is what the Windows hook renderer writes, and no block
+// names an account or SID.
+func TestWindowsStatusV2Blocks(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		cfg: cfg,
+		manifest: []enterprisestatus.ConnectorInstall{
+			{Connector: "codex", Version: "0.160.0", Enabled: true}, {Connector: "amp", Version: "0.0.1760", Enabled: true},
+		},
+		unprotected:   []enterprisehooks.UnprotectedAgent{{User: `DCLAB\dcad-alice`, SID: "S-1-5-21-1-2-3-1103", Connector: "hermes", Version: "0.9.0"}},
+		guardianKnown: true,
+		guardian: []enterprisestatus.ConnectorTarget{
+			{Connector: "codex", OK: true}, {Connector: "amp", Pending: true}, {Connector: "copilot", OK: true},
+		},
+		machinePolicy: func(name string) bool { return name == "copilot" },
+		gatewayHealth: func() ([]byte, error) {
+			return []byte(`{"identity":{"sources":[{"source":"windows_lsa","directory":"active_directory","last_ok_age_seconds":9}],"failing":0,"stale":0}}`), nil
+		},
+	})
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.3")
+	result.Installed, result.InstalledVersion = true, "1.0.3"
+	result.Readiness.Gateway = true
+	result.MachinePolicy["codex"] = windowsEnterpriseMachinePolicy(true)
+	applyWindowsEnterpriseStatusV2(result)
+	result.Finish("windows", 0)
+
+	document, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
+	for _, leak := range []string{"dcad-alice", "S-1-5-21", "DCLAB"} {
+		if strings.Contains(string(document), leak) {
+			t.Fatalf("status names %q:\n%s", leak, document)
+		}
+	}
+	for name, state := range result.Connectors {
+		if want := enterprisehooks.ManagedHookFailMode(cfg, name); state.EffectiveHookFailMode != want {
+			t.Fatalf("%s: effective_hook_fail_mode %q, the Windows renderer writes %q", name, state.EffectiveHookFailMode, want)
+		}
+	}
+	if codex := result.Connectors["codex"]; codex.ManagedHook == nil || !*codex.ManagedHook || codex.HooksInstalled != "all" || codex.EffectiveMode != "action" {
+		t.Fatalf("codex = %+v", codex)
+	}
+	if copilot := result.Connectors["copilot"]; copilot.ManagedHook == nil || !*copilot.ManagedHook {
+		t.Fatalf("copilot (runtime-only) = %+v", copilot)
+	}
+	if amp := result.Connectors["amp"]; amp.ManagedHook == nil || *amp.ManagedHook || amp.Targets == nil || amp.Targets.Pending != 1 {
+		t.Fatalf("amp = %+v", amp)
+	}
+	if hermes := result.Connectors["hermes"]; hermes.Detected == nil || !*hermes.Detected || strings.Join(hermes.Versions, ",") != "0.9.0" {
+		t.Fatalf("hermes = %+v", hermes)
+	}
+	if result.OpenShell == nil || result.OpenShell.ReasonCode != enterprisestatus.CodePlatformUnsupported || result.OpenShell.DriverAvailable != "none" {
+		t.Fatalf("openshell = %+v", result.OpenShell)
+	}
+	if result.Identity == nil || result.Identity.State != enterprisestatus.IdentityStateOK || result.Identity.Sources[0].Source != "windows_lsa" {
+		t.Fatalf("identity = %+v", result.Identity)
+	}
+}
+
+func TestWindowsStatusV2GatewayAndConfigFailures(t *testing.T) {
+	health := 0
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		configErr:     errors.New("parse config.yaml: bad"),
+		manifestErr:   os.ErrNotExist,
+		gatewayHealth: func() ([]byte, error) { health++; return nil, errors.New("connection refused") },
+	})
+	notReady := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.3")
+	applyWindowsEnterpriseStatusV2(notReady)
+	if health != 0 || notReady.Identity.ReasonCode != enterprisestatus.CodeGatewayNotReady {
+		t.Fatalf("not ready: %d health reads, identity %+v", health, notReady.Identity)
+	}
+	if messagesWithCode(notReady.Warnings, enterprisestatus.CodeStatusDetailUnavailable) != 1 {
+		t.Fatalf("warnings = %+v", notReady.Warnings)
+	}
+	ready := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.3")
+	ready.Readiness.Gateway = true
+	applyWindowsEnterpriseStatusV2(ready)
+	if health != 1 || ready.Identity.ReasonCode != enterprisestatus.CodeGatewayDidNotReport {
+		t.Fatalf("ready: %d health reads, identity %+v", health, ready.Identity)
+	}
+	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.3")
+	applyWindowsEnterpriseStatusV2(ensure)
+	if ensure.Connectors != nil || ensure.OpenShell != nil || ensure.Identity != nil {
+		t.Fatal("ensure carries status v2 blocks")
+	}
+}
+
+func messagesWithCode(messages []enterprisestatus.Message, code string) int {
+	n := 0
+	for _, message := range messages {
+		if message.Code == code {
+			n++
+		}
+	}
+	return n
+}

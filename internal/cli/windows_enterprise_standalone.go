@@ -1112,6 +1112,7 @@ func applyWindowsEnterpriseInstallerReport(
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
+		applyWindowsEnterpriseStatusV2(result)
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	applyWindowsEnterpriseAPIPortHolders(result, opts, report)

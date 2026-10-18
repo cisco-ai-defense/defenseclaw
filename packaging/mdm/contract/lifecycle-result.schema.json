@@ -109,6 +109,14 @@
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "connectors": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/connectorState" },
+      "description": "status and verify, standalone profile, management_contract 1 builds from 1.0.3 (absent before): one entry per connector id the installed config enables, or that still has guardian targets or unprotected installs. Connector ids, codes, counts and versions only; never an account. Optional: absent under Secure Client and on older builds."
+    },
+    "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
+    "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -137,7 +145,8 @@
       "then": {
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
-          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false,
+          "connectors": false, "openshell": false, "identity": false
         }
       },
       "else": {
@@ -281,6 +290,92 @@
             }
           }
         }
+      }
+    },
+    "versionToken": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$" },
+    "connectorState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "hooks_installed"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "The installed config enables the connector's hooks." },
+        "detected": { "type": "boolean", "description": "The enumerator found the agent for at least one eligible account (a manifest target or an unprotected install). Absent when the connector is not enabled or the enumerator has not run." },
+        "versions": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "$ref": "#/$defs/versionToken" }, "description": "Distinct agent versions of the detected installs, sorted. A version that is not a plain version token is not shown (warning status_detail_unavailable counts it)." },
+        "hooks_installed": { "enum": ["all", "partial", "none", "unknown"], "description": "From the guardian's last reconcile: all, every target protected; partial, some; none, no target protected (also no target); unknown, no readable guardian state, or one the root-only attestation does not vouch for." },
+        "targets": { "$ref": "#/$defs/connectorTargets" },
+        "effective_mode": { "enum": ["observe", "action"], "description": "The connector's default guardrail mode; a guardrail profile can change it per request. Absent when the installed config cannot be loaded." },
+        "effective_hook_fail_mode": { "enum": ["open", "closed"], "description": "The fail mode the managed hooks are rendered with: the value the hook renderer resolves, not the configured one. Absent when the installed config cannot be loaded." },
+        "managed_hook": { "type": "boolean", "description": "true: the DefenseClaw hook is in administrator-owned vendor machine policy; false: a per-user registration the guardian keeps in each home. Absent when the connector is not enabled." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+          "then": { "properties": { "targets": false } },
+          "else": { "required": ["targets"] }
+        }
+      ]
+    },
+    "connectorTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "protected", "pending", "failed"],
+      "description": "The connector's guardian targets; total is protected + pending + failed.",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "protected": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0, "description": "Waiting for the account's session (Windows)." },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "openshellCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "driver_available"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.openshell.enabled as last applied." },
+        "install": { "enum": ["prerequisite", "setup"] },
+        "installed": { "type": "boolean", "description": "Prerequisite mode: the administrator's OpenShell CLI, gateway (and MicroVM driver when the driver wants VMs) are present and pass the root-owned trust check. Absent in setup mode and when disabled." },
+        "version": { "$ref": "#/$defs/versionToken", "description": "The one release every part reports (prerequisite) or the pinned release (setup); absent when unknown or the parts disagree." },
+        "driver": { "enum": ["vm", "docker", "auto"], "description": "The configured driver." },
+        "driver_available": { "enum": ["vm", "docker", "none"], "description": "The driver users get now: docker is the docker driver or the docker fallback of the MicroVM driver." },
+        "reason_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Why driver_available is not the configured driver, or is none: openshell_prerequisite_missing, openshell_launcher_conflict, openshell_driver_fallback, openshell_disabled, platform_unsupported (Windows). Absent when everything is ready." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "required": ["reason_code"], "properties": { "install": false, "installed": false, "version": false, "driver": false, "driver_available": { "const": "none" } } },
+          "else": { "required": ["install", "driver"] }
+        }
+      ]
+    },
+    "identityHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["ok", "failing", "idle", "unknown"], "description": "failing: failing_accounts > 0; idle: no lookup succeeded since the gateway started; unknown: reason_code says why." },
+        "sources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/identitySource" }, "description": "The identity sources that answered a lookup since the gateway started, sorted by source." },
+        "failing_accounts": { "type": "integer", "minimum": 0 },
+        "stale_accounts": { "type": "integer", "minimum": 0 },
+        "serving_offline_cache": { "type": "boolean", "description": "stale_accounts > 0: directory facts are served past their 15-minute lifetime because their refresh fails; they are dropped at 60 minutes." },
+        "reason_code": { "enum": ["gateway_not_ready", "gateway_did_not_report"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "unknown" } } },
+          "then": { "required": ["reason_code"], "properties": { "sources": false, "failing_accounts": false, "stale_accounts": false, "serving_offline_cache": false } },
+          "else": { "required": ["failing_accounts", "stale_accounts", "serving_offline_cache"], "properties": { "reason_code": false } }
+        }
+      ]
+    },
+    "identitySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "last_ok_age_seconds"],
+      "properties": {
+        "source": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "The defenseclaw.user.identity.source token: nss_files, sssd, sssd_infopipe, winbind, nss_ldap, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso, hook_reported, or a newer token." },
+        "directory": { "enum": ["local", "ldap", "active_directory", "entra_id", "okta", "other"], "description": "The directory that owns the accounts the source answered for; absent when the OS did not say." },
+        "last_ok_age_seconds": { "type": "integer", "minimum": 0, "description": "Seconds since the source last answered, on the gateway clock." }
       }
     },
     "message": {

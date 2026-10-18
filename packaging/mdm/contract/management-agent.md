@@ -597,7 +597,8 @@ Exit 0.
   `policy.effective_digest` / `policy.gateway_reported_digest` /
   `policy.applied`, `bundle` (the last receipt that reached staging and the
   confirmed bundle), `last_refusal`, `inspection`, `readiness`, `services`,
-  `coverage_complete` and `security_complete`. A pending transaction is
+  `coverage_complete` and `security_complete`, and from 1.0.3 the optional
+  `connectors`, `openshell` and `identity` blocks (4.4.1). A pending transaction is
   `transaction_pending: true` with `errors[].code` `verify_failed`.
   A bundle receipt no run finished (state `received`, `verified`, `staged`
   or `applied`) while no run holds the lock is also `transaction_pending:
@@ -617,6 +618,65 @@ Exit 0.
 ```powershell
 & $GW enterprise windows status --profile standalone --json
 ```
+
+#### 4.4.1 Connector, OpenShell and identity blocks
+
+From 1.0.3, `status` and `verify` of the standalone profile carry three
+optional members. Builds before 1.0.3 leave them out, and adding them did
+not bump `management_contract`: the agent treats a present block as "this
+build reports it" and ignores members it does not know (section 0). Under
+Secure Client and in a `not_root` result they are absent. They never add an
+error, never change `ok`, `coverage_complete`, `security_complete` or the
+exit code; a block whose input could not be read leaves out the members that
+input feeds and adds the warning `status_detail_unavailable`.
+
+- `connectors`: one entry per connector id (`codex`, `claudecode`, ...) the
+  installed config enables, or that still has guardian targets or
+  unprotected installs. `enabled`; `detected` (the enumerator found the
+  agent for at least one eligible account; absent when not enabled or the
+  enumerator has not run); `versions` (distinct agent versions, at most 8;
+  a string that is not a plain version is not shown);
+  `hooks_installed` (`all`, `partial`, `none`, or `unknown` when the
+  guardian state is missing or not vouched for by the root-only
+  attestation); `targets` (`total`, `protected`, `pending`, `failed`,
+  absent with `unknown`); `effective_mode` (`observe` or `action`, the
+  connector default; a guardrail profile can change it per request);
+  `effective_hook_fail_mode` (`open` or `closed`: the value the hook
+  renderer writes into the managed hooks, not the configured one); and
+  `managed_hook` (`true` when the hook is in administrator-owned vendor
+  machine policy, `false` for a per-user registration the guardian keeps).
+- `openshell`: `enabled`, `install` (`prerequisite` or `setup`),
+  `installed` (prerequisite mode: the administrator's OpenShell parts are
+  present and root-owned), `version`, `driver` (configured: `vm`, `docker`,
+  `auto`), `driver_available` (what users get now: `vm`, `docker`, which
+  includes the docker fallback of the MicroVM driver, or `none`) and
+  `reason_code` when that is not the configured driver or is `none`
+  (`openshell_prerequisite_missing`, `openshell_launcher_conflict`,
+  `openshell_driver_fallback`, `openshell_disabled`). Windows always
+  reports `{"enabled": false, "driver_available": "none", "reason_code":
+  "platform_unsupported"}`. Status spawns no extra probe for it: the block is
+  derived from the sandbox rows status already checks.
+- `identity`: the gateway's directory lookups. `state` is `ok`, `failing`
+  (`failing_accounts` > 0), `idle` (no lookup succeeded since the gateway
+  started) or `unknown` with `reason_code` `gateway_not_ready` or
+  `gateway_did_not_report` (an older gateway during an upgrade). `sources`
+  lists each identity source that answered since the gateway started, with
+  its `directory` and `last_ok_age_seconds`: the source tokens are those of
+  the telemetry attribute `defenseclaw.user.identity.source` (`sssd`,
+  `sssd_infopipe`, `winbind`, `nss_files`, `windows_lsa`,
+  `macos_opendirectory`, ...), the directory one of `local`, `ldap`,
+  `active_directory`, `entra_id`, `okta`, `other`. `stale_accounts` and
+  `serving_offline_cache` say that DefenseClaw serves directory facts past
+  their 15-minute lifetime because their refresh fails (it drops them at 60
+  minutes).
+
+Privacy: the blocks carry connector ids, codes, counts, versions and ages
+only, never an account name, UPN, SID, uid, pid, path, group or free text.
+The agent may forward them as they are. It must not forward the members
+that do name accounts (`enrollment.accounts`,
+`bundle.sessions_restart_required.entries`, warning and error messages)
+off the device. The agent does not read `/health` itself (section 7); the
+`identity` block is the supported way to see it.
 
 ### 4.5 Bundle state: `enterprise bundle status`
 
@@ -1107,6 +1167,12 @@ Per-user installs and Secure Client computers refuse every command.
   (section 0).
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
+- The `identity` block cannot see an SSSD or Open Directory that answers
+  from its own offline cache: the lookup succeeds, so `state` stays `ok`.
+  It reports lookups since the gateway last started, so `idle` right after
+  a restart is normal. `effective_mode` is the connector default; a
+  guardrail profile can select another mode per request, which status does
+  not report per user (4.4.1).
 - DefenseClaw does not stop or restart agent sessions. A session already
   running when a bundle enables or changes its connector is not enforced
   until it restarts, although the apply is `confirmed`;

@@ -167,7 +167,7 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 	}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		result := h.run(Options{Action: action})
-		if !hasWarning(result, codeProfileAssignments) || !hasWarning(result, codeOptionalDestination) {
+		if !hasWarning(result, codeProfileAssignment) || !hasWarning(result, codeOptionalDestination) {
 			t.Fatalf("%s warnings = %+v", action, result.Warnings)
 		}
 	}
@@ -176,7 +176,7 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warning_count":2,"profile_warning_count":2}`), nil
 	}
-	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignments); !strings.Contains(got,
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignment); !strings.Contains(got,
 		"2 guardrail profile assignment warning(s) are not listed") || !strings.Contains(got, "profile-explain --user") {
 		t.Fatalf("withheld assignment warnings = %q", got)
 	}
@@ -348,7 +348,7 @@ func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
 	}
 	r := h.run(Options{Action: ActionEnsure, ConfigFile: bad})
 	requireError(t, r, codeConfig)
-	got := messagesOf(r.Warnings, codeProfileAssignments)
+	got := messagesOf(r.Warnings, codeProfileAssignment)
 	if !strings.HasPrefix(got, runningDeploymentPrefix) || !strings.Contains(got, `group "dc-sbx-*"`) {
 		t.Fatalf("the active config's advisory is not labelled as the running deployment's: %q", got)
 	}
@@ -360,7 +360,7 @@ func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
 	}
 	// A successful status of the same host keeps the plain wording.
 	status := h.run(Options{Action: ActionStatus})
-	if got := messagesOf(status.Warnings, codeProfileAssignments); strings.Contains(got, runningDeploymentPrefix) || status.ConfigRefused {
+	if got := messagesOf(status.Warnings, codeProfileAssignment); strings.Contains(got, runningDeploymentPrefix) || status.ConfigRefused {
 		t.Fatalf("status is labelled as a refused run: %q", got)
 	}
 }

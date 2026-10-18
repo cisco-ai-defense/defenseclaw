@@ -192,6 +192,41 @@ def _set(**members):
     return lambda document: document.update(members)
 
 
+# The status v2 blocks of a Linux status (connectors, openshell, identity),
+# from 1.0.3: codes, connector ids, counts, versions and ages only.
+_STATUS_V2_BLOCKS = {
+    "connectors": {
+        "codex": {"enabled": True, "detected": True, "versions": ["0.160.0"], "hooks_installed": "all",
+                  "targets": {"total": 2, "protected": 2, "pending": 0, "failed": 0},
+                  "effective_mode": "action", "effective_hook_fail_mode": "closed", "managed_hook": True},
+        "amp": {"enabled": True, "detected": False, "hooks_installed": "none",
+                "targets": {"total": 0, "protected": 0, "pending": 0, "failed": 0},
+                "effective_mode": "observe", "effective_hook_fail_mode": "closed", "managed_hook": False},
+    },
+    "openshell": {"enabled": True, "install": "prerequisite", "installed": True, "version": "0.0.36", "driver": "vm",
+                  "driver_available": "docker", "reason_code": "openshell_driver_fallback"},
+    "identity": {"state": "ok", "sources": [{"source": "sssd", "directory": "active_directory", "last_ok_age_seconds": 42}],
+                 "failing_accounts": 0, "stale_accounts": 0, "serving_offline_cache": False},
+}
+
+
+def _linux_status(change):
+    def build(_: dict[str, dict]) -> object:
+        document = copy.deepcopy(_WINDOWS_BUSY_RESULT)
+        document.update(copy.deepcopy(_STATUS_V2_BLOCKS), action="status", ok=True, platform="linux", errors=[],
+                        exit_code=0, coverage_complete=True, security_complete=True)
+        change(document)
+        return document
+    return build
+
+
+def _not_root_with_connectors(document: dict) -> None:
+    for name in ("installed", "installed_version", "transaction_pending", "services", "readiness", "inspection",
+                 "machine_policy", "enrollment", "openshell", "identity"):
+        document.pop(name, None)
+    document.update(ok=False, exit_code=1, errors=[{"code": "not_root", "message": "run this command as root"}])
+
+
 def _elevation_required(platform: str):
     return _set(platform=platform, exit_code=5,
                 errors=[{"code": "elevation_required", "message": "run this command elevated"}])
@@ -277,6 +312,29 @@ MANAGEMENT_CONTRACT_RULES = (
      _windows_result(_elevation_required("windows")), True),
     ("Linux lifecycle result with exit 5", "lifecycle-result.schema.json",
      _windows_result(_elevation_required("linux")), False),
+    ("Linux status with the connectors, openshell and identity blocks", "lifecycle-result.schema.json",
+     _linux_status(lambda d: None), True),
+    ("status connector entry that names an account", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["connectors"]["codex"].update(user="alice")), False),
+    ("status connector fail mode that is not open or closed", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["connectors"]["codex"].update(effective_hook_fail_mode="fail_open")), False),
+    ("status connector version that is not a version token", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["connectors"]["codex"].update(versions=["1.0 beta"])), False),
+    ("status connector with unknown hooks and target counts", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["connectors"]["codex"].update(hooks_installed="unknown")), False),
+    ("status openshell driver_available outside vm, docker, none", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["openshell"].update(driver_available="kvm")), False),
+    ("status identity source that lists accounts", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d["identity"]["sources"][0].update(accounts=["1001"])), False),
+    ("status identity unknown without reason_code", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d.update(identity={"state": "unknown"})), False),
+    ("status identity gateway_not_ready", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d.update(identity={"state": "unknown", "reason_code": "gateway_not_ready"})), True),
+    ("not_root result with a connectors block", "lifecycle-result.schema.json",
+     _linux_status(_not_root_with_connectors), False),
+    ("Windows status openshell platform_unsupported", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d.update(platform="windows", openshell={
+         "enabled": False, "driver_available": "none", "reason_code": "platform_unsupported"})), True),
 )
 
 

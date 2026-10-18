@@ -199,8 +199,14 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
-	LogPath      string        `json:"log_path,omitempty"`
-	ExitCode     int           `json:"exit_code"`
+	// Connectors, OpenShell and Identity are the status v2 blocks of status
+	// and verify on the standalone profile (connector_block.go,
+	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
+	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
+	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
+	Identity   *IdentityHealth           `json:"identity,omitempty"`
+	LogPath    string                    `json:"log_path,omitempty"`
+	ExitCode   int                       `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).
@@ -439,7 +445,7 @@ const notRootCode = "not_root"
 // as "not installed" (GAP-0279).
 var deploymentStateFields = []string{
 	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
-	"destinations",
+	"destinations", "connectors", "openshell", "identity",
 }
 
 func (r Result) refusedNotRoot() bool {

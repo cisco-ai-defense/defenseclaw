@@ -1574,6 +1574,8 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			if directory := directoryHealthSummary(directoryCacheHealth(), rootPeer); directory != nil {
 				body["directory"] = directory
 			}
+			// Tokens, counts and ages only, so every caller gets it.
+			body["identity"] = identityHealthSummary(directoryCacheHealth(), directorySourceAnswers(), time.Now())
 			// An assignment group the host does not know (renamed, deleted,
 			// or spelled another way after an SSSD naming switch) selects
 			// nobody, and the whole team falls to the default profile:
