@@ -574,13 +574,7 @@ Two kinds of change take this path on Windows too:
   (`guardrail.connectors.<name>` and its `enabled`). `ensure` also refreshes
   the enrolled targets, and the hook guardian reloads the config and
   registers or removes the hooks without a restart, as it does for a new
-  user. A change that turns Codex on or off is the exception: only the
-  lifecycle transaction installs and removes Codex's machine policy
-  (`C:\ProgramData\OpenAI\Codex\requirements.toml` and DefenseClaw's
-  ownership record for it), so that `ensure` runs the full transaction, for
-  a signed policy bundle too: an upgrade from Setup, a repair with the new
-  config from the installed CLI (`enterprise bundle apply`). Its
-  `ensure_upgrade` or `ensure_repair` warning says so.
+  user.
 
 If the gateway does not report the policy in time, or the lifecycle lock is
 busy, `ensure` puts the previous config back and runs the full upgrade, as it
