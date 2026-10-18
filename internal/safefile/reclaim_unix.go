@@ -43,8 +43,13 @@ func ReclaimToDirectoryOwner(path string) error {
 	if err != nil {
 		return fmt.Errorf("safefile: stat opened private directory %s: %w", dir, err)
 	}
-	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o077 != 0 {
+	if !dirInfo.IsDir() {
 		return fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		if err := relaxModeVerdict(dir, fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)); err != nil {
+			return err
+		}
 	}
 	dirStat, ok := dirInfo.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -79,7 +84,9 @@ func ReclaimToDirectoryOwner(path string) error {
 		return fmt.Errorf("safefile: private file is not regular: %s", path)
 	}
 	if fileInfo.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("safefile: private file permissions are too broad: %s", path)
+		if err := relaxModeVerdict(path, fmt.Errorf("safefile: private file permissions are too broad: %s", path)); err != nil {
+			return err
+		}
 	}
 	fileStat, ok := fileInfo.Sys().(*syscall.Stat_t)
 	if !ok {

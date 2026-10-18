@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // TrustStrictAncestorsEnv restores the pre-AIFW-34262 behaviour: ancestor
@@ -276,6 +278,24 @@ func relaxAncestorTrustJudgement(advisory bool, path, label string, err error) e
 		return err
 	}
 	return relaxAncestorTrustVerdict(advisory, path, label, err)
+}
+
+func init() {
+	safefile.ManagedModeAdvisory = managedModeAdvisory
+}
+
+// managedModeAdvisory downgrades a safefile group/other mode verdict on a path
+// inside PlatformInstallerOwnedRoots to an advisory. The managed install below
+// those roots is root-owned and laid out by the platform installer (the macOS
+// runtime directory is root:wheel 0750, wheel holds only root); the managed
+// release line never enforced owner-only modes there, and enforcing them made
+// the gateway exit at every start. TrustStrictAncestorsEnv keeps them fatal.
+func managedModeAdvisory(path, reason string) bool {
+	if !PlatformInstallerOwnedPath(path) || trustStrictAncestors() {
+		return false
+	}
+	reportTrustAdvisory(path, "managed private path", reason)
+	return true
 }
 
 func trustStrictAncestors() bool {

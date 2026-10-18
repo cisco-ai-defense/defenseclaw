@@ -33,10 +33,10 @@ func validatePrivateProtection(path string, wantDirectory bool) error {
 		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
 	}
 	if wantDirectory && info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("safefile: private directory permissions are too broad: %s", path)
+		return relaxModeVerdict(path, fmt.Errorf("safefile: private directory permissions are too broad: %s", path))
 	}
 	if !wantDirectory && info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("safefile: private file permissions are too broad: %s", path)
+		return relaxModeVerdict(path, fmt.Errorf("safefile: private file permissions are too broad: %s", path))
 	}
 	return nil
 }
