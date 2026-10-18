@@ -236,17 +236,83 @@ function Start-Process {{
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("exit_code", [0, 1, 3])
-def test_older_installer_handoff_quiesces_only_after_verification_and_preserves_child_exit(tmp_path, exit_code) -> None:
-    _run(
+@pytest.mark.parametrize("restart", [0, 3, 1, "throw"])
+def test_older_installer_handoff_combines_child_and_restart_results_after_verified_quiescence(
+    tmp_path, exit_code, restart
+) -> None:
+    expected = exit_code if exit_code else (1 if restart in (1, "throw") else restart)
+    result = "throw 'injected restart failure'" if restart == "throw" else f"return {restart}"
+    output = _run(
         tmp_path,
         f"""
 {_handoff_stubs('1.0.2', exit_code)}
+function Start-Gateway {{
+    $script:events += 'restart'
+    $script:starts++
+    $script:running = ${str(restart in (0, 3)).lower()}
+    {result}
+}}
 $code = Invoke-ReleaseInstaller '1.0.1' @('-Yes')
-if ($code -ne {exit_code}) {{ throw 'Child exit code was lost' }}
+if ($code -ne {expected}) {{ throw ('Wrong handoff exit: ' + $code) }}
 if ($script:starts -ne 1 -or $script:children -ne 1) {{ throw 'Current runtime was not restarted once' }}
 if (($script:events -join ',') -ne 'fetch,fetch,wait,stop,watchdog,child,restart') {{
     throw ('Unsafe handoff order: ' + ($script:events -join ','))
 }}
+""",
+    )
+    if restart in (1, "throw"):
+        assert "The installed gateway could not restart" in output
+        assert "Retry the installed version with 'defenseclaw-gateway start'" in output
+        assert "'defenseclaw rollback', then 'defenseclaw-gateway start'" in output
+    else:
+        assert "could not restart" not in output
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("restart", [1, "throw"])
+def test_handoff_restart_failure_does_not_replace_the_original_recovery_guard_exception(tmp_path, restart) -> None:
+    receipt = tmp_path / ".defenseclaw-cas-v2-during-stop"
+    result = "throw 'injected restart failure'" if restart == "throw" else "return 1"
+    output = _run(
+        tmp_path,
+        f"""
+{_handoff_stubs('1.0.2', 0)}
+function Stop-Gateway {{
+    $script:running = $false
+    [IO.File]::WriteAllText({_literal(receipt)}, 'pending recovery')
+    return $true
+}}
+function Start-Gateway {{ $script:starts++; {result} }}
+try {{ Invoke-ReleaseInstaller '1.0.1' @('-Yes'); throw 'handoff unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+if ($script:children -ne 0 -or $script:starts -ne 1) {{ throw 'Refused handoff changed dispatch or restart' }}
+""",
+    )
+    assert receipt.read_bytes() == b"pending recovery"
+    assert "could not restart" in output
+    assert "Retry the installed version with 'defenseclaw-gateway start'" in output
+    assert "To undo a completed downgrade" not in output
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_handoff_restart_failure_is_local_to_one_invocation(tmp_path) -> None:
+    _run(
+        tmp_path,
+        f"""
+{_handoff_stubs('1.0.2', 0)}
+function Start-Gateway {{
+    $script:starts++
+    if ($script:starts -eq 1) {{ return 1 }}
+    $script:running = $true
+    return 0
+}}
+if ((Invoke-ReleaseInstaller '1.0.1' @('-Yes')) -ne 1) {{ throw 'Failed restart was reported as success' }}
+$script:running = $true
+if ((Invoke-ReleaseInstaller '1.0.1' @('-Yes')) -ne 0) {{ throw 'Prior restart failure leaked into later handoff' }}
+if ($script:children -ne 2 -or $script:starts -ne 2) {{ throw 'Repeated handoff did not run independently' }}
 """,
     )
 

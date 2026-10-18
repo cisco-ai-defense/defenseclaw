@@ -528,6 +528,9 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     $downgrade = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -lt [version]$installed
     if ($downgrade) { Assert-NoActiveConnectorRecovery "Downgrade to $target" }
     $restartCurrent = $false
+    $childCode = $null
+    $restartFailed = $false
+    $restartCode = 0
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-upgrade-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
@@ -579,15 +582,33 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             -ArgumentList @($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ })
         $null = $child.Handle
         $child.WaitForExit()
-        return $child.ExitCode
+        $childCode = $child.ExitCode
     } finally {
         if ($restartCurrent) {
+            $restartIssue = ""
             try {
-                if (-not (Get-GatewayProcess)) { [void](Start-Gateway) }
-            } catch { Write-Warn "The installed gateway could not restart: $($_.Exception.Message)" }
+                if (-not (Get-GatewayProcess)) {
+                    $restartCode = Start-Gateway
+                    if ($restartCode -notin @(0, 3)) { $restartIssue = "exit $restartCode" }
+                }
+            } catch { $restartIssue = $_.Exception.Message }
+            if ($restartIssue) {
+                $restartFailed = $true
+                Write-Warn "The installed gateway could not restart ($restartIssue)"
+                Write-Info "Retry the installed version with 'defenseclaw-gateway start' and check its log."
+                if ($null -ne $childCode) {
+                    Write-Info "To undo a completed downgrade, run 'defenseclaw rollback', then 'defenseclaw-gateway start'."
+                }
+            }
         }
         Invoke-Quietly { Remove-Tree $tmp }
     }
+    # The older child saw a stopped gateway, so it may have committed without
+    # checking startup. Keep its failure/attention code, but never report its
+    # success when the gateway that was running could not be brought back.
+    if ($restartFailed -and $childCode -eq 0) { return 1 }
+    if ($childCode -eq 0 -and $restartCode -eq 3) { return 3 }
+    return $childCode
 }
 
 function Initialize-Native {
