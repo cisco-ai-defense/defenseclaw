@@ -9,6 +9,7 @@ package enterprisebundle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // secretRefsFixture signs a bundle whose manifest lists a required
@@ -87,6 +89,39 @@ func TestVerifyListsEveryMissingSecretRef(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A stored credential the gateway's read refuses (managed
+// ErrUnusableServiceCredential: an extra reader ACE, empty, too large) is
+// missing, not unchecked: a required one refuses, an optional one is listed,
+// and it never hides the state of another reference (review of GAP-0009).
+func TestVerifyCountsUnusableCredentialAsMissing(t *testing.T) {
+	f, b, a := secretRefsFixture(t)
+	unusable := fmt.Errorf("principal S-1-5-32-545 may read the protected credential: %w", managed.ErrUnusableServiceCredential)
+	store := func(errs map[string]error) func(string) (bool, error) {
+		return func(name string) (bool, error) {
+			err, ok := errs[name]
+			if !ok {
+				err = managed.ErrNoServiceCredential
+			}
+			return managed.ServiceCredentialPresence(err)
+		}
+	}
+	in := f.input(t, b, a)
+	in.SecretPresent = store(map[string]error{"ai-defense-api-key": unusable, "zz-optional": nil, "splunk-token": nil})
+	res, err := enterprisebundle.Verify(context.Background(), in)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing || !strings.Contains(err.Error(), "credential ai-defense-api-key") {
+		t.Fatalf("unusable required credential: got %v, want secret_ref_missing", err)
+	}
+	if !slices.Equal(res.SecretRefsMissing, []string{"ai-defense-api-key"}) || hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("unusable required credential: missing %#v, warnings %+v", res.SecretRefsMissing, res.Warnings)
+	}
+
+	in.SecretPresent = store(map[string]error{"ai-defense-api-key": nil, "zz-optional": unusable, "splunk-token": nil})
+	res, err = enterprisebundle.Verify(context.Background(), in)
+	if err != nil || !slices.Equal(res.SecretRefsMissing, []string{"zz-optional"}) || hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("unusable optional credential: missing %#v, warnings %+v, err %v", res.SecretRefsMissing, res.Warnings, err)
 	}
 }
 

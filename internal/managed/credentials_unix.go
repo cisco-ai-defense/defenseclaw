@@ -45,12 +45,9 @@ func resolvePlatformServiceCredential(name, secretsDir string) ([]byte, Credenti
 		}
 		return nil, "", fmt.Errorf("inspect credential %s: %w", name, err)
 	}
-	if err := validateProtectedCredentialFile(path); err != nil {
-		return nil, "", err
-	}
-	data, err := readBoundedCredential(path)
+	data, err := readStoredCredential(name, path, validateProtectedCredentialFile)
 	if err != nil {
-		return nil, "", fmt.Errorf("credential %s: %w", name, err)
+		return nil, "", err
 	}
 	return data, CredentialFromFile, nil
 }

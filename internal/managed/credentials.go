@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"syscall"
 )
 
 // ServiceCredentialLimit bounds a protected credential read. API keys are a
@@ -27,6 +28,52 @@ const ServiceCredentialLimit = 16 << 10
 // provisioned. Callers treat it as "remote inspection disabled", never as
 // "use some other key".
 var ErrNoServiceCredential = errors.New("service credential is not provisioned")
+
+// ErrUnusableServiceCredential reports that the named credential is stored
+// but fails a check the gateway's own read applies: the path trust, the
+// reader ACL, the size limit, an empty or a multi-line value. The gateway
+// cannot use it, so bundle verify and apply count it as missing
+// (ServiceCredentialPresence), never as unchecked.
+var ErrUnusableServiceCredential = errors.New("service credential is stored but unusable")
+
+// unusableCredentialError keeps the text and the chain of the failed check
+// and adds ErrUnusableServiceCredential to it.
+type unusableCredentialError struct{ err error }
+
+func (e *unusableCredentialError) Error() string { return e.err.Error() }
+func (e *unusableCredentialError) Unwrap() []error {
+	return []error{ErrUnusableServiceCredential, e.err}
+}
+
+// credentialVerdict classifies a failed check of a credential file that
+// exists. A failed operating-system call (access denied, a file, owner or
+// security descriptor that could not be read) means the caller could not
+// decide, and the error is returned as is; any other failure is a verdict on
+// the stored file and wraps ErrUnusableServiceCredential.
+func credentialVerdict(err error) error {
+	var errno syscall.Errno
+	if err == nil || errors.Is(err, ErrUnusableServiceCredential) || errors.As(err, &errno) {
+		return err
+	}
+	return &unusableCredentialError{err: err}
+}
+
+// ServiceCredentialPresence maps the result of a credential read to the
+// presence bundle verify and apply report. Stored and usable is present.
+// Not stored, or stored but unusable (ErrUnusableServiceCredential), is
+// missing with no error, so a required reference refuses with
+// secret_ref_missing as the gateway would fail to read it. Any other error
+// means the caller could not read the store and is returned, so verify warns
+// secret_presence_unchecked.
+func ServiceCredentialPresence(err error) (bool, error) {
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrNoServiceCredential), errors.Is(err, ErrUnusableServiceCredential):
+		return false, nil
+	}
+	return false, err
+}
 
 var serviceCredentialNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
@@ -53,6 +100,23 @@ func ResolveServiceCredential(name, secretsDir string) ([]byte, CredentialSource
 		return nil, "", fmt.Errorf("credential name %q is not valid", name)
 	}
 	return resolvePlatformServiceCredential(name, secretsDir)
+}
+
+// readStoredCredential runs the gateway's checks on the credential file at
+// path, which exists, then reads it. A check that refuses the file, or a
+// value that is too large, empty or not a single line, wraps
+// ErrUnusableServiceCredential (credentialVerdict).
+func readStoredCredential(name, path string, checks ...func(path string) error) ([]byte, error) {
+	for _, check := range checks {
+		if err := check(path); err != nil {
+			return nil, credentialVerdict(err)
+		}
+	}
+	data, err := readBoundedCredential(path)
+	if err != nil {
+		return nil, credentialVerdict(fmt.Errorf("credential %s: %w", name, err))
+	}
+	return data, nil
 }
 
 // readBoundedCredential reads at most ServiceCredentialLimit bytes from an

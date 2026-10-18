@@ -9,7 +9,6 @@
 package cli
 
 import (
-	"errors"
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -26,9 +25,12 @@ var resolveBundleSecret = managed.ResolveServiceCredentialAs
 // agree. The caller is an administrator or plain SYSTEM shell without the
 // service's environment pins, so the gateway service account comes from the
 // layout the installer pins it from (GAP-0009). The value is dropped at once
-// and never printed. A credential that is not stored is missing; any other
-// failure (a standard account, a store or ACL the checks refuse) is an
-// error, so verify warns secret_presence_unchecked instead of refusing.
+// and never printed. A credential that is not stored, or that is stored but
+// fails a check the gateway's read applies (path trust, an extra reader ACE,
+// empty, too large), is missing, so a required reference refuses. Only a
+// store the caller cannot read (a standard account, a failed security
+// descriptor read) is an error, so verify warns secret_presence_unchecked
+// (managed.ServiceCredentialPresence).
 func managedBundleSecretPresent(name string) (bool, error) {
 	layout, err := enterprisebundle.Layout(runtime.GOOS)
 	if err != nil {
@@ -38,11 +40,5 @@ func managedBundleSecretPresent(name string) (bool, error) {
 	for i := range value {
 		value[i] = 0
 	}
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, managed.ErrNoServiceCredential):
-		return false, nil
-	}
-	return false, err
+	return managed.ServiceCredentialPresence(err)
 }

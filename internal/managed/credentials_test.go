@@ -12,10 +12,13 @@ package managed
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -77,6 +80,82 @@ func TestReadBoundedCredential(t *testing.T) {
 		if _, err := readBoundedCredential(write(name, data)); err == nil {
 			t.Errorf("%s credential must be rejected", name)
 		}
+	}
+}
+
+// A stored credential the gateway's read refuses (an extra reader ACE, an
+// untrusted owner, empty, too large, not one line) is missing for bundle
+// verify and apply, so a required reference refuses; only a failed
+// operating-system call (the caller cannot read the store) is unchecked.
+// The error text of the failed check is kept (review of GAP-0009).
+func TestStoredCredentialPresence(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	stored := write("stored", []byte("key-123\n"))
+	refuse := func(err error) func(string) error { return func(string) error { return err } }
+	pass := func(string) error { return nil }
+	extraReader := errors.New(`C:\ProgramData\Cisco\DefenseClaw\secrets\llm-key: principal S-1-5-32-545 may read the protected credential; only LocalSystem, Administrators and the gateway service may`)
+	type tc struct {
+		name      string
+		path      string
+		checks    []func(string) error
+		present   bool
+		unchecked bool
+	}
+	cases := []tc{
+		{"stored and usable", stored, []func(string) error{pass, pass}, true, false},
+		{"extra Users read ACE", stored, []func(string) error{pass, refuse(extraReader)}, false, false},
+		{"untrusted owner", stored, []func(string) error{refuse(errors.New("owner S-1-5-21-1-2-3-1001 is not trusted for protected credential")), pass}, false, false},
+		{"empty file", write("empty", nil), nil, false, false},
+		{"whitespace only", write("blank", []byte(" \n")), nil, false, false},
+		{"oversized file", write("big", []byte(strings.Repeat("k", ServiceCredentialLimit+1))), nil, false, false},
+		{"two lines", write("lines", []byte("a\nb")), nil, false, false},
+		{"security descriptor unreadable", stored, []func(string) error{pass, refuse(fmt.Errorf("%s: inspect Windows security descriptor: %w", stored, syscall.EACCES))}, false, true},
+		{"leaf access denied", stored, []func(string) error{refuse(fmt.Errorf("%s: %w", stored, &fs.PathError{Op: "lstat", Path: stored, Err: syscall.EACCES}))}, false, true},
+	}
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		locked := write("locked", []byte("key-123"))
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		cases = append(cases, tc{"open denied", locked, nil, false, true})
+	}
+	for _, c := range cases {
+		value, readErr := readStoredCredential("llm-key", c.path, c.checks...)
+		present, err := ServiceCredentialPresence(readErr)
+		if present != c.present || (err != nil) != c.unchecked {
+			t.Errorf("%s: present %v, err %v (read %v)", c.name, present, err, readErr)
+		}
+		if c.present && string(value) != "key-123" {
+			t.Errorf("%s: value %q", c.name, value)
+		}
+		if !c.present && !c.unchecked && !errors.Is(readErr, ErrUnusableServiceCredential) {
+			t.Errorf("%s: %v does not wrap ErrUnusableServiceCredential", c.name, readErr)
+		}
+		if c.unchecked && errors.Is(readErr, ErrUnusableServiceCredential) {
+			t.Errorf("%s: %v must not be unusable", c.name, readErr)
+		}
+	}
+	readErr := credentialVerdict(extraReader)
+	if readErr.Error() != extraReader.Error() || !errors.Is(readErr, extraReader) {
+		t.Fatalf("verdict %q lost the check's text or chain", readErr)
+	}
+	for name, err := range map[string]error{
+		"not stored":       ErrNoServiceCredential,
+		"wrapped unusable": fmt.Errorf("credential llm-key: %w", ErrUnusableServiceCredential),
+	} {
+		if present, err := ServiceCredentialPresence(err); present || err != nil {
+			t.Errorf("%s: present %v, err %v; want missing", name, present, err)
+		}
+	}
+	if present, err := ServiceCredentialPresence(fmt.Errorf("inspect credential llm-key: %w", &fs.PathError{Op: "lstat", Err: syscall.EACCES})); present || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("unreadable store: present %v, err %v; want unchecked", present, err)
 	}
 }
 
