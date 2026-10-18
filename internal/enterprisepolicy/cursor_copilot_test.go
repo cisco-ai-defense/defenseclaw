@@ -241,3 +241,37 @@ func TestVSCodePolicyFolderDefenseClawCreatedIsRemoved(t *testing.T) {
 		t.Fatalf("the existing parent must stay: %v", err)
 	}
 }
+
+// A CLI-only Copilot policy (the Windows Secure Client profile's) publishes
+// the policy.d drop-in the Copilot CLI and the GitHub Copilot app load, and
+// writes no VS Code device policy or Copilot managed setting.
+func TestCopilotCLIPolicyOnlyWritesNoEditorPolicy(t *testing.T) {
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	vscodePolicy := filepath.Join(opts.Root, "etc/vscode/policy.json")
+	writeFile(t, vscodePolicy, `{"UpdateMode": "manual"}`)
+	state, err := copilotTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNoConflicts(t, state)
+	if !state.Covered {
+		t.Fatalf("state: %+v", state)
+	}
+	dir, _ := CopilotPolicyDir(opts)
+	if drop := readFile(t, filepath.Join(dir, DefenseClawDropInName)); !strings.Contains(drop, `hook --connector copilot --enterprise-managed --event 'preToolUse'`) {
+		t.Fatalf("copilot drop-in: %s", drop)
+	}
+	if got := readFile(t, vscodePolicy); got != `{"UpdateMode": "manual"}` {
+		t.Fatalf("a CLI-only policy changed the VS Code policy: %s", got)
+	}
+	if settings, err := CopilotManagedSettingsPath(opts); err == nil {
+		if _, err := os.Stat(settings); !os.IsNotExist(err) {
+			t.Fatalf("a CLI-only policy wrote Copilot managed settings %s: %v", settings, err)
+		}
+	}
+	verified, err := copilotTarget{}.Verify(opts)
+	if err != nil || !verified.Covered {
+		t.Fatalf("verify: %+v %v", verified, err)
+	}
+}

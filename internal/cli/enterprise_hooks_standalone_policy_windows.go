@@ -153,6 +153,10 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		enterpriseHookSecureClientPlatformPrepare(stderr)
+		return
+	}
 	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		return
@@ -227,10 +231,11 @@ func windowsStandalonePerUserEnrollmentKeep(manifest enterprisehooks.Manifest) f
 }
 
 // pruneWindowsStandalonePerUserEnrollments revokes per-user connector
-// enrollment for SIDs the manifest no longer authorizes, so a removed user
-// or disabled connector fails closed before any target runtime is touched.
+// enrollment (Copilot's alone on Secure Client) for SIDs the manifest no
+// longer authorizes, so a removed user or disabled connector fails closed
+// before any target runtime is touched.
 func pruneWindowsStandalonePerUserEnrollments(manifest enterprisehooks.Manifest, hookBinary string) error {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
+	if cfg == nil || (!cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()) {
 		return nil
 	}
 	return enterprisehooks.PruneWindowsPerUserManagedEnrollments(

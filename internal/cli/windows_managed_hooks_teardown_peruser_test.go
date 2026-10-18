@@ -264,12 +264,16 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 	}
 	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 
-	// Only the standalone profile's teardown accepts the per-user connectors.
+	// The standalone profile's teardown accepts every per-user connector,
+	// Secure Client's only GitHub Copilot.
 	t.Run("teardown targets", func(t *testing.T) {
 		t.Setenv(managed.EnterpriseProfileEnv, "")
-		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err == nil ||
+		if _, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("devin")); err == nil ||
 			!strings.Contains(err.Error(), "does not support connector") {
-			t.Fatalf("Secure Client teardown accepted copilot: %v", err)
+			t.Fatalf("Secure Client teardown accepted devin: %v", err)
+		}
+		if targets, _, _, _, err := windowsManagedHooksTeardownTargets(perUserTeardownManifest("copilot")); err != nil || len(targets) != 1 {
+			t.Fatalf("Secure Client teardown refused copilot: targets=%v err=%v", targets, err)
 		}
 		t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 		for _, name := range []string{"copilot", "devin", "amp"} {

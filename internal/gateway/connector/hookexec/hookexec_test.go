@@ -2692,6 +2692,52 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	}
 }
 
+// A Secure Client GitHub Copilot hook follows its authenticated delivery mode
+// (#1163): open allows an unreachable gateway or an unreadable response and
+// logs fail_open; closed, strict availability and an enrollment refusal
+// still deny in Copilot's own shape.
+func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
+	sp := specs["copilot"]
+	run := func(mutate func(*Options), fail func(Options) int) (int, string, string) {
+		home := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		opts := Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true, SecureClient: true,
+			Home: home, Stdout: &stdout, Stderr: &stderr, Now: time.Now}
+		mutate(&opts)
+		code := fail(opts)
+		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+		return code, stdout.String(), string(failures)
+	}
+	open := func(*Options) {}
+	unreachable := func(opts Options) int { return failUnreachable(opts, sp, "open", managedGatewayNotRunningReason) }
+	if code, stdout, failures := run(open, unreachable); code != 0 || strings.Contains(stdout, "deny") ||
+		!strings.Contains(failures, `"outcome":"fail_open"`) || !strings.Contains(failures, managedGatewayNotRunningReason) {
+		t.Fatalf("open, gateway stopped: code=%d stdout=%q failures=%q", code, stdout, failures)
+	}
+	response := func(opts Options) int { return failResponse(opts, sp, "open", "invalid JSON response") }
+	if code, stdout, failures := run(open, response); code != 0 || strings.Contains(stdout, "deny") ||
+		!strings.Contains(failures, `"outcome":"fail_open"`) {
+		t.Fatalf("open, unreadable response: code=%d stdout=%q failures=%q", code, stdout, failures)
+	}
+	closed := func(opts Options) int { return failUnreachable(opts, sp, "closed", managedGatewayPortHeldReason) }
+	if code, stdout, failures := run(open, closed); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(failures, `"outcome":"fail_closed"`) {
+		t.Fatalf("closed, port held: code=%d stdout=%q failures=%q", code, stdout, failures)
+	}
+	strict := func(opts *Options) { opts.StrictAvailability = true }
+	if _, stdout, _ := run(strict, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("strict availability allowed a stopped gateway: %q", stdout)
+	}
+	unenrolled := func(opts Options) int { return failUnenrolled(opts, sp, managedUIDUnregisteredReason) }
+	if _, stdout, _ := run(open, unenrolled); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("an unenrolled account's call was allowed: %q", stdout)
+	}
+	standalone := func(opts *Options) { opts.SecureClient = false; opts.ExplainUnenrolledAccount = true }
+	if _, stdout, _ := run(standalone, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook allowed a stopped gateway: %q", stdout)
+	}
+}
+
 // A per-user hook names the next step after "gateway unreachable" instead of
 // repeating it; a managed hook and any other reason keep the reason (GAP-1204).
 func TestUnreachableDetailNamesTheNextStep(t *testing.T) {

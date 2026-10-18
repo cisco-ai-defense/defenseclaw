@@ -116,6 +116,27 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 	}
 }
 
+// The Secure Client Setup also manages GitHub Copilot (the CLI and the GitHub
+// Copilot app); the standalone shorthand keeps its three connectors.
+func TestParseEnterpriseSetupShorthandAcceptsCopilotOnSecureClient(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,claudecode,cursor,copilot",
+	})
+	if err != nil || help || opts.Connector != "codex,claudecode,cursor,copilot" {
+		t.Fatalf("Secure Client Copilot shorthand install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+	_, _, err = parseStandaloneEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,copilot",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supported: codex, claudecode, cursor.") {
+		t.Fatalf("standalone Copilot shorthand error = %v, want the three-connector refusal", err)
+	}
+}
+
 // TestParseEnterpriseSetupShorthandRejectsBadGrammar covers the
 // mutual-exclusion and pairing invariants the shorthand enforces.
 func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {

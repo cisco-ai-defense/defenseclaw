@@ -30,7 +30,8 @@ import (
 // connector: on the machine policy route its managed plugin runs the hook
 // binary for every event, so every OpenCode row publishes a generation.
 //
-// The Secure Client profile never manages these connectors.
+// The Secure Client profile manages only the connectors in
+// windowsSecureClientPerUserConnectors.
 var windowsStandalonePerUserConnectors = map[string]bool{
 	"copilot":     true,
 	"antigravity": true,

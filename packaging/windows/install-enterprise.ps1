@@ -1887,9 +1887,14 @@ function Get-DefenseClawBootstrapRecordedModulePin {
 # Windows managed_enterprise supports only connectors with a complete native
 # reconcile, trusted-runtime, rollback, and teardown lifecycle. Cursor uses its
 # documented machine enterprise hook source while retaining per-user scoped
-# DefenseClaw runtime and credentials.
-$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
+# DefenseClaw runtime and credentials. The Secure Client profile also manages
+# GitHub Copilot (the Copilot CLI and the GitHub Copilot app, which runs the
+# same CLI) through Copilot's policy.d machine policy.
+$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp', 'copilot')
 $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor')
+if ($EnterpriseProfile -cne 'Standalone') {
+    $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors += 'copilot'
+}
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -3074,6 +3079,7 @@ function Get-DefenseClawConnectorMetadataVersion {
         'codex' { '@openai\codex'; break }
         'claudecode' { '@anthropic-ai\claude-code'; break }
         'amp' { '@ampcode\cli'; break }
+        'copilot' { '@github\copilot'; break }
         default { return '' }
     }
     $expectedName = $package -replace '\\', '/'
@@ -3109,6 +3115,11 @@ function Get-DefenseClawConnectorMetadataVersion {
         -Path $machinePackage `
         -ExpectedNames @($expectedName)
     if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+
+    if ($Connector -eq 'copilot') {
+        return Get-DefenseClawCopilotAppCLIMetadataVersion `
+            -UserHome $userHomeFull
+    }
 
     if ($Connector -eq 'codex') {
         $codexCandidateObserved = $false
@@ -3167,6 +3178,44 @@ function Get-DefenseClawConnectorMetadataVersion {
         }
     }
     return ''
+}
+
+function Get-DefenseClawCopilotAppCLIMetadataVersion {
+    <#
+        The GitHub Copilot app (not Microsoft Copilot) runs the Copilot CLI it
+        keeps under %LOCALAPPDATA%\github-copilot-sdk\cli\<version>\copilot.exe.
+        Return the newest such release whose copilot.exe exists, read from
+        its folder name; nothing in the profile is executed.
+    #>
+    param([Parameter(Mandatory)][string]$UserHome)
+
+    $root = [IO.Path]::Combine($UserHome, 'AppData\Local\github-copilot-sdk\cli')
+    if (-not (Test-DefenseClawConnectorMetadataPath `
+            -Root $UserHome -Path $root -Directory)) {
+        return ''
+    }
+    $best = ''
+    $bestVersion = $null
+    $entries = @(
+        [IO.Directory]::EnumerateDirectories($root) |
+            Microsoft.PowerShell.Utility\Select-Object -First 64
+    )
+    foreach ($entry in $entries) {
+        $name = [IO.Path]::GetFileName($entry)
+        if ($name -cnotmatch '^([0-9]+\.[0-9]+\.[0-9]+)(?:-[0-9]+)?$') { continue }
+        $release = $Matches[1]
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $UserHome `
+                -Path ([IO.Path]::Combine($entry, 'copilot.exe')))) {
+            continue
+        }
+        $parsed = [version]$release
+        if ($null -eq $bestVersion -or $parsed -gt $bestVersion) {
+            $best = $release
+            $bestVersion = $parsed
+        }
+    }
+    return $best
 }
 
 function Resolve-DefenseClawConnectorMetadataVersion {
@@ -3246,6 +3295,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
         'cursor'     = '1.7.0'
+        'copilot'    = '1.0.18'
     }
     foreach ($u in $users) {
         $deferTarget = (

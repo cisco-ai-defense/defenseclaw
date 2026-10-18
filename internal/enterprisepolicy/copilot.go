@@ -280,13 +280,9 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		}
 		state.Changed = changed
 	}
-	if err := vscodeDevicePolicy(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
+	if err := copilotEditorPolicy(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
 		return state, err
 	}
-	if err := copilotManagedSettings(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
-		return state, err
-	}
-	copilotVSCodeStatus(opts, &state)
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
@@ -311,18 +307,32 @@ func (t copilotTarget) Verify(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
-	if err := vscodeDevicePolicy(opts, &state, false); err != nil {
+	if err := copilotEditorPolicy(opts, &state, false); err != nil {
 		return state, err
 	}
-	if err := copilotManagedSettings(opts, &state, false); err != nil {
-		return state, err
-	}
-	copilotVSCodeStatus(opts, &state)
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
 	state.finish()
 	return state, nil
+}
+
+// copilotEditorPolicy reconciles (write) or inspects the VS Code device
+// policies and Copilot managed settings that govern Copilot in VS Code, and
+// reports the VS Code status. A CLI-only policy (opts.CopilotCLIPolicyOnly)
+// has none.
+func copilotEditorPolicy(opts Options, state *State, write bool) error {
+	if opts.CopilotCLIPolicyOnly {
+		return nil
+	}
+	if err := vscodeDevicePolicy(opts, state, write); err != nil {
+		return err
+	}
+	if err := copilotManagedSettings(opts, state, write); err != nil {
+		return err
+	}
+	copilotVSCodeStatus(opts, state)
+	return nil
 }
 
 func (t copilotTarget) RemoveOwned(opts Options) (State, error) {

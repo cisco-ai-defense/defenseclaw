@@ -1802,6 +1802,29 @@ func TestSetTemporaryEnvironmentRestoresUnsetAndExistingValues(t *testing.T) {
 	}
 }
 
+// The QA shorthand adds GitHub Copilot on Secure Client only.
+func TestWindowsEnterpriseShorthandAcceptsCopilotOnlyForSecureClient(t *testing.T) {
+	secureClient := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex,copilot", resolvedProfile: managed.ProfileSecureClient,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", secureClient); err != nil {
+		t.Fatalf("Secure Client install with Copilot: %v", err)
+	}
+	standalone := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "codex,copilot", resolvedProfile: managed.ProfileStandalone,
+	}
+	err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", standalone)
+	if err == nil || !strings.Contains(err.Error(), "supported: codex, claudecode, cursor.") {
+		t.Fatalf("standalone install with Copilot error = %v, want the three-connector refusal", err)
+	}
+	devin := &windowsEnterpriseLifecycleOptions{
+		mode: "action", connector: "devin", resolvedProfile: managed.ProfileSecureClient,
+	}
+	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "install", devin); err == nil {
+		t.Fatal("Secure Client accepted devin in the QA shorthand")
+	}
+}
+
 func TestWindowsEnterpriseEnsureAcceptsShorthandOnlyForStandalone(t *testing.T) {
 	standalone := &windowsEnterpriseLifecycleOptions{
 		mode: "action", connector: "claudecode,codex", resolvedProfile: managed.ProfileStandalone,

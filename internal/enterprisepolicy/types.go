@@ -120,6 +120,11 @@ type Options struct {
 	// default (sdk, govern).
 	CopilotHarnessPreference string
 	CopilotLocalHarness      string
+	// CopilotCLIPolicyOnly limits the Copilot target to its policy.d drop-in,
+	// which the Copilot CLI and the GitHub Copilot app (it runs the same CLI)
+	// load: no VS Code device policy and no Copilot managed setting. The
+	// Windows Secure Client profile sets it (PublishWindowsSecureClientCopilot).
+	CopilotCLIPolicyOnly bool
 	// CopilotUserHomes are the enrolled accounts' homes (from the
 	// administrator's eligible-accounts record, never a user's
 	// environment). The VS Code managed-hooks lock is written only when

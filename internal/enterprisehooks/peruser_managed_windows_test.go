@@ -32,7 +32,15 @@ func TestRegisterWindowsStandalonePerUserConnectorsRequiresStandalonePin(t *test
 	registry := connector.NewRegistry()
 	RegisterWindowsStandalonePerUserConnectors(registry)
 	for _, name := range WindowsStandalonePerUserConnectorNames() {
-		if _, ok := registry.Get(name); ok {
+		conn, ok := registry.Get(name)
+		if name == "copilot" {
+			// Secure Client manages GitHub Copilot alone among them.
+			if !ok || !isWindowsStandalonePerUserBuiltin(name, conn) {
+				t.Fatal("Secure Client registry is missing the built-in copilot connector")
+			}
+			continue
+		}
+		if ok {
 			t.Fatalf("Secure Client registry gained per-user connector %s", name)
 		}
 	}
@@ -263,9 +271,15 @@ func TestWindowsPerUserManagedEnrollmentDecodeIsStrict(t *testing.T) {
 
 func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T) {
 	pinWindowsStandaloneProfileForTest(t, false)
-	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewCopilotConnector()); err == nil ||
+	if err := certifyWindowsEnterpriseConnector("devin", connector.NewDevinConnector()); err == nil ||
 		!strings.Contains(err.Error(), "standalone") {
-		t.Fatalf("Secure Client process certified copilot: %v", err)
+		t.Fatalf("Secure Client process certified devin: %v", err)
+	}
+	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewCopilotConnector()); err != nil {
+		t.Fatalf("Secure Client process refused the built-in copilot connector: %v", err)
+	}
+	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewDevinConnector()); err == nil {
+		t.Fatal("Secure Client certified an impostor implementation under the copilot name")
 	}
 	pinWindowsStandaloneProfileForTest(t, true)
 	for _, conn := range []connector.Connector{
@@ -308,7 +322,7 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 		},
 	}}
 	pinWindowsStandaloneProfileForTest(t, false)
-	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex"}) {
+	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex", "copilot"}) {
 		t.Fatalf("Secure Client connectors = %v", got)
 	}
 	// A CLI or Setup process reading the standalone config carries no pin

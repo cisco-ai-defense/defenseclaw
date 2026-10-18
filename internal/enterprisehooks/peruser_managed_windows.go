@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -53,10 +55,15 @@ type windowsPerUserManagedEnrollmentTarget struct {
 }
 
 // RegisterWindowsStandalonePerUserConnectors adds the built-in per-user
-// connectors to registry when, and only when, this process serves the
-// standalone profile. Secure Client registries are unchanged.
+// connectors this process's profile manages to registry: every one on the
+// standalone profile, and Copilot alone on Secure Client
+// (windowsSecureClientPerUserConnectors).
 func RegisterWindowsStandalonePerUserConnectors(registry *connector.Registry) {
-	if registry == nil || !windowsEnterpriseStandaloneProcess() {
+	if registry == nil {
+		return
+	}
+	if !windowsEnterpriseStandaloneProcess() {
+		registry.RegisterBuiltin(connector.NewCopilotConnector())
 		return
 	}
 	registry.RegisterBuiltin(connector.NewCopilotConnector())
@@ -69,10 +76,11 @@ func RegisterWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 }
 
 // certifyWindowsStandalonePerUserConnector admits a per-user connector only
-// in a process pinned to the standalone profile and only as its built-in
-// implementation.
+// as its built-in implementation, and only in a process whose profile manages
+// it: a process pinned to the standalone profile, or a Secure Client process
+// for Copilot.
 func certifyWindowsStandalonePerUserConnector(name string, conn connector.Connector) error {
-	if !windowsEnterpriseStandaloneProcess() {
+	if !windowsProfilePerUserConnector(name) {
 		return fmt.Errorf(
 			"enterprise hooks: connector %q is managed on native Windows only by the standalone enterprise profile",
 			name,
@@ -84,16 +92,105 @@ func certifyWindowsStandalonePerUserConnector(name string, conn connector.Connec
 	return nil
 }
 
+// windowsSecureClientPerUserConnectors are the per-user connectors the
+// Secure Client profile manages. The GitHub Copilot CLI, and the GitHub
+// Copilot app that runs the same CLI, load DefenseClaw's hook from the
+// policy.d machine policy, so the Secure Client guardian publishes that policy
+// and each enrolled user's runtime the way the standalone guardian does. The
+// other per-user connectors need a registration in the user's own agent
+// configuration and stay standalone-only.
+var windowsSecureClientPerUserConnectors = map[string]bool{
+	"copilot": true,
+}
+
+// windowsSecureClientPerUserRuntimeLeaf names the folder DefenseClaw owns
+// inside Copilot's machine folder on the Secure Client profile.
+const windowsSecureClientPerUserRuntimeLeaf = "DefenseClaw"
+
 // defaultWindowsPerUserManagedRuntimeDir places the enrollment and selector
-// in the standalone hook runtime directory: administrator-written and
-// readable by the standard users whose hooks resolve them. The state root
-// is not readable by standard users.
+// in a directory that is administrator-written and readable by the standard
+// users whose hooks resolve them; the state root is not readable by them. The
+// standalone profile uses its hook runtime directory. Secure Client uses
+// DefenseClaw's own folder in Copilot's machine folder, next to the policy.d
+// drop-in every Copilot user already reads: the hook runtime directory's
+// Cisco ancestors belong to the Secure Client install.
 func defaultWindowsPerUserManagedRuntimeDir(connectorName string) (string, error) {
+	if !windowsPerUserRuntimeStandalone() {
+		if !windowsSecureClientPerUserConnectors[connectorName] {
+			return "", fmt.Errorf("enterprise hooks: the Secure Client profile does not manage %q per user", connectorName)
+		}
+		programData, err := winpath.TrustedProgramData()
+		if err != nil {
+			return "", fmt.Errorf("enterprise hooks: resolve trusted ProgramData: %w", err)
+		}
+		return filepath.Join(programData, "GitHub", "Copilot", windowsSecureClientPerUserRuntimeLeaf), nil
+	}
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		return "", fmt.Errorf("enterprise hooks: resolve the standalone hook runtime directory: %w", err)
 	}
 	return filepath.Join(layout.HookRuntimeDir, connectorName), nil
+}
+
+// windowsPerUserRuntimeStandalone reports whether this process resolves the
+// standalone per-user runtime: a process carrying the standalone profile pin,
+// or a hook launched from a standalone install root. Hooks never carry the
+// pin; like the standalone hook's own runtime choice
+// (standaloneEnterpriseHookExecutable), the protected location of the
+// running binary decides. Every other process serves Secure Client.
+var windowsPerUserRuntimeStandalone = func() bool {
+	return windowsEnterpriseStandaloneProcess() || windowsStandaloneInstallExecutable()
+}
+
+// windowsStandaloneInstallExecutable reports whether the running binary sits
+// in <standalone install root>\bin, a production or run-scoped certification
+// root under the protected Program Files registration.
+var windowsStandaloneInstallExecutable = sync.OnceValue(func() bool {
+	executable, err := os.Executable()
+	if err != nil || !filepath.IsAbs(executable) {
+		return false
+	}
+	bin := filepath.Dir(filepath.Clean(executable))
+	if !strings.EqualFold(filepath.Base(bin), "bin") {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return false
+	}
+	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
+})
+
+// windowsProfilePerUserConnector reports whether the profile this process
+// serves manages name per user: every per-user connector on the standalone
+// profile, and windowsSecureClientPerUserConnectors on Secure Client.
+func windowsProfilePerUserConnector(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if _, ok := windowsStandalonePerUserConnector(name); !ok {
+		return false
+	}
+	return windowsEnterpriseStandaloneProcess() || windowsSecureClientPerUserConnectors[name]
+}
+
+// IsWindowsProfilePerUserConnector reports whether the profile this process
+// serves manages name per user.
+func IsWindowsProfilePerUserConnector(name string) bool {
+	return windowsProfilePerUserConnector(name)
+}
+
+// WindowsProfilePerUserConnectorNames returns the per-user connectors the
+// profile this process serves manages, in a stable order.
+func WindowsProfilePerUserConnectorNames() []string {
+	if windowsEnterpriseStandaloneProcess() {
+		return WindowsStandalonePerUserConnectorNames()
+	}
+	names := []string{}
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		if windowsSecureClientPerUserConnectors[name] {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // windowsPerUserManagedRuntimeDir is the machine directory of one per-user
@@ -108,8 +205,12 @@ func windowsPerUserManagedRuntimeDir(connectorName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory ||
-		!strings.EqualFold(filepath.Base(directory), name) {
+	// The directory is named for its connector; on Secure Client it is
+	// DefenseClaw's own folder in Copilot's machine folder.
+	leaf := filepath.Base(directory)
+	named := strings.EqualFold(leaf, name) ||
+		(!windowsPerUserRuntimeStandalone() && strings.EqualFold(leaf, windowsSecureClientPerUserRuntimeLeaf))
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || !named {
 		return "", fmt.Errorf("enterprise hooks: refusing noncanonical per-user runtime directory %s", directory)
 	}
 	return directory, nil
@@ -390,6 +491,9 @@ func resolveWindowsPerUserManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	// Closed on the standalone profile; the authenticated Secure Client
+	// generation carries its delivery mode (#1163).
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
 }
@@ -423,6 +527,7 @@ func prepareWindowsPerUserManagedGeneration(
 		contractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		target.setup.HookFailMode,
 	)
 	if err != nil {
 		return WindowsManagedRuntimeGenerationPublication{}, true, fmt.Errorf(
@@ -509,6 +614,7 @@ func verifyWindowsPerUserManagedRegistration(
 		contractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		target.setup.HookFailMode,
 	)
 }
 
@@ -566,13 +672,13 @@ func revokeWindowsPerUserManagedRegistration(
 
 // windowsEnumeratorHookConnector reports whether the Windows enumerator
 // emits rows for name: the machine-policy connectors always, the per-user
-// connectors only for a standalone config.
+// connectors for a standalone config, and Copilot for a Secure Client one.
 func windowsEnumeratorHookConnector(name string, standalone bool) bool {
 	if _, ok := windowsHookConnectors[name]; ok {
 		return true
 	}
 	_, perUser := windowsStandalonePerUserConnector(name)
-	return perUser && standalone
+	return perUser && (standalone || windowsSecureClientPerUserConnectors[name])
 }
 
 // WindowsPerUserManagedEnrollmentTarget is one secretless enrollment row.
@@ -677,7 +783,7 @@ func ReadWindowsPerUserManagedEnrollmentTargets(
 // whether (connector, SID) is still an enabled manifest target.
 func PruneWindowsPerUserManagedEnrollments(hookExecutable string, keep func(connectorName, sid string) bool) error {
 	var errs []error
-	for _, name := range WindowsStandalonePerUserConnectorNames() {
+	for _, name := range WindowsProfilePerUserConnectorNames() {
 		if hookBinary, _ := windowsStandalonePerUserConnector(name); !hookBinary {
 			continue
 		}

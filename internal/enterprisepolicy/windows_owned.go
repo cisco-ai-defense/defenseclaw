@@ -106,6 +106,49 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
+// PublishWindowsSecureClientCopilot is the Windows Secure Client guardian's
+// GitHub Copilot machine policy. With enabled it reconciles DefenseClaw's
+// policy.d drop-in, which the Copilot CLI and the GitHub Copilot app (it runs
+// the same CLI) load for every user; otherwise it removes the drop-in this
+// deployment recorded, and leaves a host it never published to untouched. A
+// Secure Client config has no enterprise.machine_policy, so the drop-in
+// carries the default policy, and the profile writes no VS Code device
+// policy, Copilot managed setting or public summary.
+func PublishWindowsSecureClientCopilot(opts Options, enabled bool) (State, error) {
+	if opts.goos() != "windows" {
+		return State{}, errors.New("PublishWindowsSecureClientCopilot applies only to Windows")
+	}
+	if !opts.CopilotCLIPolicyOnly {
+		return State{}, errors.New("the Secure Client Copilot policy is CLI-only")
+	}
+	if err := opts.Validate(); err != nil {
+		return State{}, err
+	}
+	target := copilotTarget{}
+	if enabled {
+		return target.Reconcile(opts)
+	}
+	return RemoveWindowsSecureClientCopilot(opts)
+}
+
+// RemoveWindowsSecureClientCopilot removes the GitHub Copilot drop-in a
+// Secure Client deployment recorded (teardown, or Copilot turned off). A host
+// without that record is left as found.
+func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
+	if opts.goos() != "windows" {
+		return State{}, errors.New("RemoveWindowsSecureClientCopilot applies only to Windows")
+	}
+	record, err := loadRecord(opts, copilotConnector)
+	if err != nil || record == nil {
+		return State{Connector: copilotConnector, Route: RouteMachinePolicy}, err
+	}
+	target := copilotTarget{}
+	if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+		return State{}, fmt.Errorf("%s: %w", copilotConnector, err)
+	}
+	return target.RemoveOwned(opts)
+}
+
 // takeBackWindowsGoOwnedForRemoval takes back a target's vendor folders that
 // a standard user created first, as a reconcile does, before the removal
 // reads them. A user-created C:\ProgramData\GitHub\Copilot\policy.d made the

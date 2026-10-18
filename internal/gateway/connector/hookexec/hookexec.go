@@ -1374,9 +1374,12 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return allowManagedStandaloneStop(opts, sp, reason, "transport")
 	}
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
-	logHookFailure(opts, sp, reason, "transport", failMode, blocked || managedCopilotFailsClosed(opts, sp))
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	copilotOpen := secureClientCopilotOpen(opts, sp, failMode)
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked || (managedCopilotFailsClosed(opts, sp) && !copilotOpen))
+	if !copilotOpen {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
 	if blocked {
 		if sp.connector == "antigravity" {
@@ -1675,13 +1678,16 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if closes && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, reason, "response")
 	}
-	logHookFailure(opts, sp, reason, "response", failMode, closes || managedCopilotFailsClosed(opts, sp))
+	copilotOpen := secureClientCopilotOpen(opts, sp, failMode)
+	logHookFailure(opts, sp, reason, "response", failMode, closes || (managedCopilotFailsClosed(opts, sp) && !copilotOpen))
 	if closes && managedPlainFailClosed(opts, sp) {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	if !copilotOpen {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
 	if sp.failOpenOnly || failMode == "open" {
 		return emitHookResult(opts, sp, sp.openAllow)
@@ -1712,6 +1718,17 @@ func managedCopilotFailsClosed(opts Options, sp spec) bool {
 	}
 	return sp.dialect == copilotVSCodeLocalSurface &&
 		copilotVSCodeLocalOutput(opts.Event, "block", "DefenseClaw") != ""
+}
+
+// secureClientCopilotOpen reports a Secure Client GitHub Copilot hook whose
+// authenticated delivery mode is open (#1163): a gateway it cannot reach and
+// a response it cannot read allow the call, as they do for every other Secure
+// Client connector, instead of the managed deny. A closed mode (configured,
+// strict availability, or another program on the gateway port) and the
+// enrollment and policy refusals still deny.
+func secureClientCopilotOpen(opts Options, sp spec, failMode string) bool {
+	return sp.connector == "copilot" && opts.SecureClient && secureClientHook(opts) &&
+		!opts.StrictAvailability && normalizeFailMode(failMode) == "open"
 }
 
 // managedCopilotFailClosed denies an administrator-managed Copilot tool call

@@ -40,6 +40,7 @@ var (
 	windowsFirstInstallRollbackUserConfigRestorer   = enterprisehooks.RestoreWindowsStandaloneUserAgentConfigs
 	windowsFirstInstallRollbackCopilotVSCodeRemover = enterprisehooks.RemoveWindowsStandaloneCopilotVSCodeUserFiles
 	windowsFirstInstallRollbackFootprintRemover     = rollbackWindowsStandaloneFirstInstallFootprint
+	windowsSecureClientFirstInstallRollbackRemover  = rollbackWindowsSecureClientFirstInstallFootprint
 	windowsFirstInstallRollbackHomeGone             = windowsFirstInstallHomeGone
 )
 
@@ -121,7 +122,7 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 			note("the WSL agent-session policy: %v", err)
 		}
 	}
-	if err := enterprisehooks.RemoveWindowsStandalonePerUserRuntimeSelectors(); err != nil {
+	if err := enterprisehooks.RemoveWindowsPerUserRuntimeSelectors(); err != nil {
 		note("per-user runtime selectors: %v", err)
 	}
 	if kept, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {

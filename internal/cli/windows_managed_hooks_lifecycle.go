@@ -484,6 +484,10 @@ func runWindowsManagedHooksLifecycle(
 		if pendingExists && enterprisehooks.WindowsStandaloneProcess() &&
 			windowsManagedHooksLifecycleFirstInstall(ctx, pending) {
 			report.Leftovers = windowsFirstInstallRollbackFootprintRemover(ctx)
+		} else if pendingExists && windowsManagedHooksLifecycleFirstInstall(ctx, pending) {
+			// A rolled-back first Secure Client install takes back the
+			// GitHub Copilot enrollment and policy the guardian published.
+			report.Leftovers = windowsSecureClientFirstInstallRollbackRemover(ctx)
 			for _, leftover := range report.Leftovers {
 				fmt.Fprintf(os.Stderr, "warning: the rollback could not remove %s\n", leftover)
 			}

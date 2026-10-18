@@ -111,12 +111,13 @@ func windowsStandaloneSignedOutRollbackEnabled() bool {
 	return strings.TrimSpace(os.Getenv(windowsStandaloneSignedOutRollbackSwitch)) != "0"
 }
 
-// RemoveWindowsStandalonePerUserRuntimeSelectors removes the runtime selector
-// of every standalone per-user connector. A connector without its machine
-// directory has none, and none is created.
-func RemoveWindowsStandalonePerUserRuntimeSelectors() error {
+// RemoveWindowsPerUserRuntimeSelectors removes the runtime selector
+// of every per-user connector the profile manages (Copilot alone on Secure
+// Client). A connector without its machine directory has none, and none is
+// created.
+func RemoveWindowsPerUserRuntimeSelectors() error {
 	var errs []error
-	for _, name := range WindowsStandalonePerUserConnectorNames() {
+	for _, name := range WindowsProfilePerUserConnectorNames() {
 		present, err := windowsPerUserManagedRuntimeDirPresent(name)
 		if err != nil {
 			errs = append(errs, err)

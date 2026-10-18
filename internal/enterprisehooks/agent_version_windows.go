@@ -120,6 +120,21 @@ func windowsAgentPresence(profileHome, connectorName string) bool {
 		runtimeDirectory = filepath.Join(home, ".cursor", "extensions")
 		paths = append(paths, filepath.Join(home, "AppData", "Local", "Programs", "cursor", "Cursor.exe"),
 			runtimeDirectory)
+	case "copilot":
+		// GitHub Copilot, never Microsoft Copilot: the CLI from its MSI, and
+		// the GitHub Copilot app, which runs the CLI it keeps under
+		// github-copilot-sdk. The CLI keeps its sessions in ~\.copilot.
+		// WinGet's Links\copilot.exe is a symbolic link, so a WinGet-only
+		// install counts through its sessions.
+		local := filepath.Join(home, "AppData", "Local")
+		runtimeDirectory = filepath.Join(home, ".copilot", "session-state")
+		paths = append(paths, filepath.Join(home, "AppData", "Roaming", "npm", "copilot.cmd"),
+			filepath.Join(local, "GitHubCopilotCLI", "copilot.exe"),
+			filepath.Join(local, "Programs", "GitHub Copilot", "github.exe"),
+			runtimeDirectory)
+		if appCLI := windowsCopilotAppCLIExecutable(home); appCLI != "" {
+			paths = append(paths, appCLI)
+		}
 	default:
 		return false
 	}

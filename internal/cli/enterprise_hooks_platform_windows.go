@@ -194,10 +194,10 @@ func syncEnterpriseHookManagedEnrollments(
 	apiAddr string,
 	publishExact bool,
 ) error {
-	if cfg != nil && cfg.StandaloneEnterprise() {
-		// Standalone per-user connectors carry their own machine enrollment;
-		// revoke SIDs the manifest no longer authorizes first so they fail
-		// closed even when a later step fails.
+	if cfg != nil && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration()) {
+		// Per-user connectors (Copilot alone on Secure Client) carry their
+		// own machine enrollment; revoke SIDs the manifest no longer
+		// authorizes first so they fail closed even when a later step fails.
 		codexOpts, err := resolveWindowsCodexRequirementsLayout("reconcile")
 		if err != nil {
 			return err

@@ -77,11 +77,12 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // Outside Secure Client the protected Windows deployment never permits Codex,
 // Claude Code or Cursor hooks to inherit a fail-open normal-mode setting, and
 // the standalone per-user connectors always fail closed. Under Secure Client
-// (#1163) Codex, Claude Code and Cursor honor the configured policy: unset and
-// "open" resolve to open, an explicit or invalid non-empty value to closed.
+// (#1163) Codex, Claude Code, Cursor and Copilot honor the configured policy:
+// unset and "open" resolve to open, an explicit or invalid non-empty value to
+// closed.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser && !secureClientHookDelivery() {
 		return "closed"
 	}
 	if secureClientHookDelivery() {

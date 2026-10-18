@@ -754,6 +754,11 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	}
 	key := previousManifestKey(row.SID, row.Connector)
 	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+	if version == "" && row.Connector == "copilot" {
+		if copilot := windowsSecureClientCopilotVersion(row.UserHome, row.SID); copilot != "" {
+			version, reason = copilot, ""
+		}
+	}
 	if prev, ok := previous[key]; ok {
 		// Secure Client preserves authorization, not stale compatibility
 		// evidence (#1163). Every other profile keeps the recorded version,

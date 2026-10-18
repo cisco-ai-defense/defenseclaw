@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -105,18 +104,18 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 }
 
 // Standalone per-user connectors (Copilot, Antigravity, Devin, Hermes,
-// OpenCode, Amp) are part of the managed-hook teardown only in a process
-// pinned to the standalone profile. Their machine wiring is the per-user
-// enrollment and runtime selector of each hook-binary connector, plus the
-// Go-owned Copilot machine policy and public summary. After the uninstall
-// commits, finalize also removes DefenseClaw's own registration or plugin
-// from each user's agent configuration, as that user (see
-// removeWindowsManagedHooksStandalonePerUserRegistrations). Per-user runtime
-// files stay, like every other connector.
+// OpenCode, Amp) are part of the managed-hook teardown in a process pinned to
+// the standalone profile, and Copilot alone in a Secure Client process. Their
+// machine wiring is the per-user enrollment and runtime selector of each
+// hook-binary connector, plus the Go-owned Copilot machine policy (and, on
+// the standalone profile, the public summary). After the uninstall commits,
+// a standalone finalize also removes DefenseClaw's own registration or
+// plugin from each user's agent configuration, as that user (see
+// removeWindowsManagedHooksStandalonePerUserRegistrations); Secure Client
+// writes none. Per-user runtime files stay, like every other connector.
 
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
-	_, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(connectorName)
-	return perUser && enterprisehooks.WindowsStandaloneProcess()
+	return enterprisehooks.IsWindowsProfilePerUserConnector(connectorName)
 }
 
 // windowsManagedHooksStandalonePerUserExpected is the enrollment an
@@ -139,19 +138,6 @@ func windowsManagedHooksStandalonePerUserExpected(
 			enterprisehooks.WindowsPerUserManagedEnrollmentTarget{SID: target.SID, DataDir: target.DataDir})
 	}
 	return expected
-}
-
-func windowsManagedHooksStandalonePerUserConnectors(targets []windowsManagedHooksTeardownTarget) []string {
-	seen := map[string]bool{}
-	names := []string{}
-	for _, target := range targets {
-		if _, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(target.Connector); perUser && !seen[target.Connector] {
-			seen[target.Connector] = true
-			names = append(names, target.Connector)
-		}
-	}
-	sort.Strings(names)
-	return names
 }
 
 func validateWindowsManagedHooksStandalonePerUserEnrollment(identity windowsManagedHooksTeardownJournal) error {
@@ -186,7 +172,7 @@ func equalWindowsPerUserEnrollmentTargets(left, right []enterprisehooks.WindowsP
 
 func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHooksTeardownJournal) error {
 	if !enterprisehooks.WindowsStandaloneProcess() {
-		return nil
+		return removeWindowsSecureClientCopilotWiring(identity.HookBinary)
 	}
 	// Revoke every per-user enrollment, not only the manifest connectors, so
 	// an uninstall leaves no enrolled SID behind.
@@ -271,12 +257,8 @@ func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManag
 	return errors.Join(errs...)
 }
 
-func verifyWindowsManagedHooksStandalonePerUserClean(targets []windowsManagedHooksTeardownTarget) error {
-	connectors := windowsManagedHooksStandalonePerUserConnectors(targets)
-	if enterprisehooks.WindowsStandaloneProcess() {
-		connectors = enterprisehooks.WindowsStandalonePerUserConnectorNames()
-	}
-	for _, connectorName := range connectors {
+func verifyWindowsManagedHooksStandalonePerUserClean() error {
+	for _, connectorName := range enterprisehooks.WindowsProfilePerUserConnectorNames() {
 		_, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
 		if err != nil {
 			return err

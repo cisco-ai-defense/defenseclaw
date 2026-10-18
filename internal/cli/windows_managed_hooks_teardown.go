@@ -1457,6 +1457,11 @@ func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
 		return fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
 	}
+	// Secure Client: DefenseClaw's folder in Copilot's machine folder holds
+	// only lock files by now.
+	if _, err := enterprisehooks.RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil {
+		return fmt.Errorf("finalize the GitHub Copilot runtime folder: %w", err)
+	}
 	return nil
 }
 
@@ -1547,7 +1552,7 @@ func verifyWindowsManagedHooksTeardownClean(
 			"Codex machine requirements are not clean after managed-hook teardown",
 		)
 	}
-	if err := verifyWindowsManagedHooksStandalonePerUserClean(targets); err != nil {
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(); err != nil {
 		return 0, err
 	}
 	for _, target := range targets {
