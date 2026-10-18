@@ -478,6 +478,24 @@ Exit 0.
   bundle. It does not mean that agent sessions
   already running enforce it: read `bundle.sessions_restart_required` next
   (sessions that need a restart, below).
+- **Settings-only bundles do not confirm on builds without the fix**: on
+  DefenseClaw 1.0.2 and earlier, and on 1.0.3 builds made before the fix, a
+  bundle whose `config.yaml` names no file under the bundle's version
+  directory (a settings-only bundle: the config names no path under the
+  bundle's `policies/`, `discovery/` or `scanners/`) never passes the confirm
+  step, although `bundle verify` (4.2) reports `digest_verified` true for the
+  same file. The apply restarts the gateway, fails after about 40 to 50 s and
+  rolls back: exit 1, final, with `errors[].code` and `bundle.error_code`
+  `digest_mismatch`, `bundle.state` `failed`, the warning `rolled_back` and
+  `bundle.current_version` still the last good bundle's. That bundle enforces
+  again once the rollback has finished; while the apply runs, the gateway can
+  already enforce the candidate's settings. Resubmitting the same file fails
+  the same way. Seen on Linux; macOS and Windows compute the gateway digest
+  with the same code. Stopgap: ship at least one file in the bundle and name
+  it in `config.yaml`, for example a guardrail rule pack under
+  `policies/guardrail/<pack>` named by `guardrail.custom_packs.<pack>.path`;
+  such a bundle confirms. Remove this note once the agent's minimum
+  DefenseClaw build contains the fix.
 - **Sessions that need a restart**: an agent (Claude Code, Codex and the
   other connectors) reads its hooks when it starts. DefenseClaw does not stop
   or restart agent sessions, so a session that was already running when a
@@ -1065,6 +1083,13 @@ Per-user installs and Secure Client computers refuse every command.
 
 - Some failures print no JSON (section 2.3); the agent classifies them by the
   exit code.
+- On DefenseClaw 1.0.2 and earlier, and on 1.0.3 builds made before the fix,
+  a settings-only bundle (its `config.yaml` names no file under the bundle's
+  version directory) never confirms: after about 40 to 50 s and a gateway
+  restart the apply fails with `digest_mismatch` (exit 1 on Linux, final) and
+  the last good bundle is put back. Ship and name one file in the bundle
+  (4.3). Remove this note once the agent's minimum DefenseClaw build contains
+  the fix.
 - The credential value is normalised differently on Windows and on Linux and
   macOS (2.5), and Windows refuses a `secret set` before the deployment is
   installed while Linux and macOS store it (4.7).
