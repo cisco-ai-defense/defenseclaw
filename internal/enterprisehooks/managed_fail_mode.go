@@ -17,8 +17,9 @@ import "github.com/defenseclaw/defenseclaw/internal/config"
 // ManagedHookFailMode is the fail mode the managed hook renderer writes into
 // connector's hooks for cfg. It delegates to the hook renderer resolver: on
 // Linux and macOS the renderer passes cfg.EffectiveHookFailModeForConnector
-// to every hook it writes, so status reports that value and never derives
-// one from the raw config.
+// to every hook it writes and lowers closed to open for an agent that cannot
+// fail closed, so status reports that value and never derives one from the
+// raw config.
 func ManagedHookFailMode(cfg *config.Config, connector string) string {
-	return cfg.EffectiveHookFailModeForConnector(connector)
+	return renderedHookFailModeFor(connector, cfg.EffectiveHookFailModeForConnector(connector))
 }

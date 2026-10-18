@@ -238,11 +238,7 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	if !rendersScript {
 		return nil // plugin-only connectors keep no per-connector runtime record
 	}
-	rendered := expected.HookFailMode
-	if provider, ok := conn.(connector.HookCapabilityProvider); ok && rendered == "closed" && !provider.HookCapabilities(opts).SupportsFailClosed {
-		rendered = "open"
-	}
-	return verifyHookRuntimeRecords(hookDir, name, rendered)
+	return verifyHookRuntimeRecords(hookDir, name, renderedHookFailMode(conn, opts, expected.HookFailMode))
 }
 
 // readSharedHookScriptDigests returns the digests of the scripts every
