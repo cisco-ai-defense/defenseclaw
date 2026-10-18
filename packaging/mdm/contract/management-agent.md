@@ -424,7 +424,9 @@ Exit 0.
 
   The prediction holds for the installed config verify read. Another apply
   or an MDM `ensure` before this apply can change it; the receipt's
-  `restart` is what happened.
+  `restart` is what happened. The receipt carries `restart` only when the
+  gateway restarted (always `true`); when it is absent the gateway kept
+  running, never read an absent `restart` as unknown.
 - Preflight before an apply:
   1. Run verify. `already_applied`: done.
   2. `refused` with `secret_ref_missing`: store every name in
