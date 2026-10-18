@@ -778,6 +778,129 @@ if ($script:starts -ne {int(was_running and swap_result == 1)}) {{ throw 'Starte
         assert path.read_bytes() == contents
 
 
+def _undo_rollback_stubs(
+    data: Path, settings: Path, receipt: Path, reason: str, restore: str, undone: int = 0, convert: bool = True
+) -> str:
+    return f"""
+{_rollback_stubs(data)}
+{_rollback_hook_backend(data, settings, receipt, restore, 'swap')}
+{_function('Undo-Rollback')}
+$script:owner = 'current'
+$script:running = ${str(reason == 'startup').lower()}
+$script:ok = @()
+function Write-Err([string]$Message) {{ Write-Host $Message }}
+function Write-Ok([string]$Message) {{ $script:ok += $Message }}
+function Test-RollbackData {{ return ${str(reason == 'audit').lower()} }}
+function Move-DamagedAuditStore {{ throw 'injected audit quarantine failure' }}
+{'' if convert else 'function Test-HookRollbackRestoreAvailable { return $false }'}
+function Switch-WithPrevious {{
+    $script:swaps++
+    if ($script:swaps -eq 1) {{
+        $script:events += 'swap-old'
+        $script:owner = 'legacy'
+        return 0
+    }}
+    $script:events += 'undo-{undone}'
+    $script:owner = '{'current' if undone == 0 else 'legacy' if undone == 1 else 'unknown'}'
+    return {undone}
+}}
+function Start-Gateway {{
+    $script:starts++
+    if ($script:owner -eq 'legacy') {{ $script:events += 'start-old'; return 1 }}
+    if ($script:owner -ne 'current') {{ throw 'Started runtime with unknown ownership' }}
+    $script:events += 'start-current'
+    return 0
+}}
+"""
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("reason", ["audit", "startup"])
+@pytest.mark.parametrize("restore", ["success", "refused", "throw"])
+def test_undo_after_legacy_swap_restores_hooks_before_starting_current_gateway(
+    tmp_path, rollback_hook_files, reason: str, restore: str
+) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    version = tmp_path / "previous" / "VERSION"
+    version.write_bytes(b"0.8.10")
+    unchanged[version] = b"0.8.10"
+    output = _run(
+        tmp_path,
+        f"""
+{_undo_rollback_stubs(tmp_path, settings, receipt, reason, restore)}
+if ((Invoke-Rollback) -ne 1) {{ throw 'Undone legacy rollback lost its failure status' }}
+if ($script:swaps -ne 2 -or $script:conversions -ne 1 -or $script:restores -ne 1) {{ throw 'Missing current-reader inverse after undo' }}
+if (($script:events -join ',') -ne 'convert,swap-old,{('start-old,' if reason == 'startup' else '')}undo-0,restore,start-current') {{
+    throw ('Hook repair did not precede current restart: ' + ($script:events -join ','))
+}}
+if (($script:ok -join ',') -like '*agent hooks*') {{ throw 'Claimed hook protection despite a possible inverse refusal' }}
+""",
+    )
+    assert "rollback is being undone" in output
+    if restore == "success":
+        assert settings.read_bytes() == b"current guarded hook"
+        assert "Current hook protection is unverified" not in output
+    else:
+        assert settings.read_bytes() == b"older direct hook"
+        assert "Current hook protection is unverified" in output
+        assert "Keep the connector recovery receipts" in output
+    assert not receipt.exists()
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("reason", ["audit", "startup"])
+@pytest.mark.parametrize("undone", [1, 2])
+def test_failed_legacy_undo_does_not_use_an_older_or_unknown_reader(
+    tmp_path, rollback_hook_files, reason: str, undone: int
+) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    version = tmp_path / "previous" / "VERSION"
+    version.write_bytes(b"0.8.10")
+    unchanged[version] = b"0.8.10"
+    _run(
+        tmp_path,
+        f"""
+{_undo_rollback_stubs(tmp_path, settings, receipt, reason, 'success', undone)}
+if ((Invoke-Rollback) -ne 1) {{ throw 'Failed undo lost failure status' }}
+if ($script:swaps -ne 2 -or $script:conversions -ne 1 -or $script:restores -ne 0) {{ throw 'Ran inverse without restored current runtime ownership' }}
+if ($script:starts -ne {int(reason == 'startup')}) {{ throw 'Started an older or unknown runtime after failed undo' }}
+if (($script:events -join ',') -like '*restore*' -or ($script:events -join ',') -like '*start-current*') {{
+    throw 'Failed undo called the current reader'
+}}
+""",
+    )
+    assert settings.read_bytes() == b"older direct hook"
+    assert not receipt.exists()
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_undo_without_hook_conversion_does_not_invoke_inverse(tmp_path, rollback_hook_files) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    version = tmp_path / "previous" / "VERSION"
+    version.write_bytes(b"0.8.10")
+    unchanged[version] = b"0.8.10"
+    _run(
+        tmp_path,
+        f"""
+{_undo_rollback_stubs(tmp_path, settings, receipt, 'audit', 'success', convert=False)}
+if ((Invoke-Rollback) -ne 1) {{ throw 'Undone rollback lost failure status' }}
+if ($script:swaps -ne 2 -or $script:conversions -ne 0 -or $script:restores -ne 0) {{ throw 'Repaired hooks without conversion' }}
+if (($script:events -join ',') -ne 'swap-old,undo-0,start-current') {{ throw 'Changed non-converting undo behavior' }}
+""",
+    )
+    assert settings.read_bytes() == b"current guarded hook"
+    assert not receipt.exists()
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("phase", ["early", "watchdog"])

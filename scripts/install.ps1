@@ -2075,7 +2075,7 @@ function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
     }
 }
 
-function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
+function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined, [bool]$RestoreHooks = $false) {
     # Put back the install the rollback replaced, and return 1 (GAP-1388): a
     # restored 0.x release whose gateway is not running leaves agents
     # unguarded, and it has no rollback command to come back with.
@@ -2091,6 +2091,7 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
         }
         return 1
     }
+    if ($RestoreHooks) { Restore-HooksAfterAbortedRollback }
     # previous\ is again the install this rollback started from, as it was.
     foreach ($marker in @("ROLLED_BACK", "START_AFTER")) { Remove-Item -LiteralPath (Join-Path $Previous $marker) -Force -ErrorAction SilentlyContinue }
     $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
@@ -2119,7 +2120,7 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
         }
     }
     if ((Start-Gateway) -in @(0, 3)) {
-        Write-Ok "DefenseClaw $forward is back, with its gateway and agent hooks"
+        Write-Ok "DefenseClaw $forward is back, with its gateway"
     } else {
         Write-Warn "DefenseClaw $forward is back, but its gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
@@ -2206,12 +2207,12 @@ function Invoke-Rollback {
     if ($auditDamaged) {
         try { $quarantined = Move-DamagedAuditStore $backTo } catch {
             $why = "The damaged audit store of DefenseClaw $backTo could not be moved aside ($($_.Exception.Message))"
-            return Undo-Rollback $why $current $backTo $savedWasRunning ""
+            return Undo-Rollback $why $current $backTo $savedWasRunning "" $conversionAttempted
         }
     }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
         # A 0.x release has no rollback command: never leave it down.
-        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined }
+        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined $conversionAttempted }
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }

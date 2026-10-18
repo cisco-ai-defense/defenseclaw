@@ -246,9 +246,10 @@ verified hook restoration before converting hooks for an older release.
 
 If rollback stops after converting agent hooks for the older version, the
 installer attempts to restore the current hook form through verified recovery,
-including when the gateway was already stopped. If it cannot verify or restore
-the settings, it retains the recovery evidence and reports that hook protection
-needs repair before retrying.
+including when the gateway was already stopped or the older installation failed
+and the current installation was restored. It restores the hooks before restarting
+the current gateway. If it cannot verify or restore the settings, it retains the
+recovery evidence and reports that hook protection needs repair before retrying.
 
 An installer handoff that cannot restart a previously running gateway reports
 failure and prints recovery instructions. If the version change has already

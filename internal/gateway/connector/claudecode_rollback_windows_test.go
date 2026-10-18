@@ -231,6 +231,10 @@ func TestClaudeCodeRollbackRestoreRecoversPendingPublication(t *testing.T) {
 
 func TestClaudeCodeRollbackWitnessFailurePreventsPublication(t *testing.T) {
 	opts, path, original := claudeRollbackFixture(t)
+	if err := safefile.ProtectFile(path); err != nil {
+		t.Fatal(err)
+	}
+	before := readClaudeRollbackState(t, path)
 	previous := atomicFileBeforePrivatePublish
 	atomicFileBeforePrivatePublish = func(destination string) error {
 		if filepath.Base(destination) == claudeCodeRollbackWitnessName {
@@ -244,6 +248,19 @@ func TestClaudeCodeRollbackWitnessFailurePreventsPublication(t *testing.T) {
 	}
 	if after := readClaudeRollbackState(t, path); !bytes.Equal(after.data, original) {
 		t.Fatal("witness failure published a weaker hook")
+	}
+	if after := readClaudeRollbackState(t, path); !atomicTransformArtifactStatesEqualExact(before, after) {
+		t.Fatal("unpublished conversion changed original identity or metadata")
+	}
+	// The backup alone is not identity authority. Even though its bytes equal
+	// the unchanged guarded settings, missing publication proof must remain an
+	// explicit refusal rather than claiming that hook protection was verified.
+	if count, err := NewClaudeCodeConnector().RestoreHooksAfterRollback(opts); err == nil || count != 0 ||
+		!strings.Contains(err.Error(), "could not be verified") {
+		t.Fatalf("restore after witness-write failure = %d, %v; want fail-closed refusal", count, err)
+	}
+	if after := readClaudeRollbackState(t, path); !atomicTransformArtifactStatesEqualExact(before, after) {
+		t.Fatal("missing-witness refusal changed original guarded file")
 	}
 }
 
