@@ -829,7 +829,7 @@ var builtinHookContracts = map[string][]HookContract{
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
-				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
+				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
 				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",

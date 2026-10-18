@@ -2431,6 +2431,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
+	resp.HookOutput = a.copilotSecureClientPromptOutput(ctx, req, mode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {
