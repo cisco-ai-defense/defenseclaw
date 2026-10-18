@@ -479,6 +479,7 @@ $script:stops = 0
 $script:starts = 0
 $script:swaps = 0
 $script:conversions = 0
+$script:restores = 0
 $script:running = $true
 function Read-Text([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ return [IO.File]::ReadAllText($Path).Trim() }}; return '' }}
 function Get-InstalledVersion {{ return '{current}' }}
@@ -492,7 +493,9 @@ function Get-ProcessesUnder {{ return @() }}
 function Stop-Gateway {{ $script:stops++; $script:running = $false; return $true }}
 function Stop-Watchdog {{}}
 function Start-Gateway {{ $script:starts++; $script:running = $true; return 0 }}
+function Test-HookRollbackRestoreAvailable {{ return $true }}
 function Convert-HooksForRollback {{ $script:conversions++ }}
+function Restore-HooksAfterAbortedRollback {{ $script:restores++ }}
 function Switch-WithPrevious {{ $script:swaps++; return 0 }}
 function Protect-UvDirectory {{}}
 function Invoke-PruneOrphanedHooks {{}}
@@ -545,11 +548,234 @@ if ($script:swaps -ne 0) {{ throw 'Rollback exchanged runtime or data' }}
 if ($script:starts -ne {0 if phase == 'early' else 1}) {{ throw 'Current gateway was not restored' }}
 if ($script:stops -ne {0 if phase == 'early' else 1}) {{ throw 'Early refusal stopped current runtime' }}
 if ($script:conversions -ne {1 if phase == 'conversion' else 0}) {{ throw 'Recovery refusal ran hook conversion' }}
+if ($script:restores -ne {1 if phase == 'conversion' else 0}) {{ throw 'Repair ran without a conversion attempt' }}
 """,
     )
     assert receipt.read_bytes() == b"pending recovery"
     assert (tmp_path / "config.yaml").read_bytes() == b"current config"
     assert (previous / "data" / "config.yaml").read_bytes() == b"prior config"
+
+
+@pytest.fixture
+def rollback_hook_files(tmp_path):
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "bin").mkdir()
+    (tmp_path / "bin").mkdir()
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    unchanged = {
+        previous / "VERSION": b"1.0.1",
+        tmp_path / "config.yaml": b"current config",
+        previous / "data" / "config.yaml": b"prior config",
+        tmp_path / "bin" / "defenseclaw-gateway.exe": b"current runtime never executed",
+        previous / "bin" / "defenseclaw-gateway.exe": b"prior runtime never executed",
+    }
+    for path, contents in unchanged.items():
+        path.write_bytes(contents)
+    settings = agent / "settings.json"
+    settings.write_bytes(b"current guarded hook")
+    receipt = tmp_path / ".defenseclaw-cas-v2-conversion.complete"
+    return settings, receipt, unchanged
+
+
+def _rollback_hook_backend(data: Path, settings: Path, receipt: Path, restore: str, abort: str) -> str:
+    # The PS orchestration runs unchanged. The native boundary models either a
+    # publication followed by cleanup failure, or a clean completed conversion;
+    # exact ownership/CAS restoration is tested by the Go connector suite.
+    return f"""
+{_function('Convert-HooksForRollback')}
+{_function('Restore-HooksAfterAbortedRollback')}
+{_function('Test-HookRollbackRestoreAvailable')}
+$script:events = @()
+$global:LASTEXITCODE = 0
+function Get-NativeOutput([string]$FilePath, [string[]]$Arguments) {{
+    if ($FilePath -ne {_literal(data / 'bin' / 'defenseclaw-gateway.exe')} -or
+        ($Arguments -join '|') -ne 'connector|prepare-rollback|--help') {{ throw 'Unexpected capability probe' }}
+    $global:LASTEXITCODE = 0
+    return "Flags:`n      --restore   Restore current owned hooks"
+}}
+function Invoke-Native([string]$FilePath, [string[]]$Arguments) {{
+    if ($FilePath -ne {_literal(data / 'bin' / 'defenseclaw-gateway.exe')}) {{ throw 'Invoked a saved or foreign reader' }}
+    $joined = $Arguments -join '|'
+    if ($joined -eq ('connector|prepare-rollback|--data-dir|' + $DataDir)) {{
+        $script:conversions++
+        $script:events += 'convert'
+        [IO.File]::WriteAllText({_literal(settings)}, 'older direct hook')
+        if ('{abort}' -ne 'swap') {{ [IO.File]::WriteAllText({_literal(receipt)}, 'owned pending conversion') }}
+        if ('{abort}' -eq 'throw') {{ throw 'conversion published before injected failure' }}
+        if ('{abort}' -eq 'swap') {{ return 0 }}
+        return 1
+    }}
+    if ($joined -ne ('connector|prepare-rollback|--restore|--data-dir|' + $DataDir)) {{ throw 'Unexpected native command' }}
+    $script:restores++
+    $script:events += 'restore'
+    if ('{restore}' -eq 'throw') {{ throw 'injected restoration failure' }}
+    if ('{restore}' -eq 'no_exit') {{ return $global:LASTEXITCODE }}
+    if ('{restore}' -eq 'refused') {{ return 1 }}
+    [IO.File]::WriteAllText({_literal(settings)}, 'current guarded hook')
+    if (Test-Path -LiteralPath {_literal(receipt)}) {{ [IO.File]::Delete({_literal(receipt)}) }}
+    return 0
+}}
+function Start-Gateway {{
+    $script:starts++
+    $script:events += 'start'
+    $script:running = $true
+    return 0
+}}
+"""
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("was_running", [False, True])
+@pytest.mark.parametrize("abort", ["receipt", "throw"])
+@pytest.mark.parametrize("restore", ["success", "refused", "throw", "no_exit"])
+def test_aborted_rollback_repairs_only_with_current_reader_and_preserves_abort(
+    tmp_path, rollback_hook_files, was_running: bool, abort: str, restore: str
+) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    reason = "active connector recovery" if abort == "receipt" else "conversion published before injected failure"
+    output = _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path)}
+{_rollback_hook_backend(tmp_path, settings, receipt, restore, abort)}
+$script:running = ${str(was_running).lower()}
+try {{ Invoke-Rollback; throw 'rollback unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*{reason}*') {{ throw }}
+}}
+if ($script:swaps -ne 0) {{ throw 'Aborted rollback exchanged runtime or data' }}
+if ($script:conversions -ne 1 -or $script:restores -ne 1) {{ throw 'Conversion did not get its narrow inverse' }}
+if ($script:starts -ne {int(was_running)}) {{ throw 'Changed the gateway running preference' }}
+if (($script:events -join ',') -ne 'convert,restore{',start' if was_running else ''}') {{ throw 'Restart preceded hook repair' }}
+""",
+    )
+    if restore == "success":
+        assert settings.read_bytes() == b"current guarded hook"
+        assert not receipt.exists()
+        assert "Current hook protection is unverified" not in output
+    else:
+        assert settings.read_bytes() == b"older direct hook"
+        assert receipt.read_bytes() == b"owned pending conversion"
+        assert "Current hook protection is unverified" in output
+        assert "Keep the connector recovery receipts" in output
+        assert "connector prepare-rollback --restore --data-dir" in output
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("was_running", [False, True])
+@pytest.mark.parametrize("help_kind", ["legacy", "mention", "bare", "failed", "no_exit"])
+def test_rollback_refuses_legacy_converter_before_stopping_or_changing_hooks(
+    tmp_path, rollback_hook_files, was_running: bool, help_kind: str
+) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    help_output = {
+        "legacy": "Flags:`n      --data-dir string   Data directory",
+        "mention": "Description: the --restore option is unavailable",
+        "bare": "Description:`n`n--restore is unavailable",
+        "failed": "Flags:`n      --restore   Failed command output",
+        "no_exit": "Flags:`n      --restore   No fresh native exit code",
+    }[help_kind]
+    _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path)}
+{_function('Test-HookRollbackRestoreAvailable')}
+$script:running = ${str(was_running).lower()}
+$global:LASTEXITCODE = 0
+function Get-NativeOutput {{
+    {'$global:LASTEXITCODE = 1' if help_kind == 'failed' else '$global:LASTEXITCODE = 0' if help_kind != 'no_exit' else ''}
+    return "{help_output}"
+}}
+try {{ Invoke-Rollback; throw 'unsupported converter unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*Repair this DefenseClaw version first*') {{ throw }}
+}}
+if ($script:swaps -ne 0 -or $script:conversions -ne 0 -or $script:restores -ne 0) {{ throw 'Legacy capability refusal changed hooks or runtime' }}
+if ($script:stops -ne 0 -or $script:starts -ne 0 -or $script:running -ne ${str(was_running).lower()}) {{
+    throw 'Early capability refusal changed gateway state'
+}}
+""",
+    )
+    assert settings.read_bytes() == b"current guarded hook"
+    assert not receipt.exists()
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_missing_gateway_skips_conversion_and_inverse_without_blocking_rollback(tmp_path) -> None:
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "VERSION").write_text("1.0.1", encoding="ascii")
+    _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path)}
+{_function('Test-HookRollbackRestoreAvailable')}
+$script:running = $false
+function Get-NativeOutput {{ throw 'Probed a missing executable' }}
+if ((Invoke-Rollback) -ne 0) {{ throw 'Missing gateway blocked existing repair path' }}
+if ($script:swaps -ne 1 -or $script:conversions -ne 0 -or $script:restores -ne 0) {{ throw 'Attempted hook mutation without a current reader' }}
+""",
+    )
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_hook_restore_and_restart_errors_do_not_mask_original_rollback_abort(tmp_path, rollback_hook_files) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    output = _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path)}
+{_rollback_hook_backend(tmp_path, settings, receipt, 'throw', 'receipt')}
+function Start-Gateway {{ $script:starts++; throw 'injected restart failure' }}
+try {{ Invoke-Rollback; throw 'rollback unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
+}}
+if ($script:swaps -ne 0 -or $script:restores -ne 1 -or $script:starts -ne 1) {{ throw 'Skipped attempted recovery' }}
+""",
+    )
+    assert "Current hook protection is unverified" in output
+    assert "current gateway could not restart: injected restart failure" in output
+    assert settings.read_bytes() == b"older direct hook"
+    assert receipt.read_bytes() == b"owned pending conversion"
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("was_running", [False, True])
+@pytest.mark.parametrize("swap_result", [1, 2])
+def test_failed_swap_repairs_hooks_only_when_current_runtime_ownership_is_restored(
+    tmp_path, rollback_hook_files, was_running: bool, swap_result: int
+) -> None:
+    settings, receipt, unchanged = rollback_hook_files
+    _run(
+        tmp_path,
+        f"""
+{_rollback_stubs(tmp_path)}
+{_rollback_hook_backend(tmp_path, settings, receipt, 'success', 'swap')}
+$script:running = ${str(was_running).lower()}
+function Switch-WithPrevious {{ $script:swaps++; return {swap_result} }}
+try {{ Invoke-Rollback; throw 'rollback unexpectedly passed' }} catch {{
+    if ($_.Exception.Message -notlike '*Rollback failed part-way*') {{ throw }}
+}}
+if ($script:swaps -ne 1 -or $script:conversions -ne 1) {{ throw 'Wrong swap attempt' }}
+if ($script:restores -ne {1 if swap_result == 1 else 0}) {{ throw 'Repaired hooks without current runtime ownership' }}
+if ($script:starts -ne {int(was_running and swap_result == 1)}) {{ throw 'Started unknown runtime ownership' }}
+""",
+    )
+    assert settings.read_bytes() == (b"current guarded hook" if swap_result == 1 else b"older direct hook")
+    assert not receipt.exists()
+    for path, contents in unchanged.items():
+        assert path.read_bytes() == contents
 
 
 @WINDOWS_POWERSHELL
@@ -575,7 +801,7 @@ def test_roll_forward_refuses_current_recovery_without_stranding_it_in_previous(
 try {{ Invoke-Rollback; throw 'roll forward unexpectedly passed' }} catch {{
     if ($_.Exception.Message -notlike '*active connector recovery*') {{ throw }}
 }}
-if ($script:swaps -ne 0 -or $script:conversions -ne 0) {{ throw 'Roll forward moved pending recovery' }}
+if ($script:swaps -ne 0 -or $script:conversions -ne 0 -or $script:restores -ne 0) {{ throw 'Roll forward moved pending recovery' }}
 if ($script:starts -ne {0 if phase == 'early' else 1}) {{ throw 'Wrong current runtime restart behavior' }}
 """,
     )
@@ -596,7 +822,7 @@ def test_roll_forward_allows_incoming_recovery_for_the_newer_reader(tmp_path) ->
         f"""
 {_rollback_stubs(tmp_path, '1.0.1')}
 if ((Invoke-Rollback) -ne 0) {{ throw 'Roll forward failed' }}
-if ($script:swaps -ne 1 -or $script:conversions -ne 0) {{ throw 'Roll forward routing changed' }}
+if ($script:swaps -ne 1 -or $script:conversions -ne 0 -or $script:restores -ne 0) {{ throw 'Roll forward routing changed' }}
 """,
     )
     assert receipt.read_bytes() == b"incoming protocol"

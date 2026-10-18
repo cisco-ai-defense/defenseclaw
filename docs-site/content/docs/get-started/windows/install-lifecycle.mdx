@@ -241,7 +241,14 @@ version change. Same-version repair remains available. Rolling forward to a
 saved newer version can restore that version's own recovery records.
 Windows CLI downgrades use the current installation's saved installer for
 these checks. If that installer is missing or unsafe, repair the current
-installation first.
+installation first. Rollback also requires the current gateway to support
+verified hook restoration before converting hooks for an older release.
+
+If rollback stops after converting agent hooks for the older version, the
+installer attempts to restore the current hook form through verified recovery,
+including when the gateway was already stopped. If it cannot verify or restore
+the settings, it retains the recovery evidence and reports that hook protection
+needs repair before retrying.
 
 An installer handoff that cannot restart a previously running gateway reports
 failure and prints recovery instructions. If the version change has already

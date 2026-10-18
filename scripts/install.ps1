@@ -2008,19 +2008,53 @@ Environment:
 
 # -- Main ---------------------------------------------------------------------
 
+function Test-HookRollbackRestoreAvailable {
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    # A missing reader cannot convert anything; keep that existing repair path.
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return $false }
+    $global:LASTEXITCODE = $null
+    $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
+    if ($global:LASTEXITCODE -ne 0 -or $help -notmatch '(?m)^[ \t]+--restore(?:[ \t]|$)') {
+        throw ("The current gateway cannot safely restore converted rollback hooks. " +
+            "Repair this DefenseClaw version first, then retry rollback; nothing was changed")
+    }
+    return $true
+}
+
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     # A hook entry this install wrote in a shape the older release does not
     # recognise (the per-user Claude Code cmd.exe launcher guard, GAP-1284)
     # outlived that release's uninstall. This install's gateway rewrites those
     # entries in the shape every earlier release removes; rolling forward runs
-    # setup, which writes the current shape again. A failure does not stop the
-    # rollback, but says what may be left behind.
+    # setup, which writes the current shape again. A failure warns; pending
+    # connector recovery below prevents the version swap.
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway)) { return }
     if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
         Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
+    }
+}
+
+function Restore-HooksAfterAbortedRollback {
+    # Only the current reader may recover a published conversion and restore
+    # its exact owned hooks. A saved settings copy is not overwrite authority.
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $failure = ""
+    try {
+        if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+            throw "the current gateway executable is unavailable"
+        }
+        # A failed native launch must not inherit a previous command's success.
+        $global:LASTEXITCODE = $null
+        $restored = Invoke-Native $gateway @("connector", "prepare-rollback", "--restore", "--data-dir", $DataDir)
+        if ($null -eq $restored -or $restored -ne 0) { throw "the current reader did not verify hook restoration" }
+    } catch { $failure = $_.Exception.Message }
+    if ($failure) {
+        Write-Warn "Current hook protection is unverified after the aborted rollback ($failure)"
+        Write-Info "Keep the connector recovery receipts and repair with the current DefenseClaw release before continuing agent tool calls."
+        Write-Info "Retry the current reader: & `"$gateway`" connector prepare-rollback --restore --data-dir `"$DataDir`""
     }
 }
 
@@ -2121,6 +2155,8 @@ function Invoke-Rollback {
     if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
     }
+    $canConvertHooks = $false
+    if (-not $rollForward) { $canConvertHooks = Test-HookRollbackRestoreAvailable }
     Wait-VenvFree
     # GAP-1388: check the saved data before anything of this install changes.
     $toLegacy = [version]$backTo -lt [version]"1.0.0"
@@ -2129,6 +2165,7 @@ function Invoke-Rollback {
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
+    $conversionAttempted = $false
     try {
         Stop-Watchdog
         Assert-GatewayQuiescent "Rollback to $backTo"
@@ -2136,19 +2173,27 @@ function Invoke-Rollback {
         if (-not $rollForward) {
             Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         }
-        if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
+        if ($canConvertHooks) {
+            $conversionAttempted = $true
+            Convert-HooksForRollback $currentLabel $backTo
+        }
         # Conversion can itself leave recovery work even when it only warns.
         if (-not $rollForward) {
             Assert-NoActiveConnectorRecovery "Rollback to $backTo"
             Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         }
     } catch {
-        if ($wasRunning) { [void](Start-Gateway) }
-        throw
+        $abort = $_
+        if ($conversionAttempted) { Restore-HooksAfterAbortedRollback }
+        if ($wasRunning) {
+            try { [void](Start-Gateway) } catch { Write-Warn "The current gateway could not restart: $($_.Exception.Message)" }
+        }
+        throw $abort
     }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
     if ($swapped -ne 0) {
         # 1: the swap undid itself, so this install is back and may run again.
+        if ($swapped -eq 1 -and $conversionAttempted) { Restore-HooksAfterAbortedRollback }
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }

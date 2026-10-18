@@ -12,6 +12,7 @@ for current behavior.
 
 ### Fixed
 
+- An aborted Windows rollback restores hooks converted for the older release, including when the gateway was stopped. Restoration verifies the exact published file and retains recovery evidence when it cannot establish ownership.
 - Windows version changes refuse active connector transactions before capturing rollback data or switching versions, so pending receipts cannot become stranded in a saved snapshot. Rollback also checks saved data before starting an older reader. Retrying a rollback after a receipt move failure keeps the live runtime and settings intact. A failed gateway restart after an installer handoff reports failure with rollback and restart instructions.
 - Windows connector setup preserves ordinary NTFS extended attributes when replacing an agent's settings. Windows can invalidate its own `$Kernel.Purge.*` cache attributes after a content change; those attributes no longer make a completed replacement look like a foreign edit. File identity, permissions, content, and recovery checks remain enforced.
 - A failed Windows upgrade keeps connector recovery receipts before removing the failed runtime, including when restoring the retired 0.8.x Setup installation. The installer reports the private recovery archive instead of discarding evidence for partially updated agent settings.

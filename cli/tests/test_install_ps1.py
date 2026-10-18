@@ -668,7 +668,7 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
     assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
     rollback = _ps1_function("Invoke-Rollback")
     # GAP-1284: this install's gateway converts its hook entries before the older one is restored.
-    assert rollback.index("if (-not $rollForward) { Convert-HooksForRollback") < rollback.index("Switch-WithPrevious")
+    assert rollback.index("if ($canConvertHooks)") < rollback.index("Convert-HooksForRollback") < rollback.index("Switch-WithPrevious")
     assert (
         rollback.index("Switch-WithPrevious")
         < rollback.index("Protect-UvDirectory")

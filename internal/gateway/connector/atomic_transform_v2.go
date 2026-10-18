@@ -123,6 +123,10 @@ type atomicTransformV2Options struct {
 	// replacement. The bound owner check repeats on every CAS attempt.
 	preserveExistingProtection bool
 	expectedOwner              *windows.SID
+	// Optional caller proof checks run against this transaction's actual
+	// snapshot, including no-ops, and its prepared publication before commit.
+	validateSnapshot func(atomicFileSnapshot) error
+	beforeCommit     func(atomicTransformV2Receipt) error
 }
 
 func (txn *atomicTransformV2Transaction) close() error {
@@ -186,6 +190,11 @@ func atomicTransformFileV2Locked(
 		snapshot, err := readAtomicFileSnapshot(path)
 		if err != nil {
 			return err
+		}
+		if options.validateSnapshot != nil {
+			if err := options.validateSnapshot(snapshot); err != nil {
+				return err
+			}
 		}
 		if snapshot.exists && options.expectedOwner != nil {
 			if err := validateAtomicTransformV2ExpectedOwner(path, snapshot, options.expectedOwner); err != nil {
@@ -282,6 +291,12 @@ func atomicTransformFileV2Locked(
 			continue
 		}
 
+		if options.beforeCommit != nil {
+			if err := options.beforeCommit(txn.receipt); err != nil {
+				_ = txn.close()
+				return errors.Join(err, recoverAtomicTransformV2Locked(inputPath, stateDir))
+			}
+		}
 		err = commitAtomicTransformV2(path, snapshot, txn)
 		if closeErr := txn.close(); closeErr != nil && err == nil {
 			err = closeErr
