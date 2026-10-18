@@ -137,6 +137,20 @@
       "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
     },
     {
+      "$comment": "Only Linux and macOS have machine-policy-only connectors (managed_hook true, no per-user target). On Windows every connector entry carries targets unless hooks_installed is unknown.",
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
+      "then": {
+        "properties": {
+          "connectors": {
+            "additionalProperties": {
+              "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+              "else": { "required": ["targets"] }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
       "if": {
         "required": ["errors"],

@@ -60,7 +60,8 @@ func TestLifecycleSchemaWindowsExitCodesMatchTheLifecycle(t *testing.T) {
 	}
 	var allowed []int
 	for _, clause := range schema.AllOf {
-		if clause.If.Properties.Platform.Const == "windows" {
+		// Other Windows clauses (the connectors rule) carry no exit codes.
+		if clause.If.Properties.Platform.Const == "windows" && len(clause.Then.Properties.ExitCode.Enum) > 0 {
 			allowed = clause.Then.Properties.ExitCode.Enum
 		}
 	}
