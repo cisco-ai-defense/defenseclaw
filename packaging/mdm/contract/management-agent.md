@@ -312,8 +312,8 @@ Prints one line and exits 0, also on a managed device. Schema
 There is no features list: a build that prints `management_contract: 1` has
 everything in this file except the members marked optional, which a later
 build added without a bump (section 0): gate on `management_contract` 1 and
-then on the member being present. A build without the member predates the
-contract; use these fallbacks on it:
+then on the member being present. A build without the member predates that
+member; use these fallbacks on it:
 
 | Item | `management_contract` 1 | Member absent |
 |---|---|---|
