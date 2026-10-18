@@ -13,7 +13,9 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,3 +265,65 @@ func TestOpenShellCapabilityMapping(t *testing.T) {
 }
 
 func boolRef(v bool) *bool { return &v }
+
+// The docker row only says Docker is installed. On Linux a block that would
+// report docker asks the engine: a stopped engine is driver_available none
+// with openshell_prerequisite_missing and a warning (GAP-0006); a Mac is not
+// asked (Docker Desktop runs per user).
+func TestOpenShellCapabilityAsksTheDockerEngine(t *testing.T) {
+	docker := openshellSettings{Enabled: true, Install: "setup", Driver: "docker", Version: "0.0.36"}
+	vm := openshellSettings{Enabled: true, Install: "setup", Driver: "vm", Fallback: "docker", Version: "0.0.36"}
+	rows := []prereqRow{{Name: "openshell pin", OK: true}, {Name: "docker", OK: true}}
+	vmRows := []prereqRow{{Name: "openshell pin", OK: true}, {Name: "kvm"}}
+	for _, tc := range []struct {
+		name, goos     string
+		s              openshellSettings
+		primary        []prereqRow
+		fallback       []prereqRow
+		socket, answer bool
+		want, reason   string
+		asked          bool
+	}{
+		{"linux engine answers", "linux", docker, rows, nil, true, true, "docker", "", true},
+		{"linux engine stopped", "linux", docker, rows, nil, true, false, "none", codeOpenShellPrerequisite, true},
+		{"linux no engine socket", "linux", docker, rows, nil, false, true, "none", codeOpenShellPrerequisite, false},
+		{"linux vm fallback, engine stopped", "linux", vm, vmRows, rows, true, false, "none", codeOpenShellPrerequisite, true},
+		{"macOS is not asked", "darwin", docker, rows, nil, false, false, "docker", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, tc.goos)
+			if tc.socket {
+				writeHostFile(t, h, "/var/run/docker.sock", "")
+			}
+			asked := false
+			h.env.DockerEngine = func(_ context.Context, socket string) error {
+				asked = true
+				if socket != h.env.P("/var/run/docker.sock") {
+					t.Errorf("asked %s", socket)
+				}
+				if !tc.answer {
+					return errors.New("connection refused")
+				}
+				return nil
+			}
+			l := &lifecycle{env: h.env, opts: Options{Action: ActionStatus}, result: enterprisestatus.New(ActionStatus, "standalone", tc.goos, "1.0.3")}
+			l.noteOpenShellCapability(context.Background(), tc.s, true, tc.primary, tc.fallback)
+			got := l.result.OpenShell
+			if got.DriverAvailable != tc.want || got.ReasonCode != tc.reason || asked != tc.asked {
+				t.Fatalf("openshell = %+v, asked %v", got, asked)
+			}
+			warned := messagesOf(l.result.Warnings, codeOpenShellPrerequisite) != ""
+			if warned != (tc.want == "none") {
+				t.Fatalf("warnings = %+v", l.result.Warnings)
+			}
+		})
+	}
+	// ensure does not ask.
+	h := newTestHost(t, "linux")
+	h.env.DockerEngine = func(context.Context, string) error { t.Fatal("ensure asked the engine"); return nil }
+	l := &lifecycle{env: h.env, opts: Options{Action: ActionEnsure}, result: enterprisestatus.New(ActionEnsure, "standalone", "linux", "1.0.3")}
+	l.noteOpenShellCapability(context.Background(), docker, true, rows, nil)
+	if l.result.OpenShell != nil {
+		t.Fatal("ensure carries the openshell block")
+	}
+}

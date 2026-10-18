@@ -231,6 +231,11 @@ type Env struct {
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+	// DockerEngine connects to the Docker engine socket at the rooted path
+	// and returns nil when the engine accepts the connection (see
+	// dockerEngineAnswers); status and verify use it for the openshell block
+	// on Linux.
+	DockerEngine func(ctx context.Context, socket string) error
 
 	// UserUnitSource reads the definition of a sandbox user unit by its
 	// embedded file name (default: the embedded unit assets); tests replace it.
@@ -360,6 +365,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.DiskSpace == nil {
 		e.DiskSpace = diskSpace
+	}
+	if e.DockerEngine == nil {
+		e.DockerEngine = dialDockerEngine
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)

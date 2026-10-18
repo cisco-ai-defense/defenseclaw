@@ -95,7 +95,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 				l.describePending(entry)
 			}
 		}
-		l.noteOpenShellCapability(settings, false, nil, nil)
+		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
 		return
 	}
 	row := func(name, state string) {
@@ -104,7 +104,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	row("openshell", fmt.Sprintf("enabled, install=%s driver=%s%s gateway=127.0.0.1:%d%s", settings.Install, settings.Driver,
 		fallbackNote(settings), settings.GatewayPort, versionNote(settings.Version)))
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
-	l.noteOpenShellCapability(settings, true, primary, fallback)
+	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
 	for _, check := range primary {
 		if check.OK {
@@ -587,9 +587,12 @@ func (e *Env) checkKVM() prereqRow {
 	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " is limited to its group (users need the kvm group)"}
 }
 
+// dockerSockets are where the Docker engine listens on Linux and macOS.
+var dockerSockets = []string{"/var/run/docker.sock", "/run/docker.sock"}
+
 func (e *Env) checkDocker() prereqRow {
 	cli := e.firstExisting(append(e.binCandidates("docker"), "/Applications/Docker.app/Contents/Resources/bin/docker"))
-	sock := e.firstExisting([]string{"/var/run/docker.sock", "/run/docker.sock"})
+	sock := e.firstExisting(dockerSockets)
 	switch {
 	case cli == "" && sock == "":
 		return prereqRow{Name: "docker", Detail: "Docker is not installed", Fix: "install Docker Engine (Docker Desktop on a Mac); the sandbox images are built and run through it"}

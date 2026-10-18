@@ -475,6 +475,8 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		}
 		return peercred.Credentials{}, errors.New("connection refused")
 	}
+	// The fake host's Docker engine answers; tests that stop it replace this.
+	env.DockerEngine = func(context.Context, string) error { return nil }
 	env.fillDefaults()
 	h.env = env
 	return h

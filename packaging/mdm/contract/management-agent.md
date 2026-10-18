@@ -691,7 +691,10 @@ input feeds and adds the warning `status_detail_unavailable`.
   `openshell_driver_fallback`, `openshell_disabled`). Windows always
   reports `{"enabled": false, "driver_available": "none", "reason_code":
   "platform_unsupported"}`. Status spawns no extra probe for it: the block is
-  derived from the sandbox rows status already checks.
+  derived from the sandbox rows status already checks, plus, on Linux when
+  it would report `docker`, one bounded connect to the Docker engine socket:
+  a stopped engine is `driver_available` `none` with
+  `openshell_prerequisite_missing` (also a warning).
 - `identity`: the gateway's directory lookups. `state` is `ok`, `failing`
   (`failing_accounts` > 0), `idle` (no lookup succeeded since the gateway
   started) or `unknown` with `reason_code` `gateway_not_ready` or

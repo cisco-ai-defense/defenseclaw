@@ -14,11 +14,14 @@ package enterpriseunix
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -182,11 +185,51 @@ func (l *lifecycle) noteIdentityHealth(body []byte) {
 
 // noteOpenShellCapability sets the openshell block for status and verify
 // from the sandbox rows describeOpenShell computed (on: sandboxes are
-// enabled).
-func (l *lifecycle) noteOpenShellCapability(settings openshellSettings, on bool, primary, fallback []prereqRow) {
-	if l.statusV2() {
-		l.result.OpenShell = openShellCapability(settings, on, primary, fallback)
+// enabled). The docker row only says Docker is installed; on Linux, where
+// one system engine serves every user, a block that would report docker
+// also asks the engine, so a stopped engine is driver_available none
+// (GAP-0006). On a Mac Docker Desktop runs per user, so sandbox doctor
+// checks it for each user instead.
+func (l *lifecycle) noteOpenShellCapability(ctx context.Context, settings openshellSettings, on bool, primary, fallback []prereqRow) {
+	if !l.statusV2() {
+		return
 	}
+	c := openShellCapability(settings, on, primary, fallback)
+	if c.DriverAvailable == enterprisestatus.OpenShellDriverDocker && l.env.GOOS == "linux" {
+		if socket, err := l.env.dockerEngineAnswers(ctx); err != nil {
+			c.DriverAvailable, c.ReasonCode = enterprisestatus.OpenShellDriverNone, codeOpenShellPrerequisite
+			l.result.AddWarning(codeOpenShellPrerequisite, fmt.Sprintf("sandboxes cannot run for users on this host (docker): "+
+				"the Docker engine does not answer on %s (%v); start it (systemctl start docker)", socket, err))
+		}
+	}
+	l.result.OpenShell = c
+}
+
+// dockerEngineTimeout bounds one connect to the Docker engine socket.
+const dockerEngineTimeout = time.Second
+
+// dockerEngineAnswers connects to the first Docker engine socket that
+// exists; socket is the path it tried (the first candidate when none
+// exists).
+func (e *Env) dockerEngineAnswers(ctx context.Context) (socket string, err error) {
+	socket = e.firstExisting(dockerSockets)
+	if socket == "" {
+		return dockerSockets[0], errors.New("no engine socket")
+	}
+	return socket, e.DockerEngine(ctx, e.P(socket))
+}
+
+// dialDockerEngine is the production DockerEngine: one bounded unix
+// connect, closed at once, nothing written.
+func dialDockerEngine(ctx context.Context, socket string) error {
+	ctx, cancel := context.WithTimeout(ctx, dockerEngineTimeout)
+	defer cancel()
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // openShellCapability maps the sandbox rows to the openshell block: codes and
