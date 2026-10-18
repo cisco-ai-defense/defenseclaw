@@ -30862,7 +30862,12 @@ function Invoke-DefenseClawNuclearUninstall {
         'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.lock',
         'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.receipt',
         'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.state',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.lock'
+        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.lock',
+        # GitHub Copilot (the CLI and the GitHub Copilot app): DefenseClaw's
+        # policy.d drop-in and DefenseClaw's own enrollment and runtime
+        # selector folder beside it.
+        'C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json',
+        'C:\ProgramData\GitHub\Copilot\DefenseClaw'
     )) {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
             continue
@@ -30882,6 +30887,21 @@ function Invoke-DefenseClawNuclearUninstall {
         }
         catch {
             $warnings.Add("nuclear uninstall could not remove fixed-path $fixedPath : $($_.Exception.Message)")
+        }
+    }
+
+    # The Copilot policy folders hold nothing once DefenseClaw's files are
+    # gone, unless an administrator added policy of their own; only empty
+    # ones are removed.
+    foreach ($copilotFolder in @(
+        'C:\ProgramData\GitHub\Copilot\policy.d',
+        'C:\ProgramData\GitHub\Copilot',
+        'C:\ProgramData\GitHub'
+    )) {
+        if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $copilotFolder -PathType Container) -and
+            $null -eq (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $copilotFolder -Force -ErrorAction SilentlyContinue |
+                Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $copilotFolder -Force -ErrorAction SilentlyContinue
         }
     }
 

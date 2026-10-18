@@ -5,14 +5,19 @@
 
 package enterprisehooks
 
-import "strings"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // RemoveWindowsSecureClientPerUserRuntimeDirectories is the last step of a
 // Secure Client managed-hook teardown or first-install rollback. Once the
 // enrollment and selector are gone, DefenseClaw's folder in Copilot's machine
 // folder (%ProgramData%\GitHub\Copilot\DefenseClaw) holds only lock files; it
-// loses them and is removed. A folder that still holds anything else is left
-// in place and returned, and Copilot's own folders are never touched.
+// loses them and is removed, and so are the Copilot and GitHub folders above
+// it when nothing else is left in them. A folder that still holds anything
+// else is left in place; DefenseClaw's own is returned.
 func RemoveWindowsSecureClientPerUserRuntimeDirectories() ([]string, error) {
 	if windowsPerUserRuntimeStandalone() {
 		return nil, nil
@@ -23,15 +28,38 @@ func RemoveWindowsSecureClientPerUserRuntimeDirectories() ([]string, error) {
 		if err != nil {
 			return kept, err
 		}
+		existed, err := windowsHookRuntimePlainDirectory(directory)
+		if err != nil {
+			return kept, err
+		}
 		removed, err := removeWindowsHookRuntimeConnectorDirectory(directory)
 		if err != nil {
 			return kept, err
 		}
 		if !removed {
 			kept = append(kept, directory)
+			continue
+		}
+		if existed {
+			removeEmptyWindowsCopilotFolders(directory)
 		}
 	}
 	return kept, nil
+}
+
+// removeEmptyWindowsCopilotFolders removes the Copilot folder and the GitHub
+// folder above DefenseClaw's once they are empty plain directories: the
+// policy publication created them for DefenseClaw's drop-in, and the drop-in
+// and DefenseClaw's folder are gone. Any other content keeps them.
+func removeEmptyWindowsCopilotFolders(directory string) {
+	for _, folder := range []string{filepath.Dir(directory), filepath.Dir(filepath.Dir(directory))} {
+		if exists, err := windowsHookRuntimePlainDirectory(folder); err != nil || !exists {
+			return
+		}
+		if err := os.Remove(folder); err != nil {
+			return
+		}
+	}
 }
 
 // windowsSecureClientCopilotVersion is a Secure Client GitHub Copilot row's

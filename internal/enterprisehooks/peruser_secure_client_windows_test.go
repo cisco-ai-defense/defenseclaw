@@ -152,14 +152,36 @@ func TestRemoveWindowsSecureClientPerUserRuntimeDirectories(t *testing.T) {
 	if err := os.Remove(filepath.Join(directory, "enrollment.json")); err != nil {
 		t.Fatal(err)
 	}
+	// An administrator's policy in Copilot's folder keeps it and GitHub's.
+	adminPolicy := filepath.Join(filepath.Dir(directory), "policy.d", "10-company.json")
+	if err := os.MkdirAll(filepath.Dir(adminPolicy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adminPolicy, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if kept, err := RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil || len(kept) != 0 {
 		t.Fatalf("lock-only folder: kept=%v err=%v", kept, err)
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("lock-only folder survived: %v", err)
 	}
-	if _, err := os.Stat(filepath.Dir(directory)); err != nil {
-		t.Fatalf("Copilot's own folder was removed: %v", err)
+	if _, err := os.Stat(adminPolicy); err != nil {
+		t.Fatalf("the administrator's Copilot policy was removed: %v", err)
+	}
+	// Once DefenseClaw's folder was the last thing there, the empty Copilot
+	// and GitHub folders go with it.
+	if err := os.RemoveAll(filepath.Dir(adminPolicy)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil || len(kept) != 0 {
+		t.Fatalf("last folder: kept=%v err=%v", kept, err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(directory))); !os.IsNotExist(err) {
+		t.Fatalf("the empty GitHub folder survived: %v", err)
 	}
 	pinWindowsPerUserRuntimeStandaloneForTest(t, true)
 	if kept, err := RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil || kept != nil {
