@@ -8,6 +8,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -47,8 +48,8 @@ func verifyV2Device(t *testing.T) (e *bundleCLIEnv, signed string, source string
 	return e, signed, source
 }
 
-// treeOf lists every file and directory below root with its size and
-// modification time, so a test can prove a run wrote nothing there.
+// treeOf lists every file and directory below root with its exact size,
+// mode and modification time, so a test can prove a run wrote nothing there.
 func treeOf(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
@@ -58,7 +59,7 @@ func treeOf(t *testing.T, root string) []string {
 		}
 		info, err := entry.Info()
 		if err == nil {
-			out = append(out, path+" "+info.ModTime().String()+" "+strings.Repeat("x", int(info.Size()%7)))
+			out = append(out, fmt.Sprintf("%s %s %d %s", path, info.ModTime(), info.Size(), info.Mode()))
 		}
 		return nil
 	})
