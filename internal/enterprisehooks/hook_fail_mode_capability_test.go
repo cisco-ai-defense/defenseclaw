@@ -11,6 +11,7 @@
 package enterprisehooks
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -35,6 +36,11 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 		"hermes": "open", "copilot": "open", // cannot fail closed
 		"codex": "closed", "claudecode": "closed", "opencode": "closed",
 		"amp": "open", // configured open stays open
+	}
+	if runtime.GOOS == "windows" {
+		// The Windows renderer pins every standalone per-user connector closed
+		// whatever the config says (windowsEnterpriseHookFailMode).
+		want["amp"] = "closed"
 	}
 	for name, mode := range want {
 		if got := ManagedHookFailMode(cfg, name); got != mode {
