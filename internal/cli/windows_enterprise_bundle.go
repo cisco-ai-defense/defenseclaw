@@ -63,6 +63,14 @@ const (
 	windowsBundleStagedAnchorsName = "bundle-staged-anchors.json"
 	windowsBundleMaxConfig         = 4 << 20
 	windowsBundleMaxAnchors        = 256 << 10
+	// Warnings of a changing run without --bundle that settles the
+	// receipts a killed bundle run left (GAP-1302). The first three are the
+	// codes Linux and macOS use for the same outcomes.
+	windowsBundleInterruptedWarning     = "bundle_interrupted"
+	windowsBundleUnconfirmedWarning     = "bundle_unconfirmed"
+	windowsBundleStateUnreadableWarning = "bundle_state_unreadable"
+	windowsBundleSettleDeferredWarning  = "bundle_settle_deferred"
+	windowsBundleMarkerFailedWarning    = "bundle_marker_failed"
 	// windowsBundlePolicyWaits bounds how often the confirm re-reads the
 	// gateway policy after a successful transaction (a hot reload lags).
 	windowsBundlePolicyWaits = 4
@@ -85,6 +93,7 @@ var (
 	windowsBundleEnsureDirectory        = ensureWindowsBundleDirectory
 	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
 	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
+	windowsBundleSyncMarker             = syncWindowsBundleMarker
 )
 
 func init() {
@@ -106,20 +115,37 @@ func init() {
 // receipt and the confirmed state. The store lock excludes a live apply; an
 // active writer retains ownership and status reports its pending receipt.
 func settleWindowsBundleStatus(ctx context.Context) error {
+	_, err := settleWindowsBundleStatusReport(ctx)
+	return err
+}
+
+// settleWindowsBundleStatusReport is settleWindowsBundleStatus that also
+// returns the receipts still unsettled afterwards, read under the store
+// lock: no live apply owns them, a killed one left them (GAP-0028). nil
+// while a live apply holds the lock.
+func settleWindowsBundleStatusReport(ctx context.Context) ([]*enterprisebundle.Receipt, error) {
 	layout, err := windowsBundleLayout()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
 	if err != nil {
 		// A live apply may hold this lock. It will settle its own receipt.
 		if errors.Is(err, errWindowsBundleStoreBusy) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer unlock()
 	driver := newWindowsBundleDriver(layout)
+	if err := settleWindowsBundleStatusLocked(ctx, layout, driver); err != nil {
+		return nil, err
+	}
+	unsettled, _ := driver.Store.Unsettled()
+	return unsettled, nil
+}
+
+func settleWindowsBundleStatusLocked(ctx context.Context, layout managed.StandaloneLayout, driver *enterprisebundle.Driver) error {
 	receipts, err := driver.Store.Receipts()
 	if err != nil {
 		return err
@@ -242,6 +268,11 @@ type windowsBundleRun struct {
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
+	// anchorCommit records the anchor file a BUNDLE= TRUSTANCHORS= run
+	// committed (commitAnchors), so a repeat of the confirmed bundle that
+	// installed other anchors is not reported as an already_applied no-op
+	// (GAP-0034).
+	anchorCommit *anchorOnlyChange
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
@@ -598,8 +629,10 @@ func publishWindowsBundleVersion(root string) error {
 // file and verifies the bundle against the stage; finish commits it once
 // the bundle is confirmed. --trust-anchors alone installs the anchor file.
 // In bundle mode (anchors installed) a --config that is not the
-// current bundle config is refused with bundle_required. done is set when
-// the run ended here with err as its outcome.
+// current bundle config is refused with bundle_required. Without --bundle
+// and --trust-anchors, a changing run on an installed device settles the
+// receipts a killed bundle run left (settleWindowsInterruptedBundles). done
+// is set when the run ended here with err as its outcome.
 func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions) (done bool, err error) {
 	if opts.bundleRollback {
 		return false, nil
@@ -636,12 +669,23 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	driver := newWindowsBundleDriver(layout)
 	if !requested {
-		return refuseWindowsBundleRequired(cmd, action, opts, driver)
+		if done, err := refuseWindowsBundleRequired(cmd, action, opts, driver); done {
+			return true, err
+		}
+		if opts.installedBeforeRun {
+			// The bundle restore of this run (or the current bundle config it
+			// was given) re-installs the last good bundle over a bundle config
+			// a killed run installed and the gateway never confirmed.
+			reinstall := windowsBundleRestoreRequested(action, opts) || strings.TrimSpace(opts.configPath) != ""
+			opts.bundleSettle = &windowsBundleSettle{ctx: ctx}
+			settleWindowsInterruptedBundles(opts.bundleSettle, layout, driver, opts.bundleLockWait, reinstall)
+		}
+		return false, nil
 	}
 	if !opts.installedBeforeRun {
 		return refuse(string(enterprisebundle.CodeNotManaged), "DefenseClaw enterprise is not installed: install it first with /ensure CONFIG=<config.yaml>, then deliver policy bundles with /ensure BUNDLE=<file> TRUSTANCHORS=<bundle-anchors.json>")
 	}
-	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
+	unlock, err := lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
 	if err != nil {
 		return refuse("lifecycle_busy", err.Error())
 	}
@@ -695,6 +739,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	run.previous = installed
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
+	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())
@@ -730,6 +775,139 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	opts.configPath = path
 	handedOff = true
 	return false, nil
+}
+
+// windowsBundleSettle is what a changing run that delivers no bundle
+// settled of the receipts a killed bundle run left. The bundle status
+// warning bundle_pending and the contract (4.6) name a plain `enterprise
+// windows ensure` as the recovery, so it settles them as `ensure --bundle`
+// does before it receives its own bundle (GAP-1302).
+type windowsBundleSettle struct {
+	ctx      context.Context
+	warnings []enterprisebundle.Warning
+	// deferred is set while an install transaction is pending: the ensure
+	// recovers it first, and finish settles the receipts after it.
+	deferred bool
+	// replacing names the bundle a killed run installed and the gateway
+	// never confirmed; the bundle restore of this run replaces its config
+	// with the confirmed bundle's.
+	replacing string
+}
+
+func (s *windowsBundleSettle) warn(code, message string) {
+	s.warnings = append(s.warnings, enterprisebundle.Warning{Code: code, Message: message})
+}
+
+// windowsBundleSettleReplacing is the bundle the restore of this run
+// replaces (windowsBundleSettle.replacing), or "".
+func windowsBundleSettleReplacing(opts *windowsEnterpriseLifecycleOptions) string {
+	if opts == nil || opts.bundleSettle == nil {
+		return ""
+	}
+	return opts.bundleSettle.replacing
+}
+
+// windowsBundleInstallTransactionPending reports an install transaction a
+// run started and did not finish (install\pending.json): its recovery puts
+// back the config it recorded.
+func windowsBundleInstallTransactionPending(layout managed.StandaloneLayout) bool {
+	_, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json"))
+	return err == nil
+}
+
+// settleWindowsInterruptedBundles settles, under bundle.lock, the receipts
+// no run finished: received, verified and staged receipts fail as
+// interrupted (nothing was installed), and an applied one (or a staged one
+// whose config a committed transaction installed) is confirmed when the
+// installed config and the gateway enforce it and fails as not_confirmed
+// otherwise (warning bundle_unconfirmed). reinstall says whether this run
+// then re-installs the last good bundle over a config that failed that way;
+// the warning says who does.
+// While a live bundle run holds the lock it owns its receipts, and nothing is
+// settled. While an install transaction is pending, the settle waits for the
+// ensure to recover it (finishWindowsInterruptedBundles runs it again).
+func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed.StandaloneLayout, driver *enterprisebundle.Driver, wait time.Duration, reinstall bool) {
+	unsettled, err := driver.Store.Unsettled()
+	if err != nil {
+		settle.warn(windowsBundleStateUnreadableWarning, "could not read the policy bundle receipts to settle them: "+err.Error())
+		return
+	}
+	if len(unsettled) == 0 {
+		settle.deferred = false
+		return
+	}
+	if windowsBundleInstallTransactionPending(layout) {
+		settle.deferred = true
+		return
+	}
+	settle.deferred = false
+	unlock, err := lockWindowsBundleStoreWithin(settle.ctx, layout.LifecycleDir, wait)
+	if err != nil {
+		if !errors.Is(err, errWindowsBundleStoreBusy) {
+			settle.warn(windowsBundleStateUnreadableWarning, "could not lock the policy bundle store to settle the receipts a killed run left: "+err.Error())
+		}
+		return
+	}
+	defer unlock()
+	installed, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		settle.warn(windowsBundleStateUnreadableWarning, "could not read the installed config to settle the policy bundle receipts a killed run left: "+err.Error())
+		return
+	}
+	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(settle.ctx))
+	if err != nil {
+		settle.warn(windowsBundleStateUnreadableWarning, "could not settle the policy bundle receipts a killed run left: "+err.Error())
+		return
+	}
+	if n := len(report.Interrupted); n > 0 {
+		settle.warn(windowsBundleInterruptedWarning, fmt.Sprintf(
+			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
+	}
+	if n := len(report.Completed); n > 0 {
+		settle.warn(enterprisebundle.WarnConfirmedAfterInterrupt, fmt.Sprintf(
+			"%d policy bundle(s) a previous run applied and did not confirm are confirmed now: the gateway enforces them", n))
+	}
+	if len(rollback) > 0 {
+		rc := rollback[0]
+		label := fmt.Sprintf("policy bundle %s version %d", rc.BundleID, rc.Version)
+		message := fmt.Sprintf("%s was applied by a run that ended before the gateway confirmed it (failed: %s); ", label, rc.ErrorCode)
+		switch {
+		case !windowsBundleHasCurrent(driver.Store):
+			message += "no bundle was confirmed before it, so its config stays installed until a signed bundle is delivered and confirmed"
+		case reinstall:
+			settle.replacing = label
+			message += "this run re-installs the last good bundle"
+		default:
+			message += "run `enterprise windows ensure --profile standalone` to re-install the last good bundle"
+		}
+		settle.warn(windowsBundleUnconfirmedWarning, message)
+	}
+	if err := windowsBundleSyncMarker(driver.Store); err != nil {
+		settle.warn(windowsBundleMarkerFailedWarning, "the policy bundle receipts were settled, but the enterprise marker was not updated: "+err.Error())
+	}
+}
+
+// finishWindowsInterruptedBundles adds what settleWindowsInterruptedBundles
+// did to the result. A settle deferred behind a pending install transaction
+// runs now, after the ensure recovered it.
+func finishWindowsInterruptedBundles(opts *windowsEnterpriseLifecycleOptions, result *enterprisestatus.Result) {
+	settle := opts.bundleSettle
+	if settle == nil {
+		return
+	}
+	opts.bundleSettle = nil
+	if settle.deferred {
+		if layout, err := windowsBundleLayout(); err == nil {
+			settleWindowsInterruptedBundles(settle, layout, newWindowsBundleDriver(layout), opts.bundleLockWait, false)
+		}
+		if settle.deferred {
+			settle.warn(windowsBundleSettleDeferredWarning, "an install transaction is still pending, so the policy bundle receipts a killed run left were not settled; "+
+				"the current or last good bundle keeps enforcing: run `enterprise windows ensure --profile standalone` again")
+		}
+	}
+	for _, w := range settle.warnings {
+		result.AddWarning(w.Code, w.Message)
+	}
 }
 
 // refuseWindowsBundleRequired refuses, in bundle mode, a --config that is
@@ -797,6 +975,7 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	}
 	run := opts.bundle
 	if run == nil {
+		finishWindowsInterruptedBundles(opts, result)
 		attachWindowsBundleSummary(result, nil, nil, nil)
 		return
 	}
@@ -852,8 +1031,19 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil {
 		receipt = p.Receipt
 	}
+	if p != nil && p.AlreadyApplied && result.Bundle == nil {
+		// A repeated delivery of the current bundle wrote no receipt: its
+		// block is the confirmed current bundle, not a newer delivery that
+		// failed after staging (the store summary).
+		if current, err := run.driver.Store.CurrentSummary(); err == nil && current != nil {
+			result.Bundle = current
+		}
+	}
 	confirmed := attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
 	settleAnchorOnlyEnsure(result, run.anchorOnly, confirmed)
+	// The bundle of this run verified against the committed anchors, so the
+	// change line needs no clause about the confirmed bundle.
+	settleAnchorOnlyEnsure(result, run.anchorCommit, false)
 }
 
 func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
@@ -863,15 +1053,19 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 	}
 }
 
-// commitAnchors installs the staged trust anchors of a confirmed bundle; a
-// failed commit puts the previous anchors back and fails the run.
+// commitAnchors installs the staged trust anchors of a confirmed bundle and
+// records what it installed for the result; a failed commit puts the
+// previous anchors back and fails the run.
 func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
-	if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+	installed, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
+	if err != nil {
 		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		if restoreErr := run.restoreAnchors(); restoreErr != nil {
 			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
 		}
+		return
 	}
+	run.anchorCommit = &anchorOnlyChange{path: run.anchorPath, existed: run.anchorExisted, previous: run.anchorPrevious, installed: installed}
 }
 
 func (run *windowsBundleRun) restoreAnchors() error {
@@ -1233,6 +1427,18 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 		_ = windows.CloseHandle(handle)
 	}, nil
+}
+
+// lockWindowsBundleStoreWithin takes the bundle store lock, waiting up to
+// wait for another bundle run to release it (`enterprise bundle apply
+// --lock-wait`); a wait of 0 returns at once, as lockWindowsBundleStore does.
+func lockWindowsBundleStoreWithin(ctx context.Context, lifecycleDir string, wait time.Duration) (func(), error) {
+	unlock, err := acquireWindowsLockWithin(ctx, wait, func() (func(), error) { return lockWindowsBundleStore(lifecycleDir) },
+		func(err error) bool { return errors.Is(err, errWindowsBundleStoreBusy) })
+	if err != nil && wait > 0 && errors.Is(err, errWindowsBundleStoreBusy) {
+		return nil, fmt.Errorf("%w (still held after --lock-wait %s)", err, formatWindowsLockWait(wait))
+	}
+	return unlock, err
 }
 
 // writeWindowsBundleMarker publishes the confirmed bundle on the standalone

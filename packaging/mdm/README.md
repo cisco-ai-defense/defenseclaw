@@ -24,6 +24,7 @@ in the config, including which agents to protect, is in
 | `contract/lifecycle-result.schema.json` | The JSON document every lifecycle action, wrapper and removal script prints (schema version 2). |
 | `contract/exit-codes.md` | Exit codes per OS, what they mean, and which ones an MDM should retry. |
 | `contract/detection.md` | How to tell an MDM that DefenseClaw is installed, current and healthy. |
+| `contract/management-agent.md`, `contract/*.schema.json` | The contract for a root or LocalSystem management agent that drives the `enterprise` commands itself, and the JSON Schemas of every document those commands print or read. |
 | `windows/Invoke-DefenseClawEnterprise.ps1` | Generic Windows wrapper (PowerShell 7.4 or later). Verifies and runs `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure`. |
 | `windows/detect.ps1`, `windows/uninstall.ps1` | Windows detection and removal. These run in Windows PowerShell 5.1 (32- or 64-bit) and PowerShell 7. |
 | `linux/*.sh`, `macos/*.sh` | Generic wrapper (`defenseclaw-enterprise.sh`), `detect.sh` and `uninstall.sh`. The Linux and macOS copies differ only in the line `DC_SCRIPT_OS`. |

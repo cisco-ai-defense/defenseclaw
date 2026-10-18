@@ -1025,6 +1025,9 @@ type windowsClaudeManagedRuntimeVersionReport struct {
 	Version       string `json:"version"`
 	Commit        string `json:"commit,omitempty"`
 	Built         string `json:"built,omitempty"`
+	// ManagementContract is the management agent contract the gateway
+	// implements; accepted, not checked.
+	ManagementContract int `json:"management_contract,omitempty"`
 }
 
 func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolicyTarget, expectedVersion string) error {
@@ -1089,6 +1092,12 @@ func probeWindowsClaudeManagedRuntimeVersion(gatewayPath, expectedVersion string
 	if err != nil {
 		return fmt.Errorf("version probe exited unsuccessfully: %w: %s", err, strings.TrimSpace(string(output)))
 	}
+	return checkWindowsClaudeManagedRuntimeVersionReport(output, expectedVersion)
+}
+
+// checkWindowsClaudeManagedRuntimeVersionReport accepts exactly one
+// gateway --version-json document of expectedVersion.
+func checkWindowsClaudeManagedRuntimeVersionReport(output []byte, expectedVersion string) error {
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
 	var report windowsClaudeManagedRuntimeVersionReport

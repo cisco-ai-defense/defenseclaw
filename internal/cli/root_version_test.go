@@ -30,4 +30,14 @@ func TestWriteMachineVersion(t *testing.T) {
 		report.Version != appVersion || report.Commit != appCommit || report.Built != appBuildDate {
 		t.Fatalf("machine version report = %+v", report)
 	}
+	// The management agent contract version is the only capability signal:
+	// every build that prints it has the whole contract, so there is no
+	// features list to read.
+	var members map[string]any
+	if err := json.Unmarshal(output.Bytes(), &members); err != nil {
+		t.Fatal(err)
+	}
+	if members["management_contract"] != float64(1) || members["features"] != nil {
+		t.Fatalf("machine version report members = %v", members)
+	}
 }

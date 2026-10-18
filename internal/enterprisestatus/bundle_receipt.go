@@ -40,6 +40,10 @@ const (
 	PublicReceiptSchemaVersion = 1
 
 	maxPublicReceiptBytes = 16 << 10
+
+	// MaxDeliveryIDBytes bounds the delivery id of `enterprise bundle apply
+	// --delivery-id`.
+	MaxDeliveryIDBytes = 128
 )
 
 var receiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
@@ -49,9 +53,12 @@ var receiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 type PublicReceipt struct {
 	SchemaVersion int    `json:"schema_version"`
 	ReceiptID     string `json:"receipt_id"`
-	BundleID      string `json:"bundle_id,omitempty"`
-	Version       uint64 `json:"version,omitempty"`
-	SignerKeyID   string `json:"signer_key_id,omitempty"`
+	// DeliveryID is the caller-supplied --delivery-id of this delivery
+	// (CheckDeliveryID), absent without the flag.
+	DeliveryID  string `json:"delivery_id,omitempty"`
+	BundleID    string `json:"bundle_id,omitempty"`
+	Version     uint64 `json:"version,omitempty"`
+	SignerKeyID string `json:"signer_key_id,omitempty"`
 	// Principal is the manifest created_by (control-plane:<tenant>/<admin>
 	// or operator:<os-admin>).
 	Principal string `json:"principal,omitempty"`
@@ -86,6 +93,7 @@ type PublicReceipt struct {
 // policy. Its terminal receipt remains in the root-only receipt history.
 type BundleRefusal struct {
 	ReceiptID        string   `json:"receipt_id"`
+	DeliveryID       string   `json:"delivery_id,omitempty"`
 	BundleID         string   `json:"bundle_id,omitempty"`
 	Version          uint64   `json:"version,omitempty"`
 	ErrorCode        string   `json:"error_code"`
@@ -102,6 +110,34 @@ func PublicReceiptPath(configDir string) string {
 
 // ValidReceiptID permits only lifecycle receipt IDs in spool file names.
 func ValidReceiptID(id string) bool { return receiptIDPattern.MatchString(id) }
+
+// CheckDeliveryID explains why id is not a delivery id `enterprise bundle
+// apply --delivery-id` accepts: 1 to MaxDeliveryIDBytes bytes of A-Z, a-z,
+// 0-9 and . _ : - (ASCII, no space or control character). The value is
+// opaque and supplied by the caller (an MDM wrapper, a management agent or
+// an administrator alike); nil when id is valid.
+func CheckDeliveryID(id string) error {
+	switch {
+	case id == "":
+		return errors.New("--delivery-id needs a value of 1 to 128 characters; leave the flag out for none")
+	case len(id) > MaxDeliveryIDBytes:
+		return fmt.Errorf("--delivery-id takes at most %d bytes, not %d", MaxDeliveryIDBytes, len(id))
+	}
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; !deliveryIDByte(c) {
+			return fmt.Errorf("--delivery-id takes only A-Z, a-z, 0-9, dot, underscore, colon and hyphen; byte %d is 0x%02x", i+1, c)
+		}
+	}
+	return nil
+}
+
+// ValidDeliveryID reports whether CheckDeliveryID accepts id.
+func ValidDeliveryID(id string) bool { return CheckDeliveryID(id) == nil }
+
+// deliveryIDChars is the delivery id alphabet.
+const deliveryIDChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+
+func deliveryIDByte(c byte) bool { return strings.IndexByte(deliveryIDChars, c) >= 0 }
 
 // Key identifies one terminal receipt: a new delivery or a retry of the same
 // bundle gets a new key.
@@ -142,6 +178,8 @@ func ReadPublicReceipt(path string) (PublicReceipt, error) {
 		return PublicReceipt{}, errors.New("bundle receipt.json names no receipt")
 	case r.State != BundleConfirmed && r.State != BundleFailed:
 		return PublicReceipt{}, fmt.Errorf("bundle receipt.json state %q is not terminal", r.State)
+	case r.DeliveryID != "" && !ValidDeliveryID(r.DeliveryID):
+		return PublicReceipt{}, errors.New("bundle receipt.json delivery_id is not a valid delivery id")
 	}
 	return r, nil
 }

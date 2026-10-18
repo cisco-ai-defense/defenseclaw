@@ -904,3 +904,95 @@ func TestWindowsConfirmedBundleRepairsVerifiedInstallDamageWithReason(t *testing
 		t.Fatalf("repair did not name the failed check: %+v", result.Warnings)
 	}
 }
+
+// GAP-0033: the lifecycle transaction owns Codex's machine policy on Windows.
+// A config that turns Codex protection on or off is not written in the
+// running gateway, so the guardian never writes Codex requirements and their
+// ownership record for a deployment record that does not attest them; the
+// upgrade transaction applies it instead, a signed bundle's included.
+func TestWindowsHotConfigRoutesCodexTargetChangeToTransaction(t *testing.T) {
+	const claudeOnly = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    claudecode:\n      enabled: true\n"
+	const withCodex = "config_version: 9\nguardrail:\n  block_at: LOW\n  connectors:\n    claudecode:\n      enabled: true\n    codex:\n      enabled: true\n"
+	for _, tc := range []struct {
+		name, previous, next string
+	}{
+		{"enable", claudeOnly, withCodex},
+		{"disable", withCodex, claudeOnly},
+	} {
+		for _, bundle := range []bool{false, true} {
+			name := tc.name + " Setup"
+			if bundle {
+				name = tc.name + " bundle"
+			}
+			t.Run(name, func(t *testing.T) {
+				host, opts := newHotConfigHost(t, tc.previous, tc.next)
+				host.adopted = true
+				if bundle {
+					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+				}
+				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+				applied, keys := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+					&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+				installed, err := os.ReadFile(host.configPath)
+				if err != nil || applied || len(keys) != 0 || len(host.writes) != 0 || host.refreshes != 0 || string(installed) != tc.previous {
+					t.Fatalf("Codex %s applied=%t keys=%q writes=%q refreshes=%d installed=%q read=%v",
+						tc.name, applied, keys, host.writes, host.refreshes, installed, err)
+				}
+				if !opts.codexTargetTransaction || len(result.Errors) != 0 {
+					t.Fatalf("Codex %s transaction=%t errors=%v", tc.name, opts.codexTargetTransaction, result.Errors)
+				}
+			})
+		}
+	}
+
+	// A policy change that keeps Codex on stays in the running gateway, and
+	// the flag a previous attempt of the run set does not carry over.
+	host, opts := newHotConfigHost(t, withCodex, strings.Replace(withCodex, "block_at: LOW", "block_at: HIGH", 1))
+	host.adopted = true
+	opts.codexTargetTransaction = true
+	opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{}}}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = host.digest
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if !applied || opts.codexTargetTransaction || len(host.writes) != 1 || len(stub.calls) != 1 {
+		t.Fatalf("Codex kept on: applied=%t transaction=%t writes=%q installerCalls=%q errors=%v",
+			applied, opts.codexTargetTransaction, host.writes, stub.calls, result.Errors)
+	}
+}
+
+// GAP-0033: an ordinary CONFIG= ensure that turns Codex on runs the upgrade
+// transaction without writing the config first, and says why.
+func TestWindowsEnterpriseEnsureUpgradesForCodexTargetChange(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	const next = "config_version: 9\nguardrail:\n  connectors:\n    claudecode: {}\n    codex: {}\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || len(host.writes) != 0 || host.refreshes != 0 {
+		t.Fatalf("Codex enable: installer runs %q, writes %q, target refreshes %d", stub.calls, host.writes, host.refreshes)
+	}
+	if !strings.Contains(fmt.Sprint(result.Warnings), "turns Codex protection on or off") {
+		t.Fatalf("Codex enable warnings = %v", result.Warnings)
+	}
+}
+
+// GAP-0033: Setup carries the payload and upgrades; the installed CLI's
+// `enterprise bundle apply` carries none, so its Codex change is a repair
+// with the bundle config, which runs the same transaction.
+func TestWindowsEnterpriseCodexTargetAction(t *testing.T) {
+	setup := ensureTestOptions()
+	if got := windowsEnterpriseCodexTargetAction(setup); got != "upgrade" {
+		t.Fatalf("Setup payload: action %q, want upgrade", got)
+	}
+	installedCLI := ensureTestOptions()
+	installedCLI.gatewayBinary, installedCLI.acpBinary, installedCLI.hookBinary, installedCLI.sensorHelperBinary = "", "", "", ""
+	if got := windowsEnterpriseCodexTargetAction(installedCLI); got != "repair" {
+		t.Fatalf("installed CLI: action %q, want repair", got)
+	}
+}

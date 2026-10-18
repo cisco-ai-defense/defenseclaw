@@ -34,6 +34,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -464,8 +465,10 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	var unsettledBundles []*enterprisebundle.Receipt
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
-		if err := settleWindowsBundleStatus(ctx); err != nil {
+		var err error
+		if unsettledBundles, err = settleWindowsBundleStatusReport(ctx); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("settle policy bundle receipt: %w", err))
 		}
 	}
@@ -509,7 +512,7 @@ func runWindowsEnterpriseStandaloneAction(
 	// bundle config, not an edit made outside the lifecycle (GAP-0114).
 	var bundleRestore windowsBundleRestore
 	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx); bundleRestore.failed() {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			bundleRestore.apply(result)
 			applyWindowsEnterpriseRecordedDeployment(result)
@@ -561,6 +564,12 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	applyWindowsEnterprisePolicy(ctx, result)
+	if action == "status" && report.Installed && len(unsettledBundles) > 0 {
+		// A receipt no live apply owns: a plain ensure settles it (GAP-0028,
+		// GAP-1302).
+		result.TransactionPending = true
+		result.AddWarning(enterprisebundle.WarnBundlePending, enterprisebundle.UnsettledMessage(unsettledBundles, "enterprise windows ensure --profile standalone"))
+	}
 	if (action == "status" || action == "verify") && report.Installed {
 		if report.CursorTargetEnabled {
 			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
@@ -941,7 +950,7 @@ func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Resu
 		if !managed.ValidCredentialName(name) {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(layout.SecretsDir, name)); !errors.Is(err, os.ErrNotExist) {
+		if windowsSecretStored(layout.SecretsDir, name) {
 			continue
 		}
 		result.AddWarning("credential_missing", fmt.Sprintf(
@@ -1089,7 +1098,9 @@ func applyWindowsEnterpriseInstallerReport(
 		if err == nil && aiDefense {
 			result.Inspection.AIDefense = "unavailable:gateway_not_ready"
 			if report.GatewayReady {
-				result.Inspection.AIDefense = "ok"
+				// Status, verify and a hot config apply replace this with
+				// the gateway's /health posture (appendStandaloneGatewayWarnings).
+				result.Inspection.AIDefense = "unknown"
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
@@ -2657,7 +2668,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// starts the gateway on the installed config (GAP-0114). A restore that
 	// fails stops here, before any service starts on the edited file.
 	if windowsBundleRestoreRequested("ensure", opts) {
-		restore := restoreWindowsBundleConfig(ctx)
+		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts))
 		restore.apply(result)
 		if restore.failed() {
 			applyWindowsEnterpriseRecordedDeployment(result)
@@ -2838,6 +2849,10 @@ func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerRepo
 	return "the installed deployment failed verification without a diagnostic"
 }
 
+// windowsEnterpriseCodexTargetTransactionReason is how the ensure result
+// says why a config change ran the upgrade transaction.
+const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
+
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -3000,12 +3015,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		if applied {
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
-		if plan.Reason == "drift:bundle" {
+		// A signed bundle has no transaction fallback after a hot apply that
+		// failed; one that turns Codex protection on or off never started
+		// one and is applied by the transaction (GAP-0033).
+		if plan.Reason == "drift:bundle" && !opts.codexTargetTransaction {
 			result.AddError("bundle_apply_failed", "the policy bundle apply did not complete; check the preceding bundle error and gateway health")
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		startOnlyKeys = keys
 		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+		if opts.codexTargetTransaction {
+			plan.Action = windowsEnterpriseCodexTargetAction(opts)
+		}
 	}
 	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
 		// The transaction must not load an installed config.yaml that does
@@ -3036,6 +3057,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// /repair healed the same host (GAP-0935).
 		if plan.Reason != "verify_failed" {
 			clearWindowsEnterpriseSources(&actionOpts)
+			if opts.codexTargetTransaction {
+				// The repair installs the supplied config on the installed
+				// binaries (windowsEnterpriseCodexTargetAction).
+				actionOpts.configPath = opts.configPath
+			}
 		}
 		if alreadyAppliedNeedsRepair {
 			actionOpts.configPath = ""
@@ -3181,6 +3207,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if len(startOnlyKeys) > 0 {
 		// Say why a config-only change stopped the services (GAP-0719).
 		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
+	} else if opts.codexTargetTransaction {
+		reason += " (" + windowsEnterpriseCodexTargetTransactionReason + ")"
 	}
 	if plan.Reason == "verify_failed" && plan.Detail != "" {
 		reason += ": " + plan.Detail
@@ -3301,6 +3329,20 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 		return errors.New(message)
 	}
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
+}
+
+// windowsEnterpriseCodexTargetAction is the transaction that applies a
+// config turning Codex protection on or off (GAP-0033): the upgrade when the
+// run carries the payload (Setup CONFIG= or BUNDLE=), and otherwise a repair
+// with the supplied config. The installed CLI (`enterprise bundle apply`)
+// carries no payload, and the installer refuses an Upgrade without one; the
+// repair runs the same transaction on the installed binaries, Codex's
+// machine policy included.
+func windowsEnterpriseCodexTargetAction(opts *windowsEnterpriseLifecycleOptions) string {
+	if len(missingWindowsEnterpriseSources(opts)) != 0 {
+		return "repair"
+	}
+	return "upgrade"
 }
 
 func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []string {

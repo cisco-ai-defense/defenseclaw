@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-receipt-v1.json",
+  "title": "Public bundle receipt (receipt.json and receipt-events/<receipt_id>.json)",
+  "description": "The public bundle receipt (enterprisestatus.PublicReceipt, internal/enterprisestatus/bundle_receipt.go), written by the bundle store (internal/enterprisebundle/store.go) for every terminal receipt: one immutable file <etc>/bundles/receipt-events/<receipt_id>.json (mode 0644) and the single-slot summary <etc>/bundles/receipt.json (the last finished receipt that reached staging, or the first refusal while none did; a later refusal only sets its last_refusal, so refusals are forwarded from receipt-events/). Readable by any account; no secrets, no error message, no manifest hash. Writing them is best effort: the authoritative result of an apply is the command's stdout, and `enterprise bundle status` is authoritative for state. A reader refuses a link, a file over 16 KiB and a non-terminal state, as ReadPublicReceipt does. Each delivery has its own receipt_id: the first delivery of a bundle uses the bundle id, later deliveries r-<ULID>. delivery_id is the caller-supplied `bundle apply --delivery-id`, when one was given. A repeated delivery of the current bundle (already_applied) writes no receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "state",
+    "sessions_restart_required",
+    "finished_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "delivery_id": {
+      "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId"
+    },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "signer_key_id": {
+      "type": "string"
+    },
+    "principal": {
+      "type": "string",
+      "description": "Manifest created_by: control-plane:<tenant>/<admin> or operator:<os-admin>."
+    },
+    "actor": {
+      "type": "string",
+      "description": "The local OS account that ran the apply, as configwrite.CurrentOSActor spells it: os:uid:<uid>:<name> on Linux and macOS (os:uid:0:root for root), os:sid:<sid>:<name> on Windows (os:sid:S-1-5-18:NT_AUTHORITY/SYSTEM for LocalSystem; a backslash in the name becomes /, other characters outside [A-Za-z0-9._:/-] become _), os:unknown when the account cannot be read. MDM and a management agent running as root or SYSTEM record the same actor."
+    },
+    "change_summary": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "confirmed",
+        "failed"
+      ]
+    },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "effective_policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "warning_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      }
+    },
+    "disabled_by_bundle": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.-]*$"
+      }
+    },
+    "enforcing_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "config_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "applied_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "confirmed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sessions_restart_required": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rolled_back": {
+      "const": true
+    },
+    "restart": {
+      "const": true
+    },
+    "restart_required": {
+      "const": true
+    },
+    "current_bundle_id": {
+      "type": "string",
+      "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "current_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "last_refusal": {
+      "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/bundleRefusal"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error_code"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "error_code"
+          ]
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+      "delivery_id": "acme-agent:d-000913",
+      "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+      "version": 13,
+      "signer_key_id": "acme-2026a",
+      "principal": "control-plane:acme/alice",
+      "actor": "os:uid:0:root",
+      "change_summary": "Block HIGH for eng",
+      "state": "confirmed",
+      "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+      "enforcing_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+      "config_generation": 41,
+      "applied_at": "2026-10-16T21:05:01.120Z",
+      "confirmed_at": "2026-10-16T21:05:09.874Z",
+      "sessions_restart_required": 0,
+      "finished_at": "2026-10-16T21:05:09.874Z",
+      "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+      "current_version": 13
+    },
+    {
+      "schema_version": 1,
+      "receipt_id": "r-01JABC7Q2W3E4R5T6Y7V8P9A0S",
+      "bundle_id": "b-01JAB9Z3K9QX4M2N8P6R5T0V1W",
+      "version": 14,
+      "signer_key_id": "acme-2026a",
+      "principal": "control-plane:acme/alice",
+      "actor": "os:uid:0:root",
+      "state": "failed",
+      "error_code": "secret_ref_missing",
+      "sessions_restart_required": 0,
+      "finished_at": "2026-10-16T22:00:03.002Z",
+      "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+      "current_version": 13
+    }
+  ]
+}

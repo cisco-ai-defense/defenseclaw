@@ -294,8 +294,7 @@ func repairAtomicTransformV2ReplacementDACL(
 	if len(beforeDescriptor) > 1 {
 		return false, fmt.Errorf("multiple ReplaceFileW DACL repair test hooks")
 	}
-	if receipt.Old.PreservedMetadataSHA256 != "" &&
-		observed.Target.preservedMetadataDigest == receipt.Old.PreservedMetadataSHA256 {
+	if atomicTransformV2PublishedMetadataMatches(receipt, observed.Target) {
 		return false, nil
 	}
 	if observed.Stage.exists || !atomicTransformV2BackupOldMatches(receipt.Old, observed.Backup) ||
@@ -344,6 +343,12 @@ func repairAtomicTransformV2ReplacementDACL(
 	oldMetadata, err := atomicTransformV2WindowsMetadataFromOpen(backup)
 	if err != nil {
 		return false, err
+	}
+	if receipt.OldPreservedEAMetadataSHA256 != "" {
+		if targetMetadata.EACopyability != atomicTransformEACopyable || oldMetadata.EACopyability != atomicTransformEACopyable {
+			return false, nil
+		}
+		targetMetadata.Streams, oldMetadata.Streams = targetMetadata.PreservedStreams, oldMetadata.PreservedStreams
 	}
 	if !atomicTransformV2WindowsPreservedMatchesExceptDACL(targetMetadata, oldMetadata) {
 		return false, nil
@@ -476,7 +481,7 @@ func repairAtomicTransformV2ReplacementOwner(
 	if !receipt.PreserveOldOwner || observed.Stage.exists ||
 		!atomicTransformV2BackupOldMatches(receipt.Old, observed.Backup) ||
 		!atomicTransformV2StageContentMatches(receipt.Stage, observed.Target) ||
-		observed.Target.preservedMetadataDigest != receipt.Old.PreservedMetadataSHA256 ||
+		!atomicTransformV2PublishedMetadataMatches(receipt, observed.Target) ||
 		observed.Target.ownerGroupDigest != receipt.Stage.OwnerGroupSHA256 ||
 		observed.Target.linkCount != 1 || observed.Target.creationTime != receipt.Old.CreationTime {
 		return false, nil

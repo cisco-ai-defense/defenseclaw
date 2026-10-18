@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -42,19 +43,22 @@ type atomicTransformV2WindowsMetadataStream struct {
 }
 
 type atomicTransformV2WindowsMetadataWitness struct {
-	Digest           string
-	PreservedDigest  string
-	StageOwnedDigest string
-	Identity         string
-	ProtectionSHA256 string
-	OwnerGroupSHA256 string
-	DACLSHA256       string
-	DACLCanonical    string
-	CreationTime     uint64
-	LastWriteTime    uint64
-	FileAttributes   uint32
-	Compression      uint16
-	Streams          []atomicTransformV2WindowsMetadataStream
+	Digest                     string
+	PreservedDigest            string
+	CanonicalEAPreservedDigest string
+	EACopyability              atomicTransformEACopyability
+	StageOwnedDigest           string
+	Identity                   string
+	ProtectionSHA256           string
+	OwnerGroupSHA256           string
+	DACLSHA256                 string
+	DACLCanonical              string
+	CreationTime               uint64
+	LastWriteTime              uint64
+	FileAttributes             uint32
+	Compression                uint16
+	Streams                    []atomicTransformV2WindowsMetadataStream
+	PreservedStreams           []atomicTransformV2WindowsMetadataStream
 }
 
 func atomicTransformV2WindowsDACLCanonicalFromOpen(file *os.File) (string, error) {
@@ -247,30 +251,89 @@ type atomicTransformV2BackupStreamHeader struct {
 }
 
 type atomicTransformV2BackupReader struct {
-	file    *os.File
-	context uintptr
+	file        *os.File
+	context     uintptr
+	call        atomicTransformV2BackupReadCall
+	readFailure error
+	closed      bool
+	closeError  error
+}
+
+// The private per-instance adapter permits controlled parser tests without a
+// mutable global hook. Production instances always use the exact held file.
+type atomicTransformV2BackupReadCall func(
+	file *os.File, buffer []byte, abort bool, context *uintptr,
+) (read uint32, success bool, callErr error)
+
+func atomicTransformV2CallBackupRead(
+	file *os.File, buffer []byte, abort bool, context *uintptr,
+) (uint32, bool, error) {
+	if file == nil || context == nil || !abort && len(buffer) == 0 {
+		return 0, false, syscall.EINVAL
+	}
+	var read uint32
+	var result uintptr
+	var callErr error
+	if abort {
+		result, _, callErr = atomicTransformV2BackupReadW.Call(
+			uintptr(file.Fd()), 0, 0, 0,
+			1, 0, // DACL is witnessed separately from BackupRead.
+			uintptr(unsafe.Pointer(context)),
+		)
+	} else {
+		result, _, callErr = atomicTransformV2BackupReadW.Call(
+			uintptr(file.Fd()), uintptr(unsafe.Pointer(&buffer[0])), uintptr(uint32(len(buffer))),
+			uintptr(unsafe.Pointer(&read)), 0, 0, // DACL is witnessed separately from BackupRead.
+			uintptr(unsafe.Pointer(context)),
+		)
+	}
+	runtime.KeepAlive(file)
+	runtime.KeepAlive(buffer)
+	runtime.KeepAlive(context)
+	return read, result != 0, callErr
+}
+
+func (r *atomicTransformV2BackupReader) invoke(buffer []byte, abort bool) (uint32, bool, error) {
+	call := r.call
+	if call == nil {
+		call = atomicTransformV2CallBackupRead
+	}
+	return call(r.file, buffer, abort, &r.context)
+}
+
+func atomicTransformV2BackupFailure(err error) error {
+	if err == nil || err == syscall.Errno(0) {
+		return syscall.EINVAL
+	}
+	return err
 }
 
 func (r *atomicTransformV2BackupReader) Read(buffer []byte) (int, error) {
+	if r.closed {
+		return 0, errors.Join(os.ErrClosed, r.closeError)
+	}
+	if r.readFailure != nil {
+		return 0, r.readFailure
+	}
 	if len(buffer) == 0 {
 		return 0, nil
 	}
-	var read uint32
-	result, _, callErr := atomicTransformV2BackupReadW.Call(
-		uintptr(r.file.Fd()),
-		uintptr(unsafe.Pointer(&buffer[0])),
-		uintptr(uint32(len(buffer))),
-		uintptr(unsafe.Pointer(&read)),
-		0, // do not abort
-		0, // DACL is witnessed separately from BackupRead
-		uintptr(unsafe.Pointer(&r.context)),
-	)
-	runtime.KeepAlive(r.file)
-	if result == 0 {
-		if callErr == nil || callErr == syscall.Errno(0) {
-			callErr = syscall.EINVAL
-		}
-		return int(read), callErr
+	if uint64(len(buffer)) > uint64(^uint32(0)) {
+		r.readFailure = syscall.EINVAL
+		return 0, r.readFailure
+	}
+	read, success, callErr := r.invoke(buffer, false)
+	if !success {
+		r.readFailure = atomicTransformV2BackupFailure(callErr)
+	}
+	if uint64(read) > uint64(len(buffer)) {
+		r.readFailure = errors.Join(r.readFailure, syscall.EINVAL)
+	}
+	if r.readFailure != nil {
+		// Do not accept partial bytes from a failed native operation. Otherwise
+		// io.ReadFull/binary.Read/io.CopyN can suppress n+err at an exact boundary.
+		// The failure also remains latched through subsequent Read and Close.
+		return 0, r.readFailure
 	}
 	if read == 0 {
 		return 0, io.EOF
@@ -279,19 +342,24 @@ func (r *atomicTransformV2BackupReader) Read(buffer []byte) (int, error) {
 }
 
 func (r *atomicTransformV2BackupReader) Close() error {
+	if r.closed {
+		return r.closeError
+	}
+	r.closed = true // Exactly one abort attempt, including an ambiguous failure.
+	r.closeError = r.readFailure
 	if r.context == 0 {
-		return nil
+		return r.closeError
 	}
-	result, _, callErr := atomicTransformV2BackupReadW.Call(
-		uintptr(r.file.Fd()), 0, 0, 0, 1, 0,
-		uintptr(unsafe.Pointer(&r.context)),
-	)
-	runtime.KeepAlive(r.file)
-	r.context = 0
-	if result == 0 && callErr != nil && callErr != syscall.Errno(0) {
-		return callErr
+	read, success, callErr := r.invoke(nil, true)
+	if !success {
+		r.closeError = errors.Join(r.closeError, atomicTransformV2BackupFailure(callErr))
+	} else {
+		r.context = 0
 	}
-	return nil
+	if read != 0 {
+		r.closeError = errors.Join(r.closeError, syscall.EINVAL)
+	}
+	return r.closeError
 }
 
 func atomicTransformV2HashString(digest hash.Hash, value string) {
@@ -301,10 +369,15 @@ func atomicTransformV2HashString(digest hash.Hash, value string) {
 
 func atomicTransformV2WindowsBackupStreamsFromOpen(
 	file *os.File,
-) ([]atomicTransformV2WindowsMetadataStream, error) {
+) (streams []atomicTransformV2WindowsMetadataStream, err error) {
 	reader := &atomicTransformV2BackupReader{file: file}
-	defer reader.Close()
-	streams := make([]atomicTransformV2WindowsMetadataStream, 0, 4)
+	defer func() {
+		err = errors.Join(err, reader.Close())
+		if err != nil {
+			streams = nil
+		}
+	}()
+	streams = make([]atomicTransformV2WindowsMetadataStream, 0, 4)
 	var total int64
 	for {
 		var header atomicTransformV2BackupStreamHeader
@@ -404,6 +477,21 @@ func atomicTransformV2WindowsMetadataFromOpen(
 	if err != nil {
 		return witness, err
 	}
+	rawEA, preservedEA, copyability, err := atomicTransformV2WindowsObserveEAFromOpen(file)
+	if err != nil {
+		return witness, err
+	}
+	if !atomicTransformV2EAMatchesWitness(rawEA, streams) {
+		return witness, fmt.Errorf("EA changed between exact metadata observations: %w", errAtomicTransformConflict)
+	}
+	witness.EACopyability = copyability
+	for _, stream := range streams {
+		if stream.ID != 2 {
+			witness.PreservedStreams = append(witness.PreservedStreams, stream)
+		} else if preservedEA != nil {
+			witness.PreservedStreams = append(witness.PreservedStreams, *preservedEA)
+		}
+	}
 	witness.ProtectionSHA256 = protection
 	witness.OwnerGroupSHA256 = ownerGroup
 	witness.DACLSHA256 = dacl
@@ -436,7 +524,7 @@ func atomicTransformV2WindowsMetadataFromOpen(
 
 	// ReplaceFileW deliberately keeps Stage's file ID and unnamed/main stream,
 	// but is documented to transfer Old's creation time, DACL, compression/EFS
-	// attributes, named streams, EAs, and object ID. This second digest excludes
+	// attributes, named streams, and object ID. This legacy digest excludes
 	// identity, unnamed stream, and both timestamps; creation/last-write are
 	// persisted explicitly because an internal provisional rename can alter
 	// creation while ReplaceFileW takes creation from Old and last-write from New.
@@ -471,6 +559,16 @@ func atomicTransformV2WindowsMetadataFromOpen(
 		atomicTransformV2HashString(preserved, stream.SHA256)
 	}
 	witness.PreservedDigest = hex.EncodeToString(preserved.Sum(nil))
+	// Keep the v2 raw digest above byte-for-byte compatible with interrupted
+	// older transactions. Only new receipts opt into a separate cross-inode
+	// witness, which preserves ordinary EA entries and excludes solely the
+	// kernel-only Purge cache invalidated by content writes. Full Digest still
+	// authenticates every raw stream, including those cache entries.
+	if copyability == atomicTransformEACopyable {
+		canonical := witness
+		canonical.Streams = witness.PreservedStreams
+		witness.CanonicalEAPreservedDigest = atomicTransformV2CanonicalEAPreservedHash(canonical)
+	}
 
 	// With no named ADS, native ReplaceFileW keeps Stage's last-write time. When
 	// Old has an ADS, NTFS advances the published target to the ReplaceFileW call
@@ -484,6 +582,32 @@ func atomicTransformV2WindowsMetadataFromOpen(
 	_ = binary.Write(stageOwned, binary.LittleEndian, witness.LastWriteTime)
 	witness.StageOwnedDigest = hex.EncodeToString(stageOwned.Sum(nil))
 	return witness, nil
+}
+
+func atomicTransformV2CanonicalEAPreservedHash(witness atomicTransformV2WindowsMetadataWitness) string {
+	digest := sha256.New()
+	atomicTransformV2HashString(digest, "DefenseClaw Windows canonical EA preserved metadata witness v1")
+	atomicTransformV2HashString(digest, witness.DACLSHA256)
+	_ = binary.Write(digest, binary.LittleEndian, witness.FileAttributes&^(windows.FILE_ATTRIBUTE_ARCHIVE|windows.FILE_ATTRIBUTE_NORMAL))
+	_ = binary.Write(digest, binary.LittleEndian, witness.Compression)
+	var count uint32
+	for _, stream := range witness.Streams {
+		if stream.ID != atomicTransformV2BackupData {
+			count++
+		}
+	}
+	_ = binary.Write(digest, binary.LittleEndian, count)
+	for _, stream := range witness.Streams {
+		if stream.ID == atomicTransformV2BackupData {
+			continue
+		}
+		_ = binary.Write(digest, binary.LittleEndian, stream.ID)
+		_ = binary.Write(digest, binary.LittleEndian, stream.Attributes)
+		atomicTransformV2HashString(digest, stream.Name)
+		_ = binary.Write(digest, binary.LittleEndian, stream.Size)
+		atomicTransformV2HashString(digest, stream.SHA256)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 func atomicTransformV2WindowsPreservedComparison(

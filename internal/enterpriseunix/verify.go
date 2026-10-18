@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -45,6 +46,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
 	busyMessage := ""
+	var unsettled []*enterprisebundle.Receipt
 	if env.waitForApplyTrigger(ctx) {
 		// The apply trigger is applying a changed config.yaml, secret or
 		// policy file: until it commits, the files differ from the record and
@@ -59,6 +61,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	} else if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
+		if err == nil {
+			// No run holds the lock, so no run owns a receipt it did not
+			// finish: a killed apply left it. Status read
+			// transaction_pending false with the bundle staged until the
+			// next ensure settled it (GAP-0028). Read (never settled) while
+			// the lock is held, so an apply that starts now is not counted.
+			unsettled, _ = env.bundleStore().Unsettled()
+		}
 		lock.release()
 	}
 	if l.opts.Action == ActionVerify && env.packageTransactionInProgress() {
@@ -98,6 +108,10 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	pending, _ := env.loadPending()
 	if pending != nil {
 		r.TransactionPending = true
+	}
+	if record != nil && len(unsettled) > 0 {
+		r.TransactionPending = true
+		r.AddWarning(enterprisebundle.WarnBundlePending, enterprisebundle.UnsettledMessage(unsettled, env.lifecycleCommand(ActionEnsure)))
 	}
 	if statusBusy {
 		if record != nil {
@@ -1099,13 +1113,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if r.Inspection.AIDefense == "" {
 		r.Inspection.AIDefense = "unknown"
 	}
-	if strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
-		// Not an error: the local policy engine keeps deciding. But the
-		// cloud inspection the administrator enabled is not running.
-		r.AddWarning(codeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
-			r.Inspection.AIDefense+"; the local policy engine keeps deciding. Check the "+
-			"enterprise.inspection.ai_defense credential and network access")
-	}
+	r.AddAIDefenseWarning()
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
@@ -1157,10 +1165,6 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 		r.AddWarning(codeSandboxPackDir, problem)
 	}
 }
-
-// codeAIDefenseUnavailable warns that enabled AI Defense inspection is
-// failing (for example a rejected key).
-const codeAIDefenseUnavailable = "ai_defense_unavailable"
 
 // codeDirectoryLookups warns that the gateway cannot resolve some accounts in
 // the directory (a domain controller or SSSD that does not answer).

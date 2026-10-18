@@ -19,6 +19,7 @@ them with their default return-code tables.
 | `1603` | `ERROR_INSTALL_FAILURE` | The action failed. Mutating actions have already rolled back to the previous deployment. | Failure; read `errors[].code` |
 | `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`). | Retry later (Intune's default table retries 1618) |
 | `1639` | `ERROR_INVALID_COMMAND_LINE` | Invalid arguments, for example a first install without a config. Retrying will not help. | Failure; fix the assignment |
+| `5` | `ERROR_ACCESS_DENIED` | A standard account ran the installed CLI's `enterprise windows status` or `verify`, or `enterprise secret`, which need an elevated administrator or SYSTEM token (`elevation_required`). `enterprise secret` exits `5` only on a managed computer and `1603` with the same code on a computer without the standalone deployment marker. Setup and the wrappers report an unelevated token as `1603` instead. | Failure; run the command as SYSTEM |
 | `3010` | `ERROR_SUCCESS_REBOOT_REQUIRED` | Reserved. The standalone lifecycle does not require reboots today. | Soft reboot |
 
 Intune's default Win32 return codes are `0` Success, `1707` Success, `3010`
@@ -49,7 +50,7 @@ Setup returns only `0` and `1603`, its argument errors included.
 | `0` | Success or nothing to do. | Success |
 | `1` | The action failed (already rolled back), the config is invalid (`config_invalid`), or the wrapper refused an input. | Failure; read `errors[].code` |
 | `2` | Invalid arguments. | Failure; fix the script settings |
-| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock. | Retry later (set Intune's retry count or your MDM's retry policy) |
+| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock, or a signed policy bundle whose gateway stopped reporting its policy before the receipt was confirmed (`not_confirmed`, receipt `applied`). | Retry later (set Intune's retry count or your MDM's retry policy) |
 
 ## Error codes
 
@@ -80,7 +81,7 @@ evaluated". Run the `status` action to inspect the host.
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | all | `1603` / `1` | The private staging folder or the Intune content is not as expected, including a missing pinned bundle or anchors. |
 | `mdm_base_config_mismatch` | unix | — / `2` | A config delivered with a signed bundle (the base config) does not match the bundle's. Its `guardrail:` block differs in more than `custom_packs.<pack>.path`, a pack path is not absolute, its `claude_code:`, `codex:`, `connector_hooks:` or `application_protection:` block differs from the bundle's (or only one of them has it), or the bundle's `config.yaml` does not match its manifest. No other key is compared. Nothing was installed. |
 | `mdm_tar_missing` | unix | — / `1` | A base config came with a signed bundle and `tar`, which the comparison needs, is not installed. Nothing was installed. |
-| `mdm_anchor_install_failed` | unix | — / `1` | The wrapper could not write the bundle trust anchor file (`--trust-anchor-file`), or its folder is not root-only. Nothing was applied. |
+| `mdm_anchor_install_failed` | unix | — / `1`, `2` or `75` | The wrapper could not install the bundle trust anchor file (`--trust-anchor-file` or the inline anchors). When the installed gateway has `enterprise bundle anchors install` (`management_contract` 1), that command refused the file: the message names its code (`anchor_invalid`, `anchor_insecure`, `lifecycle_busy`, ...) and the exit code is the command's, `75` when the lifecycle lock stayed busy. With an older gateway the wrapper could not write the file, or its folder is not root-only. The bundle was not applied. |
 | `mdm_staging_noexec` | unix | — / `1` | Linux: the payload's gateway cannot run from the staging folder (a `noexec` mount, named in the message). Use `--staging-dir` or a deb/rpm source. |
 | `mdm_staging_full` | unix | — / `1` | The staging filesystem filled while extracting a payload archive. Choose a staging folder with more space and retry. |
 | `mdm_cancelled` | unix | — / `1` | The MDM stopped the wrapper; it stopped the lifecycle child and reported failure. Inspect the deployment before retrying. |
@@ -93,7 +94,12 @@ lifecycle itself.
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,
 `secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`;
-`lifecycle_busy` exits `1618` / `75`. On Windows, a bundle that verified
+`lifecycle_busy` exits `1618` / `75`. On Linux and macOS a bundle whose
+config the transaction committed, but whose gateway stopped reporting its
+policy (it crashed or was killed) before the receipt was confirmed, exits
+`75` with `not_confirmed`: the receipt stays `applied`, the last good bundle
+stays current, and the retry confirms it or puts the last good bundle back.
+On Windows, a bundle that verified
 but did not finish applying to the running deployment exits `1618` too:
 `bundle_apply_failed`, after the error that names the cause (for example
 `bundle_hot_apply_unavailable` with the verify detail, or
@@ -113,10 +119,54 @@ administrator or SYSTEM token. An unelevated token returns `not_admin` and
 exits `1603` before reading the protected deployment record. The refused
 status does not report bundle state that the caller could not read.
 
+## Management agent commands
+
+A management agent that runs the `enterprise` commands itself
+(`management-agent.md`) gets the same codes:
+
+- `enterprise bundle verify` and `apply`: `0`; `1` / `1603` for a refusal or
+  a failed apply; `75` / `1618` for `lifecycle_busy`; `2` / `1639` for invalid
+  arguments, with `errors[0].code` `invalid_arguments` in the JSON document.
+  On Windows, `apply --lock-wait` waits only for `bundle.lock`; a busy
+  installer `lifecycle.lock` (a repair, `ensure` without a bundle, a guardian
+  repair) still exits `1618` after its fixed 30 s.
+- `enterprise bundle anchors install` (Linux and macOS): `0`; `1` refused
+  (`anchor_insecure`, `anchor_invalid`, `anchor_missing`,
+  `anchor_restore_failed`, `not_root`, `not_managed`); `2` invalid arguments;
+  `75` busy. Windows installs anchors with `enterprise windows ensure
+  --trust-anchors`, which exits like `ensure`.
+- `enterprise secret set` and `remove`: Linux and macOS `0`, `1`, `2` and
+  `75`, as above; with `--json` every failure prints one JSON document (a
+  failure before the lifecycle ran: `invalid_arguments` `2`, `not_root`,
+  `change_failed` or `state_invalid` `1`). A `change_failed` before the
+  lifecycle ran means the agent exited or stopped before it sent the whole
+  value on stdin (or sent nothing for 60 s): nothing was stored, and the agent
+  resubmits the same call once it runs again. An empty, multi-line or
+  oversized value it sent in full is `invalid_arguments` `2`. Windows `0`; `5` not elevated on a managed computer
+  (`1603` with the same `elevation_required` code on a computer without the
+  standalone deployment marker); `1603` not installed,
+  `credential_in_use`, `change_failed`, `restart_failed` or `state_invalid`
+  (a junction, mount point, symlink or file where the secrets folder belongs:
+  nothing was read, written or deleted); `1618` when
+  `bundle.lock` is not free within `--lock-wait` or the installer's
+  `lifecycle.lock` within 30 s (nothing was written); `1639` invalid
+  arguments, unknown flags included. Builds that do not report
+  `management_contract` in `--version-json` exit `1` for a flag error on
+  Windows and print no JSON for failures.
+- `enterprise secret status`: Linux and macOS as above. Windows `0`; `5` /
+  `1603` `elevation_required` as for `set`; `1603` `state_invalid` when the
+  store cannot be read or is not a real directory; `1639` invalid arguments. With `--json` and
+  `management_contract` 1 every Windows failure prints the failure document
+  of `secret-result.schema.json` with `action: "status"`.
+
 ## Retries, downgrades and rollback
 
 Retry only `1618` and `75`. Every other failure repeats until you change the
-artifact, the config or the host.
+artifact, the config or the host. Two exceptions are for a management agent:
+Windows `secret set` / `remove` with `restart_failed` (`1603`), and Linux and
+macOS `secret set` with a `change_failed` before the lifecycle ran (`1`, the
+agent stopped before it sent the value); resubmit the same call
+(`management-agent.md` section 2.2).
 
 Windows `ensure` refuses an artifact older than the installed version
 (`downgrade_refused`, `1603`), and `rpm -U` refuses an older rpm, so an MDM

@@ -36,6 +36,9 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
 		return err
 	}
+	if err := checkDeliveryID(cmd, opts.deliveryID); err != nil {
+		return err
+	}
 	bundle := opts.bundle
 	if bundle != "" {
 		abs, err := filepath.Abs(bundle)
@@ -52,11 +55,16 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 		env.LockTimeout = opts.lockWait
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{
-		Action: enterpriseunix.ActionEnsure, Bundle: bundle, BundleInbox: opts.inbox, Reason: opts.reason,
-	})
+	result := enterpriseunix.Run(cmd.Context(), env, unixBundleApplyOptions(opts, bundle))
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// unixBundleApplyOptions is the ensure run of `bundle apply` for the bundle
+// at the absolute path bundle ("" with --inbox).
+func unixBundleApplyOptions(opts *bundleApplyOptions, bundle string) enterpriseunix.Options {
+	return enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Bundle: bundle, BundleInbox: opts.inbox,
+		Reason: opts.reason, DeliveryID: opts.deliveryID}
 }

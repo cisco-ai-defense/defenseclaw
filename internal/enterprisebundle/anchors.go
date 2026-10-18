@@ -106,35 +106,47 @@ type TrustCheck func(path string) error
 // ACL, links; nil skips the check) or that is not a regular file is
 // anchor_insecure; a malformed file is anchor_invalid.
 func LoadAnchors(path string, trust TrustCheck) (*Anchors, error) {
+	anchors, _, err := ReadAnchorsFile(path, trust)
+	return anchors, err
+}
+
+// ReadAnchorsFile is LoadAnchors that also returns the bytes it decoded
+// (nil on any error), so a caller that installs the file writes exactly
+// what was checked without reading the source again.
+func ReadAnchorsFile(path string, trust TrustCheck) (*Anchors, []byte, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
+		return nil, nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
 	}
 	if err != nil {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
 	}
 	if !info.Mode().IsRegular() {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
 	}
 	if trust != nil {
 		if err := trust(path); err != nil {
-			return nil, refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
+			return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
 		}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor file was replaced while it was read")
+		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor file was replaced while it was read")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, MaxAnchorsBytes+1))
 	if err != nil {
-		return nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot read the trust anchor file")
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot read the trust anchor file")
 	}
-	return DecodeAnchors(raw)
+	anchors, err := DecodeAnchors(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return anchors, raw, nil
 }
 
 // DecodeAnchors decodes bundle-anchors.json strictly (anchor_invalid).

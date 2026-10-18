@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/version-v1.json",
+  "title": "defenseclaw-gateway --version-json",
+  "description": "The one line `defenseclaw-gateway --version-json` prints, with exit code 0, also on a managed device (machineVersionReport, internal/cli/root.go). management_contract is the version of the management agent contract (management-agent.md) that the build implements; a build without the member predates the contract, and the agent uses the fallbacks in management-agent.md section 3. There is no features list: a build that reports management_contract 1 implements all of contract 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "const": "defenseclaw-gateway",
+      "description": "Constant, also when the binary runs as defenseclaw or defenseclaw.exe."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The product version, for example 1.0.4."
+    },
+    "commit": {
+      "type": "string"
+    },
+    "built": {
+      "type": "string"
+    },
+    "management_contract": {
+      "const": 1,
+      "description": "The management agent contract version (management-agent.md). A breaking change to a verb, flag, schema or exit code of the contract bumps it; new optional members do not."
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "name": "defenseclaw-gateway",
+      "version": "1.0.2",
+      "commit": "a6ab014b0c",
+      "built": "2026-10-16T22:10:00Z"
+    },
+    {
+      "schema_version": 1,
+      "name": "defenseclaw-gateway",
+      "version": "1.0.3",
+      "commit": "0123456789",
+      "built": "2026-10-30T18:00:00Z",
+      "management_contract": 1
+    }
+  ]
+}

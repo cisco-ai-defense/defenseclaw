@@ -97,6 +97,9 @@ type Options struct {
 	// BundleInbox makes an ensure apply the highest version in the bundle
 	// inbox (<etc>/bundles/inbox) and remove the processed files.
 	BundleInbox bool
+	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
+	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
+	DeliveryID string
 }
 
 // Error codes in the lifecycle result.
@@ -225,6 +228,9 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
+	// confirmedLate are the manifest SHA-256s of the bundles this run's
+	// settle confirmed late (bundle_confirmed_after_interrupt).
+	confirmedLate map[string]bool
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
 }
@@ -790,6 +796,14 @@ func (l *lifecycle) validateOptions() int {
 			return bad("--bundle must be an absolute path")
 		case o.ConfigFile != "" || o.PayloadDir != "" || o.FromPackage || o.NoStart || o.AdoptExisting || o.Mutate != nil:
 			return bad("a policy bundle carries the config: --config, --payload, --from-package, --no-start and --adopt-existing do not apply")
+		}
+	}
+	if o.DeliveryID != "" {
+		if o.Bundle == "" && !o.BundleInbox {
+			return bad("--delivery-id applies only to a policy bundle apply")
+		}
+		if err := enterprisestatus.CheckDeliveryID(o.DeliveryID); err != nil {
+			return bad(err.Error())
 		}
 	}
 	return 0

@@ -340,8 +340,10 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # GAP-1993: the new window never appears in an SSH session; rc 0 hid the result.
+    from defenseclaw import __version__
+
     (home / "installer").mkdir()
-    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    (home / "installer" / "install.ps1").write_text(f'$DcVersion = "{__version__}"\n', encoding="utf-8")
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
     started: list[object] = []

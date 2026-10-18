@@ -135,7 +135,7 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, opts 
 	if probeFooled {
 		result.Readiness.Gateway = false
 		result.Inspection.Local = "unknown"
-		if result.Inspection.AIDefense == "ok" {
+		if result.Inspection.AIDefense == "unknown" {
 			result.Inspection.AIDefense = "unavailable:gateway_not_ready"
 		}
 	}

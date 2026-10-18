@@ -974,6 +974,13 @@ type HookRollbackConverter interface {
 	ConvertHooksForRollback(opts SetupOpts) (int, error)
 }
 
+// HookRollbackRestorer reverses only an authenticated conversion when a
+// rollback aborts while this release still owns the installation. It must not
+// run Setup or change connector selection or credentials.
+type HookRollbackRestorer interface {
+	RestoreHooksAfterRollback(opts SetupOpts) (int, error)
+}
+
 // ScopedHookTokenRequirement is implemented by connector runtimes that depend
 // on a connector-scoped bearer credential. Such connectors must fail setup if
 // the least-privilege sidecar cannot be established; they may never fall back

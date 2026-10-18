@@ -100,6 +100,12 @@ func CheckTransition(from, to string) error {
 	return fmt.Errorf("bundle receipt cannot move from %s to %s", from, to)
 }
 
+// WarnBundlePending is the warning of a status that found a receipt no
+// run finished: bundle status for the last receipt, and lifecycle status for
+// any receipt left while no run holds the lifecycle lock (with
+// transaction_pending true).
+const WarnBundlePending = "bundle_pending"
+
 // Finished reports a final receipt state.
 func Finished(state string) bool { return state == StateConfirmed || state == StateFailed }
 
@@ -116,6 +122,10 @@ type Ref struct {
 	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
 	ConfirmedAt           string `json:"confirmed_at,omitempty"`
 	RestartRequired       bool   `json:"restart_required,omitempty"`
+	// DeliveryID is the --delivery-id of the receipt that confirmed this
+	// bundle ("" for none), so the bundle block keeps it once that receipt
+	// is pruned.
+	DeliveryID string `json:"delivery_id,omitempty"`
 }
 
 func (r *Ref) validate() error {
@@ -128,6 +138,8 @@ func (r *Ref) validate() error {
 		return errors.New("manifest_sha256 is not a SHA-256 digest")
 	case !validVersionDir(r.Dir, r.Version, r.BundleID):
 		return errors.New("dir does not name the bundle version directory")
+	case r.DeliveryID != "" && !enterprisestatus.ValidDeliveryID(r.DeliveryID):
+		return errors.New("delivery_id is not a delivery id")
 	}
 	return nil
 }
@@ -164,6 +176,11 @@ type Transition struct {
 	At    string `json:"at"`
 }
 
+// WarnConfirmedAfterInterrupt is the receipt warning code of a bundle that
+// a later lifecycle run confirmed: the run that applied it ended before the
+// gateway confirmed it (not_confirmed, or the run stopped after the commit).
+const WarnConfirmedAfterInterrupt = "bundle_confirmed_after_interrupt"
+
 // Receipt is receipts/<receipt id>.json: how far one bundle got. The
 // receipt id is the bundle id, or r-<ULID> for a bundle whose manifest could
 // not be read. BundleID and Version are what the manifest claims until the
@@ -179,6 +196,10 @@ type Receipt struct {
 	Principal     string `json:"principal,omitempty"`
 	// Actor is the local OS account that received this bundle.
 	Actor string `json:"actor,omitempty"`
+	// DeliveryID is the opaque id the caller of `enterprise bundle apply
+	// --delivery-id` gave this delivery, or "". It names the delivery, not
+	// who delivered it: any root or administrator caller can set it.
+	DeliveryID string `json:"delivery_id,omitempty"`
 	// ChangeSummary is the manifest change_summary, set at verified.
 	ChangeSummary  string       `json:"change_summary,omitempty"`
 	ManifestSHA256 string       `json:"manifest_sha256,omitempty"`
@@ -257,7 +278,7 @@ func (r *Receipt) Refusal() *enterprisestatus.BundleRefusal {
 	if !r.IsRefusal() || len(r.Transitions) == 0 {
 		return nil
 	}
-	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, BundleID: r.BundleID,
+	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, BundleID: r.BundleID,
 		Version: r.Version, ErrorCode: string(r.ErrorCode), Time: r.Transitions[len(r.Transitions)-1].At,
 		WarningCodes: append([]string(nil), r.WarningCodes...), DisabledByBundle: append([]string(nil), r.DisabledByBundle...)}
 }
@@ -276,7 +297,7 @@ func DigestWarningCode(expected, enforcing string, comparable bool) string {
 // the confirmed receipt of the bundle that enforces.
 func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 	out := &enterprisestatus.BundleState{
-		BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
+		ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		Restart: r.Restart, RestartRequired: r.RestartRequired,
@@ -304,6 +325,16 @@ func VersionDirName(version uint64, bundleID string) string {
 // named by the installed config, even when the earlier receipt was failed.
 func VersionDirNameForReceipt(version uint64, bundleID, receiptID string) string {
 	return VersionDirName(version, bundleID) + "-" + receiptID
+}
+
+// receiptIDOfVersionDir is the receipt id a receipt-specific version
+// directory name of bundle id at version ends in; "" for a legacy name.
+func receiptIDOfVersionDir(name string, version uint64, bundleID string) string {
+	id, ok := strings.CutPrefix(name, VersionDirName(version, bundleID)+"-")
+	if !ok || !receiptIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
 }
 
 // IsVersionDirName accepts current receipt-specific and legacy version
@@ -493,7 +524,7 @@ func (s *Store) PublicReceiptEventsDir() string {
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
 	out := enterprisestatus.PublicReceipt{
-		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
+		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
 		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
@@ -625,11 +656,17 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 
 // Receive starts the receipt of a bundle in state received. bundleID and
 // version are what the still unverified manifest claims ("" and 0 when it
-// could not be read).
-func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
+// could not be read); deliveryID is the caller-supplied --delivery-id ("" for
+// none), refused unless enterprisestatus.CheckDeliveryID accepts it.
+func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Receipt, error) {
+	if deliveryID != "" {
+		if err := enterprisestatus.CheckDeliveryID(deliveryID); err != nil {
+			return nil, err
+		}
+	}
 	at := s.now()
 	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived, Actor: configwrite.CurrentOSActor(),
-		Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
+		DeliveryID: deliveryID, Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
 	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version
 	} else {
@@ -876,7 +913,7 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	}
 	ref := &Ref{BundleID: r.BundleID, Version: r.Version, ManifestSHA256: r.ManifestSHA256, Dir: r.Dir,
 		SignerKeyID: r.SignerKeyID, EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
-		RestartRequired: r.RestartRequired}
+		RestartRequired: r.RestartRequired, DeliveryID: r.DeliveryID}
 	if err := ref.validate(); err != nil {
 		return State{}, fmt.Errorf("bundle receipt %s: %w", r.ReceiptID, err)
 	}
@@ -975,6 +1012,46 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 	return report, s.gc(st, kept)
 }
 
+// Unsettled returns the receipts no run finished (received, verified, staged
+// or applied), newest first. Read while no lifecycle run holds the lock that
+// serializes bundle runs, each one was left by a run that ended before it
+// settled the receipt (a killed child): the next mutating lifecycle run
+// settles it (Settle), and until then the current or last good bundle
+// enforces. Read-only: status reports them without settling.
+func (s *Store) Unsettled() ([]*Receipt, error) {
+	receipts, err := s.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	var out []*Receipt
+	for _, r := range receipts {
+		if !Finished(r.State) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// UnsettledMessage is the WarnBundlePending message of a read-only lifecycle
+// status that found unsettled receipts and no run holding the lock. ensure is
+// the command that settles them.
+func UnsettledMessage(unsettled []*Receipt, ensure string) string {
+	if len(unsettled) == 0 {
+		return ""
+	}
+	newest := unsettled[0]
+	which := "receipt " + newest.ReceiptID
+	if newest.DeliveryID != "" {
+		which += " (delivery " + newest.DeliveryID + ")"
+	}
+	more := ""
+	if n := len(unsettled) - 1; n > 0 {
+		more = fmt.Sprintf(" and %d older unfinished receipt(s)", n)
+	}
+	return fmt.Sprintf("policy bundle %s is %s%s, and no lifecycle run is applying it: the run that received it ended before it finished (a killed apply), "+
+		"so the current or last good bundle keeps enforcing; run `%s` to recover and settle it", which, newest.State, more, ensure)
+}
+
 // Receipts returns every readable receipt, newest first. An unreadable
 // receipt file is skipped: it cannot be settled and never names a bundle
 // that enforces.
@@ -1025,11 +1102,45 @@ func (s *Store) Summary() (*enterprisestatus.BundleState, error) {
 	if last != nil {
 		return last.Status(st.Current), nil
 	}
-	if c := st.Current; c != nil {
-		return &enterprisestatus.BundleState{BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
-			EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt}, nil
+	if st.Current != nil {
+		return currentBundleState(st.Current), nil
 	}
 	return nil, nil
+}
+
+// CurrentSummary is the result v2 bundle block of the confirmed current
+// bundle, whatever a newer delivery left as the latest receipt: its
+// confirmed receipt, or the state's record of it once that receipt was
+// pruned; nil when no bundle is current. A repeated delivery of the current
+// bundle writes no receipt and reports this block.
+func (s *Store) CurrentSummary() (*enterprisestatus.BundleState, error) {
+	st, err := s.LoadState()
+	if err != nil || st.Current == nil {
+		return nil, err
+	}
+	c := st.Current
+	receipts, err := s.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	id := receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID)
+	for _, r := range receipts {
+		if r.State == StateConfirmed && r.BundleID == c.BundleID && r.Version == c.Version && (id == "" || r.ReceiptID == id) {
+			return r.Status(c), nil
+		}
+	}
+	return currentBundleState(c), nil
+}
+
+// currentBundleState is the bundle block of the current bundle from the
+// store state alone. The receipt that promoted it named its version
+// directory, so its id survives the receipt being pruned; Confirm copied its
+// delivery_id and restart_required into the state.
+func currentBundleState(c *Ref) *enterprisestatus.BundleState {
+	return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID), DeliveryID: c.DeliveryID,
+		BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
+		EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt,
+		RestartRequired: c.RestartRequired}
 }
 
 // prune keeps the MaxReceipts newest receipts; an unfinished one is never

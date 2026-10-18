@@ -228,6 +228,16 @@ def test_enterprise_lifecycle_paths_run_the_enterprise_lanes() -> None:
         assert outputs["packaging"] and outputs["enterprise"], path
 
 
+def test_management_contract_files_run_the_go_contract_tests_and_checks() -> None:
+    for path in (
+        "packaging/mdm/contract/management-agent.md",
+        "packaging/mdm/contract/bundle-status.schema.json",
+        "packaging/mdm/contract/exit-codes.md",
+    ):
+        outputs = classify(path)
+        assert outputs["go"] and outputs["checks"] and outputs["windows_go"], path
+
+
 def test_the_develop_skill_runs_the_checks_lane() -> None:
     outputs = classify(".claude/skills/defenseclaw-develop/SKILL.md")
     assert outputs["checks"]

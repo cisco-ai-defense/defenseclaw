@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -378,7 +379,7 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
-	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
+	if !status.OK || !strings.Contains(messagesOf(status.Warnings, enterprisestatus.CodeAIDefenseUnavailable), "unavailable:auth_failed") {
 		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 	// The warning names the failing accounts (GAP-0696).

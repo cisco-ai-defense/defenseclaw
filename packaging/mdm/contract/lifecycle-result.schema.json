@@ -24,7 +24,7 @@
     "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
     "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
     "installed": { "type": "boolean" },
-    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first. Linux, macOS and Windows status also set it, with warning bundle_pending, when a policy bundle receipt is unfinished and no run holds the lock (a killed apply): ensure settles it, and the current or last good bundle enforces until then." },
     "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
     "readiness": {
       "type": "object",
@@ -43,7 +43,16 @@
       "required": ["local", "ai_defense"],
       "properties": {
         "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
-        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+        "ai_defense": {
+          "type": "string",
+          "enum": [
+            "", "disabled", "ok", "unknown",
+            "unavailable:auth_failed", "unavailable:credential_unavailable", "unavailable:unreachable",
+            "unavailable:proxy_auth_required", "unavailable:proxy_config", "unavailable:not_initialized",
+            "unavailable:error", "unavailable:gateway_not_ready"
+          ],
+          "description": "Cisco AI Defense inspection, from the gateway's /health (standaloneInspectionPosture). disabled: enterprise.inspection.ai_defense is off. ok: AI Defense answered a request with the stored key. unknown: no request has been answered since the key was stored or the gateway restarted, or the gateway did not report. unavailable:auth_failed: AI Defense rejected the stored key (HTTP 401 or 403) on the last request. unavailable:credential_unavailable: the credential is missing or fails its trust check. unavailable:unreachable: no answer (connection failure or timeout). unavailable:proxy_auth_required / proxy_config: the egress proxy wants credentials (HTTP 407) or its setting is invalid. unavailable:error: another failure, for example an HTTP 5xx. unavailable:not_initialized: the client was never built. unavailable:gateway_not_ready (Windows): the gateway is not ready. Every unavailable value also adds warning ai_defense_unavailable; the local policy engine keeps deciding. The value never carries the key or the response body."
+        }
       }
     },
     "machine_policy": {
@@ -111,7 +120,7 @@
     },
     {
       "if": { "properties": { "platform": { "const": "windows" } } },
-      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 5, 1603, 1618, 1639, 3010] } } },
       "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
     },
     {
@@ -204,11 +213,16 @@
         "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
       }
     },
+    "deliveryId": {
+      "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "The opaque id the caller passed to `enterprise bundle apply --delivery-id` (management_contract 1): 1 to 128 bytes of A-Z a-z 0-9 . _ : -. Caller-supplied, so it names a delivery, not who made it: an MDM wrapper, a management agent and an administrator can all pass one. Absent when the apply had no --delivery-id (Setup BUNDLE=, `enterprise windows ensure --bundle`, the inbox path unit, the MDM kits) and on builds without the flag."
+    },
     "bundleRefusal": {
       "type": "object", "additionalProperties": false,
       "required": ["receipt_id", "error_code", "time"],
       "properties": {
         "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the refused delivery." },
         "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
         "version": { "type": "integer", "minimum": 0 },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
@@ -222,6 +236,8 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json (management_contract 1). Absent on older builds and when no receipt was kept (a refusal before the bundle was received). A repeated delivery of the current bundle (already_applied) writes no receipt and reports the current confirmed receipt's id." },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the delivery whose receipt this block reports. A repeated delivery of the current bundle (already_applied) reports the confirmed receipt, so this is that delivery's id (or absent), never the repeat's own." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },

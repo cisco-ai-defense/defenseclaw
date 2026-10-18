@@ -529,6 +529,54 @@ echo installed-ok
     assert "step 1.0.4101 -> 1.0.4101" in result.stdout, result.stdout
     assert log.read_text(encoding="utf-8").strip() == "rpm -U --replacepkgs"
 
+# GAP-0030: a --staging-dir folder that does not exist exited 1 with no
+# result and "DC_TRUST_ACL: unbound variable" (set -u): the check skipped
+# dc_trusted_path, which is what set the variable. Both twins run their own
+# settings and state block and the real dc_stage_parent; a stub stat makes an
+# existing folder read as another account's on either host.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+@pytest.mark.parametrize("case", ["missing", "untrusted"])
+def test_unix_wrapper_refuses_a_bad_custom_staging_dir_with_a_result(os_dir: str, shell: str, case: str, tmp_path: Path) -> None:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    validator = _schema_validator()
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    header = text[text.index("set -eu\n"):text.index("dc_platform() {")]
+    functions = "\n".join(_shell_function(text, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_fail_result", "dc_log", "dc_stat_uid", "dc_stat_mode",
+        "dc_acl_write_entry", "dc_trusted_path", "dc_stage_parent"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat = bin_dir / "stat"
+    stat.write_text("#!/bin/sh\necho 501\n", encoding="utf-8")  # owned by another account
+    stat.chmod(0o755)
+    staging = tmp_path / "mdm-stage"
+    if case == "untrusted":
+        staging.mkdir()
+    script = f"""{header}
+PATH='{bin_dir}':$PATH
+DC_STAGING_DIR='{staging}'
+{functions}
+dc_stage_parent
+echo staged
+"""
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+    assert result.returncode == 1 and result.stderr == "", (result.stdout, result.stderr)
+    documents = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(documents) == 1, result.stdout
+    document = json.loads(documents[0])
+    assert not sorted(validator.iter_errors(document), key=str), document
+    assert document["exit_code"] == 1 and document["platform"] == ("darwin" if os_dir == "macos" else "linux")
+    assert [e["code"] for e in document["errors"]] == ["mdm_staging_untrusted"], document
+    message = document["errors"][0]["message"]
+    if case == "missing":
+        assert f"the staging folder {staging} does not exist" in message and "mkdir -m 0700" in message, message
+    else:
+        assert f"the staging folder {staging} is not a root-owned directory that only root can write" in message, message
+
+
 # GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
 # could not run from the wrapper's /var/tmp staging folder, and the result was
 # mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
@@ -912,42 +960,238 @@ def test_unix_detect_requires_tetragon_readiness_in_each_format(tmp_path: Path) 
         assert (ready.returncode, ready.stdout) == (0, "ready\n"), shell
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
-def test_unix_wrapper_restores_the_trust_anchor_file_after_a_failed_apply(tmp_path: Path) -> None:
-    # The wrapper installs the anchor file before the bundle apply; a failed
-    # apply puts back the file it replaced (or removes the one it added), and
-    # an identical file is not rewritten.
+_ANCHORS_FUNCTIONS = ("dc_sha256", "dc_anchors_dir", "dc_anchors_verb", "dc_run_anchors_verb", "dc_put_anchors",
+                      "dc_install_anchors", "dc_restore_anchors")
+# The installed gateway, as the wrapper sees it: --version-json, and
+# `enterprise bundle anchors install` installing STUB_DEST (or printing
+# STUB_REPLY and exiting STUB_EXIT). Each call and the mode of the file
+# --file names go to STUB_LOG.
+_STUB_GATEWAY = """#!/bin/sh
+printf '%s\\n' "$*" >>"$STUB_LOG"
+if [ "$1" = --version-json ]; then
+    [ "$STUB_VERSION" != fail ] || { echo 'Error: unknown flag: --version-json' >&2; exit 1; }
+    printf '%s\\n' "$STUB_VERSION"
+    exit 0
+fi
+[ "$1 $2 $3 $4 $5" = "enterprise bundle anchors install --file" ] && [ "$7 $8 $9" = "--lock-wait 10m --json" ] || exit 2
+ls -l "$6" | cut -c1-10 >>"$STUB_LOG"
+if [ -n "${STUB_REPLY:-}" ]; then
+    cat "$STUB_REPLY"
+    echo "${STUB_STDERR:-}" >&2
+    exit "$STUB_EXIT"
+fi
+if [ -f "$STUB_DEST" ] && cmp -s "$6" "$STUB_DEST"; then
+    result=unchanged
+elif [ -f "$STUB_DEST" ]; then
+    result=replaced
+else
+    result=installed
+fi
+[ "$result" = unchanged ] || { cp "$6" "$STUB_DEST"; chmod 0644 "$STUB_DEST"; }
+printf '{\\n  "schema_version": 1,\\n  "command": "anchors install",\\n  "ok": true,\\n  "result": "%s",\\n  "anchors": "%s",\\n  "warnings": [],\\n  "errors": []\\n}\\n' "$result" "$STUB_DEST"
+"""
+_VERSION_CONTRACT = ('{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.3","commit":"0123456789",'
+                     '"built":"2026-10-30T18:00:00Z","management_contract":1}')
+# What 1.0.2 and earlier print: no management_contract member.
+_VERSION_BEFORE = '{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.2","commit":"0123456789","built":"x"}'
+
+
+def _anchors_harness(tmp_path: Path, body: str) -> tuple[Path, Path, Path, str]:
+    """The wrapper's anchor functions with a stub gateway; returns stage, anchors, log and the script."""
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    names = ("dc_sha256", "dc_put_anchors", "dc_install_anchors", "dc_restore_anchors")
-    functions = "\n".join(_shell_function(text, name) for name in names)
+    assert text.replace("DC_SCRIPT_OS=linux #", "DC_SCRIPT_OS=darwin #", 1) == _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in _ANCHORS_FUNCTIONS)
     (tmp_path / "etc").mkdir()
     stage = tmp_path / "stage"
     stage.mkdir()
+    gateway = tmp_path / "bin" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    gateway.write_text(_STUB_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    script = f"""DC_SCRIPT_OS=linux DC_STAGE="{stage}" DC_ANCHORS="{anchors}" DC_GATEWAY="${{T_GATEWAY:-{gateway}}}"
+DC_EXIT_FAILURE=1 DC_TRUST_ACL="" DC_CHILD="" DC_ANCHORS_PREVIOUS="" DC_ANCHORS_CHANGED=0
+DC_ANCHORS_VERB=0 DC_ANCHORS_SOURCE="" DC_ANCHORS_RESULT=""
+dc_log() {{ :; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+chown() {{ :; }}
+dc_trusted_path() {{ [ "${{T_UNTRUSTED:-0}}" = 0 ]; }}
+{functions}
+{body}
+"""
+    return stage, anchors, tmp_path / "gateway.log", script
+
+
+def _anchors_env(log: Path, anchors: Path, **values: str) -> dict[str, str]:
+    return dict(os.environ, STUB_LOG=str(log), STUB_DEST=str(anchors), **values)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("writer", ["command", "shell"])
+def test_unix_wrapper_restores_the_trust_anchor_file_after_a_failed_apply(tmp_path: Path, writer: str) -> None:
+    # The wrapper installs the anchor file before the bundle apply; a failed
+    # apply puts back the file it replaced (or removes the one it added), and
+    # an identical file is not rewritten. F7: an installed gateway with
+    # management_contract 1 does both with `enterprise bundle anchors
+    # install`; an older one gets the wrapper's own writer.
+    stage, anchors, log, script = _anchors_harness(tmp_path, """dc_install_anchors "$DC_STAGE/$1.json"
+echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
+[ "$2" = keep ] || dc_restore_anchors""")
     for name, body in (("old", '{"v": 1}'), ("new", '{"v": 2}')):
         (stage / f"{name}.json").write_text(body, encoding="utf-8")
-    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
-    script = f'''DC_SCRIPT_OS=linux DC_STAGE="{stage}" DC_ANCHORS="{anchors}" DC_TRUST_ACL=""
-DC_ANCHORS_PREVIOUS="" DC_ANCHORS_CHANGED=0
-dc_log() {{ :; }}
-dc_fail_result() {{ echo "fail $2"; exit "$1"; }}
-chown() {{ :; }}
-dc_trusted_path() {{ :; }}
-{functions}
-dc_install_anchors "$DC_STAGE/$1.json"
-echo "changed=$DC_ANCHORS_CHANGED"
-[ "$2" = keep ] || dc_restore_anchors
-'''
+    version = _VERSION_CONTRACT if writer == "command" else _VERSION_BEFORE
+    verb = int(writer == "command")
 
-    def run(name: str, then: str) -> str:
-        result = subprocess.run(["sh", "-c", script, "t", name, then], capture_output=True, text=True, timeout=10)
+    def run(name: str, then: str) -> tuple[str, list[str]]:
+        log.unlink(missing_ok=True)
+        result = subprocess.run(["sh", "-c", script, "t", name, then], capture_output=True, text=True, timeout=10,
+                                env=_anchors_env(log, anchors, STUB_VERSION=version))
         assert result.returncode == 0, result.stdout + result.stderr
-        return result.stdout
+        return result.stdout, log.read_text(encoding="utf-8").splitlines()
 
-    assert run("new", "restore") == "changed=1\n" and not anchors.exists()
-    assert run("old", "keep") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    def installs(calls: list[str]) -> list[str]:
+        return [call.split(" --file ")[1] for call in calls if call.startswith("enterprise bundle anchors install")]
+
+    out, calls = run("new", "restore")
+    assert out == f"changed=1 verb={verb}\n" and not anchors.exists()
+    out, calls = run("old", "keep")
+    assert out == f"changed=1 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
     assert oct(anchors.stat().st_mode & 0o777) == "0o644" and oct(anchors.parent.stat().st_mode & 0o777) == "0o755"
-    assert run("old", "restore") == "changed=0\n" and anchors.read_text() == '{"v": 1}'
-    assert run("new", "restore") == "changed=1\n" and anchors.read_text() == '{"v": 1}'
+    out, calls = run("old", "restore")
+    assert out == f"changed=0 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
+    out, calls = run("new", "restore")
+    assert out == f"changed=1 verb={verb}\n" and anchors.read_text() == '{"v": 1}'
+    assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
+    if writer == "shell":
+        assert calls == ["--version-json"]
+        return
+    # The install and the restore: a private root-only copy in the trust
+    # folder (the command refuses a source in a sticky or linked folder),
+    # with the contract's argv; the copy is gone afterwards.
+    source = f"{anchors.parent}/.bundle-anchors.json.mdm-source-"
+    assert calls[0] == "--version-json" and len(installs(calls)) == 2, calls
+    for call in installs(calls):
+        assert call.startswith(source) and call.endswith(" --lock-wait 10m --json"), call
+    assert [line for line in calls if re.fullmatch(r"-[rwx-]{9}", line)] == ["-rw-------", "-rw-------"], calls
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("reason", ["already_applied", "compliant"])
+def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
+    # GAP-0034 (twin of the Windows finding): a kit run that installed other
+    # trust anchors, then found the confirmed bundle already applied (or,
+    # without a bundle, the deployment compliant), printed the lifecycle's
+    # "noop": true. It changed the device, so it is not a no-op, and changes
+    # names the anchor file. An unchanged anchor file keeps the no-op.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
+    anchors = tmp_path / "trust" / "bundle-anchors.json"
+    base = {
+        "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": reason,
+        "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+        "installed": True, "transaction_pending": False, "services": [],
+        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+        "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+        "coverage_complete": True, "security_complete": True, "errors": [],
+    }
+    validator = _schema_validator()
+
+    def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
+        document = dict(base)
+        if changes is not None:
+            document["changes"] = changes
+        document["exit_code"] = 0
+        result = tmp_path / "result.json"
+        result.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        script = f"""DC_STAGE="{tmp_path}" DC_RESULT="{result}" DC_ANCHORS="{anchors}"
+DC_ANCHORS_CHANGED={changed} DC_ANCHORS_PREVIOUS="{previous}"
+{functions}
+dc_annotate_anchors_step
+cat "$DC_RESULT"
+"""
+        completed = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        out = json.loads(completed.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), out
+        return out
+
+    rotated = run("1", str(tmp_path / "previous.json"))
+    assert rotated["noop"] is False and "noop_reason" not in rotated, rotated
+    assert rotated["changes"] == [f"replaced the trust anchors in {anchors}"], rotated
+    first = run("1", "", changes=["restarted the gateway"])
+    assert first["noop"] is False and "noop_reason" not in first, first
+    assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
+    unchanged = run("0", "")
+    assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(("version", "untrusted", "missing", "expected"), [
+    (_VERSION_CONTRACT, False, False, "verb"),
+    (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":2'), False, False, "verb"),
+    (_VERSION_CONTRACT.replace(':1}', ': 1 }'), False, False, "verb"),
+    (_VERSION_BEFORE, False, False, "shell"),
+    (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":0'), False, False, "shell"),
+    ("fail", False, False, "shell"),
+    ("not json", False, False, "shell"),
+    (_VERSION_CONTRACT, True, False, "shell"),
+    (_VERSION_CONTRACT, False, True, "shell"),
+])
+def test_unix_wrapper_probes_the_installed_gateway_for_the_anchors_command(
+    tmp_path: Path, version: str, untrusted: bool, missing: bool, expected: str
+) -> None:
+    # The probe is --version-json (management_contract 1 or later) on the
+    # installed, root-owned gateway; a build without the member, an older
+    # build without the flag, an untrusted or missing binary get the writer.
+    _, anchors, log, script = _anchors_harness(tmp_path, "if dc_anchors_verb; then echo verb; else echo shell; fi")
+    env = _anchors_env(log, anchors, STUB_VERSION=version, T_UNTRUSTED=str(int(untrusted)))
+    if missing:
+        env["T_GATEWAY"] = str(tmp_path / "bin" / "absent")
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10, env=env)
+    assert (result.returncode, result.stdout) == (0, expected + "\n"), result.stderr
+
+
+def _anchors_examples() -> list[dict]:
+    return json.loads(_text(MDM / "contract" / "anchors-install.schema.json"))["examples"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("case", ["anchor_invalid", "anchor_insecure", "lifecycle_busy", "no_json", "crash"])
+def test_unix_wrapper_reports_an_anchors_command_refusal(tmp_path: Path, case: str) -> None:
+    # A refusal of `enterprise bundle anchors install` is mdm_anchor_install_failed
+    # with the command's exit code (1 refused, 75 busy, anything else 1) and
+    # its errors[0].code, or its stderr when it printed no JSON. Nothing is
+    # written: the installed file stays, the private copy is removed, and the
+    # wrapper does not fall back to its own writer.
+    stage, anchors, log, script = _anchors_harness(tmp_path, 'dc_install_anchors "$DC_STAGE/new.json"; echo installed')
+    (stage / "new.json").write_text('{"v": 2}', encoding="utf-8")
+    anchors.parent.mkdir()
+    anchors.write_text('{"v": 1}', encoding="utf-8")
+    refusals = {example["errors"][0]["code"]: example for example in _anchors_examples() if not example["ok"]}
+    busy = dict(refusals["anchor_invalid"], errors=[{"code": "lifecycle_busy", "message": "another lifecycle run holds the lock"}])
+    reply, code, stderr = {
+        "anchor_invalid": (refusals["anchor_invalid"], 1, ""),
+        "anchor_insecure": (refusals["anchor_insecure"], 1, ""),
+        "lifecycle_busy": (busy, 75, ""),
+        "no_json": (None, 1, "Error: unknown flag: --lock-wait"),
+        "crash": (None, 3, "panic: boom"),
+    }[case]
+    reply_file = tmp_path / "reply.json"
+    reply_file.write_text(json.dumps(reply, indent=2) + "\n" if reply else "", encoding="utf-8")
+    env = _anchors_env(log, anchors, STUB_VERSION=_VERSION_CONTRACT, STUB_REPLY=str(reply_file),
+                       STUB_EXIT=str(code), STUB_STDERR=stderr)
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10, env=env)
+    prefix = "enterprise bundle anchors install did not install the trust anchor file"
+    expected = {
+        "anchor_invalid": (1, f"{prefix} (anchor_invalid): {refusals['anchor_invalid']['errors'][0]['message']}"),
+        "anchor_insecure": (1, f"{prefix} (anchor_insecure): {refusals['anchor_insecure']['errors'][0]['message']}"),
+        "lifecycle_busy": (75, f"{prefix} (lifecycle_busy): another lifecycle run holds the lock"),
+        "no_json": (1, f"{prefix}: Error: unknown flag: --lock-wait"),
+        "crash": (1, f"{prefix}: panic: boom"),
+    }[case]
+    assert (result.returncode, result.stdout.strip()) == (expected[0], f"fail {expected[0]} mdm_anchor_install_failed {expected[1]}")
+    assert anchors.read_text() == '{"v": 1}'
     assert sorted(p.name for p in anchors.parent.iterdir()) == ["bundle-anchors.json"]
 
 
@@ -1336,7 +1580,7 @@ dc_trusted_path() {{ :; }}; dc_binaries_damaged() {{ return 1; }}
 dc_stage_source() {{ :; }}; dc_install_package() {{ call package; }}
 dc_run_lifecycle_retry() {{ shift; call "$@"; }}
 dc_install_anchors() {{ call anchors; }}; dc_restore_anchors() {{ call restore; }}
-dc_annotate_package_step() {{ :; }}; dc_emit_result() {{ :; }}
+dc_annotate_package_step() {{ :; }}; dc_annotate_anchors_step() {{ :; }}; dc_emit_result() {{ :; }}
 dc_fail_result() {{ call "fail $2"; exit "$1"; }}
 dc_cleanup() {{ rm -rf "$DC_STAGE"; }}; dc_stop_child() {{ :; }}
 dc_main

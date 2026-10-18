@@ -196,6 +196,7 @@ func windowsEnterpriseHotConfigApply(
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
 	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	opts.codexTargetTransaction = false
 	failBundle := func(code, message string) {
 		if bundleChange {
 			result.AddError(code, message)
@@ -276,6 +277,14 @@ func windowsEnterpriseHotConfigApply(
 	}
 	if bytes.Equal(previous, next) {
 		return unavailable("the staged config is byte-identical to the installed config")
+	}
+	// Turning Codex protection on or off is the lifecycle transaction's:
+	// it owns Codex's machine policy. Nothing is written here, so the
+	// guardian never writes the Codex requirements for a deployment record
+	// that does not attest them (GAP-0033).
+	if windowsConfigCodexTargetChanged(previous, next) {
+		opts.codexTargetTransaction = true
+		return false, nil
 	}
 	// A file that changes no setting (line endings, comments, formatting)
 	// is installed the same way: the gateway reloads it to the same policy
@@ -600,7 +609,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err != nil || windowsEnterpriseConfigParses(current) {
 		return "", nil
 	}
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+	if windowsBundleInstallTransactionPending(layout) {
 		return "", nil
 	}
 	if windowsEnterpriseHotConfigSourceCheck(supplied) != nil {

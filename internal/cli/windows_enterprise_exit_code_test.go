@@ -14,9 +14,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWindowsEnterpriseLifecycleReportsTheFatalInstallExitCode(t *testing.T) {
@@ -71,5 +75,26 @@ func TestWindowsEnterpriseLifecycleReportsTheFatalInstallExitCode(t *testing.T) 
 				t.Fatalf("exit code = %d, want %d", got, test.want)
 			}
 		})
+	}
+}
+
+// Every exit code windowsEnterpriseFailureCodeFor returns is one the lifecycle
+// result schema allows on Windows (windowsLifecycleExitCodes), including 5
+// for elevation_required.
+func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
+	for code, want := range map[string]int{
+		"elevation_required":              enterprisestatus.WindowsExitAccessDenied,
+		"lifecycle_busy":                  enterprisestatus.WindowsExitBusy,
+		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
+		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
+		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,
+		"anything_else":                   enterprisestatus.WindowsExitFailure,
+	} {
+		result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, "test")
+		got := windowsEnterpriseFailureCodeFor(result)
+		if got != want || !slices.Contains(windowsLifecycleExitCodes, got) {
+			t.Fatalf("%s exits %d, want %d (one of %v)", code, got, want, windowsLifecycleExitCodes)
+		}
 	}
 }

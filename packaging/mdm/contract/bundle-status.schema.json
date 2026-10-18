@@ -1,0 +1,468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-status-v1.json",
+  "title": "enterprise bundle status --json",
+  "description": "`enterprise bundle status --json` (bundleStatusResult, internal/cli/enterprise_bundle_status.go): the confirmed bundle (current), the last good bundle, the version floor, the last receipt that reached staging, the last refusal before staging, the running gateway's digest and whether it enforces the current bundle. On Windows the command first settles a receipt that a killed run left in state applied (skipped while an apply holds bundle.lock), and an unelevated token gets the short not_admin document (bundle-refused.schema.json). Exit 0 when ok, 1 (Linux, macOS) or 1603 (Windows) otherwise.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/full"
+    },
+    {
+      "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json"
+    }
+  ],
+  "$defs": {
+    "full": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "ok",
+        "bundle_mode",
+        "current",
+        "last_good",
+        "floor",
+        "last_receipt",
+        "sessions_restart_required",
+        "alert_only_rule_count",
+        "gateway_checked",
+        "applied",
+        "warnings",
+        "errors"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "command": {
+          "const": "status"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "bundle_mode": {
+          "type": "boolean",
+          "description": "True when <etc>/trust/bundle-anchors.json exists."
+        },
+        "anchors": {
+          "type": "string"
+        },
+        "current": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ref"
+            }
+          ]
+        },
+        "last_good": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ref"
+            }
+          ]
+        },
+        "floor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_receipt": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/receipt"
+            }
+          ]
+        },
+        "last_refusal": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/bundleRefusal"
+        },
+        "bundle": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/bundleState"
+        },
+        "sessions_restart_required": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/sessionRestartStatus",
+          "description": "Agent sessions that must restart to pick up the confirmed bundle. A status refused before the live session scan (not_managed, not_root, state_invalid) reports state unknown, count 0 and no entries."
+        },
+        "alert_only_rule_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gateway_checked": {
+          "type": "boolean"
+        },
+        "gateway_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "applied": {
+          "type": "boolean",
+          "description": "The running gateway reports the current bundle's effective digest and no rejected reload."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-verify-v1.json#/$defs/warning"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json#/$defs/bundleError"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "errors": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "errors": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprisebundle.Ref (internal/enterprisebundle/store.go): a bundle record of bundle-state.json, printed unchanged as current and last_good.",
+      "required": [
+        "bundle_id",
+        "version",
+        "manifest_sha256",
+        "dir"
+      ],
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signer_key_id": {
+          "type": "string"
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "confirmed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "restart_required": {
+          "const": true
+        },
+        "delivery_id": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId",
+          "description": "The --delivery-id of the apply that confirmed this bundle (guide section 2.6), absent when it had none. The state keeps it, so it outlives that receipt being pruned."
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The root-only receipt, enterprisebundle.Receipt (internal/enterprisebundle/store.go). Unlike the public receipt it carries error_message, manifest_sha256, dir and the transitions.",
+      "required": [
+        "schema_version",
+        "receipt_id",
+        "state",
+        "transitions",
+        "sessions_restart_required"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string"
+        },
+        "device_group": {
+          "type": "string"
+        },
+        "signer_key_id": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "delivery_id": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId"
+        },
+        "change_summary": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "applied",
+            "confirmed",
+            "failed"
+          ]
+        },
+        "transitions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "at"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "received",
+                  "verified",
+                  "staged",
+                  "applied",
+                  "confirmed",
+                  "failed"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "expected_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "digest_comparable": {
+          "const": true
+        },
+        "warning_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        },
+        "disabled_by_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "applied_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "confirmed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sessions_restart_required": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rolled_back": {
+          "const": true
+        },
+        "enforcing_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "restart": {
+          "const": true
+        },
+        "restart_required": {
+          "const": true
+        },
+        "dir": {
+          "type": "string"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error_code"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "command": "status",
+      "ok": true,
+      "bundle_mode": true,
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "current": {
+        "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "version": 13,
+        "manifest_sha256": "9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "dir": "v13-b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "signer_key_id": "acme-2026a",
+        "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+        "config_generation": 41,
+        "confirmed_at": "2026-10-16T21:05:09.874Z",
+        "delivery_id": "acme-agent:d-000913"
+      },
+      "last_good": null,
+      "floor": 13,
+      "last_receipt": {
+        "schema_version": 1,
+        "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "version": 13,
+        "tenant_id": "acme",
+        "device_group": "eng-laptops",
+        "signer_key_id": "acme-2026a",
+        "principal": "control-plane:acme/alice",
+        "actor": "os:uid:0:root",
+        "delivery_id": "acme-agent:d-000913",
+        "manifest_sha256": "9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "state": "confirmed",
+        "transitions": [
+          {
+            "state": "received",
+            "at": "2026-10-16T21:05:00.010Z"
+          },
+          {
+            "state": "verified",
+            "at": "2026-10-16T21:05:00.420Z"
+          },
+          {
+            "state": "staged",
+            "at": "2026-10-16T21:05:00.611Z"
+          },
+          {
+            "state": "applied",
+            "at": "2026-10-16T21:05:01.120Z"
+          },
+          {
+            "state": "confirmed",
+            "at": "2026-10-16T21:05:09.874Z"
+          }
+        ],
+        "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+        "config_generation": 41,
+        "applied_at": "2026-10-16T21:05:01.120Z",
+        "confirmed_at": "2026-10-16T21:05:09.874Z",
+        "sessions_restart_required": 0
+      },
+      "bundle": {
+        "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "delivery_id": "acme-agent:d-000913",
+        "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "version": 13,
+        "state": "confirmed",
+        "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+        "config_generation": 41,
+        "applied_at": "2026-10-16T21:05:01.120Z",
+        "confirmed_at": "2026-10-16T21:05:09.874Z",
+        "sessions_restart_required": {
+          "state": "known",
+          "count": 0,
+          "entries": []
+        }
+      },
+      "sessions_restart_required": {
+        "state": "known",
+        "count": 0,
+        "entries": []
+      },
+      "alert_only_rule_count": 0,
+      "gateway_checked": true,
+      "gateway_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
+      "applied": true,
+      "warnings": [],
+      "errors": []
+    }
+  ]
+}

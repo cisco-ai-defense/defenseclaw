@@ -8,13 +8,17 @@ package cli
 
 import (
 	"io"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 type bundleApplyOptions struct {
 	bundle, reason       string
+	deliveryID           string
 	inbox, json          bool
 	refuseCapabilityLoss bool
 	lockWait             time.Duration
@@ -43,6 +47,8 @@ reports the new policy; a failed or interrupted apply keeps or puts back the
 last good bundle. Every apply ends in a receipt (bundle status). A repeated
 apply of the current bundle is a no-op (already_applied). --inbox applies the
 highest version in <etc>/bundles/inbox and removes the processed files.
+--delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)
+on the receipt, receipt.json and the result bundle block.
 Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage.`,
 		Args:         bundleNoArgs,
 		SilenceUsage: true,
@@ -56,10 +62,32 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage.`,
 	f.BoolVar(&opts.inbox, "inbox", false, "apply the highest version in the bundle inbox")
 	f.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")
+	f.StringVar(&opts.deliveryID, "delivery-id", "", "opaque id of this delivery, recorded on its receipt (1 to 128 of A-Z a-z 0-9 . _ : -)")
 	addLockWaitFlag(f, &opts.lockWait)
+	if runtime.GOOS == "windows" {
+		f.Lookup("lock-wait").Usage = windowsApplyLockWaitUsage
+		f.Lookup("reason").Usage = "accepted for one command line on every OS; has no effect on Windows"
+	}
 	f.BoolVar(&opts.json, "json", false, "print the result as JSON")
 	cmd.SetFlagErrorFunc(lifecycleFlagError)
 	return cmd
+}
+
+// windowsApplyLockWaitUsage is --lock-wait of Windows `bundle apply`: it
+// covers bundle.lock only, and its default is no wait.
+const windowsApplyLockWaitUsage = "wait up to this long for another policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618"
+
+// checkDeliveryID refuses a --delivery-id that was given (also as "") but is
+// not 1 to 128 of A-Z a-z 0-9 . _ : -, with the invalid-arguments exit code
+// (2, Windows 1639) and no JSON, as every other apply argument error.
+func checkDeliveryID(cmd *cobra.Command, id string) error {
+	if id == "" && !cmd.Flags().Changed("delivery-id") {
+		return nil
+	}
+	if err := enterprisestatus.CheckDeliveryID(id); err != nil {
+		return lifecycleFlagError(cmd, err)
+	}
+	return nil
 }
 
 // bundleApplyRefused prints an apply refused before the lifecycle ran.

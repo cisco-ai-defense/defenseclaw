@@ -417,6 +417,126 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 }
 
+// The bundle block of an apply names the receipt it reports (receipt_id). A
+// fresh apply names the receipt it wrote, which is also the name of its
+// public receipt; a repeat of the current bundle writes no receipt and names
+// the current confirmed one (noop_reason is already_applied only when ensure
+// had nothing else to do); a bundle refused after its
+// receipt was written leaves the block on the confirmed receipt and names
+// its own receipt in last_refusal; a refusal before any receipt was written
+// reports no block.
+func TestBundleApplyResultNamesTheReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	r := b.apply(path)
+	requireOK(t, r)
+	rc := b.receipt(bundleID(1))
+	if r.Bundle == nil || r.Bundle.ReceiptID == "" || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("fresh apply: bundle block = %+v, receipt %s", r.Bundle, rc.ReceiptID)
+	}
+	public := filepath.Join(b.env.bundleStore().PublicReceiptEventsDir(), r.Bundle.ReceiptID+".json")
+	if _, err := os.Stat(public); err != nil {
+		t.Fatalf("no public receipt named by receipt_id: %v", err)
+	}
+
+	receipts, _ := b.env.bundleStore().Receipts()
+	r = b.apply(path)
+	requireOK(t, r)
+	after, _ := b.env.bundleStore().Receipts()
+	if len(after) != len(receipts) || r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("repeated delivery: receipts %d -> %d, bundle block = %+v", len(receipts), len(after), r.Bundle)
+	}
+
+	r = b.apply(b.dir(1, v2))
+	if r.OK || !hasMessageCode(r.Errors, string(enterprisebundle.CodeVersionNotNewer)) {
+		t.Fatalf("same version, other bytes: ok %v, errors %+v", r.OK, r.Errors)
+	}
+	if r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID || r.LastRefusal == nil ||
+		r.LastRefusal.ReceiptID == "" || r.LastRefusal.ReceiptID == rc.ReceiptID {
+		t.Fatalf("refusal after the receipt: bundle block = %+v, last refusal = %+v", r.Bundle, r.LastRefusal)
+	}
+
+	fresh := newTestHost(t, "linux")
+	r = fresh.run(Options{Action: ActionEnsure, Bundle: path})
+	if r.OK || !hasMessageCode(r.Errors, codeNotInstalled) || r.Bundle != nil {
+		t.Fatalf("refusal before the receipt: ok %v, errors %+v, bundle block = %+v", r.OK, r.Errors, r.Bundle)
+	}
+}
+
+// failAfterStaging delivers version v and fails it after its receipt reached
+// staging, so it is the latest receipt the store summary reports.
+func (b *bundleHost) failAfterStaging(version uint64, cfg string) {
+	b.t.Helper()
+	b.env.bundleFault = func(phase string) error {
+		if phase == enterprisebundle.StateStaged {
+			return errors.New("injected failure after staging")
+		}
+		return nil
+	}
+	defer func() { b.env.bundleFault = nil }()
+	if r := b.apply(b.dir(version, cfg)); r.OK || r.Bundle == nil || r.Bundle.BundleID != bundleID(version) || r.Bundle.State != enterprisebundle.StateFailed {
+		b.t.Fatalf("delivery of v%d did not fail after staging: ok %v, bundle block = %+v", version, r.OK, r.Bundle)
+	}
+}
+
+// A repeat of the current bundle after a newer delivery failed after
+// staging reports the current confirmed bundle and its receipt, not the
+// failed delivery that is the latest receipt: the receipt_id it returns is
+// the one the device enforces.
+func TestBundleApplyRepeatAfterANewerFailureNamesTheConfirmedReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID || r.Bundle.BundleID != bundleID(1) ||
+		r.Bundle.State != enterprisebundle.StateConfirmed || r.Bundle.CurrentBundleID != "" || r.Bundle.ConfirmedAt == "" {
+		t.Fatalf("repeat after a newer failure: bundle block = %+v, want the confirmed receipt %s", r.Bundle, confirmed.ReceiptID)
+	}
+	// The first repeat converged what the failed delivery left; the next
+	// is the already_applied no-op and reports the same block.
+	r = b.apply(path)
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != "already_applied" || r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID ||
+		r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("no-op repeat: noop %v, reason %q, bundle block = %+v", r.Noop, r.NoopReason, r.Bundle)
+	}
+}
+
+// A repeat of the current bundle that also repairs drift (here a new
+// credential to apply) has no noop_reason, and still passes the contract's
+// success test: exit 0, ok, bundle.bundle_id the submitted bundle and
+// bundle.state confirmed, also after a newer delivery failed after staging.
+func TestBundleApplyRepeatThatRepairsDriftPassesTheSuccessTest(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+	if err := b.env.WriteSecret(context.Background(), "ai-defense-api-key", []byte("drift-value")); err != nil {
+		t.Fatal(err)
+	}
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Noop || r.NoopReason != "" {
+		t.Fatalf("repeat with drift: noop %v, reason %q; want the drift repaired", r.Noop, r.NoopReason)
+	}
+	if r.ExitCode != 0 || r.Bundle == nil || r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed ||
+		r.Bundle.ReceiptID != confirmed.ReceiptID {
+		t.Fatalf("repeat with drift: exit %d, bundle block = %+v; want confirmed %s", r.ExitCode, r.Bundle, bundleID(1))
+	}
+}
+
 func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
 	b := newBundleHost(t)
 	stagePackage(t, b.testHost, "1.0.0")
@@ -790,8 +910,22 @@ func TestBundleApplyCrashPointMatrix(t *testing.T) {
 				b.apply(path)
 			}()
 			b.env.bundleFault = nil
+			// Before that run, status (read-only) reports the receipt no run
+			// owns as a pending transaction the management agent settles
+			// with ensure; it read transaction_pending false (GAP-0028).
+			before := b.receipt(bundleID(2))
+			status := b.run(Options{Action: ActionStatus})
+			if !status.TransactionPending || !hasWarning(status, enterprisebundle.WarnBundlePending) {
+				t.Fatalf("status after a crash at %s: transaction_pending=%v warnings=%+v", phase, status.TransactionPending, status.Warnings)
+			}
+			if after := b.receipt(bundleID(2)); after.State != before.State || len(after.Transitions) != len(before.Transitions) {
+				t.Fatalf("status changed the receipt: %+v -> %+v", before, after)
+			}
 			// The next lifecycle run (the verify timer or MDM ensure).
 			requireOK(t, b.run(Options{Action: ActionEnsure}))
+			if status := b.run(Options{Action: ActionStatus}); status.TransactionPending || hasWarning(status, enterprisebundle.WarnBundlePending) {
+				t.Fatalf("status after ensure settled a crash at %s: transaction_pending=%v warnings=%+v", phase, status.TransactionPending, status.Warnings)
+			}
 			st := b.state()
 			rc := b.receipt(bundleID(2))
 			if phase == "committed" {
@@ -1013,6 +1147,158 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	if gen, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath)); err != nil ||
 		gen.BundleID != bundleID(1) || gen.BundleVersion != 1 || !configwrite.IsPrincipalActor(gen.Actor) {
 		t.Fatalf("restored generation = %+v (%v), want bundle 1", gen, err)
+	}
+}
+
+// GAP-0032: a gateway killed after the transaction's confirm (the receipt
+// is applied) and absent until the receipt would be confirmed returned
+// confirmed with policy.applied false. Confirmed means the running gateway
+// enforces the digest, so the apply fails not_confirmed with the retry exit
+// code and the receipt stays applied; the resubmit of the same bundle, once
+// the gateway runs again, confirms it and passes the success test. A gateway
+// that its service manager starts again within the confirm wait confirms
+// the bundle in the same run, and the policy block says it is applied.
+func TestBundleApplyGatewayKilledBeforeConfirmIsNotConfirmed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, _ := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			killAfterApplied := func(phase string) error {
+				if phase == enterprisebundle.StateApplied {
+					b.healthy = false
+				}
+				return nil
+			}
+			b.env.bundleFault = killAfterApplied
+			path := b.dir(2, v2)
+			r := b.apply(path)
+			b.env.bundleFault = nil
+			requireError(t, r, codeBundleNotConfirmed)
+			if r.OK || r.ExitCode != enterprisestatus.UnixExitBusy {
+				t.Fatalf("apply ok=%t exit=%d, want the retry exit %d", r.OK, r.ExitCode, enterprisestatus.UnixExitBusy)
+			}
+			if r.Bundle == nil || r.Bundle.BundleID != bundleID(2) || r.Bundle.State == enterprisestatus.BundleConfirmed {
+				t.Fatalf("bundle block = %+v, want bundle 2 not confirmed", r.Bundle)
+			}
+			if r.Policy != nil && r.Policy.Applied {
+				t.Fatalf("policy block says applied while the gateway is down: %+v", r.Policy)
+			}
+			if rc := b.receipt(bundleID(2)); rc.State != enterprisebundle.StateApplied {
+				t.Fatalf("receipt = %+v, want applied for the next run to settle", rc)
+			}
+			if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(1) {
+				t.Fatalf("current = %+v, want the last good bundle", st.Current)
+			}
+
+			// The gateway runs again; the agent resubmits the same bundle.
+			b.healthy = true
+			again := b.apply(path)
+			requireOK(t, again)
+			if again.ExitCode != 0 || again.Bundle == nil || again.Bundle.BundleID != bundleID(2) ||
+				again.Bundle.State != enterprisestatus.BundleConfirmed || !hasWarning(again, codeBundleConfirmedLate) {
+				t.Fatalf("resubmit exit=%d bundle=%+v warnings=%+v", again.ExitCode, again.Bundle, again.Warnings)
+			}
+			if again.Policy == nil || !again.Policy.Applied {
+				t.Fatalf("resubmit policy = %+v", again.Policy)
+			}
+			if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(2) {
+				t.Fatalf("current after resubmit = %+v", st.Current)
+			}
+
+			// Killed after applied, started again by the service manager
+			// while the confirm waits: confirmed in the same run.
+			_, _, v3 := bundleConfigs(b.testHost)
+			down := 0
+			health := b.env.HealthGet
+			b.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+				if !b.healthy {
+					if down++; down == 3 {
+						b.healthy = true
+					}
+				}
+				return health(ctx)
+			}
+			b.env.bundleFault = killAfterApplied
+			late := b.apply(b.dir(3, v3))
+			b.env.bundleFault, b.env.HealthGet = nil, health
+			requireOK(t, late)
+			if late.Bundle == nil || late.Bundle.BundleID != bundleID(3) || late.Bundle.State != enterprisestatus.BundleConfirmed {
+				t.Fatalf("restarted gateway: bundle = %+v", late.Bundle)
+			}
+			if late.Policy == nil || !late.Policy.Applied || late.Policy.GatewayReportedDigest != late.Policy.EffectiveDigest {
+				t.Fatalf("restarted gateway: policy = %+v", late.Policy)
+			}
+		})
+	}
+}
+
+// GAP-0042: on macOS the apply LaunchDaemon watches config.yaml, so the
+// path-triggered ensure that the bundle's own config write queued ran as soon
+// as the not_confirmed apply released the lock, and confirmed the receipt
+// late. The agent's resubmit of the same bytes was then a repeat of the
+// current bundle (already_applied) without bundle_confirmed_after_interrupt,
+// so the agent could not tell the late confirm from a first one. The
+// resubmit reports it; a different bundle submitted after a not_confirmed
+// one, and a repeat of a bundle its own run confirmed, do not.
+func TestBundleConfirmedLateByAnotherRunWarnsOnResubmit(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, v3 := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			notConfirmed := func(path string) {
+				t.Helper()
+				b.env.bundleFault = func(phase string) error {
+					if phase == enterprisebundle.StateApplied {
+						b.healthy = false
+					}
+					return nil
+				}
+				r := b.apply(path)
+				b.env.bundleFault, b.healthy = nil, true
+				requireError(t, r, codeBundleNotConfirmed)
+				if r.ExitCode != enterprisestatus.UnixExitBusy || hasWarning(r, codeBundleConfirmedLate) {
+					t.Fatalf("not_confirmed apply: exit=%d warnings=%+v", r.ExitCode, r.Warnings)
+				}
+			}
+
+			path2 := b.dir(2, v2)
+			notConfirmed(path2)
+			// The path-triggered ensure confirms it before the agent resubmits.
+			trigger := b.run(Options{Action: ActionEnsure, Reason: "path"})
+			requireOK(t, trigger)
+			if st := b.state(); !hasWarning(trigger, codeBundleConfirmedLate) || st.Current == nil || st.Current.BundleID != bundleID(2) {
+				t.Fatalf("path ensure: warnings=%+v current=%+v", trigger.Warnings, st.Current)
+			}
+			again := b.apply(path2)
+			requireOK(t, again)
+			if again.Bundle == nil || again.Bundle.BundleID != bundleID(2) || again.Bundle.State != enterprisestatus.BundleConfirmed ||
+				!hasWarning(again, codeBundleConfirmedLate) || again.Policy == nil || !again.Policy.Applied {
+				t.Fatalf("resubmit after a late confirm: bundle=%+v policy=%+v warnings=%+v", again.Bundle, again.Policy, again.Warnings)
+			}
+
+			// Bundle 3 is not confirmed and the agent submits bundle 4 (other
+			// bytes, another digest): this run's settle confirms bundle 3 late,
+			// which its receipt records, but the result reports bundle 4.
+			notConfirmed(b.dir(3, v3))
+			path4 := b.dir(4, v2)
+			other := b.apply(path4)
+			requireOK(t, other)
+			if other.Bundle == nil || other.Bundle.BundleID != bundleID(4) || other.Bundle.State != enterprisestatus.BundleConfirmed ||
+				hasWarning(other, codeBundleConfirmedLate) {
+				t.Fatalf("other bundle after not_confirmed: bundle=%+v warnings=%+v", other.Bundle, other.Warnings)
+			}
+			if rc := b.receipt(bundleID(3)); rc.State != enterprisebundle.StateConfirmed || !slices.Contains(rc.WarningCodes, codeBundleConfirmedLate) {
+				t.Fatalf("bundle 3 receipt = %+v, want confirmed late", rc)
+			}
+			// A repeat of a bundle its own run confirmed is no late confirm.
+			repeat := b.apply(path4)
+			requireOK(t, repeat)
+			if repeat.Bundle == nil || repeat.Bundle.BundleID != bundleID(4) || hasWarning(repeat, codeBundleConfirmedLate) {
+				t.Fatalf("repeat of a first-confirmed bundle: bundle=%+v warnings=%+v", repeat.Bundle, repeat.Warnings)
+			}
+		})
 	}
 }
 

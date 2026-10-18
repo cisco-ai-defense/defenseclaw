@@ -142,7 +142,11 @@ func windowsBundleRestoreRequested(action string, opts *windowsEnterpriseLifecyc
 // bytes, which validated at their first apply, and undoing the write would
 // put the unsigned edit back in force; a gateway that cannot take them fails
 // the run with bundle_not_applied.
-func restoreWindowsBundleConfig(ctx context.Context) windowsBundleRestore {
+//
+// replacing names the bundle a killed run installed and the gateway never
+// confirmed, when this run settled it (windowsBundleSettle.replacing): the
+// change says that config is what the restore replaced, not an edit.
+func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBundleRestore {
 	var out windowsBundleRestore
 	fail := func(code, message string) windowsBundleRestore {
 		out.errors = append(out.errors, enterprisestatus.Message{Code: code, Message: message})
@@ -187,7 +191,7 @@ func restoreWindowsBundleConfig(ctx context.Context) windowsBundleRestore {
 		return fail("bundle_restore_failed", "cannot open lifecycle.lock to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	defer release()
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+	if windowsBundleInstallTransactionPending(layout) {
 		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_restore_deferred",
 			Message: "an install transaction is pending; its recovery restores the config it recorded first, and the next ensure re-applies " + label})
 		return out
@@ -215,6 +219,8 @@ func restoreWindowsBundleConfig(ctx context.Context) windowsBundleRestore {
 	change := "config.yaml had been changed outside the lifecycle; re-applied " + label + " from the bundle store"
 	if missing {
 		change = "config.yaml was missing; re-applied " + label + " from the bundle store"
+	} else if replacing != "" {
+		change = "config.yaml was the config of " + replacing + ", which an interrupted run installed and the gateway never confirmed; re-applied " + label + " from the bundle store"
 	}
 	if kept != "" {
 		change += " and kept the edited file at " + kept

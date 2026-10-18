@@ -87,6 +87,7 @@ func newEnterpriseBundleCommand() *cobra.Command {
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
 	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand(), newEnterpriseBundleStatusCommand(), newEnterpriseBundleApplyCommand())
+	group.AddCommand(platformBundleVerbs()...)
 	return group
 }
 

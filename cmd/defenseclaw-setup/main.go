@@ -2018,6 +2018,9 @@ type machineVersionReport struct {
 	Version       string `json:"version"`
 	Commit        string `json:"commit,omitempty"`
 	Built         string `json:"built,omitempty"`
+	// ManagementContract is the management agent contract the gateway
+	// implements; accepted, not checked.
+	ManagementContract int `json:"management_contract,omitempty"`
 }
 
 func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {

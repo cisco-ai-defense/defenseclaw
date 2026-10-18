@@ -92,7 +92,7 @@ function Assert-DefenseClawBinaryIdentity {
         }
         $properties = @($root.EnumerateObject() | ForEach-Object { $_.Name })
         $required = @('schema_version', 'name', 'version', 'commit')
-        $allowed = @($required + 'built')
+        $allowed = @($required + 'built' + 'management_contract')
         foreach ($name in $required) {
             if ($name -notin $properties) {
                 throw "DefenseClaw identity output is missing $name`: $Path"

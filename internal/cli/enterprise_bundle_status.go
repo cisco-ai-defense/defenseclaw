@@ -76,7 +76,11 @@ Run it as root or an administrator.`,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			res := &bundleStatusResult{SchemaVersion: bundleOutputSchemaVersion, Command: "status",
-				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
+				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{},
+				// Replaced by the live scan; a status refused before it reports
+				// the scan as unknown rather than the zero value.
+				SessionsRestartRequired: enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{},
+					Reason: "not scanned: bundle status was refused before the session scan"}}
 			err := bundleStatus(bundleContext(cmd), res)
 			if err != nil {
 				res.Errors, err = bundleRefusal(err)
@@ -147,7 +151,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_failed",
 				Message: message})
 		case !enterprisebundle.Finished(last.State):
-			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_pending",
+			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
 				Message: "the last bundle received is " + last.State + " and not confirmed yet; the next lifecycle run settles it"})
 		}
 	} else if summary, err := store.Summary(); err == nil {
@@ -222,10 +226,18 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		}
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: bundleReceiptWarningMessage(code, currentReceipt)})
 	}
+	// The state records the signer of the current bundle, so the check
+	// still runs once its confirmed receipt was pruned.
+	signer := ""
 	if currentReceipt != nil {
-		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
-			res.Warnings = append(res.Warnings, *warning)
-		}
+		signer = currentReceipt.SignerKeyID
+	} else if st.Current != nil {
+		signer = st.Current.SignerKeyID
+	}
+	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
+	}
+	if currentReceipt != nil {
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
@@ -263,6 +275,8 @@ func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt)
 		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
 	case enterprisebundle.WarnDigestLayoutUnverifiable:
 		return "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
+	case enterprisebundle.WarnConfirmedAfterInterrupt:
+		return "the run that applied this bundle ended before the gateway confirmed it; a later lifecycle run confirmed it once the gateway reported its policy"
 	case "capability_disabled":
 		if receipt == nil {
 			return "the bundle disabled a capability"
@@ -283,6 +297,15 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
 	if err != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
+	}
+	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleSignerWarning is key_unknown or key_revoked when anchors no longer
+// trust the confirmed bundle signer ("" for none); nil otherwise.
+func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) *enterprisebundle.Warning {
+	if anchors == nil || signerKeyID == "" {
+		return nil
 	}
 	key := anchors.Key(signerKeyID)
 	if key == nil {

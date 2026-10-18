@@ -91,10 +91,22 @@ func TrustedSecretSource(path string) error {
 // ReadSecretValue reads a credential from r, stripping one trailing line
 // ending so `echo key |` works.
 func ReadSecretValue(r io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+	data, err := ReadSecretBytes(r)
 	if err != nil {
 		return nil, err
 	}
+	return ParseSecretValue(data)
+}
+
+// ReadSecretBytes reads what a credential source delivers, at most one byte
+// over the credential limit, without checking it (ParseSecretValue does).
+func ReadSecretBytes(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+}
+
+// ParseSecretValue checks the bytes a credential source delivered and
+// strips one trailing line ending.
+func ParseSecretValue(data []byte) ([]byte, error) {
 	if len(data) > maxSecretBytes {
 		return nil, fmt.Errorf("credential exceeds %d bytes", maxSecretBytes)
 	}

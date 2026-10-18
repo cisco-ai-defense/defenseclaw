@@ -369,7 +369,7 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 	if err := os.WriteFile(pending, []byte(`{"action":"upgrade"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restore := restoreWindowsBundleConfig(context.Background())
+	restore := restoreWindowsBundleConfig(context.Background(), "")
 	if restore.failed() || len(restore.changes) != 0 || len(restore.warnings) != 1 || restore.warnings[0].Code != "bundle_restore_deferred" {
 		t.Fatalf("restore during a pending transaction: %+v", restore)
 	}
@@ -379,7 +379,7 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 	if err := os.Remove(pending); err != nil {
 		t.Fatal(err)
 	}
-	if restore := restoreWindowsBundleConfig(context.Background()); restore.failed() || len(restore.changes) != 1 {
+	if restore := restoreWindowsBundleConfig(context.Background(), ""); restore.failed() || len(restore.changes) != 1 {
 		t.Fatalf("restore after the transaction settled: %+v", restore)
 	}
 }

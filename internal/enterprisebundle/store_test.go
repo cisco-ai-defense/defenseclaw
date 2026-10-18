@@ -59,7 +59,7 @@ func TestStoreProtectsPrivateDirectoryAndAtomicFiles(t *testing.T) {
 		_, err := os.Lstat(path)
 		return err
 	}
-	r, err := s.Receive(testBundleID(88), 1)
+	r, err := s.Receive(testBundleID(88), 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestStoreProtectsPrivateDirectoryAndAtomicFiles(t *testing.T) {
 
 func TestStageCallsDirectoryCreatorOncePerPath(t *testing.T) {
 	s := testStore(t)
-	r, err := s.Receive(testBundleID(89), 1)
+	r, err := s.Receive(testBundleID(89), 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func digestOf(s string) string { sum := sha256.Sum256([]byte(s)); return hex.Enc
 // applyThrough runs a receipt for bundle n, version v, up to state stop.
 func applyThrough(t *testing.T, s *Store, n int, v uint64, stop string) *Receipt {
 	t.Helper()
-	r, err := s.Receive(testBundleID(n), v)
+	r, err := s.Receive(testBundleID(n), v, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestStoreFailureKeepsTheLastGoodBundleAndFloor(t *testing.T) {
 	}
 	// The confirmed bundle delivered again gets a receipt of its own; the
 	// confirmed receipt stays, and the block names the bundle that enforces.
-	again, err := s.Receive(retry.BundleID, 6)
+	again, err := s.Receive(retry.BundleID, 6, "")
 	if err != nil || again.ReceiptID == retry.ReceiptID || again.BundleID != retry.BundleID {
 		t.Fatalf("re-delivered receipt = %+v, %v", again, err)
 	}
@@ -271,14 +271,14 @@ func TestRefusedReplayPreservesEnforcingReceipt(t *testing.T) {
 	s := testStore(t)
 	v1 := applyThrough(t, s, 1, 1, StateConfirmed)
 	v2 := applyThrough(t, s, 2, 2, StateConfirmed)
-	replay, err := s.Receive(v1.BundleID, 1)
+	replay, err := s.Receive(v1.BundleID, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Fail(replay, CodeVersionNotNewer, "older version"); err != nil {
 		t.Fatal(err)
 	}
-	secondReplay, err := s.Receive(v1.BundleID, 1)
+	secondReplay, err := s.Receive(v1.BundleID, 1, "")
 	if err != nil || secondReplay.ReceiptID == replay.ReceiptID {
 		t.Fatalf("second refusal receipt = %+v, %v", secondReplay, err)
 	}
@@ -302,7 +302,7 @@ func TestRefusedReplayPreservesEnforcingReceipt(t *testing.T) {
 func TestPrunedReceiptIDIsNotReusedWhileAuditEventRemains(t *testing.T) {
 	s := testStore(t)
 	id := testBundleID(85)
-	first, err := s.Receive(id, 9)
+	first, err := s.Receive(id, 9, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestPrunedReceiptIDIsNotReusedWhileAuditEventRemains(t *testing.T) {
 	if err := os.Remove(s.receiptPath(first.ReceiptID)); err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.Receive(id, 9)
+	second, err := s.Receive(id, 9, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +401,58 @@ func TestSettleEndsInterruptedRunsAndFinishesAConfirmCut(t *testing.T) {
 	}
 }
 
+// Unsettled lists, read-only, what Settle would finish: the receipts no
+// run finished. Status reports them as a pending transaction (GAP-0028).
+func TestUnsettledListsUnfinishedReceiptsWithoutSettling(t *testing.T) {
+	s := testStore(t)
+	if got, err := s.Unsettled(); err != nil || len(got) != 0 || UnsettledMessage(got, "ensure") != "" {
+		t.Fatalf("empty store: %v, %v", got, err)
+	}
+	applyThrough(t, s, 1, 2, StateConfirmed)
+	if got, err := s.Unsettled(); err != nil || len(got) != 0 {
+		t.Fatalf("confirmed only: %v, %v", got, err)
+	}
+	applied := applyThrough(t, s, 2, 3, StateApplied)
+	staged, err := s.Receive(testBundleID(3), 4, "agent:crash-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Unsettled()
+	if err != nil || len(got) != 2 || got[0].ReceiptID != staged.ReceiptID || got[1].ReceiptID != applied.ReceiptID {
+		t.Fatalf("unsettled = %+v, %v", got, err)
+	}
+	message := UnsettledMessage(got, "defenseclaw-gateway enterprise linux ensure")
+	for _, want := range []string{staged.ReceiptID, "delivery agent:crash-v4", "is received", "1 older unfinished", "enterprise linux ensure"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message %q lacks %q", message, want)
+		}
+	}
+	if rc := receiptByID(t, s, staged.ReceiptID); rc.State != StateReceived {
+		t.Fatalf("Unsettled changed the receipt: %+v", rc)
+	}
+	if _, err := s.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Unsettled(); err != nil || len(got) != 1 || got[0].ReceiptID != applied.ReceiptID {
+		t.Fatalf("after settle (applied stays for the caller): %+v, %v", got, err)
+	}
+}
+
+func receiptByID(t *testing.T, s *Store, id string) *Receipt {
+	t.Helper()
+	receipts, err := s.Receipts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range receipts {
+		if r.ReceiptID == id {
+			return r
+		}
+	}
+	t.Fatalf("no receipt %s", id)
+	return nil
+}
+
 func TestStoreRefusesAStateThatWouldLowerTheFloor(t *testing.T) {
 	s := testStore(t)
 	if err := os.MkdirAll(s.LifecycleDir, 0o700); err != nil {
@@ -457,7 +509,7 @@ func TestReceiptsArePrunedAndUnreadableBundlesGetAReceipt(t *testing.T) {
 	s := testStore(t)
 	open := applyThrough(t, s, 1, 1, StateReceived)
 	for i := 0; i < MaxReceipts+5; i++ {
-		r, err := s.Receive("", 0)
+		r, err := s.Receive("", 0, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -575,6 +627,103 @@ func TestReceiptStatusFieldsMatchTheResultBlock(t *testing.T) {
 	}
 }
 
+// The bundle block names the receipt it reports (receipt_id): the file name
+// of the public receipt a management agent forwards.
+func TestReceiptStatusNamesItsReceipt(t *testing.T) {
+	r := &Receipt{ReceiptID: "r-01JA0000000000000000000009", BundleID: testBundleID(2), Version: 3, State: StateConfirmed}
+	if got := r.Status(nil); got.ReceiptID != r.ReceiptID {
+		t.Fatalf("receipt_id = %q, want %q", got.ReceiptID, r.ReceiptID)
+	}
+}
+
+// With no receipt left (pruned), the summary of the current bundle names
+// the receipt that promoted it, from its version directory name. A legacy
+// directory name carries no receipt id, so none is reported.
+func TestSummaryOfTheCurrentBundleNamesItsConfirmedReceipt(t *testing.T) {
+	id := testBundleID(4)
+	for name, tc := range map[string]struct{ dir, want string }{
+		"receipt directory": {VersionDirNameForReceipt(4, id, "r-01JA0000000000000000000004"), "r-01JA0000000000000000000004"},
+		"legacy directory":  {VersionDirName(4, id), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := testStore(t)
+			if err := s.saveState(State{Current: &Ref{BundleID: id, Version: 4, ManifestSHA256: digestOf(id), Dir: tc.dir}, Floor: 4}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Summary()
+			if err != nil || got == nil || got.ReceiptID != tc.want || got.State != StateConfirmed {
+				t.Fatalf("summary = %+v, %v; want receipt_id %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// A repeated delivery of the current bundle reports the current confirmed
+// receipt, also when a newer delivery failed after staging and is the
+// latest receipt Summary reports, and after the confirmed receipt was
+// pruned.
+func TestCurrentSummaryReportsTheConfirmedReceiptPastANewerFailure(t *testing.T) {
+	s := testStore(t)
+	if got, err := s.CurrentSummary(); err != nil || got != nil {
+		t.Fatalf("no current bundle: %+v, %v", got, err)
+	}
+	v1 := applyThrough(t, s, 1, 1, StateConfirmed)
+	v2 := applyThrough(t, s, 2, 2, StateStaged)
+	if err := s.Fail(v2, CodeApplyFailed, "the gateway did not adopt it"); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := s.Summary(); err != nil || latest == nil || latest.ReceiptID != v2.ReceiptID || latest.State != StateFailed {
+		t.Fatalf("summary = %+v, %v; want the failed v2 receipt", latest, err)
+	}
+	got, err := s.CurrentSummary()
+	if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.BundleID != v1.BundleID || got.State != StateConfirmed ||
+		got.CurrentBundleID != "" || got.ConfirmedAt == "" {
+		t.Fatalf("current summary = %+v, %v; want the confirmed v1 receipt %s", got, err, v1.ReceiptID)
+	}
+	if err := os.Remove(s.receiptPath(v1.ReceiptID)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.CurrentSummary()
+	if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.BundleID != v1.BundleID || got.State != StateConfirmed {
+		t.Fatalf("current summary after prune = %+v, %v; want receipt_id %s", got, err, v1.ReceiptID)
+	}
+}
+
+// The state's record of the confirmed bundle keeps the delivery_id and
+// restart_required its receipt reported, so a repeated delivery reports them
+// also after that receipt was pruned.
+func TestCurrentSummaryAfterPruneKeepsDeliveryIDAndRestartRequired(t *testing.T) {
+	s := testStore(t)
+	v1 := applyThrough(t, s, 1, 1, StateApplied)
+	v1.DeliveryID, v1.RestartRequired = "acme-agent:d-000913", true
+	if _, err := s.Confirm(v1); err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []string{"confirmed receipt", "after prune"} {
+		if stage == "after prune" {
+			if err := os.Remove(s.receiptPath(v1.ReceiptID)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := s.CurrentSummary()
+		if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.DeliveryID != v1.DeliveryID || !got.RestartRequired {
+			t.Fatalf("%s: current summary = %+v, %v; want receipt %s, delivery_id %s, restart_required", stage, got, err, v1.ReceiptID, v1.DeliveryID)
+		}
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Current.DeliveryID = "agent 7"
+	if err := s.saveState(st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadState(); err == nil || !strings.Contains(err.Error(), "delivery_id") {
+		t.Fatalf("a state with a bad current delivery_id loaded: %v", err)
+	}
+}
+
 // A process killed while it rewrites bundle-state.json leaves either the old
 // or the new state, never a torn or empty one; settle removes the temp file.
 func TestBundleStateSurvivesAKillDuringTheWrite(t *testing.T) {
@@ -647,7 +796,7 @@ func TestStoreKeepsAnAppliedBundleAndTheFloorOnARetry(t *testing.T) {
 	applyThrough(t, s, 1, 4, StateConfirmed)
 	applied := applyThrough(t, s, 5, 6, StateApplied)
 
-	again, err := s.Receive(applied.BundleID, applied.Version)
+	again, err := s.Receive(applied.BundleID, applied.Version, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1676,6 +1676,11 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 			}
 		})
 	}
+	// The gateway also names the management agent contract it implements.
+	contract := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1}`)
+	if err := validateMachineVersion(contract, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
+		t.Fatalf("validateMachineVersion with management_contract: %v", err)
+	}
 	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
 	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {
 		t.Fatalf("version-only CLI identity: %v", err)

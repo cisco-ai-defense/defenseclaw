@@ -57,6 +57,9 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     ((".github/",), frozenset()),
     # The defenseclaw-develop skill is verified by make skill-check inside make check.
     ((".claude/skills/defenseclaw-develop/",), frozenset({"checks"})),
+    # The management contract: the Go contract tests and check_schemas.py
+    # validate command output against these schemas and read the guide.
+    (("packaging/mdm/contract/",), frozenset({"go", "packaging"})),
     (("docs-site/", "docs/"), frozenset({"docs"})),
     (("*.md", "*.mdx"), frozenset({"docs"})),
     (("macos/",), frozenset({"macos_app"})),

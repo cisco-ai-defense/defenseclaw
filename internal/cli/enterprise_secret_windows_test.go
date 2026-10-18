@@ -14,17 +14,22 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -45,21 +50,65 @@ func windowsSecretTestHarness(t *testing.T) string {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "secrets")
-	previousLayout, previousAccount := windowsSecretLayout, windowsSecretGatewayAccount
-	previousInstalled, previousElevated, previousRestart := windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
-	t.Cleanup(func() {
-		windowsSecretLayout, windowsSecretGatewayAccount = previousLayout, previousAccount
-		windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousInstalled, previousElevated, previousRestart
-	})
-	windowsSecretLayout = func() (managed.StandaloneLayout, error) {
-		return managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir}, nil
-	}
+	previousAccount := windowsSecretGatewayAccount
+	t.Cleanup(func() { windowsSecretGatewayAccount = previousAccount })
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
 	// A virtual service account that always exists stands in for the
 	// gateway service.
 	windowsSecretGatewayAccount = `NT SERVICE\TrustedInstaller`
-	windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
-	windowsSecretRestartGateway = func() (bool, error) { return true, nil }
 	return dir
+}
+
+// windowsSecretLockEvents records what the stubbed locks and restart saw.
+type windowsSecretLockEvents struct {
+	events                  []string
+	bundle                  time.Duration
+	bundleErr, lifecycleErr error
+}
+
+// stubWindowsSecretHost points the secret verb at layout on an elevated,
+// installed host whose locks and gateway restart are recorded, not taken.
+func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windowsSecretLockEvents {
+	t.Helper()
+	previousLayout, previousInstalled, previousElevated, previousRestart := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
+	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
+	previousManaged := managedHostWindowsStandalone
+	t.Cleanup(func() {
+		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousLayout, previousInstalled, previousElevated, previousRestart
+		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
+		managedHostWindowsStandalone = previousManaged
+	})
+	host := &windowsSecretLockEvents{}
+	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
+	windowsSecretIsElevated = func() bool { return true }
+	windowsSecretRestartGateway = func() (bool, error) { host.events = append(host.events, "restart"); return true, nil }
+	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {
+		if dir != layout.LifecycleDir {
+			t.Errorf("bundle.lock taken in %q, want %q", dir, layout.LifecycleDir)
+		}
+		host.bundle = wait
+		if host.bundleErr != nil {
+			return nil, host.bundleErr
+		}
+		host.events = append(host.events, "lock bundle")
+		return func() { host.events = append(host.events, "unlock bundle") }, nil
+	}
+	windowsSecretLifecycleLockPath = func() (string, error) { return `C:\stub\DefenseClaw-Lifecycle\lifecycle.lock`, nil }
+	windowsSecretLifecycleLock = func(string) (func(), error) {
+		if host.lifecycleErr != nil {
+			return nil, host.lifecycleErr
+		}
+		host.events = append(host.events, "lock lifecycle")
+		return func() { host.events = append(host.events, "unlock lifecycle") }, nil
+	}
+	secretRawArgs = func() []string { return nil }
+	// The standalone marker of the computer the test runs on must not pick
+	// the refusal class: a managed test host turned the unmanaged 1603
+	// expectation into exit 5 (mgmt-agent-api GAP-0002). A test that wants
+	// a managed computer stubs the marker itself.
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	return host
 }
 
 func runWindowsSecretCommand(t *testing.T, action string, opts enterpriseSecretOptions, stdin string) (string, error) {
@@ -183,6 +232,8 @@ func TestWindowsSecretRemoveRefusesAnUnreadableConfig(t *testing.T) {
 	if restarted {
 		t.Fatal("gateway restarted after a refused remove")
 	}
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
 }
 
 func TestWindowsSecretRefusals(t *testing.T) {
@@ -198,20 +249,317 @@ func TestWindowsSecretRefusals(t *testing.T) {
 		t.Fatal("set without a standalone deployment must be refused")
 	}
 	windowsSecretIsElevated = func() bool { return false }
+	// Without the standalone marker a standard account gets 1603
+	// elevation_required (management-agent.md 4.7).
 	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || commandExitCode(err) != windowsSecretExitFailure {
-		t.Fatalf("a non-elevated token must be refused, got %v", err)
+		t.Fatalf("a non-elevated token on a computer without the standalone marker must be refused with 1603, got %v (exit %d)", err, commandExitCode(err))
 	}
 	// GAP-0931: on a managed computer a standard account gets exit 5
 	// elevation_required and the command to ask for, like every other
 	// enterprise refusal there.
-	restoreManaged := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = restoreManaged })
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
 	_, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, "")
 	var refusal *managedViewRefusal
 	if err == nil || commandExitCode(err) != 5 || !errors.As(err, &refusal) || refusal.code != "elevation_required" ||
 		!strings.Contains(err.Error(), "enterprise secret status") {
 		t.Fatalf("a standard account on a managed computer: %v (exit %d)", err, commandExitCode(err))
+	}
+}
+
+// windowsSecretFailureDoc decodes stdout as exactly one failure document of
+// secret-result.schema.json and checks its shape against err.
+func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code string) secretFailureResult {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
+	var doc secretFailureResult
+	if decodeErr := dec.Decode(&doc); decodeErr != nil {
+		t.Fatalf("stdout is not one failure document: %v\n%s", decodeErr, out)
+	}
+	if dec.More() {
+		t.Fatalf("stdout holds more than one document:\n%s", out)
+	}
+	var keys map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(out), &keys)
+	for key := range keys {
+		switch key {
+		case "schema_version", "ok", "action", "name", "gateway_restarted", "errors", "exit_code":
+		default:
+			t.Fatalf("failure document has %q: %s", key, out)
+		}
+	}
+	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
+		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true}
+	exit := commandExitCode(err)
+	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
+		doc.Errors[0].Code != code || !allowed[doc.Errors[0].Code] || doc.Errors[0].Message == "" || doc.ExitCode != exit {
+		t.Fatalf("failure document %+v for exit %d, want action %s code %s", doc, exit, action, code)
+	}
+	switch exit {
+	case enterprisestatus.WindowsExitAccessDenied, windowsSecretExitFailure, enterprisestatus.WindowsExitBusy, windowsSecretExitInvalid:
+	default:
+		t.Fatalf("exit %d is not a Windows secret exit code", exit)
+	}
+	return doc
+}
+
+// A5: every set and remove failure before the write prints one document,
+// with the matching exit code, and never the value.
+func TestWindowsSecretFailuresPrintOneDocument(t *testing.T) {
+	const value = "s3cr3t-value-never-printed"
+	for _, tc := range []struct {
+		name   string
+		action string
+		opts   enterpriseSecretOptions
+		stdin  string
+		setup  func(*windowsSecretLockEvents)
+		code   string
+		exit   int
+	}{
+		{name: "bad name", action: "set", opts: enterpriseSecretOptions{name: "../escape", fromStdin: true}, stdin: value, code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "no source", action: "set", opts: enterpriseSecretOptions{name: "ok-name"}, code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "two lines", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value + "\nmore", code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		// mgmt-agent-api GAP-0031 parity: a stdin closed with no value (the
+		// agent stopped) and a blank line are one invalid_arguments document.
+		{name: "closed stdin, empty value", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: "", code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "blank line", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: " \r\n", code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "lock wait over 15m", action: "remove", opts: enterpriseSecretOptions{name: "ok-name", lockWait: 16 * time.Minute}, code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "not installed", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value, code: "not_installed", exit: windowsSecretExitFailure,
+			setup: func(*windowsSecretLockEvents) {
+				windowsSecretDeploymentInstalled = func() (bool, error) { return false, nil }
+			}},
+		{name: "bundle lock busy", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true, lockWait: time.Second}, stdin: value, code: "lifecycle_busy", exit: enterprisestatus.WindowsExitBusy,
+			setup: func(h *windowsSecretLockEvents) { h.bundleErr = errWindowsBundleStoreBusy }},
+		{name: "bundle lock broken", action: "remove", opts: enterpriseSecretOptions{name: "ok-name"}, code: "state_invalid", exit: windowsSecretExitFailure,
+			setup: func(h *windowsSecretLockEvents) { h.bundleErr = errors.New("access denied") }},
+		{name: "lifecycle lock busy", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value, code: "lifecycle_busy", exit: enterprisestatus.WindowsExitBusy,
+			setup: func(h *windowsSecretLockEvents) { h.lifecycleErr = windows.ERROR_SHARING_VIOLATION }},
+		{name: "lifecycle lock missing", action: "remove", opts: enterpriseSecretOptions{name: "ok-name"}, code: "state_invalid", exit: windowsSecretExitFailure,
+			setup: func(h *windowsSecretLockEvents) { h.lifecycleErr = errors.New("lifecycle lock is not a regular file") }},
+		{name: "standard user, managed", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value, code: "elevation_required", exit: enterprisestatus.WindowsExitAccessDenied,
+			setup: func(*windowsSecretLockEvents) {
+				windowsSecretIsElevated = func() bool { return false }
+				managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+			}},
+		{name: "standard user, unmanaged", action: "remove", opts: enterpriseSecretOptions{name: "ok-name"}, code: "elevation_required", exit: windowsSecretExitFailure,
+			setup: func(*windowsSecretLockEvents) {
+				windowsSecretIsElevated = func() bool { return false }
+				managedHostWindowsStandalone = func() (string, bool) { return "", false }
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			secrets := filepath.Join(t.TempDir(), "secrets")
+			host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: secrets, LifecycleDir: t.TempDir()})
+			restoreManaged, restoreWait := managedHostWindowsStandalone, windowsSecretInstallerLockWait
+			t.Cleanup(func() { managedHostWindowsStandalone, windowsSecretInstallerLockWait = restoreManaged, restoreWait })
+			windowsSecretInstallerLockWait = 50 * time.Millisecond
+			if tc.setup != nil {
+				tc.setup(host)
+			}
+			opts := tc.opts
+			opts.json = true
+			out, err := runWindowsSecretCommand(t, tc.action, opts, tc.stdin)
+			if commandExitCode(err) != tc.exit {
+				t.Fatalf("exit %d (%v), want %d", commandExitCode(err), err, tc.exit)
+			}
+			doc := windowsSecretFailureDoc(t, out, err, tc.action, tc.code)
+			if doc.Name != tc.opts.name {
+				t.Fatalf("name %q, want %q as given", doc.Name, tc.opts.name)
+			}
+			if strings.Contains(out, value) || strings.Contains(err.Error(), value) {
+				t.Fatal("the credential value was printed")
+			}
+			if _, statErr := os.Stat(secrets); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("a refused %s touched the credential store: %v", tc.action, statErr)
+			}
+			for _, event := range host.events {
+				if event == "restart" {
+					t.Fatal("the gateway restarted after a refusal")
+				}
+			}
+			// A lock taken before a refusal is released.
+			if len(host.events)%2 != 0 {
+				t.Fatalf("locks left held: %v", host.events)
+			}
+			// Text mode keeps the plain error and prints nothing on stdout.
+			opts.json = false
+			if tc.setup != nil {
+				tc.setup(host)
+			}
+			if out, err := runWindowsSecretCommand(t, tc.action, opts, tc.stdin); out != "" || commandExitCode(err) != tc.exit {
+				t.Fatalf("text mode: exit %d, stdout %q", commandExitCode(err), out)
+			}
+		})
+	}
+}
+
+// A5: a flag error exits 1639 and, when the command line asks for --json
+// anywhere, prints the failure document; cobra stops parsing at the bad flag.
+func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: filepath.Join(t.TempDir(), "secrets"), LifecycleDir: t.TempDir()})
+	for _, tc := range []struct {
+		args []string
+		json bool
+	}{
+		{args: []string{"--bogus", "--json"}, json: true},
+		{args: []string{"--json", "--bogus"}, json: true},
+		{args: []string{"--name", "ok-name", "--lock-wait", "soon", "--json"}, json: true},
+		{args: []string{"--name", "ok-name", "--from-stdin", "--json", "extra"}, json: true},
+		{args: []string{"--from-stdin", "--json"}, json: true},
+		{args: []string{"--bogus", "--json=false"}},
+		{args: []string{"--bogus"}},
+		{args: []string{"--bogus", "--", "--json"}},
+	} {
+		cmd := newEnterpriseSecretCommand("set", "Store a protected credential and apply it")
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		cmd.SetIn(strings.NewReader(""))
+		cmd.SetArgs(tc.args)
+		secretRawArgs = func() []string { return tc.args }
+		err := cmd.Execute()
+		if commandExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("%v: exit %d (%v), want 1639", tc.args, commandExitCode(err), err)
+		}
+		if !tc.json {
+			if out.Len() != 0 {
+				t.Fatalf("%v printed %q without --json", tc.args, out.String())
+			}
+			continue
+		}
+		windowsSecretFailureDoc(t, out.String(), err, "set", "invalid_arguments")
+	}
+	if cmd := newEnterpriseSecretCommand("set", "x"); !strings.Contains(cmd.Flags().Lookup("lock-wait").Usage, "bundle.lock") {
+		t.Fatalf("Windows --lock-wait help: %q", cmd.Flags().Lookup("lock-wait").Usage)
+	}
+}
+
+// A5: set and remove take bundle.lock (with --lock-wait), then
+// lifecycle.lock, and change the credential and restart the gateway under
+// both; an identical value is written and restarted again.
+func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	written := false
+	windowsSecretRestartGateway = func() (bool, error) {
+		_, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key"))
+		written = statErr == nil
+		host.events = append(host.events, "restart")
+		return true, nil
+	}
+	want := []string{"lock bundle", "lock lifecycle", "restart", "unlock lifecycle", "unlock bundle"}
+	for i := 0; i < 2; i++ {
+		host.events = nil
+		out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true, lockWait: 10 * time.Minute}, "same-value\n")
+		if err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+		if out != `{"action":"set","gateway_restarted":true,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
+			t.Fatalf("success document changed: %q", out)
+		}
+		if strings.Join(host.events, ",") != strings.Join(want, ",") || host.bundle != 10*time.Minute || !written {
+			t.Fatalf("set %d: events %v, bundle wait %s, written before restart %v", i, host.events, host.bundle, written)
+		}
+	}
+	host.events = nil
+	if _, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, ""); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if strings.Join(host.events, ",") != strings.Join(want, ",") || host.bundle != 0 || written {
+		t.Fatalf("remove: events %v, bundle wait %s, present at restart %v", host.events, host.bundle, written)
+	}
+
+	// The credential was stored, the restart failed: restart_failed, and
+	// the value is not printed.
+	windowsSecretRestartGateway = func() (bool, error) { return false, errors.New("service did not start") }
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "rotated-value")
+	windowsSecretFailureDoc(t, out, err, "set", "restart_failed")
+	if strings.Contains(out, "rotated-value") || !strings.Contains(err.Error(), "credential ai-defense-api-key stored") {
+		t.Fatalf("restart failure: %v %s", err, out)
+	}
+}
+
+// An uninstall that finishes while the change waits for lifecycle.lock
+// leaves no deployment: the change refuses not_installed (1603) under both
+// locks, writes nothing and restarts nothing.
+func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	for _, action := range []string{"set", "remove"} {
+		t.Run(action, func(t *testing.T) {
+			host.events = nil
+			windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
+			windowsSecretLifecycleLock = func(string) (func(), error) {
+				// The uninstall held lifecycle.lock and finished.
+				windowsSecretDeploymentInstalled = func() (bool, error) { return false, nil }
+				host.events = append(host.events, "lock lifecycle")
+				return func() { host.events = append(host.events, "unlock lifecycle") }, nil
+			}
+			stored := filepath.Join(dir, "ai-defense-api-key")
+			if action == "remove" {
+				// The refused remove must leave a stored credential as it was.
+				// The refused set before it created no secrets folder.
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(stored, []byte("kept-value"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(stored) })
+			}
+			opts := enterpriseSecretOptions{name: "ai-defense-api-key", json: true, fromStdin: action == "set"}
+			out, err := runWindowsSecretCommand(t, action, opts, "late-value")
+			windowsSecretFailureDoc(t, out, err, action, "not_installed")
+			kept, readErr := os.ReadFile(stored)
+			if action == "set" && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("stored after the deployment was removed: %v", readErr)
+			}
+			if action == "remove" && (readErr != nil || string(kept) != "kept-value") {
+				t.Fatalf("remove changed the credential after the deployment was removed: %q, %v", kept, readErr)
+			}
+			if want := "lock bundle,lock lifecycle,unlock lifecycle,unlock bundle"; strings.Join(host.events, ",") != want {
+				t.Fatalf("events %v, want %s (no restart)", host.events, want)
+			}
+		})
+	}
+}
+
+// A5: bundle.lock held by another bundle run (a second handle in this
+// process) is lifecycle_busy 1618 without --lock-wait, and waits with it.
+func TestWindowsSecretWaitsForTheRealBundleLock(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	lifecycleDir := filepath.Join(filepath.Dir(dir), "install")
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: lifecycleDir})
+	savedEnsure, savedPublish := windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile
+	t.Cleanup(func() {
+		windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile = savedEnsure, savedPublish
+	})
+	windowsBundleEnsurePrivateDirectory = func(path string) error { return os.MkdirAll(path, 0o700) }
+	windowsBundlePublishPrivateFile = func(string) error { return nil }
+	windowsSecretLockBundleStore = lockWindowsBundleStoreWithin
+	unlock, err := lockWindowsBundleStore(lifecycleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "held-value")
+	windowsSecretFailureDoc(t, out, err, "set", "lifecycle_busy")
+	if _, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stored while bundle.lock was held: %v", statErr)
+	}
+	go func() { time.Sleep(300 * time.Millisecond); unlock() }()
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true, lockWait: 30 * time.Second}, "held-value"); err != nil {
+		t.Fatalf("--lock-wait 30s with bundle.lock freed after 300ms: %v", err)
+	}
+}
+
+func TestWindowsArgsRequestJSON(t *testing.T) {
+	for args, want := range map[string]bool{
+		"--json": true, "--name x --json": true, "--json=true": true, "--json=1": true,
+		"--json=false": false, "--json=maybe": false, "": false, "-- --json": false, "--jsonx": false,
+	} {
+		if got := secretArgsRequestJSON(strings.Fields(args)); got != want {
+			t.Fatalf("%q: %v, want %v", args, got, want)
+		}
 	}
 }
 
@@ -248,4 +596,123 @@ func windowsSecretTestACEs(t *testing.T, path string) map[string]windowsSecretTe
 		aces[sid.String()] = windowsSecretTestACE{mask: ace.Mask, flags: ace.Header.AceFlags}
 	}
 	return aces
+}
+
+// windowsSecretTestJunction makes link a junction to target.
+func windowsSecretTestJunction(t *testing.T, link, target string) {
+	t.Helper()
+	if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J %s %s: %v: %s", link, target, err, out)
+	}
+}
+
+// GAP-1314, GAP-1315: with a junction or a file where the secrets folder
+// belongs, set, remove and status each print one state_invalid document,
+// exit 1603 and restart nothing, and the junction, its target and the
+// credential the target holds stay as they were. Remove deleted that
+// credential through the junction and reported success; set reported
+// change_failed.
+func TestWindowsSecretVerbsRefuseAStoreThatIsNotARealDirectory(t *testing.T) {
+	const name, kept = "ai-defense-api-key", "kept-elsewhere"
+	for _, kind := range []string{"junction", "file"} {
+		for _, action := range []string{"set", "remove", "status"} {
+			t.Run(kind+"_"+action, func(t *testing.T) {
+				root := t.TempDir()
+				dir, target := filepath.Join(root, "secrets"), filepath.Join(root, "elsewhere")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, name), []byte(kept), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "junction" {
+					windowsSecretTestJunction(t, dir, target)
+				} else if err := os.WriteFile(dir, []byte(kept), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+				opts := enterpriseSecretOptions{name: name, fromStdin: action == "set", json: true}
+				if action == "status" {
+					opts = enterpriseSecretOptions{json: true}
+				}
+				out, err := runWindowsSecretCommand(t, action, opts, "new-value\n")
+				doc := windowsSecretFailureDoc(t, out, err, action, "state_invalid")
+				if commandExitCode(err) != windowsSecretExitFailure || !strings.Contains(doc.Errors[0].Message, "is not a real directory") {
+					t.Fatalf("exit %d, %+v; want 1603 and not a real directory", commandExitCode(err), doc)
+				}
+				if strings.Contains(out, "new-value") || strings.Contains(out, kept) {
+					t.Fatalf("output carries a value: %s", out)
+				}
+				for _, event := range host.events {
+					if event == "restart" {
+						t.Fatal("gateway restarted after a refused change")
+					}
+				}
+				if got, err := os.ReadFile(filepath.Join(target, name)); err != nil || string(got) != kept {
+					t.Fatalf("the credential outside the store changed: %q %v", got, err)
+				}
+				if entries, err := os.ReadDir(target); err != nil || len(entries) != 1 {
+					t.Fatalf("the junction target holds %v (%v), want only %s", entries, err, name)
+				}
+				if kind == "file" {
+					if got, err := os.ReadFile(dir); err != nil || string(got) != kept {
+						t.Fatalf("the file in the place of the store changed: %q %v", got, err)
+					}
+				} else if info, err := os.Lstat(dir); err != nil || info.Mode().Type() == os.ModeDir {
+					t.Fatalf("the junction is gone or became a folder: %v %v", info, err)
+				}
+				if windowsSecretStored(dir, name) {
+					t.Fatal("a credential behind a store that is not a real directory counts as stored")
+				}
+			})
+		}
+	}
+}
+
+// In a real folder remove deletes only the named credential, a link named
+// like a credential is removed itself and never its target, a folder of that
+// name is refused, and a credential that is not there is not an error.
+func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
+	root := t.TempDir()
+	dir, target := filepath.Join(root, "secrets"), filepath.Join(root, "elsewhere")
+	for _, folder := range []string{dir, target, filepath.Join(dir, "a-folder")} {
+		if err := os.Mkdir(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, value := range map[string]string{
+		filepath.Join(dir, "ai-defense-api-key"): "one",
+		filepath.Join(dir, "other-key"):          "two",
+		filepath.Join(target, "llm-key"):         "outside",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windowsSecretTestJunction(t, filepath.Join(dir, "llm-key"), target)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	for _, name := range []string{"ai-defense-api-key", "llm-key", "never-stored"} {
+		out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+		if err != nil || !strings.Contains(out, `"ok":true`) {
+			t.Fatalf("remove %s: %v %s", name, err, out)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s is still in the store: %v", name, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "llm-key")); err != nil || string(got) != "outside" {
+		t.Fatalf("removing the link llm-key changed its target: %q %v", got, err)
+	}
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "a-folder", json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "change_failed")
+	if info, err := os.Lstat(filepath.Join(dir, "a-folder")); err != nil || !info.IsDir() {
+		t.Fatalf("remove deleted a folder: %v %v", info, err)
+	}
+	out, err = runWindowsSecretCommand(t, "status", enterpriseSecretOptions{json: true}, "")
+	if err != nil || !strings.Contains(out, `"other-key"`) || strings.Contains(out, `"ai-defense-api-key"`) {
+		t.Fatalf("status after remove: %v %s", err, out)
+	}
+	if !windowsSecretStored(dir, "other-key") || windowsSecretStored(dir, "ai-defense-api-key") {
+		t.Fatal("windowsSecretStored disagrees with the store")
+	}
 }
