@@ -688,7 +688,11 @@ Exit 0.
   nothing written, when an install never created it). Linux and macOS store a credential before the first install and
   report `noop: true`, `noop_reason: "not_installed"`. Windows `remove`
   refuses while the installed config still references the credential
-  (`credential_in_use`).
+  (`credential_in_use`). A junction, mount point, symlink or file where the
+  Windows secrets folder belongs makes `set`, `remove` and `status` refuse
+  with `state_invalid`, exit 1603 (`<folder> is not a real directory`):
+  nothing is read, written or deleted, and the target of a junction is never
+  touched. Replace it with a real folder.
 - Lock: Linux and macOS write and apply under one `lifecycle.lock` and wait
   `--lock-wait` (default 5 s). Windows takes the two locks in the order a
   bundle apply takes them: `bundle.lock` (waiting up to `--lock-wait`,
@@ -728,7 +732,7 @@ Exit 0.
   `status` failure prints the same failure document with `action: "status"`
   and no `name`: `elevation_required` (5 / 1603, as above),
   `invalid_arguments` (1639, a flag error) or `state_invalid` (1603, the
-  store cannot be read).
+  store cannot be read or is not a real directory).
 - Exit: 0; 1 (Linux and macOS failure: `change_failed`, `not_root`,
   `state_invalid`); 2 (Linux and macOS argument or value error,
   `invalid_arguments`); 75 busy; Windows 5 / 1603 / 1618 / 1639. Every one

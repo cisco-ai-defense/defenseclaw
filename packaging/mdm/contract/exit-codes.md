@@ -145,7 +145,9 @@ A management agent that runs the `enterprise` commands itself
   oversized value it sent in full is `invalid_arguments` `2`. Windows `0`; `5` not elevated on a managed computer
   (`1603` with the same `elevation_required` code on a computer without the
   standalone deployment marker); `1603` not installed,
-  `credential_in_use`, `change_failed` or `restart_failed`; `1618` when
+  `credential_in_use`, `change_failed`, `restart_failed` or `state_invalid`
+  (a junction, mount point, symlink or file where the secrets folder belongs:
+  nothing was read, written or deleted); `1618` when
   `bundle.lock` is not free within `--lock-wait` or the installer's
   `lifecycle.lock` within 30 s (nothing was written); `1639` invalid
   arguments, unknown flags included. Builds that do not report
@@ -153,7 +155,7 @@ A management agent that runs the `enterprise` commands itself
   Windows and print no JSON for failures.
 - `enterprise secret status`: Linux and macOS as above. Windows `0`; `5` /
   `1603` `elevation_required` as for `set`; `1603` `state_invalid` when the
-  store cannot be read; `1639` invalid arguments. With `--json` and
+  store cannot be read or is not a real directory; `1639` invalid arguments. With `--json` and
   `management_contract` 1 every Windows failure prints the failure document
   of `secret-result.schema.json` with `action: "status"`.
 

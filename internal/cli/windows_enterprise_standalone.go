@@ -950,7 +950,7 @@ func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Resu
 		if !managed.ValidCredentialName(name) {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(layout.SecretsDir, name)); !errors.Is(err, os.ErrNotExist) {
+		if windowsSecretStored(layout.SecretsDir, name) {
 			continue
 		}
 		result.AddWarning("credential_missing", fmt.Sprintf(

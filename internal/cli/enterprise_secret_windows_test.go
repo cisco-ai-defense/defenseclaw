@@ -598,37 +598,121 @@ func windowsSecretTestACEs(t *testing.T, path string) map[string]windowsSecretTe
 	return aces
 }
 
-// TestWindowsSecretsDirRefusesAJunction pins that a junction in place of the
-// secrets folder is not a real directory for status or for a write: since Go
-// 1.23 Lstat reports it as ModeDir|ModeIrregular, without ModeSymlink.
-func TestWindowsSecretsDirRefusesAJunction(t *testing.T) {
-	target := t.TempDir()
-	if err := os.WriteFile(filepath.Join(target, "ai-defense-api-key"), []byte("elsewhere"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(t.TempDir(), "secrets")
+// windowsSecretTestJunction makes link a junction to target.
+func windowsSecretTestJunction(t *testing.T, link, target string) {
+	t.Helper()
 	if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
 		t.Fatalf("mklink /J %s %s: %v: %s", link, target, err, out)
 	}
-	info, err := os.Lstat(link)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// GAP-1314, GAP-1315: with a junction or a file where the secrets folder
+// belongs, set, remove and status each print one state_invalid document,
+// exit 1603 and restart nothing, and the junction, its target and the
+// credential the target holds stay as they were. Remove deleted that
+// credential through the junction and reported success; set reported
+// change_failed.
+func TestWindowsSecretVerbsRefuseAStoreThatIsNotARealDirectory(t *testing.T) {
+	const name, kept = "ai-defense-api-key", "kept-elsewhere"
+	for _, kind := range []string{"junction", "file"} {
+		for _, action := range []string{"set", "remove", "status"} {
+			t.Run(kind+"_"+action, func(t *testing.T) {
+				root := t.TempDir()
+				dir, target := filepath.Join(root, "secrets"), filepath.Join(root, "elsewhere")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, name), []byte(kept), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "junction" {
+					windowsSecretTestJunction(t, dir, target)
+				} else if err := os.WriteFile(dir, []byte(kept), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+				opts := enterpriseSecretOptions{name: name, fromStdin: action == "set", json: true}
+				if action == "status" {
+					opts = enterpriseSecretOptions{json: true}
+				}
+				out, err := runWindowsSecretCommand(t, action, opts, "new-value\n")
+				doc := windowsSecretFailureDoc(t, out, err, action, "state_invalid")
+				if commandExitCode(err) != windowsSecretExitFailure || !strings.Contains(doc.Errors[0].Message, "is not a real directory") {
+					t.Fatalf("exit %d, %+v; want 1603 and not a real directory", commandExitCode(err), doc)
+				}
+				if strings.Contains(out, "new-value") || strings.Contains(out, kept) {
+					t.Fatalf("output carries a value: %s", out)
+				}
+				for _, event := range host.events {
+					if event == "restart" {
+						t.Fatal("gateway restarted after a refused change")
+					}
+				}
+				if got, err := os.ReadFile(filepath.Join(target, name)); err != nil || string(got) != kept {
+					t.Fatalf("the credential outside the store changed: %q %v", got, err)
+				}
+				if entries, err := os.ReadDir(target); err != nil || len(entries) != 1 {
+					t.Fatalf("the junction target holds %v (%v), want only %s", entries, err, name)
+				}
+				if kind == "file" {
+					if got, err := os.ReadFile(dir); err != nil || string(got) != kept {
+						t.Fatalf("the file in the place of the store changed: %q %v", got, err)
+					}
+				} else if info, err := os.Lstat(dir); err != nil || info.Mode().Type() == os.ModeDir {
+					t.Fatalf("the junction is gone or became a folder: %v %v", info, err)
+				}
+				if windowsSecretStored(dir, name) {
+					t.Fatal("a credential behind a store that is not a real directory counts as stored")
+				}
+			})
+		}
 	}
-	if windowsSecretsDirIsReal(info) {
-		t.Fatalf("junction mode %v counted as a real directory", info.Mode())
+}
+
+// In a real folder remove deletes only the named credential, a link named
+// like a credential is removed itself and never its target, a folder of that
+// name is refused, and a credential that is not there is not an error.
+func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
+	root := t.TempDir()
+	dir, target := filepath.Join(root, "secrets"), filepath.Join(root, "elsewhere")
+	for _, folder := range []string{dir, target, filepath.Join(dir, "a-folder")} {
+		if err := os.Mkdir(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := windowsSecretStatus(link); err == nil || !strings.Contains(err.Error(), "not a real directory") {
-		t.Fatalf("status through a junction: %v, want not a real directory", err)
+	for path, value := range map[string]string{
+		filepath.Join(dir, "ai-defense-api-key"): "one",
+		filepath.Join(dir, "other-key"):          "two",
+		filepath.Join(target, "llm-key"):         "outside",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		t.Fatal(err)
+	windowsSecretTestJunction(t, filepath.Join(dir, "llm-key"), target)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(root, "install")})
+	for _, name := range []string{"ai-defense-api-key", "llm-key", "never-stored"} {
+		out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+		if err != nil || !strings.Contains(out, `"ok":true`) {
+			t.Fatalf("remove %s: %v %s", name, err, out)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s is still in the store: %v", name, err)
+		}
 	}
-	if err := ensureWindowsSecretsDir(link, system); err == nil || !strings.Contains(err.Error(), "not a real directory") {
-		t.Fatalf("ensure through a junction: %v, want not a real directory", err)
+	if got, err := os.ReadFile(filepath.Join(target, "llm-key")); err != nil || string(got) != "outside" {
+		t.Fatalf("removing the link llm-key changed its target: %q %v", got, err)
 	}
-	real := t.TempDir()
-	if info, err := os.Lstat(real); err != nil || !windowsSecretsDirIsReal(info) {
-		t.Fatalf("a plain directory must count as real: %v %v", info, err)
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "a-folder", json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "change_failed")
+	if info, err := os.Lstat(filepath.Join(dir, "a-folder")); err != nil || !info.IsDir() {
+		t.Fatalf("remove deleted a folder: %v %v", info, err)
+	}
+	out, err = runWindowsSecretCommand(t, "status", enterpriseSecretOptions{json: true}, "")
+	if err != nil || !strings.Contains(out, `"other-key"`) || strings.Contains(out, `"ai-defense-api-key"`) {
+		t.Fatalf("status after remove: %v %s", err, out)
+	}
+	if !windowsSecretStored(dir, "other-key") || windowsSecretStored(dir, "ai-defense-api-key") {
+		t.Fatal("windowsSecretStored disagrees with the store")
 	}
 }

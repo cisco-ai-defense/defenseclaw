@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -252,13 +253,23 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return false, err
 	}
+	// Pin the store before anything in it is read, written or deleted: a
+	// junction, mount point, symlink or file where the folder belongs is
+	// state_invalid. Remove deleted the credential a junction target held
+	// and reported success (GAP-1315); set reported change_failed (GAP-1314).
+	store, err := openWindowsSecretStore(layout.SecretsDir, action == "set")
+	if err != nil {
+		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+	}
+	defer store.close()
 	if action == "set" {
-		if err := writeWindowsSecret(layout.SecretsDir, opts.name, value); err != nil {
+		if err := writeWindowsSecret(store, opts.name, value); err != nil {
 			return false, secretFailed("change_failed", windowsSecretExitFailure, err)
 		}
-	} else if err := removeWindowsSecret(layout, opts.name); err != nil {
+	} else if err := removeWindowsSecret(layout, store, opts.name); err != nil {
 		return false, err
 	}
+	store.close()
 	// The gateway reads credentials when it starts; apply the change now.
 	restarted, err := windowsSecretRestartGateway()
 	if err != nil {
@@ -286,7 +297,7 @@ func requireWindowsSecretDeployment() error {
 // config it cannot compile without this credential, or run the judge without
 // its key (GAP-0674). A config that exists but cannot be read may still
 // reference it, so nothing is removed (GAP-1507).
-func removeWindowsSecret(layout managed.StandaloneLayout, name string) error {
+func removeWindowsSecret(layout managed.StandaloneLayout, store *windowsSecretStore, name string) error {
 	if strings.TrimSpace(layout.ConfigPath) != "" {
 		raw, err := os.ReadFile(layout.ConfigPath)
 		switch {
@@ -300,7 +311,7 @@ func removeWindowsSecret(layout managed.StandaloneLayout, name string) error {
 				fmt.Errorf("cannot read the installed config %s to check that it no longer references credential %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, name, err))
 		}
 	}
-	if err := os.Remove(filepath.Join(layout.SecretsDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.remove(name); err != nil {
 		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}
 	return nil
@@ -399,40 +410,164 @@ func windowsSecretFileSDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"
 }
 
-// windowsSecretsDirIsReal reports a plain directory. Since Go 1.23, Lstat on
-// Windows reports a junction or mount point as ModeDir|ModeIrregular without
-// ModeSymlink, so checking IsDir and ModeSymlink alone would let a junction
-// stand in for the secrets folder.
-func windowsSecretsDirIsReal(info os.FileInfo) bool {
-	return info.Mode().Type() == os.ModeDir
+// errWindowsSecretsDirNotReal refuses a junction, mount point, symlink or
+// file where the secrets folder belongs.
+var errWindowsSecretsDirNotReal = errors.New("is not a real directory")
+
+// windowsSecretStore is the secrets folder pinned by openWindowsSecretStore.
+// The handle is the folder itself, never what a reparse point names, and it
+// denies FILE_SHARE_DELETE, so nobody can rename or remove the folder or swap
+// a junction in while a verb works inside it. A zero handle is a folder that
+// does not exist.
+type windowsSecretStore struct {
+	dir    string
+	handle windows.Handle
 }
 
-func ensureWindowsSecretsDir(dir string, reader *windows.SID) error {
+// openWindowsSecretStore is the one guard every path into the store takes
+// before it reads, writes or deletes anything there: set, remove, status and
+// the credential_missing warning. A junction, mount point, symlink or file
+// where the folder belongs is errWindowsSecretsDirNotReal (the verbs report
+// state_invalid, exit 1603), and nothing in it or in a link target is
+// touched (GAP-1314, GAP-1315). It reads the attributes of the opened object
+// itself: since Go 1.23 os.Lstat reports a junction as ModeDir|ModeIrregular
+// without ModeSymlink, and a check by path leaves a window for a swap. create
+// makes a missing folder (set).
+func openWindowsSecretStore(dir string, create bool) (*windowsSecretStore, error) {
+	handle, err := pinWindowsSecretsDir(dir)
+	if create && errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("create %s: %w", dir, err)
+		}
+		handle, err = pinWindowsSecretsDir(dir)
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return &windowsSecretStore{dir: dir}, nil
+	case err != nil:
+		return nil, err
+	}
+	return &windowsSecretStore{dir: dir, handle: handle}, nil
+}
+
+func pinWindowsSecretsDir(dir string) (windows.Handle, error) {
+	name, err := winpath.UTF16Ptr(dir)
+	if err != nil {
+		return 0, err
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return 0, fmt.Errorf("%s: %w", dir, os.ErrNotExist)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", dir, err)
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("inspect %s: %w", dir, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("%s %w", dir, errWindowsSecretsDirNotReal)
+	}
+	return handle, nil
+}
+
+func (s *windowsSecretStore) exists() bool { return s.handle != 0 }
+
+func (s *windowsSecretStore) close() {
+	if s.handle != 0 {
+		_ = windows.CloseHandle(s.handle)
+		s.handle = 0
+	}
+}
+
+// remove deletes credential name from the pinned folder. It opens the entry
+// relative to the folder handle and follows no reparse point
+// (OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT), so a link named like the
+// credential is removed itself, never its target; a folder of that name is
+// refused. A missing credential is not an error.
+func (s *windowsSecretStore) remove(name string) error {
+	if !s.exists() {
+		return nil
+	}
+	if !managed.ValidCredentialName(name) {
+		return fmt.Errorf("credential name %q is not valid", name)
+	}
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: s.handle,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var entry windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&entry, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, &attributes, &status, nil, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open credential %s in %s: %w", name, s.dir, err)
+	}
+	defer func() { _ = windows.CloseHandle(entry) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(entry, &info); err != nil {
+		return fmt.Errorf("inspect credential %s in %s: %w", name, s.dir, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return fmt.Errorf("%s in %s is a folder, not a credential; nothing was removed", name, s.dir)
+	}
+	deleteFile := byte(1)
+	if err := windows.SetFileInformationByHandle(entry, windows.FileDispositionInfo, &deleteFile, 1); err != nil {
+		return fmt.Errorf("remove credential %s from %s: %w", name, s.dir, err)
+	}
+	return nil
+}
+
+// windowsSecretStored reports whether credential name is in the store at
+// dir. A store that is not a real directory holds none: the gateway reader
+// refuses it too. A store this account cannot open counts as stored
+// (unchecked), so a standard account is not warned about it.
+func windowsSecretStored(dir, name string) bool {
+	store, err := openWindowsSecretStore(dir, false)
+	if err != nil {
+		return !errors.Is(err, errWindowsSecretsDirNotReal)
+	}
+	defer store.close()
+	if !store.exists() {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(dir, name))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) error {
 	if reader == nil {
 		return errors.New("the secrets directory needs the gateway service SID")
 	}
-	info, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-	case err != nil:
-		return err
-	case !windowsSecretsDirIsReal(info):
-		return fmt.Errorf("%s is not a real directory", dir)
+	if !store.exists() {
+		return fmt.Errorf("%s does not exist", store.dir)
 	}
 	// The credential write below proves the whole chain through the
-	// gateway's own reader check.
-	return applyWindowsSDDL(dir, windowsSecretDirectorySDDL(reader))
+	// gateway reader check.
+	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))
 }
 
-func writeWindowsSecret(dir, name string, value []byte) error {
+func writeWindowsSecret(store *windowsSecretStore, name string, value []byte) error {
 	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
 	if err != nil || gateway == nil {
 		return fmt.Errorf("resolve the gateway service SID (%s): %v", windowsSecretGatewayAccount, err)
 	}
-	final, err := storeWindowsSecret(dir, name, value, gateway)
+	final, err := storeWindowsSecret(store, name, value, gateway)
 	if err != nil {
 		return err
 	}
@@ -442,7 +577,7 @@ func writeWindowsSecret(dir, name string, value []byte) error {
 	// (pinned by TestWindowsSecretStoreUsesTheGatewayReaderDACL).
 	previous, had := os.LookupEnv(managed.WindowsServiceAccountEnv)
 	_ = os.Setenv(managed.WindowsServiceAccountEnv, windowsSecretGatewayAccount)
-	_, _, verifyErr := managed.ResolveServiceCredential(name, dir)
+	_, _, verifyErr := managed.ResolveServiceCredential(name, store.dir)
 	if had {
 		_ = os.Setenv(managed.WindowsServiceAccountEnv, previous)
 	} else {
@@ -455,13 +590,14 @@ func writeWindowsSecret(dir, name string, value []byte) error {
 	return nil
 }
 
-// storeWindowsSecret writes value to dir\name atomically with the protected
-// credential DACL for reader, after (re)applying the secrets directory DACL,
-// and returns the final path.
-func storeWindowsSecret(dir, name string, value []byte, reader *windows.SID) (string, error) {
-	if err := ensureWindowsSecretsDir(dir, reader); err != nil {
+// storeWindowsSecret writes value to name in the pinned store atomically,
+// with the protected credential DACL for reader, after (re)applying the
+// secrets directory DACL, and returns the final path.
+func storeWindowsSecret(store *windowsSecretStore, name string, value []byte, reader *windows.SID) (string, error) {
+	if err := ensureWindowsSecretsDir(store, reader); err != nil {
 		return "", err
 	}
+	dir := store.dir
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
 		return "", err
@@ -522,18 +658,17 @@ func applyWindowsSDDL(path, sddl string) error {
 }
 
 func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
-	// The same check ensureWindowsSecretsDir makes before a write. On
-	// Windows os.ReadDir of a regular file can return no entries and no
-	// error, so a file or a link where the folder belongs would list as
-	// an empty store instead of a state the administrator must repair.
-	info, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return []windowsSecretState{}, nil
-	case err != nil:
+	// The guard set and remove take. On Windows os.ReadDir of a regular file
+	// can return no entries and no error, so a file or a link where the
+	// folder belongs would list as an empty store (or as the files of the
+	// link target) instead of a state the administrator must repair.
+	store, err := openWindowsSecretStore(dir, false)
+	if err != nil {
 		return nil, err
-	case !windowsSecretsDirIsReal(info):
-		return nil, fmt.Errorf("%s is not a real directory", dir)
+	}
+	defer store.close()
+	if !store.exists() {
+		return []windowsSecretState{}, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
