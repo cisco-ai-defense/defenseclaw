@@ -99,6 +99,7 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	in.Guardian, in.GuardianKnown = l.attestedGuardianRows()
 	if record != nil {
 		in.MachinePolicy = record.MachinePolicyConnectors
+		in.MachinePolicyCoverage = machinePolicyCoverage(record.MachinePolicyConnectors, r.MachinePolicy)
 	}
 	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
 	block, hidden := enterprisestatus.BuildConnectors(in, failMode)
@@ -107,6 +108,28 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
 			"they are not plain version strings", hidden))
 	}
+}
+
+// machinePolicyCoverage is the hooks_installed value of each connector the
+// last transaction put in vendor machine policy, from the machine policy
+// describeMachinePolicy just read: on Linux and macOS these connectors get no
+// per-user target, so the guardian has no row for them.
+func machinePolicyCoverage(connectors []string, states map[string]enterprisestatus.MachinePolicyState) map[string]string {
+	coverage := make(map[string]string, len(connectors))
+	for _, name := range connectors {
+		state, ok := states[name]
+		switch {
+		case !ok:
+			coverage[name] = enterprisestatus.HooksInstalledUnknown
+		case state.OwnedEntries == 0:
+			coverage[name] = enterprisestatus.HooksInstalledNone
+		case len(state.Conflicts) > 0:
+			coverage[name] = enterprisestatus.HooksInstalledPartial
+		default:
+			coverage[name] = enterprisestatus.HooksInstalledAll
+		}
+	}
+	return coverage
 }
 
 // attestedGuardianRows are the rows of the guardian's last reconcile, and

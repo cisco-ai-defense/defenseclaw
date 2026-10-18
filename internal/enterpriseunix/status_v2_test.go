@@ -126,6 +126,37 @@ func mustJSON(t *testing.T, value any) []byte {
 	return data
 }
 
+// On a real host Codex and Claude Code are in vendor machine policy and get
+// no per-user target: the block omits detected, versions and targets instead
+// of reporting not detected and zero, and hooks_installed follows the
+// machine policy (GAP-0002, GAP-0004).
+func TestStatusV2MachinePolicyConnectorsWithoutRows(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := statusV2Host(t, goos)
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets: []\n")
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), []byte(`{"results":[]}`), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionStatus})
+			if len(r.MachinePolicy) == 0 {
+				t.Fatalf("the fake host published no machine policy: %+v", r.MachinePolicy)
+			}
+			for name := range r.MachinePolicy {
+				state, ok := r.Connectors[name]
+				if !ok {
+					t.Fatalf("%s is in machine policy but not in the connectors block: %+v", name, r.Connectors)
+				}
+				if state.Detected != nil || state.Versions != nil || state.Targets != nil ||
+					state.HooksInstalled != enterprisestatus.HooksInstalledAll || state.ManagedHook == nil || !*state.ManagedHook {
+					t.Fatalf("%s = %+v", name, state)
+				}
+			}
+			contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
+		})
+	}
+}
+
 // A guardian state the root-only attestation does not vouch for (the
 // service account can replace it) counts nothing: hooks_installed unknown.
 func TestStatusV2UnattestedGuardianStateIsUnknown(t *testing.T) {

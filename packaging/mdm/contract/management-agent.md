@@ -674,6 +674,13 @@ input feeds and adds the warning `status_detail_unavailable`.
   renderer writes into the managed hooks, not the configured one); and
   `managed_hook` (`true` when the hook is in administrator-owned vendor
   machine policy, `false` for a per-user registration the guardian keeps).
+  On Linux and macOS a connector whose hook is in vendor machine policy only
+  (Codex, Claude Code, Copilot, OpenCode) gets no per-user target, so its
+  entry has no `detected`, `versions` or `targets`, and `hooks_installed`
+  says whether DefenseClaw's entries are in that machine policy (`all`;
+  `partial` with conflicts; `none`; `unknown` when it could not be read).
+  `effective_hook_fail_mode` is `open` for an agent that cannot fail closed
+  (Hermes, Copilot), whatever the config asks for.
 - `openshell`: `enabled`, `install` (`prerequisite` or `setup`),
   `installed` (prerequisite mode: the administrator's OpenShell parts are
   present and root-owned), `version`, `driver` (configured: `vm`, `docker`,

@@ -117,6 +117,44 @@ func TestBuildConnectorsWithoutConfigOrState(t *testing.T) {
 	}
 }
 
+// A connector whose hook is in vendor machine policy only (Linux and macOS
+// Codex, Claude Code, Copilot, OpenCode) has no account row: detected,
+// versions and targets are absent, not false and zero, and hooks_installed
+// is the machine policy's coverage (GAP-0002, GAP-0004). A machine-policy
+// connector with rows (Windows) is still counted from them.
+func TestBuildConnectorsMachinePolicyOnly(t *testing.T) {
+	in := ConnectorInputs{
+		ConfigLoaded: true, Enabled: []string{"codex", "claudecode", "copilot", "opencode", "hermes"},
+		Mode:         func(string) string { return "observe" },
+		ManifestRead: true, Manifest: []ConnectorInstall{{Connector: "hermes", Version: "0.21.5", Enabled: true}},
+		GuardianKnown: true, Guardian: []ConnectorTarget{{Connector: "hermes", OK: true}},
+		MachinePolicy: []string{"codex", "claudecode", "copilot", "opencode"},
+		MachinePolicyCoverage: map[string]string{"codex": HooksInstalledAll, "claudecode": HooksInstalledNone,
+			"copilot": HooksInstalledPartial, "opencode": "bogus"},
+	}
+	block, _ := BuildConnectors(in, func(string) string { return "closed" })
+	want := map[string]ConnectorState{
+		"codex":      {Enabled: true, HooksInstalled: HooksInstalledAll, EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(true)},
+		"claudecode": {Enabled: true, HooksInstalled: HooksInstalledNone, EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(true)},
+		"copilot":    {Enabled: true, HooksInstalled: HooksInstalledPartial, EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(true)},
+		"opencode":   {Enabled: true, HooksInstalled: HooksInstalledUnknown, EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(true)},
+		"hermes": {Enabled: true, Detected: boolPtr(true), Versions: []string{"0.21.5"}, HooksInstalled: HooksInstalledAll,
+			Targets: &ConnectorTargets{Total: 1, Protected: 1}, EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(false)},
+	}
+	if !reflect.DeepEqual(block, want) {
+		got, _ := json.MarshalIndent(block, "", " ")
+		t.Fatalf("block:\n%s", got)
+	}
+	// With rows, the rows count.
+	in.Manifest = append(in.Manifest, ConnectorInstall{Connector: "codex", Version: "0.160.0", Enabled: true})
+	in.Guardian = append(in.Guardian, ConnectorTarget{Connector: "codex"})
+	block, _ = BuildConnectors(in, nil)
+	if codex := block["codex"]; codex.Detected == nil || !*codex.Detected || codex.Targets == nil || codex.Targets.Failed != 1 ||
+		codex.HooksInstalled != HooksInstalledNone {
+		t.Fatalf("codex with rows = %+v", codex)
+	}
+}
+
 func TestBuildConnectorsBoundsVersions(t *testing.T) {
 	in := ConnectorInputs{ManifestRead: true}
 	for _, v := range []string{"9", "8", "7", "6", "5", "4", "3", "2", "1", "0"} {

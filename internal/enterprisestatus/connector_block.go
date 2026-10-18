@@ -124,6 +124,14 @@ type ConnectorInputs struct {
 	// MachinePolicy are the connectors whose DefenseClaw hook is in vendor
 	// machine policy.
 	MachinePolicy []string
+	// MachinePolicyCoverage is, for a connector whose DefenseClaw hook is in
+	// vendor machine policy only (Linux and macOS: Codex, Claude Code,
+	// Copilot and OpenCode get no per-user target, so no manifest or
+	// guardian row), its hooks_installed value from that machine policy:
+	// all when DefenseClaw's entries are in place, partial when they are in
+	// place with conflicts, none when they are not, unknown when the policy
+	// was not read. A connector that also has rows is counted from them.
+	MachinePolicyCoverage map[string]string
 	// Known reports a connector id of the registry; nil accepts every id
 	// of the connector-id form.
 	Known func(connector string) bool
@@ -225,6 +233,23 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	block = make(map[string]ConnectorState, len(listed))
 	for name := range listed {
 		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown}
+		if coverage, ok := in.MachinePolicyCoverage[name]; ok && !detected[name] && counts[name] == nil {
+			// No account row exists for a machine-policy-only connector, so
+			// detected, versions and targets would be a false "not found"
+			// and zero; the vendor machine policy says whether the hook is
+			// in place (GAP-0002, GAP-0004).
+			state.HooksInstalled = oneOf(coverage, HooksInstalledAll, HooksInstalledPartial, HooksInstalledNone)
+			if state.HooksInstalled == "" {
+				state.HooksInstalled = HooksInstalledUnknown
+			}
+			state.EffectiveMode, state.EffectiveHookFailMode = effective(in, failMode, name)
+			if state.Enabled {
+				managed := true
+				state.ManagedHook = &managed
+			}
+			block[name] = state
+			continue
+		}
 		if state.Enabled && (in.ManifestRead || len(in.Unprotected) > 0) {
 			found := detected[name]
 			state.Detected = &found
@@ -245,14 +270,7 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 				state.HooksInstalled = HooksInstalledNone
 			}
 		}
-		if in.ConfigLoaded {
-			if in.Mode != nil {
-				state.EffectiveMode = oneOf(in.Mode(name), "observe", "action")
-			}
-			if failMode != nil {
-				state.EffectiveHookFailMode = oneOf(failMode(name), "open", "closed")
-			}
-		}
+		state.EffectiveMode, state.EffectiveHookFailMode = effective(in, failMode, name)
 		if state.Enabled {
 			managed := machine[name]
 			state.ManagedHook = &managed
@@ -260,6 +278,21 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 		block[name] = state
 	}
 	return block, hidden
+}
+
+// effective is a connector's effective_mode and effective_hook_fail_mode;
+// both are empty when the config was not loaded.
+func effective(in ConnectorInputs, failMode func(connector string) string, name string) (mode, fail string) {
+	if !in.ConfigLoaded {
+		return "", ""
+	}
+	if in.Mode != nil {
+		mode = oneOf(in.Mode(name), "observe", "action")
+	}
+	if failMode != nil {
+		fail = oneOf(failMode(name), "open", "closed")
+	}
+	return mode, fail
 }
 
 // sortedVersions lists set in order, at most connectorVersionsMax of them.
