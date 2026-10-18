@@ -676,9 +676,13 @@ input feeds and adds the warning `status_detail_unavailable`.
   machine policy, `false` for a per-user registration the guardian keeps).
   On Linux and macOS a connector whose hook is in vendor machine policy only
   (Codex, Claude Code, Copilot, OpenCode) gets no per-user target, so its
-  entry has no `detected`, `versions` or `targets`, and `hooks_installed`
-  says whether DefenseClaw's entries are in that machine policy (`all`;
-  `partial` with conflicts; `none`; `unknown` when it could not be read).
+  entry has no `targets`, and `hooks_installed` says whether DefenseClaw's
+  entries are in that machine policy (`all`; `partial` with conflicts;
+  `none`; `unknown` when it could not be read). It has `detected` (`true`)
+  and `versions` only when the enumerator listed an unprotected install of
+  it (for example an `unenrolled_users: deny` user it could not enroll);
+  status reports that install in its warnings or errors (for example
+  `agent_unprotected`), not as a target.
   `effective_hook_fail_mode` is `open` for an agent that cannot fail closed
   (Hermes, Copilot), whatever the config asks for.
 - `openshell`: `enabled`, `install` (`prerequisite` or `setup`),

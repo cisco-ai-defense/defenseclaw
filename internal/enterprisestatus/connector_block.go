@@ -130,7 +130,9 @@ type ConnectorInputs struct {
 	// guardian row), its hooks_installed value from that machine policy:
 	// all when DefenseClaw's entries are in place, partial when they are in
 	// place with conflicts, none when they are not, unknown when the policy
-	// was not read. A connector that also has rows is counted from them.
+	// was not read. A connector with a manifest target or guardian row is
+	// counted from them; an unprotected install alone does not change
+	// hooks_installed.
 	MachinePolicyCoverage map[string]string
 	// Known reports a connector id of the registry; nil accepts every id
 	// of the connector-id form.
@@ -172,6 +174,8 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 		listed[name] = true
 	}
 	detected := map[string]bool{}
+	// rowed are the connectors with a manifest target.
+	rowed := map[string]bool{}
 	versions := map[string]map[string]bool{}
 	note := func(rows []ConnectorInstall) {
 		for _, row := range rows {
@@ -195,6 +199,11 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	}
 	if in.ManifestRead {
 		note(in.Manifest)
+		for _, row := range in.Manifest {
+			if name, ok := id(row.Connector); ok {
+				rowed[name] = true
+			}
+		}
 	}
 	note(in.Unprotected)
 	counts := map[string]*ConnectorTargets{}
@@ -233,11 +242,17 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	block = make(map[string]ConnectorState, len(listed))
 	for name := range listed {
 		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown}
-		if coverage, ok := in.MachinePolicyCoverage[name]; ok && !detected[name] && counts[name] == nil {
+		if coverage, ok := in.MachinePolicyCoverage[name]; ok && !rowed[name] && counts[name] == nil {
 			// No account row exists for a machine-policy-only connector, so
 			// detected, versions and targets would be a false "not found"
 			// and zero; the vendor machine policy says whether the hook is
-			// in place (GAP-0002, GAP-0004).
+			// in place (GAP-0002, GAP-0004). An unprotected install the
+			// enumerator listed still makes it detected, with its versions.
+			if state.Enabled && detected[name] {
+				found := true
+				state.Detected = &found
+			}
+			state.Versions = sortedVersions(versions[name])
 			state.HooksInstalled = oneOf(coverage, HooksInstalledAll, HooksInstalledPartial, HooksInstalledNone)
 			if state.HooksInstalled == "" {
 				state.HooksInstalled = HooksInstalledUnknown

@@ -155,6 +155,28 @@ func TestBuildConnectorsMachinePolicyOnly(t *testing.T) {
 	}
 }
 
+// A machine-policy-only connector with no manifest target can still have an
+// unprotected install (an unenrolled_users: deny user the enumerator could
+// not enroll, or a refused surface): it is detected, with its versions, and
+// hooks_installed still comes from the machine policy, not a false none from
+// zero targets.
+func TestBuildConnectorsMachinePolicyOnlyWithUnprotectedInstall(t *testing.T) {
+	in := ConnectorInputs{
+		ConfigLoaded: true, Enabled: []string{"codex"},
+		Mode:         func(string) string { return "observe" },
+		ManifestRead: true, Unprotected: []ConnectorInstall{{Connector: "codex", Version: "0.160.0"}},
+		GuardianKnown: true, MachinePolicy: []string{"codex"},
+		MachinePolicyCoverage: map[string]string{"codex": HooksInstalledAll},
+	}
+	block, _ := BuildConnectors(in, func(string) string { return "closed" })
+	want := ConnectorState{Enabled: true, Detected: boolPtr(true), Versions: []string{"0.160.0"}, HooksInstalled: HooksInstalledAll,
+		EffectiveMode: "observe", EffectiveHookFailMode: "closed", ManagedHook: boolPtr(true)}
+	if got := block["codex"]; !reflect.DeepEqual(got, want) {
+		data, _ := json.MarshalIndent(got, "", " ")
+		t.Fatalf("codex:\n%s", data)
+	}
+}
+
 func TestBuildConnectorsBoundsVersions(t *testing.T) {
 	in := ConnectorInputs{ManifestRead: true}
 	for _, v := range []string{"9", "8", "7", "6", "5", "4", "3", "2", "1", "0"} {

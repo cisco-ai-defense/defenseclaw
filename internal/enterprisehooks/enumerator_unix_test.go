@@ -502,6 +502,39 @@ func TestEnumerateUnixMachinePolicyConnectorsNeedDenyForRows(t *testing.T) {
 	}
 }
 
+// A machine-policy connector can have an unprotected install and no
+// manifest target: under unenrolled_users: deny an install whose version
+// cannot be read gets no row. Status then has only the unprotected row for
+// it (enterprisestatus.BuildConnectors).
+func TestEnumerateUnixMachinePolicyUnprotectedInstallWithoutRow(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	cfg := enumeratorConfig("codex")
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1, MachinePolicyConnectors: []string{"codex"},
+		Discover: func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+			return nil, map[string]string{"codex": UnixAgentUnversionedReasonPrefix + "codex"}, nil
+		},
+	}
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 0 || len(report.Unprotected) != 1 || report.Unprotected[0].Connector != "codex" {
+		t.Fatalf("rows = %+v, unprotected = %+v", manifest.Targets, report.Unprotected)
+	}
+}
+
 func TestWriteUnixTargetsManifestAtomicIsByteStable(t *testing.T) {
 	root := trustedTestDir(t)
 	current := uint32(os.Getuid())
