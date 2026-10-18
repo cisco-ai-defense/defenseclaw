@@ -321,7 +321,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		for _, raw := range entries {
 			entryCommand := cursorHookCommand(raw)
 			if entryCommand == legacyCommand {
-				return 0, fmt.Errorf("Cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
+				return 0, fmt.Errorf("cursor hooks event %q still has the legacy PowerShell-only DefenseClaw command", event)
 			}
 			if entryCommand == previousEncodedCommand && !allowPrevious {
 				return 0, fmt.Errorf("cursor hooks event %q still has the previous encoded DefenseClaw command", event)
@@ -343,7 +343,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 	for _, event := range cursorEnterpriseHookEvents {
 		entries, ok := cursorHookEntryList(hooks[event])
 		if !ok {
-			return fmt.Errorf("Cursor hooks event %q must be an array", event)
+			return fmt.Errorf("cursor hooks event %q must be an array", event)
 		}
 		owned, err := countOwned(event, entries)
 		if err != nil {
@@ -366,7 +366,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				return err
 			}
 			if owned > 1 {
-				return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want at most 1", event, owned)
+				return fmt.Errorf("cursor hooks event %q has %d DefenseClaw entries, want at most 1", event, owned)
 			}
 		}
 	}
@@ -382,7 +382,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 			entryCommand := cursorHookCommand(entry)
 			if entryCommand == command || entryCommand == legacyCommand || entryCommand == previousEncodedCommand {
 				if cursorEnterpriseHookEventRetired(event) {
-					return fmt.Errorf("Cursor hooks event %q still has the DefenseClaw entry an earlier release registered; this release no longer registers it and the next publish removes it", event)
+					return fmt.Errorf("cursor hooks event %q still has the DefenseClaw entry an earlier release registered; this release no longer registers it and the next publish removes it", event)
 				}
 				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
 			}
