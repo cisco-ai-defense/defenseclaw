@@ -310,8 +310,10 @@ Prints one line and exits 0, also on a managed device. Schema
 ```
 
 There is no features list: a build that prints `management_contract: 1` has
-everything in this file. A build without the member predates the contract;
-use these fallbacks on it:
+everything in this file except the members marked optional, which a later
+build added without a bump (section 0): gate on `management_contract` 1 and
+then on the member being present. A build without the member predates the
+contract; use these fallbacks on it:
 
 | Item | `management_contract` 1 | Member absent |
 |---|---|---|
@@ -321,6 +323,7 @@ use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
 On Windows the anchors call is the same on every build:
 `enterprise windows ensure --profile standalone --trust-anchors F --json`
@@ -390,6 +393,10 @@ Exit 0.
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
   `version_not_newer`, `product_too_old`, `secret_ref_missing`,
   `digest_mismatch`, `config_invalid`); 2 / 1639 `invalid_arguments`.
+- `secret_refs_missing` and `restart_prediction` are optional: absent on
+  builds before 1.0.3 and added without a `management_contract` bump, so the
+  agent gates on `management_contract` 1 and on the member being present
+  (section 3).
 - Missing credentials, `secret_refs_missing` (absent on builds before
   1.0.3): as root or SYSTEM on a device, the names of every `secret_refs`
   credential the device does not hold, required and optional, in manifest
