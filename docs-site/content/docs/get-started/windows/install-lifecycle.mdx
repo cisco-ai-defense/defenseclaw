@@ -233,6 +233,13 @@ to the failed version: do not copy its receipts into the restored installation
 or delete the agent's temporary files to force a retry. Recovery must still
 verify the original file identities, content, and permissions.
 
+Before starting an older gateway, a downgrade or rollback refuses active
+connector transactions in the data it would use. Complete recovery with the
+current version before retrying; do not delete receipts to force a downgrade.
+Windows CLI downgrades use the current installation's saved installer for
+these checks. If that installer is missing or unsafe, repair the current
+installation first.
+
 ## Uninstall and preserved state
 
 ```powershell

@@ -54,7 +54,7 @@ func TestAtomicTransformV2PreservesOrdinaryEA(t *testing.T) {
 	if err := safefile.WritePrivate(path, []byte(`{"enabled":true}`)); err != nil {
 		t.Fatal(err)
 	}
-	payload := atomicTransformEARegressionPayload("DEFENSECLAW_FIXTURE", "ordinary metadata")
+	payload := atomicTransformEARegressionPayload("CONNECTOR_EA_FIXTURE", "ordinary metadata")
 	atomicTransformEARegressionSet(t, path, payload)
 	err := atomicTransformFileWithStateDir(path, filepath.Join(root, "state"), 0o600,
 		func(current []byte, exists bool) (atomicTransformResult, error) {
@@ -96,7 +96,7 @@ func TestAtomicTransformV2EACrashRecovery(t *testing.T) {
 			if err := safefile.WritePrivate(path, []byte("old")); err != nil {
 				t.Fatal(err)
 			}
-			payload := atomicTransformEARegressionPayload("DEFENSECLAW_FIXTURE", "ordinary metadata")
+			payload := atomicTransformEARegressionPayload("CONNECTOR_EA_FIXTURE", "ordinary metadata")
 			atomicTransformEARegressionSet(t, path, payload)
 			crash := exec.Command(os.Args[0], "-test.run=^TestAtomicTransformV2HardExitHelper$")
 			crash.Env = atomicTransformV2HardExitEnv(
@@ -149,7 +149,7 @@ func TestAtomicTransformV2AllocationRejectsForeignEA(t *testing.T) {
 	if err := safefile.WritePrivate(path, []byte("old")); err != nil {
 		t.Fatal(err)
 	}
-	atomicTransformEARegressionSet(t, path, atomicTransformEARegressionPayload("DEFENSECLAW_FIXTURE", "ordinary metadata"))
+	atomicTransformEARegressionSet(t, path, atomicTransformEARegressionPayload("CONNECTOR_EA_FIXTURE", "ordinary metadata"))
 	crash := errors.New("stop fixture after staging EA")
 	var retained string
 	restore := setAtomicTransformPhaseHookForTest(path, func(phase atomicTransformPhase, state atomicTransformPhaseState) error {

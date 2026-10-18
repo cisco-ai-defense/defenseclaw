@@ -421,6 +421,7 @@ func atomicFileSnapshotStillMatches(path string, snapshot atomicFileSnapshot) (b
 	}
 	if metadata.digest != snapshot.metadataDigest ||
 		metadata.preservedDigest != snapshot.preservedMetadataDigest ||
+		metadata.canonicalEADigest != snapshot.canonicalEAMetadataDigest ||
 		metadata.stageOwnedDigest != snapshot.stageOwnedMetadataDigest ||
 		metadata.ownerGroupDigest != snapshot.ownerGroupDigest ||
 		metadata.creationTime != snapshot.creationTime ||
@@ -1424,6 +1425,7 @@ func atomicTransformArtifactStatesEqualExact(a, b atomicTransformArtifactState) 
 		a.protectionDigest == b.protectionDigest &&
 		a.metadataDigest == b.metadataDigest &&
 		a.preservedMetadataDigest == b.preservedMetadataDigest &&
+		a.canonicalEAMetadataDigest == b.canonicalEAMetadataDigest &&
 		a.stageOwnedMetadataDigest == b.stageOwnedMetadataDigest &&
 		a.ownerGroupDigest == b.ownerGroupDigest &&
 		a.creationTime == b.creationTime &&

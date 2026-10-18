@@ -20,8 +20,8 @@ This is the only upgrade code that stays on a machine between releases, so it
 must never need to change. It picks a release, downloads that release's
 installer, checks it against the release's ``checksums.txt``, and runs it.
 Everything else (what to download, how to swap, migrate, and roll back) lives
-in the installer of the release being installed, so a fix to any of it ships
-with the next release.
+in the installer. Windows downgrades first run the saved current installer,
+whose recovery checks must run before an older installer takes over.
 
 Standard library only, and imported before the rest of the CLI, so it keeps
 working when anything else in the installed version is broken.
@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -309,12 +310,28 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
+    extra = ["--local", local_dir] if local_dir else []
     try:
-        installer = _fetch_installer(repo, version, local_dir, workdir)
+        if os.name == "nt" and _key(version) < _key(installed):
+            # Older installers cannot read current recovery receipts. Let this
+            # install's controller quiesce the gateway and check them before
+            # it delegates to the verified installer of the requested release.
+            saved = os.path.join(_data_home(), "installer", "install.ps1")
+            installer = os.path.join(workdir, "install.ps1")
+            try:
+                _copy_windows_saved_installer(saved, installer)
+                _check_installer_version(installer, installed)
+            except (OSError, ShimError) as exc:
+                raise ShimError(
+                    f"cannot safely use the current saved installer {saved}: {exc}. "
+                    f"Repair DefenseClaw {installed} with its installer before retrying this downgrade"
+                ) from None
+            extra = ["--version", version, *extra]
+        else:
+            installer = _fetch_installer(repo, version, local_dir, workdir)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    extra = ["--local", local_dir] if local_dir else []
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
 
 
@@ -323,15 +340,94 @@ def _data_home() -> str:
     return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
 
 
+def _windows_regular_file_info(path: str) -> os.stat_result:
+    """Validate the saved controller's locator without accepting reparse aliases."""
+    path = os.path.abspath(path)
+    ancestors = []
+    parent = os.path.dirname(path)
+    while True:
+        ancestors.append(parent)
+        above = os.path.dirname(parent)
+        if above == parent:
+            break
+        parent = above
+    for entry in [*reversed(ancestors), path]:
+        info = os.lstat(entry)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError(f"saved installer path contains a reparse point: {entry}")
+        expected_type = stat.S_ISREG if entry == path else stat.S_ISDIR
+        if not expected_type(info.st_mode):
+            raise OSError(f"saved installer path has an unexpected file type: {entry}")
+    return info
+
+
+def _read_windows_regular_file(path: str, limit: int) -> bytes:
+    before = _windows_regular_file_info(path)
+    if before.st_size > limit:
+        raise OSError(f"saved installer metadata exceeds its size limit: {path}")
+    with open(path, "rb") as source:
+        opened = os.fstat(source.fileno())
+        body = source.read(limit + 1)
+        after = os.fstat(source.fileno())
+    named = _windows_regular_file_info(path)
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    witness = tuple(getattr(before, field) for field in fields)
+    # On Windows Python can expose creation time through lstat's st_ctime
+    # and change time through fstat's. Compare each source with itself.
+    if (
+        len(body) != before.st_size
+        or before.st_ctime_ns != named.st_ctime_ns
+        or opened.st_ctime_ns != after.st_ctime_ns
+        or any(tuple(getattr(info, field) for field in fields) != witness for info in (opened, after, named))
+    ):
+        raise OSError(f"saved installer changed while being copied: {path}")
+    return body
+
+
+def _copy_windows_saved_installer(source: str, destination: str) -> None:
+    body = _read_windows_regular_file(source, 4 * 1024 * 1024)
+    with open(destination, "xb") as target:
+        target.write(body)
+
+
 def _rollback(*, yes: bool) -> int:
     home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
-    if not os.path.isfile(installer):
+    if os.name == "nt":
+        from defenseclaw import __version__ as installed
+
+        try:
+            _windows_regular_file_info(installer)
+            use_previous = False
+        except FileNotFoundError:
+            use_previous = True
+        except OSError as exc:
+            raise ShimError(
+                f"cannot safely use the current saved installer {installer}: {exc}. "
+                "Repair the current DefenseClaw install before retrying rollback"
+            ) from None
+    else:
+        use_previous = not os.path.isfile(installer)
+    if use_previous:
         # A source ('make all') install saves no installer. After a rollback to
         # one, the install it replaced (now in previous/) still has its own, and
         # that one rolls forward again (GAP-2459).
         installer = os.path.join(home, "previous", "installer", name)
+        if os.name == "nt":
+            try:
+                back_to = (
+                    _read_windows_regular_file(os.path.join(home, "previous", "VERSION"), 128)
+                    .decode("utf-8-sig")
+                    .strip()
+                )
+            except (OSError, UnicodeError):
+                back_to = ""
+            if not _VERSION.fullmatch(back_to) or _key(back_to) < _key(installed):
+                raise ShimError(
+                    "the current saved Windows installer is missing, and the previous install cannot safely control "
+                    "this rollback. Repair the current DefenseClaw install before retrying rollback"
+                )
     if not os.path.isfile(installer):
         saved = os.path.join(home, "installer")
         raise ShimError(
@@ -351,11 +447,16 @@ def _rollback(*, yes: bool) -> int:
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
-        shutil.copyfile(installer, copy)
+        if os.name == "nt":
+            _copy_windows_saved_installer(installer, copy)
+            _check_installer_version(copy, back_to if use_previous else installed)
+        else:
+            shutil.copyfile(installer, copy)
     except BaseException as exc:
         shutil.rmtree(workdir, ignore_errors=True)
-        if isinstance(exc, OSError):
-            raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
+        if isinstance(exc, (OSError, ShimError)):
+            hint = ". Repair the current DefenseClaw install before retrying rollback" if os.name == "nt" else ""
+            raise ShimError(f"could not copy the saved installer {installer}: {exc}{hint}") from None
         raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
@@ -433,7 +534,7 @@ def _windows_terminal_without_desktop() -> bool:
 
 
 def _powershell_flag(arg: str) -> str:
-    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local"}.get(arg, arg)
+    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local", "--version": "-Version"}.get(arg, arg)
 
 
 def _installer_name() -> str:
