@@ -22,7 +22,12 @@ import (
 // agent cannot fail closed (Hermes, Copilot) gets an open hook even when the
 // config resolves closed, so status must not say closed (GAP-0001).
 func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
+	// The standalone profile, as the loader resolves it and the services pin
+	// it. A managed Config literal with no profile is Secure Client
+	// (Config.EnterpriseProfile), whose unset hook fail mode is open (#1163).
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
 	closed := config.PerConnectorGuardrailConfig{HookFailMode: "closed"}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"hermes": closed, "copilot": closed, "opencode": closed, "amp": {HookFailMode: "open"},
@@ -49,5 +54,14 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	}
 	if got := renderedHookFailModeFor("not-a-connector", "closed"); got != "closed" {
 		t.Errorf("unknown connector = %q", got)
+	}
+
+	// Secure Client is the only profile whose unset hook fail mode is open.
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	for _, name := range []string{"codex", "claudecode"} {
+		if got := ManagedHookFailMode(cfg, name); got != "open" {
+			t.Errorf("secure_client %s: ManagedHookFailMode = %q, want open", name, got)
+		}
 	}
 }
