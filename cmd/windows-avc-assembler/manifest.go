@@ -166,8 +166,8 @@ func distributionFlavorFor(flavor string, allowUnsigned bool) string {
 
 // writeProvenance emits provenance.json alongside the assembled EXE.
 // setup_sha256 is left empty and setup_size zero — AVC signs the EXE
-// after the assembler runs, and the finalize.ps1 helper (unchanged
-// since spec 002) fills the fields in-place with the signed EXE's
+// after the assembler runs, and the finalize.ps1 helper fills the
+// fields in-place with the signed EXE's
 // SHA-256 after signtool has run.
 func writeProvenance(path string, opts options) error {
 	doc := map[string]any{

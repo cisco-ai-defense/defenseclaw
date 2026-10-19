@@ -69,7 +69,7 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	}
 }
 
-// Under Secure Client (#1163, spec 007) an unset hook fail mode resolves open
+// Under Secure Client (#1163) an unset hook fail mode resolves open
 // for every connector, Codex and Claude Code included, and an explicit
 // closed stays closed except for an agent that cannot fail closed.
 func TestSecureClientManagedHookFailModeFollowsTheConfig(t *testing.T) {

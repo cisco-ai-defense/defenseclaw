@@ -56,7 +56,7 @@ SUITES = (
 )
 EVERYTHING = frozenset(SUITES)
 
-# Paths whose change must run the managed-mode CI (spec 008).
+# Paths whose change must run the managed-mode CI.
 MANAGED_MANIFEST = ".github/managed-paths.txt"
 MANAGED_SECTIONS = ("managed", "managed_impacting", "excluded")
 

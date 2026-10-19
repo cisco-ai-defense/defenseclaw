@@ -1,21 +1,17 @@
-name: Windows deterministic-build (Workstream E)
+name: Windows deterministic-build
 # Reproducibility gate for the Windows managed-enterprise AVC packaging
-# handoff. See docs/specs/001-windows-deterministic-build/design.md.
+# handoff: independent build hosts must produce byte-identical unsigned
+# outer Setup bytes from identical inputs.
 #
 # WHAT THIS GATE PROVES
 #   - windows-repro-manifest emits byte-identical manifest.json,
 #     payload-metadata.json, and provenance.json on both Linux and
-#     macOS runners.
+#     macOS runners (sorted keys, LF endings, no HTML escaping).
 #   - The fixture tarball at internal/build-repro/testdata/ is
 #     byte-stable and matches its pinned SHA-256.
-#
-# WHAT THIS GATE DOES NOT (YET) PROVE
-#   The full assemble.sh path — including the outer `go build` step —
-#   ships in Workstream A. When A lands, this workflow will be extended
-#   to run assemble.sh and compare the resulting Setup EXE SHA-256s
-#   across runners. Until then, the JSON-emitter cross-platform check
-#   catches ~all the shell-host variance the reproducibility contract
-#   is meant to remove (sorted keys, LF endings, no HTML escaping).
+#   - assemble.sh --allow-unsigned, including the outer `go build`,
+#     produces a byte-identical DefenseClawSetup-Enterprise-x64.exe on
+#     both runners (the assemble-* and compare-assemble jobs).
 
 #
 # Every pull request starts this workflow so "Windows Deterministic Build
@@ -48,8 +44,8 @@ permissions:
   contents: read
 
 env:
-  # Pin the toolchain out-of-band per the OSS-scope decision in
-  # docs/specs/001-windows-deterministic-build/design.md § Tradeoffs.
+  # Pin the toolchain out-of-band, not in go.mod, so OSS builds are not
+  # forced onto it (scripts/check-go-mod-no-toolchain.sh).
   GOTOOLCHAIN: go1.26.4
   # Expected fixture SHA-256. Regenerate via
   # scripts/generate-repro-fixture.sh; update this constant in the same
@@ -137,8 +133,8 @@ jobs:
           # is a helper that runs on THIS runner to produce the JSON
           # artefacts. It must NOT inherit GOOS=windows / GOARCH=amd64
           # / -mod=vendor from repro-flags.sh (that pin is for the
-          # outer build in Workstream A's build kit; the repo has no
-          # vendor/ dir today).
+          # outer build in the AVC build kit; the repo has no vendor/
+          # dir).
           (
             unset GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED || true
             go build -trimpath -buildvcs=false \
@@ -172,7 +168,8 @@ jobs:
             --expected-filenames "$EXPECTED_PAYLOAD_FILENAMES" \
             --out "$workdir/out/payload-metadata.json"
           # Use a fixed-byte "outer setup exe" stand-in so provenance is
-          # comparable; the real outer go build lands in Workstream A.
+          # comparable; the real outer go build is checked by the
+          # assemble-* jobs below.
           printf 'defenseclaw-outer-setup-fixture-v1\n' > "$workdir/out/setup.exe"
           "$workdir/windows-repro-manifest" emit-provenance \
             --version 0.0.0-repro-fixture \
@@ -263,10 +260,11 @@ jobs:
           path: artifacts/
           retention-days: 7
 
-  # Full assemble.sh round trip on the fixture — spec 002 AC-05 + AC-10.
+  # Full assemble.sh round trip on the fixture: independent runners must
+  # build identical unsigned outer bytes from identical inputs.
   # Runs the six-step assembler under --allow-unsigned (the fixture is
   # dummy-unsigned by design; the signature preflight is exercised in
-  # spec 002's Go-level tests, not here). Both runners produce the outer
+  # Go-level tests, not here). Both runners produce the outer
   # DefenseClawSetup-Enterprise-x64.exe from the same source tree +
   # signed-payload fixture bytes; the compare-assemble job at the end
   # asserts byte-identical SHA-256s across the two runners.
@@ -293,8 +291,8 @@ jobs:
           # assemble.sh checks for exactly these eight names.
           ls "$workdir/payload"
           # go build -mod=vendor (from repro-flags.sh) requires a vendor/
-          # tree. The outer Setup EXE has no external deps (stdlib only
-          # per spec 001 deps_test), so `go mod vendor` produces the
+          # tree. The outer Setup EXE has no external deps (stdlib only,
+          # enforced by deps_test), so `go mod vendor` produces the
           # minimum vendor/ needed for -mod=vendor to succeed.
           go mod vendor
       - name: Run assemble.sh --allow-unsigned
@@ -347,11 +345,11 @@ jobs:
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
           # go build -mod=vendor (from repro-flags.sh) requires a vendor/
-          # tree. The outer Setup EXE has no external deps (stdlib only
-          # per spec 001 deps_test), so `go mod vendor` produces the
+          # tree. The outer Setup EXE has no external deps (stdlib only,
+          # enforced by deps_test), so `go mod vendor` produces the
           # minimum vendor/ needed for -mod=vendor to succeed. Matches
           # the assemble-linux "Prepare payload from fixture + vendor
-          # tree" step — CR spec-002:PRRT_kwDORuAK-s6af8iG.
+          # tree" step.
           go mod vendor
       - name: Run assemble.sh --allow-unsigned
         env:
@@ -411,9 +409,9 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             echo ""
             echo "The outer DefenseClawSetup-Enterprise-x64.exe MUST be"
-            echo "byte-identical across CI runners — spec 002 REQ-21 +"
-            echo "spec 001 § reproducibility contract. See"
-            echo "docs/specs/002-windows-avc-packaging/design.md § Risks."
+            echo "byte-identical across CI runners. Look for a host-dependent"
+            echo "input (env, toolchain, timestamps, path) that leaked into"
+            echo "the build; repro-flags.{sh,ps1} must pin it."
             exit 1
           fi
           echo "assemble.sh produced byte-identical output across ubuntu + macos."
@@ -472,7 +470,7 @@ jobs:
   deterministic-build-required:
     # One check for the whole gate. It runs even when a job fails or is
     # skipped, and accepts skips only when the changes job selected the gate
-    # away, so the main branch ruleset can require it (spec 008).
+    # away, so the main branch ruleset can require it.
     name: Windows Deterministic Build Required
     needs:
       - changes

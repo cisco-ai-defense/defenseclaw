@@ -132,7 +132,7 @@ func TestAssembleHappyPath(t *testing.T) {
 	}
 }
 
-// TestReproducibilityByteIdentical is the spec 001 REQ-07 gate at the
+// TestReproducibilityByteIdentical is the reproducible-build gate at the
 // full-assembler level: two runs against byte-identical inputs must
 // produce a byte-identical output EXE.
 func TestReproducibilityByteIdentical(t *testing.T) {

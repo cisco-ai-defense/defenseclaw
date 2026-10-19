@@ -7,8 +7,6 @@
 # fails when a tracked file whose path looks managed is in no section here, so
 # new managed code cannot land outside this list.
 #
-# Spec: docs/specs/008-managed-path-ci-gating/README.md
-#
 # Pattern syntax (the same as scripts/ci_changes.py RULES): a pattern ending in
 # "/" is a directory prefix; any other pattern is an fnmatch glob over the
 # whole repo-relative path, where "*" also crosses "/".

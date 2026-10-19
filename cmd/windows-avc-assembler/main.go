@@ -408,8 +408,8 @@ func assemble(opts options, stdout io.Writer) error {
 
 	// Stage 5: emit provenance.json with a placeholder setup_sha256.
 	// The signed EXE hash is only knowable after AVC's step-3 signtool
-	// sign; the finalize.ps1 helper (unchanged from spec 002) fills the
-	// placeholder in place after signing.
+	// sign; the finalize.ps1 helper fills the placeholder in place
+	// after signing.
 	stage(5, "emit provenance")
 	provPath := assembled + provenanceSuffix
 	if err := writeProvenance(provPath, opts); err != nil {

@@ -27,8 +27,8 @@ import (
 // /Library/LaunchDaemons/ which is root:wheel 0644 — a non-root
 // process cannot install a replacement service or rebind an
 // already-bound port. The gateway's own codesign identity is
-// verified separately by the macOS IPC accept path (spec 004
-// peerauth_darwin.go) at accept-time via LOCAL_PEERCRED + codesign
+// verified separately by the macOS IPC accept path
+// (peerauth_darwin.go) at accept-time via LOCAL_PEERCRED + codesign
 // on the peer. This client is the reverse leg (hook → gateway)
 // where the loopback-plus-admin-plist trust chain suffices.
 //

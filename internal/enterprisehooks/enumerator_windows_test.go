@@ -62,8 +62,8 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}
 }
 
-// TestSIDIsInteractiveUserRejectsWellKnown pins REQ-11's exclusion
-// list. Every principal listed here is a well-known SID the CLI /
+// TestSIDIsInteractiveUserRejectsWellKnown pins the interactive-user
+// filter's exclusion list. Every principal listed here is a well-known SID the CLI /
 // enumerator MUST refuse — accepting any of them would let a
 // misconfigured install rewrite the machine's SYSTEM / BUILTIN /
 // NT SERVICE hook wiring, which is nonsensical (those principals
@@ -156,7 +156,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 			want: []string{"codex"},
 		},
 		{
-			// CR spec-005:PRRT_kwDORuAK-s6atyfM regression:
+			// Regression:
 			// a disabled map entry MUST beat the scalar
 			// re-declaration. A config that names claudecode
 			// both as the scalar Connector AND as an explicitly
@@ -307,7 +307,7 @@ func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t 
 	}
 }
 
-// TestWriteTargetsManifestAtomicNoOpNoWrite pins spec 005 REQ-05: a
+// TestWriteTargetsManifestAtomicNoOpNoWrite pins the no-op-no-write rule: a
 // byte-identical manifest must not touch the on-disk file. This is
 // the CORE property that prevents guardian fsnotify wakes every 5-min
 // tick on a stable box. If regressions land here, the test-fixture's
@@ -511,8 +511,7 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 }
 
 // TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled + Deferred preservation invariant spec
-// 005 REQ-08's design says: a row that already exists in the file
+// AgentVersion + Enabled + Deferred preservation invariant: a row that already exists in the file
 // keeps its agent_version + enabled state across enumeration
 // cycles. A NEW row is auto-authorized at the per-user CLI's
 // discovered version (macOS parity) — or dropped entirely if no
@@ -767,7 +766,7 @@ func TestEnumerateWindowsEmptyConnectorsReturnsEmptyManifest(t *testing.T) {
 }
 
 // TestEnumerateWindowsHonoursCancelledContext asserts the cycle-
-// timeout invariant CR spec-005:PRRT_kwDORuAK-s6atyfD asks for: a
+// timeout invariant: a
 // ctx that's already cancelled returns immediately without touching
 // the registry / filesystem. Belt-and-braces on top of the per-row
 // ctx.Err() checks; a cancelled ctx at ENTRY must never proceed.

@@ -89,12 +89,12 @@ type SubsystemHealth struct {
 }
 
 // ConfigurationState is the overall daemon+guardian readiness state
-// spec 003 (docs/specs/003-windows-deferred-config/) exposes on the
+// a deferred-config managed-enterprise install exposes on the
 // health snapshot. This is distinct from the per-subsystem
 // SubsystemState above: SubsystemState reports each component's own
 // health, ConfigurationState reports the CROSS-subsystem "is the
 // managed-enterprise Windows deployment ready to accept traffic yet"
-// question that Cisco Secure Client (Workstream C) and downstream
+// question that Cisco Secure Client and downstream
 // dashboards read.
 type ConfigurationState string
 
@@ -115,8 +115,8 @@ const (
 // ConfigurationHealth is the value published under
 // HealthSnapshot.Configuration. Since tracks the moment the current
 // State value was entered — a bounded-wait indicator downstream
-// consumers can page on without needing to inspect service uptime.
-// See spec 003 REQ-19, REQ-20, REQ-21.
+// consumers can page on without needing to inspect service uptime;
+// it changes only when State changes.
 type ConfigurationHealth struct {
 	State ConfigurationState `json:"state"`
 	Since time.Time          `json:"since"`
@@ -155,7 +155,7 @@ type HealthSnapshot struct {
 	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
 	// Configuration is the overall daemon+guardian readiness state,
 	// distinct from the per-subsystem Config/Gateway fields above.
-	// Populated only in managed_enterprise deployments (spec 003);
+	// Populated only in managed_enterprise deployments;
 	// omitted from the payload for OSS / SaaS / DP / CP hosts so
 	// downstream consumers don't have to reason about the field for
 	// deployments where it never has meaning.
@@ -165,7 +165,7 @@ type HealthSnapshot struct {
 	// server has been started (managed_enterprise or managed.enabled).
 	Managed *SubsystemHealth `json:"managed,omitempty"`
 	// Enumerator reports the DefenseClawHookEnumerator SCM service's
-	// interval-loop state (spec 005 Workstream D). Present only on
+	// interval-loop state. Present only on
 	// Windows managed_enterprise where the enumerator service runs.
 	// The three-state signal (`starting` / `running` / `error`) lets
 	// operators see whether new user profiles will actually get
@@ -252,14 +252,14 @@ type SidecarHealth struct {
 	telemetryShownState       SubsystemState
 	telemetryShownSince       time.Time
 	managed                   *SubsystemHealth
-	// enumerator tracks the DefenseClawHookEnumerator SCM service
-	// (spec 005 Workstream D). Nil until SetEnumerator is called at
+	// enumerator tracks the DefenseClawHookEnumerator SCM service.
+	// Nil until SetEnumerator is called at
 	// least once — a nil pointer omits the "enumerator" block from
 	// the snapshot, which is the correct behaviour for every
 	// deployment mode other than managed_enterprise on Windows.
 	enumerator *SubsystemHealth
 
-	// configuration is the collapsed daemon+guardian state (spec 003).
+	// configuration is the collapsed daemon+guardian state.
 	// Nil until SetDaemonConfigLoaded is called at least once — a
 	// nil pointer omits the top-level "configuration" block from the
 	// snapshot, which is the correct behaviour for every deployment
@@ -269,7 +269,7 @@ type SidecarHealth struct {
 	// deferred-config mode).
 	configuration *ConfigurationHealth
 	// daemonConfigLoaded is the daemon-side half of the collapsing
-	// rule (spec 003 § Data flow). SetDaemonConfigLoaded flips this
+	// rule. SetDaemonConfigLoaded flips this
 	// true when v8 config parses; it never goes false again.
 	daemonConfigLoaded bool
 	// guardianStateReader is best-effort probe wired by the daemon
@@ -285,7 +285,7 @@ type SidecarHealth struct {
 	// outside the lock if a concurrent installer has raced ahead of
 	// them. Prevents a stale StateUnknown sample from a pre-install
 	// snapshot from clobbering a fresh StateReady sample the
-	// installer already applied (CR spec-003:PRRT_kwDORuAK-s6al7aV).
+	// installer already applied.
 	guardianStateReaderEpoch uint64
 
 	interceptionReported     bool
@@ -439,7 +439,7 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 	h.notifySubscribers()
 }
 
-// SetDaemonConfigLoaded is the daemon-side half of the spec 003
+// SetDaemonConfigLoaded is the daemon-side half of the
 // deferred-config collapsing rule. Call once with `false` right after
 // the sidecar is constructed if the daemon is entering a
 // waiting-for-config loop, then again with `true` once v8 config
@@ -454,9 +454,9 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 // the snapshot omits the block entirely.
 func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 	// updateConfiguration handles:
-	//   - I/O-outside-lock discipline (CR spec-003:PRRT_kwDORuAK-s6alksL)
-	//   - notify-only-on-transition (CR spec-003:PRRT_kwDORuAK-s6alksD)
-	//   - epoch CAS retry (CR spec-003:PRRT_kwDORuAK-s6al7aV)
+	//   - I/O-outside-lock discipline
+	//   - notify-only-on-transition
+	//   - epoch CAS retry
 	//
 	// The mutate callback runs under the write lock exactly once
 	// per successful attempt. Its own I/O footprint is zero: just
@@ -499,8 +499,7 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 	h.guardianStateReader = fn
 	// Bump the epoch so ANY in-flight sampler that captured a
 	// stale reader is forced to re-sample instead of clobbering
-	// the fresh state we're applying below (CR
-	// spec-003:PRRT_kwDORuAK-s6al7aV).
+	// the fresh state we're applying below.
 	h.guardianStateReaderEpoch++
 	var changed bool
 	if h.configuration != nil {
@@ -522,10 +521,9 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 // call is a no-op.
 func (h *SidecarHealth) RefreshConfiguration() {
 	// updateConfiguration handles the whole discipline:
-	// outside-lock guardian I/O (CR PRRT_kwDORuAK-s6alksL),
-	// notify-only-on-change (CR PRRT_kwDORuAK-s6alksD), and the
+	// outside-lock guardian I/O, notify-only-on-change, and the
 	// epoch CAS retry that catches a concurrent SetGuardianStateReader
-	// racing ahead of our sample (CR PRRT_kwDORuAK-s6al7aV).
+	// racing ahead of our sample.
 	//
 	// mutate is nil for RefreshConfiguration — the periodic tick
 	// carries no state change of its own; it only asks the collapsing
@@ -571,8 +569,7 @@ func snapshotGuardianStateFrom(reader func() string) string {
 // use the CALLER-supplied reader (which it hasn't installed yet) to
 // sample, rather than the currently-installed one.
 //
-// The compare-and-apply retry catches the race the CR flagged
-// (spec-003:PRRT_kwDORuAK-s6al7aV):
+// The compare-and-apply retry catches this race:
 //
 //	Goroutine A:                        Goroutine B:
 //	  samples reader (epoch E1) → SA
@@ -605,7 +602,7 @@ func snapshotGuardianStateFrom(reader func() string) string {
 // and this function is the opposite: it acquires h.mu itself. sync
 // mutexes aren't reentrant, so a maintainer following the file's
 // convention would deadlock on a call from an already-lock-holding
-// site. See CR spec-003:PRRT_kwDORuAK-s6amXY8.
+// site.
 func (h *SidecarHealth) updateConfiguration(mutate func()) {
 	// Fast path: if there's no configuration tracking active AND the
 	// caller has no state change to apply, skip the guardian file
@@ -614,7 +611,6 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 	// ticker still runs — without this bail-out, every tick would
 	// pointlessly open + read the guardian .state file (or return
 	// StateUnknown from a nil reader) and then discard the result.
-	// See CR spec-003:PRRT_kwDORuAK-s6amXYx.
 	if mutate == nil {
 		h.mu.RLock()
 		inactive := h.configuration == nil
@@ -662,13 +658,13 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 
 // recomputeConfigurationLocked applies the collapsing rule; caller
 // holds h.mu (write lock) and passes the already-read guardian state
-// so the recompute never performs I/O under the lock (CR
-// spec-003:PRRT_kwDORuAK-s6alksL).
+// so the recompute never performs I/O under the lock.
 //
-// Order (spec 003 § Data flow):
+// Order:
 //  1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
-//     This lets AC-12 pass: if UCB drops targets.yaml first, the
-//     daemon still says waiting_for_config until config.yaml lands.
+//     If UCB drops targets.yaml first, the daemon still says
+//     waiting_for_config until config.yaml lands, then goes straight
+//     to ready.
 //  2. Daemon loaded, guardian state = StateReady ⇒ ready.
 //  3. Daemon loaded, guardian state = StateWaitingForTargets or
 //     StateUnknown (missing / unreadable / malformed file, OR no
@@ -677,10 +673,10 @@ func (h *SidecarHealth) updateConfiguration(mutate func()) {
 //
 // Since only advances when the collapsed state actually changes,
 // so a snapshot taken 30s into a wait returns the SAME Since as
-// one taken at the wait's start (spec 003 AC-08).
+// one taken at the wait's start.
 //
 // The switch below compares against `guardianstate` package
-// constants (CR spec-003:PRRT_kwDORuAK-s6alksT) so a rename or
+// constants so a rename or
 // reshaping of the state vocabulary is caught by the compiler,
 // not by a silent fall-through to the default branch.
 func (h *SidecarHealth) recomputeConfigurationLocked(guardianState string) {
@@ -1218,8 +1214,7 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 }
 
 // SetEnumerator records the current state of the
-// DefenseClawHookEnumerator SCM service's interval loop (spec 005
-// Workstream D). Called from the enumerator CLI subcommand as it
+// DefenseClawHookEnumerator SCM service's interval loop. Called from the enumerator CLI subcommand as it
 // moves through:
 //
 //   - Starting: service just booted, initial-cycle-delay running.
@@ -1231,11 +1226,11 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 //     reason. The interval loop keeps ticking; the state flips back
 //     to Running on the next successful cycle.
 //
-// T5.1 wiring status: the enumerator CLI and the sidecar live in
+// Wiring status: the enumerator CLI and the sidecar live in
 // separate processes, so SetEnumerator cannot be called across that
 // boundary directly. The follow-up work is to (1) have the enumerator
 // CLI atomically publish `.enumerator-state` alongside every cycle
-// (mirroring spec 003's guardianstate JSON), and (2) plumb a
+// (mirroring the guardianstate JSON), and (2) plumb a
 // SetEnumeratorStateReader callback on SidecarHealth that the daemon
 // wires to a file-watching poller which translates the on-disk record
 // into SetEnumerator invocations. Both halves belong in a coordinated
@@ -1257,7 +1252,7 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 // reference to the input map cannot mutate the stored subsystem
 // health after the call returns — Snapshot() then serves an equally
 // independent copy so a JSON marshal path and a live setter cannot
-// race on the same map. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+// race on the same map.
 func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, details map[string]interface{}) {
 	if h == nil {
 		return
@@ -1275,13 +1270,11 @@ func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, deta
 
 // cloneSubsystemDetails deep-copies the top-level map, every nested
 // map[string]interface{}, and the common slice / typed-map values that
-// health-detail callers actually emit today (spec 005 D1 introduced
-// []string / []int for cycle-counter and per-target flavor fields
-// alongside the flat primitives + nested map[string]interface{} shapes
-// the prior generation carried). A shallow copy of these types would
-// let a Snapshot() consumer mutate the internal slice header and
-// race against a subsequent Set* call — the T5.4 finding was that
-// spec-005's CR round 1 fix stopped short of handling those.
+// health-detail callers actually emit today ([]string / []int for
+// cycle-counter and per-target flavor fields alongside the flat
+// primitives + nested map[string]interface{} shapes). A shallow copy
+// of these types would let a Snapshot() consumer mutate the internal
+// slice header and race against a subsequent Set* call.
 //
 // Types not covered here fall through to a value-copy of the interface
 // header; the invariant callers must respect is: any type passed as a
@@ -1610,7 +1603,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Managed:               h.managed,
 		// Enumerator is deep-cloned so a caller mutating the returned
 		// pointer's Details map cannot race with a concurrent
-		// SetEnumerator. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+		// SetEnumerator.
 		Enumerator: cloneSubsystemHealth(h.enumerator),
 	}
 	// Deep-copy the configuration pointer under the read lock so a

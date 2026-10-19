@@ -45,13 +45,13 @@ const enterpriseWindowsEnumerateDefaultInterval = 5 * time.Minute
 // the enumerator's first cycle then runs, and any hooked-in health
 // dashboard sees a coherent startup ordering.
 //
-// Spec 005 REQ-13. Tuneable in a follow-up if telemetry shows this
+// Tuneable in a follow-up if telemetry shows this
 // is too long / too short.
 const enterpriseWindowsEnumerateInitialCycleDelay = 30 * time.Second
 
 // enterpriseWindowsEnumerateCycleTimeout bounds a single enumeration
 // cycle so a wedged registry walk / IO can't starve subsequent
-// ticks. Spec 005 REQ-19.
+// ticks.
 const enterpriseWindowsEnumerateCycleTimeout = 60 * time.Second
 
 // enterpriseWindowsEnumerateSessionSettle delays the extra cycle a sign-in
@@ -96,10 +96,8 @@ type enterpriseWindowsEnumerateOptions struct {
 //     byte-identical short-circuit in WriteTargetsManifestAtomic
 //     keeps steady-state ticks free of file mutation.
 //
-// Spec 005 REQ-03, REQ-04, REQ-13, REQ-18, REQ-19 (REQ-13's
-// audit-only sub-clause is superseded by the macOS-parity
-// auto-authorize posture; see
-// docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md residual-risk section).
+// Each tick auto-authorizes rather than only auditing (macOS parity);
+// see docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md residual-risk section.
 func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 	opts := &enterpriseWindowsEnumerateOptions{
 		interval:     enterpriseWindowsEnumerateDefaultInterval,
@@ -347,7 +345,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	fmt.Fprintf(stderr, "[hook-enumerator] cycle complete users=%d targets=%d changed=%t elapsed=%s\n",
 		countDistinctSIDs(manifest.Targets), len(manifest.Targets), changed, elapsed)
 	if elapsed > 10*time.Second {
-		// Spec 005 REQ-19 documents a soft 10 s target on a 100-user
+		// A cycle has a soft 10 s target on a 100-user
 		// fleet; log a WARN if a single cycle overshoots so operators
 		// see the degradation before the hard 60 s ceiling fires.
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
@@ -447,7 +445,7 @@ func enterpriseWindowsConnectorEmails(stderr io.Writer, cfg *config.Config, mani
 }
 
 // runEnterpriseWindowsEnumerateInterval is the interval-loop entry.
-// Runs the first cycle after `initial_delay` (per REQ-13), then
+// Runs the first cycle after `initial_delay`, then
 // every `interval` thereafter. ctx-cancel (SCM stop) returns within
 // a bounded window.
 func runEnterpriseWindowsEnumerateInterval(
@@ -456,7 +454,7 @@ func runEnterpriseWindowsEnumerateInterval(
 	opts *enterpriseWindowsEnumerateOptions,
 	manifestPath string,
 ) error {
-	// Initial cycle after the configurable delay. REQ-13 default 30 s
+	// Initial cycle after the configurable delay (default 30 s)
 	// so gateway + guardian publish their startup lines first.
 	initial := time.NewTimer(opts.initialDelay)
 	defer initial.Stop()
@@ -467,7 +465,7 @@ func runEnterpriseWindowsEnumerateInterval(
 	case <-initial.C:
 	}
 	// First cycle: log the outcome but do NOT bail on a transient
-	// "config missing" error — the whole point of REQ-04 is to
+	// "config missing" error — the loop must
 	// tolerate deferred-config boots.
 	//
 	// Each tick publishes (parity with macOS render-targets.sh): it
@@ -597,8 +595,8 @@ func countDistinctSIDs(targets []enterprisehooks.ManifestTarget) int {
 
 // enterpriseWindowsEnumerateConfigLoader is the config-load seam the
 // interval-loop uses. Points at the SAME administrator-owned config
-// path the gateway + guardian read, via the same helper spec 003
-// wired in. Test hooks reassign this to a fixture.
+// path the gateway + guardian read, via the same helper the
+// deferred-config wait uses. Test hooks reassign this to a fixture.
 var enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
 	return enterpriseHooksWindowsConfigLoader()
 }
@@ -622,17 +620,16 @@ var (
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific
 // "config.yaml is not on disk yet" error so the interval loop can
-// treat it as a soft-retry rather than a hard failure. Spec 003
-// added the deferred-config posture; the enumerator's REQ-04 mirrors
-// it.
+// treat it as a soft-retry rather than a hard failure, matching the
+// deferred-config posture of the gateway and guardian.
 //
 // Detection is `errors.Is(err, fs.ErrNotExist)` first — both
 // config.LoadFromFile and the Windows trusted-path validator wrap
 // their underlying os.Open / os.Lstat errors with %w, so the fs
 // sentinel survives the wrap chain. The substring fallback stays
 // for edge cases where a caller loses the chain (e.g. a test
-// harness that stringifies the error before passing it up). See CR
-// spec-005:PRRT_kwDORuAK-s6atyfG — a message-only check would fail
+// harness that stringifies the error before passing it up). A
+// message-only check would fail
 // on non-English Windows locales where the OS returns a localized
 // "cannot find the file" string.
 func isEnterpriseWindowsEnumerateConfigMissing(err error) bool {

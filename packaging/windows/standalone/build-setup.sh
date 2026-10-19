@@ -231,7 +231,7 @@ echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
     -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT}" \
     -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
 
-# Spec 003: the payload is no longer carried via //go:embed. Append the
+# The payload is no longer carried via //go:embed. Append the
 # [archive][manifest][footer] trailer to the just-built outer EXE so
 # runtime loadEmbeddedEnterprisePayload can read it off the tail of the
 # running image. windows-avc-assembler runs on the host (so we unset

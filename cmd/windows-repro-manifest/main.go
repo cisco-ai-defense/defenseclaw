@@ -12,7 +12,6 @@
 // ordering, whitespace, and escaping — this binary removes that
 // variance.
 //
-// Design lives in docs/specs/001-windows-deterministic-build/design.md.
 // The three subcommands each build a JSON object as a map (so
 // encoding/json sorts keys) and write it with LF line endings,
 // two-space indent, and a final trailing LF.
@@ -40,8 +39,8 @@ Subcommands:
 
 Run any subcommand with -h for its flags.
 
-See docs/specs/001-windows-deterministic-build/ for the reproducibility
-contract this tool implements.
+Output is byte-stable: sorted keys, two-space indent, LF line endings and
+a trailing LF, so bash and PowerShell build hosts emit identical bytes.
 `
 
 func main() {

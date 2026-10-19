@@ -1632,8 +1632,9 @@ jobs:
           # Force a Windows cross-compile so internal/ipc's Windows
           # peer-auth stub is in the compile set: the gate refuses a
           # release-candidate Windows build that still carries the
-          # initial-cut deferred-auth code path. See
-          # docs/specs/004-windows-ui-ipc/ REQ-18 and REQ-19.
+          # initial-cut deferred-auth code path. A `-tags ga` build must
+          # fail, and fail on the authposture gate, until Windows IPC
+          # peer authentication ships.
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: '0'
@@ -1646,23 +1647,23 @@ jobs:
           # gate. Go names the file and the missing symbol however it words
           # the error, so match those two, not the message text.
           if output=$(go build -tags ga ./internal/ipc/... 2>&1); then
-            echo "::error::spec 004 GA release-gate did not refuse -tags ga build"
+            echo "::error::GA release-gate did not refuse -tags ga build"
             echo "$output"
             exit 1
           fi
           if ! grep -q 'authposture_gagate\.go:.*authpostureGAApproved' <<<"$output"; then
-            echo "::error::go build -tags ga failed, but not on the spec 004 GA gate (authposture_gagate.go / authpostureGAApproved)"
+            echo "::error::go build -tags ga failed, but not on the GA gate (authposture_gagate.go / authpostureGAApproved)"
             echo "$output"
             exit 1
           fi
-          echo "spec 004 GA release-gate is intact: go build -tags ga refused on authpostureGAApproved"
+          echo "GA release-gate is intact: go build -tags ga refused on authpostureGAApproved"
 
   enterprise-required:
     # One required check for the standalone managed-enterprise gates, in the
     # same pattern as Go Test and Python Lint & Test: it runs even when a gate
-    # fails or is skipped, and passes only when every gate succeeded. Spec 008
-    # asks for the main branch ruleset to require this name, so a red install
-    # lane or lifecycle job blocks the merge.
+    # fails or is skipped, and passes only when every gate succeeded. The main
+    # branch ruleset is meant to require this name, so a red install lane or lifecycle job
+    # blocks the merge.
     name: Enterprise Required
     needs:
       - changes

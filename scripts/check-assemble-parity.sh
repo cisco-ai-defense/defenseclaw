@@ -10,10 +10,9 @@
 # preflight envs, assert Cisco signatures, emit manifest, stage
 # payload, cross-build outer Setup EXE, emit provenance — and they
 # MUST behave identically so a kit built with either shipped assembler
-# produces byte-identical output against the same signed payload
-# (docs/specs/002-windows-avc-packaging/design.md § Risks — "AVC picks
-# pwsh as their default and assemble.ps1 develops semantic drift from
-# assemble.sh").
+# produces byte-identical output against the same signed payload. The
+# risk is that AVC picks pwsh as its default and assemble.ps1 drifts
+# semantically from assemble.sh.
 #
 # The check is syntactic (regex-based) rather than semantic (execute
 # both scripts and diff state). Semantic parity would require
@@ -28,9 +27,6 @@
 #      six files under ./payload/.
 #   3. Emitter subcommand invocations — the two `emit-*` calls the
 #      scripts make against windows-repro-manifest must match.
-#
-# See docs/specs/001-windows-deterministic-build/design.md for the
-# reproducibility contract this parity lint helps enforce.
 
 set -euo pipefail
 
@@ -58,8 +54,7 @@ extract_sh_stages() {
 }
 extract_ps_stages() {
     # pwsh form: Write-DefenseClawStage "stage N/6  <name>" (renamed
-    # from the earlier non-approved-verb DefenseClaw-Stage per CR
-    # spec-002:PRRT_kwDORuAK-s6af8i2).
+    # from the earlier non-approved-verb DefenseClaw-Stage).
     grep -E 'Write-DefenseClawStage "stage [0-9]+/6' "${PS}" \
         | sed -E 's/^[[:space:]]*Write-DefenseClawStage "(stage [0-9]+\/6[^"]*)".*/\1/'
 }
@@ -76,7 +71,7 @@ if [[ "${sh_stages}" != "${ps_stages}" ]]; then
     echo "pwsh stages:" >&2
     echo "${ps_stages}" | sed 's/^/  /' >&2
     echo "" >&2
-    echo "See docs/specs/002-windows-avc-packaging/design.md § Risks." >&2
+    echo "Make the same stage change in both assemble.sh and assemble.ps1." >&2
     exit 1
 fi
 
@@ -130,8 +125,7 @@ extract_sh_emitter_calls() {
     # set. Preserve source order and duplicates: `sort -u` collapsed
     # two files that invoke the SAME subcommand set in a DIFFERENT
     # order into an identical hash, which is exactly the drift this
-    # lint is supposed to catch. See CR spec-002:PRRT_kwDORuAK-s6af8j4
-    # (order preservation) + PRRT_kwDORuAK-s6ahACZ (bind to call site).
+    # lint is supposed to catch.
     grep -E '"\$\{EMITTER\}" emit-[a-z-]+' "${SH}" \
         | grep -oE "emit-[a-z-]+"
 }

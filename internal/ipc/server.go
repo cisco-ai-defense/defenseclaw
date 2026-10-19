@@ -46,7 +46,7 @@ type ServerOptions struct {
 // codesign_peer_auth log-field values. The literals are stable
 // contract with any log-aggregation rule watching for the beta
 // posture — do not rename without coordinating with the release
-// monitoring path referenced in spec 004 REQ-09.
+// monitoring path.
 const (
 	codesignStateDisabled        = "disabled"
 	codesignStateEnabled         = "enabled"
@@ -62,7 +62,7 @@ const (
 //     allowlist state. The accept-time codesign validator is a
 //     Windows-side no-op today (peerauth_windows.go returns
 //     KindUnixPeerUnauthenticated unconditionally); reporting
-//     "enabled" would be a lie. Spec 004 REQ-09.
+//     "enabled" would be a lie.
 //   - Any non-empty require-flag OR allowlist on linux/darwin
 //     ⇒ "enabled".
 //   - Otherwise ⇒ "disabled" (dev / unmanaged path).
@@ -143,7 +143,7 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	// IPC surface to every Linux staff-group member. bindListenerForOS
 	// in server_unix.go has a defense-in-depth GOOS check before
 	// using staffGID, but skipping the lookup entirely on non-darwin
-	// is the cleanest posture. See CR spec-004:PRRT_kwDORuAK-s6ankzw.
+	// is the cleanest posture.
 	var staffGID uint32
 	if runtime.GOOS == "darwin" {
 		if g, err := user.LookupGroup("staff"); err == nil {
@@ -225,7 +225,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.setHealth(gateway.StateStarting, "")
 
 	// Bind the listener with per-OS bind-and-ACL discipline. Windows
-	// applies a four-ACE DACL via applyBaselineIPCACL (spec 004);
+	// applies a four-ACE DACL via applyBaselineIPCACL;
 	// linux/darwin apply chmod + chown-to-root:staff. The two paths
 	// share every subsequent step (grpc.NewServer, Serve, teardown)
 	// so the code below is OS-agnostic once `lis` is set.
@@ -252,7 +252,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.requireSigningMetadata,
 		len(s.allowedTeamIDs)+len(s.allowedSigningIDs)+len(s.allowedBundleIDs),
 	)
-	// Spec 004 REQ-08: emit the deferred-auth warning line ONCE at
+	// Emit the deferred-auth warning line ONCE at
 	// startup, BEFORE the "listening on ..." line, so any log
 	// aggregator has a clear ordering signal for the beta posture.
 	// The warning fires on EVERY Windows build (managed or
@@ -264,8 +264,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// starts (ManagedIPCEnabled() gates the sidecar bootstrap in
 	// internal/cli/sidecar.go), so we never actually reach this
 	// branch on non-managed hosts — but the label + warning are
-	// wired identically for defense-in-depth. See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzz.
+	// wired identically for defense-in-depth.
 	if codesignState == codesignStateDeferredWindows {
 		s.opts.Logf("windows: peer-auth is deferred; UDS is DACL-permissive to Authenticated Users")
 	}

@@ -6,11 +6,11 @@
 # two `signtool sign` invocations. Ships inside the build kit produced
 # by packaging/scripts/build-managed-windows-bundle.sh.
 #
-# See docs/specs/002-windows-avc-packaging/design.md § Data flow for
-# the full DefenseClaw-side + AVC-side flow. REQ-09 (requirements.md)
-# is this file's contract.
+# Contract: this file and assemble.ps1 implement the same argument
+# validation, exact payload inventory, signature check, manifest, build,
+# output, exit-code and provenance behavior.
 #
-# EXIT CODES (design.md § Interfaces)
+# EXIT CODES
 #   0 — success
 #   2 — invalid CLI args
 #   3 — preflight failure (missing env from repro-flags.sh)
@@ -107,8 +107,7 @@ while [ $# -gt 0 ]; do
         # Accept and ignore for backward-compat with older bundler
         # callers that pass this arg. The bundler-side
         # `payload-metadata.json` is the audit trail; assemble does
-        # not need to re-emit or thread cmid through — see CR
-        # spec-002:PRRT_kwDORuAK-s6af8i8.
+        # not need to re-emit or thread cmid through.
         --cmid-pseudo-version)  shift 2 ;;
         --allow-unsigned)       ALLOW_UNSIGNED=1; shift ;;
         -h|--help)              usage; exit 0 ;;
@@ -132,8 +131,7 @@ mkdir -p "${OUT_DIR}"
 # under the shipped kit's module root; if we left OUT_DIR / PAYLOAD_DIR
 # relative, those subshells' relative paths would resolve against the
 # source tree instead of the caller's CWD and land the outer EXE inside
-# ./source/ instead of ./out/ (CodeRabbit spec-002 finding — "both
-# assemblers build artifacts into the wrong directory").
+# ./source/ instead of ./out/.
 PAYLOAD_DIR="$(cd "${PAYLOAD_DIR}" && pwd)"
 SOURCE_DIR="$(cd "${SOURCE_DIR}" && pwd)"
 OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
@@ -278,7 +276,7 @@ _stage "stage 5/6  go-build DefenseClawSetup-Enterprise-x64.exe"
 # optional finalize.sh helper) fills it after step-3 signtool sign.
 # We deliberately do NOT write the .sha256 sidecar — the sidecar's
 # whole point is to record the SIGNED EXE's hash, which is only
-# knowable after AVC step 3 (design.md § Decisions).
+# knowable after AVC step 3.
 # ---------------------------------------------------------------------------
 _stage "stage 6/6  emit-provenance"
 "${EMITTER}" emit-provenance \

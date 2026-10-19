@@ -205,7 +205,7 @@ lifecycle lanes) and the Windows Go, Windows Python and PowerShell suites in
 Any Go change also runs the enterprise lanes. `make check-managed-paths`
 fails when a tracked file whose path looks managed is in no section. When
 you add a managed file, or add a managed branch to a shared file, add it to
-the manifest. See [spec 008](specs/008-managed-path-ci-gating/README.md).
+the manifest.
 
 ## CI Workflows
 

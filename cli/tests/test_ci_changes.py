@@ -37,7 +37,7 @@ REQUIRED_CHECKS = {
         "make test (unified)",
         "Go Test",
         "Rego Policy Tests",
-        # The managed-mode aggregates (spec 008).
+        # The managed-mode aggregates.
         "Enterprise Required",
     },
     "windows-native.yml": {"Windows Native Required"},
@@ -112,7 +112,7 @@ def ran(outputs: dict) -> set[str]:
     return {group for group in groups if outputs[group]}
 
 
-# What a managed path adds on top of its own rule (spec 008).
+# What a managed path adds on top of its own rule.
 MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "pwsh"}
 
 

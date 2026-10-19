@@ -131,11 +131,11 @@ func appendEnvLine(path, key, value string) error {
 	}
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
 
-	// Cold-start dependency (T5.7): in managed_enterprise mode the write
+	// Cold-start dependency: in managed_enterprise mode the write
 	// below goes through managed.WriteServiceRuntimeFile which requires
 	// the parent directory to already carry the Administrators-owned +
-	// service-writer-ACE trust contract. Spec 003 (deferred config)
-	// introduced a boot ordering that can invoke appendEnvLine before
+	// service-writer-ACE trust contract. Deferred config introduced
+	// a boot ordering that can invoke appendEnvLine before
 	// the installer's trust-setup step has applied those ACLs; when
 	// that happens the caller sees a wrapped "not trusted" error and
 	// firstboot fails. The proper cross-cutting fix is to gate this

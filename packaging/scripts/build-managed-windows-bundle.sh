@@ -59,16 +59,16 @@
 #   --version <v>         defenseclaw release version (required)
 #   --dist-dir <p>        output directory for the gateway zip (default: dist)
 #   --script-host <s>     bash|pwsh — which assemble.* to ship in the kit
-#                         (spec 002 REQ-08; default: bash)
+#                         (the kit ships exactly one; default: bash)
 #   --allow-unsigned      developer-only mode: build kit AND run
 #                         assemble.sh --allow-unsigned inline, landing a
 #                         runnable but unsigned Setup EXE under
 #                         dist/windows-enterprise-buildkit-<v>-unsigned/out/
-#                         (spec 002 REQ-14; refuses non-disposable scopes
+#                         (separate output dir; refuses non-disposable scopes
 #                         at runtime via cmd/defenseclaw-enterprise-setup)
 #   -h|--help             show this header and exit
 #
-# AVC-facing kit (spec 002 §2.3.A1): every invocation also emits
+# AVC-facing kit: every invocation also emits
 #     ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/
 # whose contents match docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC signs
 # the eight inner files under payload/, runs the shipped
@@ -91,7 +91,7 @@ SCRIPT_HOST="bash"
 # --script-host, so the deprecation warning below can fire on any
 # explicit value — including `bash` (previously the default) and `pwsh`
 # (the case CI is most likely still passing to pick up the PowerShell
-# shell assembler that spec 003 retired).
+# shell assembler that the Go assembler replaced).
 SCRIPT_HOST_EXPLICIT="false"
 ALLOW_UNSIGNED="false"
 
@@ -451,7 +451,7 @@ echo "==> staging kit payload"
 # what we tell emit-payload-metadata (--expected-filenames arg) and
 # it is the same set of names we stage under payload/. Keeping the
 # list in one variable prevents drift between the staged payload and
-# the audit trail in payload-metadata.json (CR spec-002:PRRT_kwDORuAK-s6af8iw).
+# the audit trail in payload-metadata.json.
 # The runtime's requiredPayloadFiles in cmd/defenseclaw-enterprise-setup/main.go
 # and the assemble.{sh,ps1} EXPECTED_PAYLOAD arrays must all agree —
 # scripts/check-assemble-parity.sh enforces the two assembler ends.

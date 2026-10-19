@@ -916,8 +916,8 @@ func stringContains(value, fragment string) bool {
 	return false
 }
 
-// TestSetEnumeratorPublishesSubsystem pins the wire contract spec 005
-// Workstream D introduces: SidecarHealth.Enumerator is nil until
+// TestSetEnumeratorPublishesSubsystem pins the wire contract:
+// SidecarHealth.Enumerator is nil until
 // SetEnumerator is called, then holds the last-published state +
 // LastError + Details verbatim. Snapshot() must surface the field
 // in the JSON payload so a Cisco Secure Client IPC consumer can
@@ -1009,8 +1009,8 @@ func TestSetEnumeratorJSONShape(t *testing.T) {
 	}
 }
 
-// TestSetEnumeratorDeepCopiesDetails is the regression pin CR
-// spec-005:PRRT_kwDORuAK-s6atyfQ asks for: mutating the caller's
+// TestSetEnumeratorDeepCopiesDetails is the regression pin for
+// boundary copies: mutating the caller's
 // input map after SetEnumerator MUST NOT mutate the stored
 // subsystem health; mutating the Snapshot()-returned pointer's
 // Details map MUST NOT mutate the stored subsystem health either.

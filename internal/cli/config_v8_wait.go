@@ -20,9 +20,10 @@ import (
 // waitForConfigV8ManagedTimeout is the bounded window a managed-enterprise
 // gateway daemon will wait for config.yaml to appear before returning a
 // distinguishable error so the SCM restart cycle can pick it up cleanly.
-// Spec 003 REQ-12 + AC-06. Kept as a package-level var (not a const) so a
-// CI test can shorten it via a build-tag override file; there is no env
-// var-configurable path — see spec 003 design.md § Tradeoffs #2.
+// Kept as a package-level var (not a const) so a CI test can shorten it
+// via a build-tag override file; there is deliberately no env var or
+// config key for it, so an operator cannot extend the wait without limit
+// and hide a broken drop pipeline as "still installing".
 var waitForConfigV8ManagedTimeout = 24 * time.Hour
 
 // waitForConfigV8ManagedPoll is the interval at which the wait loop
@@ -42,8 +43,6 @@ var waitForConfigV8ManagedPoll = 30 * time.Second
 // This function does NOT return the loaded config — the caller
 // re-invokes loadGatewayConfigV8 after we return so the normal error
 // path handles any parse failure uniformly.
-//
-// Spec 003 § Data flow. REQ-08 through REQ-12.
 func waitForConfigV8Managed(ctx context.Context, cfgPath string, w io.Writer) error {
 	cfgPath = filepath.Clean(cfgPath)
 	parentDir := filepath.Dir(cfgPath)
@@ -146,8 +145,8 @@ func isReadableRegularFile(path string) bool {
 
 // managedEnterpriseFromPin resolves the deploy-mode envvar pin the
 // Windows SCM installer sets (DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise).
-// Returns true only for a validated managed_enterprise value. Spec 003
-// REQ-13 + REQ-28: the wait loop is gated on this before the
+// Returns true only for a validated managed_enterprise value. The wait
+// loop is gated on this (and on a missing-file error) before the
 // (possibly-missing) config.yaml has been read.
 func managedEnterpriseFromPin() bool {
 	return managed.IsManagedEnterprise(managed.PinnedDeploymentMode())

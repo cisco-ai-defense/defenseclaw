@@ -35,6 +35,6 @@ import "net"
 //
 // This matches the product's existing posture for its other local socket:
 // see internal/ipc/peerauth_windows.go, where the socket DACL is likewise
-// the sole boundary and richer peer authentication is explicitly deferred
-// under spec 004. When that lands, this is the second place to adopt it.
+// the sole boundary and richer peer authentication is explicitly deferred.
+// When that lands, this is the second place to adopt it.
 func (s *Server) authorize(net.Conn) error { return nil }

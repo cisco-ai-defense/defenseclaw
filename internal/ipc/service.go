@@ -178,8 +178,8 @@ func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream g
 // "dev") — we tolerate an empty version by omitting the field
 // rather than sending a placeholder that AVC might try to display.
 //
-// ConfigurationState (spec 004 REQ-12 + REQ-13) is folded from
-// spec 003's HealthSnapshot.Configuration.State. Non-managed
+// ConfigurationState is folded from the deferred-config
+// HealthSnapshot.Configuration.State. Non-managed
 // deployments never populate the Configuration pointer, so
 // ConfigurationState reads UNSPECIFIED (proto3 default) — the
 // Secure Client UI treats that as "no configuration tracking here"
@@ -195,11 +195,11 @@ func (s *service) currentHealth() *pb.HealthSnapshot {
 }
 
 // mapConfigurationState folds the sidecar's internal ConfigurationState
-// (from spec 003) into the proto enum (spec 004). Nil pointer — the
+// into the proto enum. Nil pointer — the
 // case for every non-managed-enterprise deployment — collapses to
 // UNSPECIFIED. Any unknown state literal (a future
-// spec 003 extension that spec 004 hasn't caught up to) also
-// collapses to UNSPECIFIED so a stale spec 004 build never
+// health state this mapping hasn't caught up to) also
+// collapses to UNSPECIFIED so a stale build never
 // misreports the state as READY.
 func mapConfigurationState(cfg *gateway.ConfigurationHealth) pb.ConfigurationState {
 	if cfg == nil {

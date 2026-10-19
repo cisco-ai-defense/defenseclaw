@@ -145,12 +145,12 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	cfgPath := config.ConfigPath()
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
-		// Spec 003 B2: in managed_enterprise, tolerate a missing
+		// In managed_enterprise, tolerate a missing
 		// config.yaml at startup by fsnotify-waiting for UCB to drop
 		// it. Non-managed-enterprise deployments (OSS / SaaS / DP /
 		// CP) retain the existing fail-fast; the pin-based gate
 		// makes sure a wait loop never starts outside its intended
-		// scope. See docs/specs/003-windows-deferred-config/.
+		// scope.
 		retry, waitErr := enterConfigWaitLoopIfManaged(cmd.Context(), cfgPath, err, cmd.ErrOrStderr())
 		if waitErr != nil {
 			return waitErr

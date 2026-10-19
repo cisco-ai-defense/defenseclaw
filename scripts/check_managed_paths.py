@@ -5,7 +5,7 @@
 """Verify that the managed path manifest covers the managed code.
 
 .github/managed-paths.txt lists the paths whose change runs the managed-mode
-CI (scripts/ci_changes.py, spec 008). This check fails when:
+CI (scripts/ci_changes.py). This check fails when:
 
 * a manifest pattern matches no tracked file (a stale entry);
 * a tracked file whose path looks managed is in no manifest section, so a new

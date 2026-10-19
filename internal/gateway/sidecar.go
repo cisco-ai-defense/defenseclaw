@@ -5638,7 +5638,7 @@ func readManagedGuardianAuthorization(dataDir string) (*managedGuardianAuthoriza
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, "parse hook guardian authorization: trailing content"
 	}
-	// Accept version==0 (pre-spec-005 files that omit the `version`
+	// Accept version==0 (older files that omit the `version`
 	// key — JSON decode leaves the int zero) and any version >= 1: on a
 	// higher version the lenient decode above already ensured we only
 	// consumed the fields we know. Negative versions are the only
