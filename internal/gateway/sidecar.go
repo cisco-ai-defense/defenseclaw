@@ -4101,6 +4101,12 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	}))
 
+	// An older watcher created vendor system folders it watched (for
+	// example /etc/codex when the gateway ran as root); remove the empty ones
+	// it recorded so the agent reads no phantom administrator policy.
+	for _, dir := range connector.RemoveVendorSystemCreatedDirs(s.currentConfig().DataDir, connector.DefaultVendorSystemRoots()) {
+		fmt.Printf("[sidecar] watcher: removed vendor system folder %s created by an earlier release\n", dir)
+	}
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
