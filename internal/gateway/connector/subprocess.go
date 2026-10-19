@@ -1800,13 +1800,6 @@ func disabledHookTombstone(vendorLabel string) string {
 		"exit 0\n"
 }
 
-// ShimBinaries returns the list of binary names that are shimmed.
-func ShimBinaries() []string {
-	out := make([]string, len(shimBinaries))
-	copy(out, shimBinaries)
-	return out
-}
-
 func renderTemplate(tmpl string, data templateData) (string, error) {
 	t, err := template.New("").Parse(tmpl)
 	if err != nil {

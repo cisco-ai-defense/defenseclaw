@@ -91,7 +91,7 @@ DESKTOP_ONLY_FILES = frozenset(
 # (GAP-0343). They name a vendor extension, not a DefenseClaw connector.
 THIRD_PARTY_EXTENSION_IDS = ("google." + _GEMINI + "-" + _CLI + "-vscode-ide-companion",)
 # Files that may name either retired connector.
-UNRESTRICTED_FILES = frozenset({"CHANGELOG.md", "docs/ENTERPRISE-TEST-PLAN.md"})
+UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
 UPGRADE_SECTION = "## Renamed and removed connectors"
 EXCLUDED_PREFIXES = ("openwiki/",)

@@ -6084,7 +6084,7 @@ def _module_function(module: str, name: str) -> str:
 
 
 def test_gateway_service_logs_on_as_local_system() -> None:
-    """Spec 007: the gateway runs as LocalSystem, keeping its restricted
+    """The managed Windows gateway runs as LocalSystem, keeping its restricted
     service SID and single required privilege."""
     module = read(MODULE)
     assert "function Get-DefenseClawGatewayServiceAccount {\n    return 'LocalSystem'\n}" in module
@@ -6112,7 +6112,7 @@ def test_gateway_service_logs_on_as_local_system() -> None:
 
 
 def test_gateway_needs_no_service_logon_right() -> None:
-    """Spec 007: no code grants or asserts SeServiceLogonRight."""
+    """No code grants or asserts SeServiceLogonRight."""
     sources = [MODULE, INSTALLER, ROOT / "scripts" / "test-windows-enterprise-hardening.ps1"]
     sources += sorted((ROOT / "internal").rglob("*.go"))
     sources += sorted((ROOT / "cmd").rglob("*.go"))
@@ -6123,7 +6123,7 @@ def test_gateway_needs_no_service_logon_right() -> None:
 
 
 def test_existing_virtual_account_gateway_migrates_in_place() -> None:
-    """Spec 007: installs whose gateway logs on as the virtual account are
+    """Installs whose gateway logs on as the virtual account are
     upgraded, repaired, reinstalled, rolled back and uninstalled in place."""
     module = read(MODULE)
 

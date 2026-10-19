@@ -256,9 +256,7 @@ launches the stable `defenseclaw-hook.exe` runtime without a console and with
 explicitly redirected standard handles, waits for completion, and writes the
 runtime's decision back to Copilot unchanged. It normalizes Windows
 PowerShell 5.1's leading encoding marker and uses UTF-8 without a BOM for the
-child streams. It does not require Bash or WSL. See the
-[recorded upstream Windows contract](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/development/copilot-native-windows-contract.md)
-for source URLs, version and date evidence, and event semantics.
+child streams. It does not require Bash or WSL.
 
 Copilot upstream now documents optional OpenTelemetry traces and metrics.
 DefenseClaw does **not** configure or certify that native exporter in this

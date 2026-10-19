@@ -157,7 +157,7 @@ No single registry drives everything. The reliable way to find every touch point
 ```bash
 # closest sibling: copilot (per-event command hook + machine policy), devin (per-user hook),
 # amp/opencode (plugin), kiro (ACP + hooks), omnigent (policy bridge), openclaw (proxy)
-git grep -n -i -w '<sibling>' -- ':!openwiki' ':!docs/research' ':!CHANGELOG.md' | wc -l
+git grep -n -i -w '<sibling>' -- ':!openwiki' ':!CHANGELOG.md' | wc -l
 git grep -l -i -w '<sibling>' -- ':!openwiki' | awk -F/ '{print $1"/"$2}' | sort | uniq -c | sort -rn
 # then, per directory, review each hit
 git grep -n -i -w '<sibling>' -- internal/enterprisehooks

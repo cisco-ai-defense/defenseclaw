@@ -1052,24 +1052,18 @@ type windowsUserProfile struct {
 	HomeMtime int64
 }
 
-// WindowsStandaloneEligibleProfiles lists the interactive user profiles the
-// standalone profile's enrollment admits, for guardian work that needs no
+// WindowsStandaloneEligibleProfilesFor lists the interactive user profiles
+// the standalone profile's enrollment admits, for guardian work that needs no
 // per-user manifest row: a user whose connectors are all machine policy
 // still gets foreign hooks removed from their user-level config. It applies
-// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision):
-// include_users is additive and filters nothing, excluded profiles are
-// skipped, and exempt profiles are kept because their machine-policy hooks
-// still run the foreign-hook guard. A profile whose name-form entries cannot
-// be evaluated (the account lookup failed) is skipped this pass, so a
-// directory outage never touches a user who may be excluded.
-func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
-	return WindowsStandaloneEligibleProfilesFor(ctx, EnumerateOptions{ExcludeUsers: exclude, ExemptUsers: exempt})
-}
-
-// WindowsStandaloneEligibleProfilesFor is WindowsStandaloneEligibleProfiles
-// with opts' user lists and group filters, decided as EnumerateWindows
-// decides them. opts.GroupCache is read, never changed: the enumerator is
-// its only writer.
+// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision)
+// with opts' user lists and group filters: include_users is additive and
+// filters nothing, excluded profiles are skipped, and exempt profiles are
+// kept because their machine-policy hooks still run the foreign-hook guard.
+// A profile whose name-form entries cannot be evaluated (the account lookup
+// failed) is skipped this pass, so a directory outage never touches a user
+// who may be excluded. opts.GroupCache is read, never changed: the
+// enumerator is its only writer.
 func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()

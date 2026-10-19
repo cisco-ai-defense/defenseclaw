@@ -1,4 +1,3 @@
-<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 <div align="center">
 
 <pre>
@@ -31,9 +30,8 @@ risk-free.
 
 Hooks fail closed by default. Only Cisco Secure Client deployments default
 hook delivery to fail-open when no policy is specified; there an explicit
-fail-closed setting and valid policy denials remain effective. See the
-[hook delivery contract](docs/specs/007-hook-delivery-default/README.md) for
-its Secure Client scope and verification.
+fail-closed setting and valid policy denials remain effective. See
+[fail modes](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/fail-modes/).
 
 ## Get started
 

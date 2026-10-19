@@ -1342,12 +1342,6 @@ func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVers
 	return KnownBrokenAgentVersion{}, false
 }
 
-// KnownBrokenAgentVersions returns the known-broken agent versions of a
-// connector.
-func KnownBrokenAgentVersions(connectorName string) []KnownBrokenAgentVersion {
-	return append([]KnownBrokenAgentVersion(nil), knownBrokenAgentVersions[normalizeConnectorName(connectorName)]...)
-}
-
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
 	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(raw, contract.ExactAgentVersions) {
 		return true

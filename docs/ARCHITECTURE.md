@@ -1,4 +1,3 @@
-<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 # Architecture
 
 This is a code-ownership map for contributors. Product concepts and operator
@@ -61,8 +60,8 @@ Do not maintain a second endpoint table in repository Markdown.
 
 Hook delivery fails closed by default. Only under the Secure Client
 integration does an unset `hook_fail_mode` default to open, independently of
-action-mode policy enforcement ([spec 007](specs/007-hook-delivery-default/README.md),
-scoped to Secure Client). An explicit closed is always kept; OSS, standalone
+action-mode policy enforcement (see the published
+[fail modes](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/fail-modes/) page). An explicit closed is always kept; OSS, standalone
 and other managed installs keep the fail-closed rules, including managed Codex
 and Claude Code and standalone Devin. Managed authorization, runtime integrity
 and strict availability remain distinct controls.
@@ -83,8 +82,10 @@ not a Unix enterprise installation prerequisite. An unversioned, unsupported,
 or incompatibly changed contract uses the reviewed best-effort event matrix,
 in fail-open mode under Secure Client, until a later reconciliation verifies a
 known contract. Version
-changes inside the same registered contract remain compatible. See
-[`development/unverified-hook-contract-fallback.md`](development/unverified-hook-contract-fallback.md).
+changes inside the same registered contract remain compatible. A delivered
+DefenseClaw deny stays a deny: fail-open covers only delivery, authentication,
+timeout and malformed-response failures, and Windows enrollment and the strict
+managed artifact readers stay mandatory for an unverified contract.
 
 ### Policy
 

@@ -2929,7 +2929,7 @@ guarantee survival of logout.
 
 On Linux, `enterprise.openshell.driver: vm` or `auto` with
 `driver_fallback: docker` (the default) falls back to the docker driver where
-KVM does not work for the user (owner decision 2026-10-10). The daemon
+KVM does not work for the user. The daemon
 (`SandboxDaemon.selectDriver`, `openshell.SelectDriver`) probes as the user at
 each sandbox start, never at login: the CPU's `vmx`/`svm` flags, an `O_RDWR`
 open of `/dev/kvm`, and `openshell-driver-vm` (`openshell.VMProbe`). It sends

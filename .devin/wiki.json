@@ -83,7 +83,7 @@
     },
     {
       "title": "Splunk Local Bridge",
-      "purpose": "Focused guide for the bundled local Splunk bridge: Free-from-day-1 behavior, compose profiles, local app packaging, HEC/index defaults, license boundaries, and operator workflow. Reference docs/SPLUNK_APP.md, docs/requirements/FREE_FROM_DAY1.md, bundles/splunk_local_bridge/compose/README.md, bundles/splunk_local_bridge/splunk/README.md, and cli/defenseclaw/observability/.",
+      "purpose": "Focused guide for the bundled local Splunk bridge: Free-from-day-1 behavior, compose profiles, local app packaging, HEC/index defaults, license boundaries, and operator workflow. Reference docs/SPLUNK_APP.md, bundles/splunk_local_bridge/compose/README.md, bundles/splunk_local_bridge/splunk/README.md, and cli/defenseclaw/observability/.",
       "parent": "Observability, Audit, and SIEM"
     },
     {
@@ -103,7 +103,7 @@
     },
     {
       "title": "Developer Guide",
-      "purpose": "Development workflow: repo layout, build targets, local installs, generated data bundles, docs generation, code style, common scripts, release artifacts, and contribution conventions. Reference docs/CONTRIBUTING.md, docs/development/DEVELOPER_SPEC.md, Makefile, scripts/, pyproject.toml, .github/workflows/, and .goreleaser.yaml.",
+      "purpose": "Development workflow: repo layout, build targets, local installs, generated data bundles, docs generation, code style, common scripts, release artifacts, and contribution conventions. Reference docs/CONTRIBUTING.md, Makefile, scripts/, pyproject.toml, .github/workflows/, and .goreleaser.yaml.",
       "parent": "Home"
     },
     {

@@ -54,8 +54,7 @@ When rule 2 keeps a connector open although the global value is `closed`,
 
 ### Secure Client
 
-Under the Secure Client integration only, the hook delivery default of
-[spec 007](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/specs/007-hook-delivery-default/README.md)
+Under the Secure Client integration only, a different hook delivery default
 applies: an unset `guardrail.hook_fail_mode` resolves to `open`, independent
 of the guardrail mode, and an explicit `closed` (global or per connector) is
 always kept. The administrator owns that config, and the gateway resolves its

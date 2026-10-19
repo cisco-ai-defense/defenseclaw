@@ -159,24 +159,6 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         assert stale_url not in public_docs
 
 
-def test_hermes_native_windows_research_matches_supported_taxonomy() -> None:
-    text = (ROOT / "docs" / "research" / "HERMES-NATIVE-WINDOWS.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "DefenseClaw status: **supported**" in text
-    assert "Hermes is already classified as supported" in text
-    assert "authentic-client evidence and certification metadata" in text
-    for stale_claim in (
-        "preview / not certified",
-        "Hermes preview",
-        "Windows `preview` mirrors",
-        "preview/not-certified",
-        "Do not promote Hermes beyond preview",
-    ):
-        assert stale_claim not in text
-
-
 def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> None:
     windows_docs = ROOT / "docs-site/content/docs/get-started/windows"
     lifecycle = (windows_docs / "install-lifecycle.mdx").read_text(encoding="utf-8")
@@ -209,10 +191,7 @@ def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> 
 
 
 def test_claude_windows_docs_use_official_config_override() -> None:
-    claude_docs = (
-        ROOT / "docs/reference/CLAUDE-CODE-WINDOWS.md",
-        ROOT / "docs-site/content/docs/connectors/claudecode.mdx",
-    )
+    claude_docs = (ROOT / "docs-site/content/docs/connectors/claudecode.mdx",)
 
     for path in claude_docs:
         text = path.read_text(encoding="utf-8")
@@ -388,7 +367,6 @@ def test_claude_directoryadded_docs_match_packaged_v2_contract() -> None:
     assert "DirectoryAdded" not in v2_capabilities["ask_events"]
 
     for relative_path in (
-        "docs/reference/CLAUDE-CODE-WINDOWS.md",
         "docs-site/content/docs/connectors/claudecode.mdx",
         "docs-site/content/docs/connectors/compatibility.mdx",
         "docs-site/content/docs/stories/observe-claude-code.mdx",
@@ -410,14 +388,9 @@ def test_codex_docs_keep_memories_and_history_separate() -> None:
     connector_page = (
         ROOT / "docs-site/content/docs/connectors/codex.mdx"
     ).read_text(encoding="utf-8")
-    checklist = (
-        ROOT / "docs/windows-native-connector-reference-checklist.md"
-    ).read_text(encoding="utf-8")
 
     assert "`$CODEX_HOME/memories/`" in connector_page
     assert "`$CODEX_HOME/history.jsonl` is a separate" in connector_page
-    assert "%CODEX_HOME%\\memories" in checklist
-    assert "%CODEX_HOME%\\history.jsonl" in checklist
 
 
 def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
@@ -459,9 +432,6 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     setup_source = (
         ROOT / "cli/defenseclaw/commands/cmd_setup.py"
     ).read_text(encoding="utf-8")
-    research_contract = (
-        ROOT / "docs/development/antigravity-mcp-contract.md"
-    ).read_text(encoding="utf-8")
     compatibility = (
         ROOT / "docs-site/content/docs/connectors/compatibility.mdx"
     ).read_text(encoding="utf-8")
@@ -486,7 +456,6 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     assert "<workspace>/.agents/hooks.json" in config_reference
     assert "only hard-blocking claim for the connector" in connector_page_text
     assert "does not document non-zero hook exit status as enforcement" in connector_page_text
-    assert "CLI v1.1.10" in research_contract
     assert "`>=1.1.8`" in compatibility
     # The sandbox image pin follows the harness DefaultVersion.
     assert "installs agy `1.2.12`" in " ".join(compatibility.split())
@@ -509,12 +478,6 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
 def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:
     connector_page = (
         ROOT / "docs-site/content/docs/connectors/hermes.mdx"
-    ).read_text(encoding="utf-8")
-    research = (
-        ROOT / "docs/research/HERMES-NATIVE-WINDOWS.md"
-    ).read_text(encoding="utf-8")
-    acceptance = (
-        ROOT / "docs/research/NATIVE-WINDOWS-CONNECTOR-ACCEPTANCE.md"
     ).read_text(encoding="utf-8")
     contracts = json.loads(
         (ROOT / "cli/defenseclaw/inventory/hook_contracts.json").read_text(
@@ -554,12 +517,6 @@ def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:
     assert "live: false" in connector_page
     assert "source review is not packaged or real-client certification" in connector_text
 
-    assert "Last verified: **2026-09-14**" in research
-    assert "Hermes Agent v0.21.3, tag `v2026.9.14`" in research
-    assert "DefenseClaw status: **supported**" in research
-    assert "authentic-client evidence and certification metadata" in research
-    assert "latest rechecked tag [`v2026.9.14`]" in acceptance
-
 
 def test_amp_validation_status_is_boolean_and_pending_note_is_explicit() -> None:
     validated = json.loads(
@@ -595,10 +552,6 @@ def test_native_windows_required_ci_covers_nine_connector_lanes_and_omnigent_sta
     validated = json.loads((ROOT / "cli/defenseclaw/inventory/validated_versions.json").read_text(encoding="utf-8"))[
         "connectors"
     ]["omnigent"]
-    acceptance = (ROOT / "docs/research/NATIVE-WINDOWS-CONNECTOR-ACCEPTANCE.md").read_text(encoding="utf-8")
-    acceptance_row = next(
-        line for line in acceptance.splitlines() if line.startswith("| OmniGent |") and "scoped gateway calls" in line
-    )
 
     jobs = native_workflow["jobs"]
     generic_connectors = set(jobs["connector-contract"]["strategy"]["matrix"]["connector"])
@@ -633,13 +586,6 @@ def test_native_windows_required_ci_covers_nine_connector_lanes_and_omnigent_sta
     assert "authentication/HITL evidence remain pending and unclaimed" in validated["notes"]
     assert "public Setup availability gate" in validated["notes"]
     assert "advisory" not in validated["notes"]
-
-    assert "required packaged native-degraded CI is defined" in acceptance_row
-    assert "live=false" in acceptance_row
-    assert "authentication/HITL evidence remain pending and unclaimed" in acceptance_row
-    assert "neither certification nor a public Setup availability gate follows" in acceptance_row
-    assert "advisory" not in acceptance_row
-    assert "non-blocking upstream Windows CI" not in acceptance_row
 
 
 def test_windows_native_ci_concurrency_cannot_cross_cancel_push_and_manual_runs() -> None:

@@ -323,14 +323,6 @@ func openWindowsManagedFileLockForTarget(
 	return file, parent, nil
 }
 
-func validateWindowsManagedFileLockName(
-	parent *os.File,
-	name string,
-	held *os.File,
-) error {
-	return validateWindowsManagedFileLockNameForTarget(parent, name, held, nil)
-}
-
 func validateWindowsManagedFileLockNameForTarget(
 	parent *os.File,
 	name string,

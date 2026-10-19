@@ -2534,8 +2534,7 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Secure Client exception (spec 007, scoped to Secure Client by the owner
-    # decision on #1291): a config that resolves to the Secure Client profile
+    # Secure Client exception: a config that resolves to the Secure Client profile
     # and leaves ``hook_fail_mode`` unset loads as ``"open"``, and its
     # delivery fail mode is independent of the guardrail mode; an explicit
     # ``"closed"`` is always kept. See ``_apply_secure_client_hook_fail_default``.
@@ -2640,7 +2639,7 @@ class GuardrailConfig:
         observe is open. Other connector-scoped values remain explicit
         runtime response-integrity choices in observe mode.
 
-        Secure Client exception (spec 007, Secure Client only): a config the
+        Secure Client exception (Secure Client only): a config the
         loader marked as Secure Client resolves automatic-protection posture
         (for connectors outside manual setup) > explicit connector posture >
         global, independent of the guardrail mode, with its unset global
@@ -6113,9 +6112,9 @@ def _normalize_hook_fail_mode(value: Any) -> str:
 
 
 def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
-    """Secure Client exception to the fail-closed hook default (spec 007).
+    """Secure Client exception to the fail-closed hook default.
 
-    Per the owner decision on #1291, hooks fail open by default only under
+    Hooks fail open by default only under
     Secure Client: a document that resolves to the Secure Client profile
     (``deployment_mode: managed_enterprise`` and not the standalone profile,
     as Go ``SecureClientIntegration()``) loads an unset

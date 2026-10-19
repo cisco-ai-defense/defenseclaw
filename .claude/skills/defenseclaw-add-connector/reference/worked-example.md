@@ -14,7 +14,7 @@ Copilot is the most complete connector on this branch. It uses:
 This page lists every file, in the order you would write them for a connector like it. Reproduce the list with:
 
 ```bash
-git grep -l -i -w copilot -- ':!openwiki' ':!docs/research' ':!CHANGELOG.md'
+git grep -l -i -w copilot -- ':!openwiki' ':!CHANGELOG.md'
 ```
 
 ## 0. Vendor research
@@ -166,7 +166,6 @@ Record these, with the source for each, in the contract `Notes` and in the corre
 2. `docs-site/content/docs/connectors/meta.json`, `connectors/index.mdx` and `connectors/compatibility.mdx` rows.
 3. `docs-site/data/capability-matrix.json`, `docs-site/data/connector-icons.ts`, and the committed `docs-site/public/connector-icons/copilot.svg`.
 4. The enterprise pages and the four threat models (enterprise.md §10).
-5. `docs/development/copilot-native-windows-contract.md`: design notes for the Windows adapter.
 
 ## 8. Tests and CI
 
