@@ -35,3 +35,23 @@ func TestManagedModeAdvisoryRelaxesOnlyInstallerOwnedPaths(t *testing.T) {
 		t.Fatalf("managedModeAdvisory(%s) = true with %s=1, want false", runtimeDir, TrustStrictAncestorsEnv)
 	}
 }
+
+// GAP-0026: only the Secure Client install keeps the earlier write-bit
+// advisory; the standalone install below the same roots does not.
+func TestSecureClientInstallPathCoversOnlyTheSecureClientTree(t *testing.T) {
+	if safefile.ManagedWriteModeAdvisory == nil {
+		t.Fatal("safefile.ManagedWriteModeAdvisory is nil; the managed package must install it")
+	}
+	for path, want := range map[string]bool{
+		"/opt/cisco/secureclient/defenseclaw/runtime": true,
+		"/opt/cisco/secureclient":                     true,
+		"/opt/cisco/defenseclaw/runtime":              false,
+		"/opt/cisco/secureclientx":                    false,
+		"/Library/Logs/Cisco/DefenseClaw":             false,
+		"":                                            false,
+	} {
+		if got := secureClientInstallPath(path); got != want {
+			t.Errorf("secureClientInstallPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}

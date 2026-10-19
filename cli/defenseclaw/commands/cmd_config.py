@@ -678,6 +678,12 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
 
     path = str(config_module.config_path())
     key = ", ".join(getattr(change, "path", "") for change in changes)
+    before_cfg = app.cfg
+    if before_cfg is None:
+        try:
+            before_cfg = config_module.load()
+        except Exception:  # noqa: BLE001 - the writer reports an unreadable config
+            before_cfg = None
     try:
         result = config_writer.apply(
             changes,
@@ -731,6 +737,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
+    for note in _refresh_stopped_gateway_hooks(before_cfg):
+        click.echo(note, err=note.startswith("warning:"))
     logger = getattr(app, "logger", None)
     if logger is not None:
         try:
@@ -740,6 +748,87 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
             pass
     return True
+
+
+# Connectors `defenseclaw-gateway connector reconcile` can re-render
+# without the gateway (internal/cli/connector_cmd.go runConnectorReconcile).
+_RECONCILE_CONNECTORS = frozenset(
+    {"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"}
+)
+
+
+def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, str]]:
+    """The guarded connectors whose effective hook fail mode a write changed, with the new mode."""
+    try:
+        guardrail = after.guardrail
+        if not guardrail.enabled:
+            return []
+        names = list(after.active_connectors())
+    except Exception:  # noqa: BLE001 - a config without a roster renders no hooks
+        return []
+    if before is None:
+        return []
+    changed = []
+    for name in names:
+        try:
+            if hasattr(guardrail, "effective_enabled") and not guardrail.effective_enabled(name):
+                continue
+            new = guardrail.effective_hook_fail_mode(name)
+            if before.guardrail.effective_hook_fail_mode(name) != new:
+                changed.append((name, new))
+        except Exception:  # noqa: BLE001
+            continue
+    return changed
+
+
+def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
+    """Re-render the hooks whose fail mode the write changed while the gateway is stopped.
+
+    The hooks bake the fail mode, and only a running gateway re-renders them
+    on a config change (Sidecar.refreshHookGuardPolicies) or at its start.
+    With the gateway stopped, ``config unset guardrail.hook_fail_mode`` said
+    closed while every hook still failed open until the next start
+    (GAP-0009), and ``config set`` printed nothing about it (GAP-0006). The
+    same reconcile `guardrail fail-mode` runs re-renders them now; a
+    connector it cannot reach gets a note instead.
+    """
+    try:
+        after = config_module.load()
+    except Exception:  # noqa: BLE001 - the write is committed; reporting is best effort
+        return []
+    if str(getattr(after, "deployment_mode", "") or "").strip() == "managed_enterprise":
+        return []  # the enterprise guardian owns managed hooks
+    changed = _changed_hook_fail_modes(before, after)
+    if not changed:
+        return []
+    from defenseclaw.process_liveness import pid_file_alive
+
+    if pid_file_alive(os.path.join(after.data_dir, "gateway.pid")):
+        return []  # the running gateway re-renders them from this config generation
+    from defenseclaw.fail_mode import fail_mode_transaction_lock, reconcile_connector_registration
+
+    notes: list[str] = []
+    refreshed: list[str] = []
+    with fail_mode_transaction_lock(after):
+        for name, mode in changed:
+            if name not in _RECONCILE_CONNECTORS:
+                notes.append(
+                    f"warning: {name} hooks keep their previous fail mode until the next "
+                    f"defenseclaw-gateway start (wanted fail-{mode})."
+                )
+                continue
+            try:
+                reconcile_connector_registration(after, name)
+            except (OSError, RuntimeError) as exc:
+                notes.append(
+                    f"warning: {name} hooks could not be re-rendered with the gateway stopped ({exc}); "
+                    f"they keep their previous fail mode until defenseclaw-gateway start (wanted fail-{mode})."
+                )
+                continue
+            refreshed.append(f"{name} fail-{mode}")
+    if refreshed:
+        notes.insert(0, "Gateway stopped: re-rendered the hooks now (" + ", ".join(refreshed) + ").")
+    return notes
 
 
 def _guarded_connector_modes(app: AppContext) -> dict[str, str]:

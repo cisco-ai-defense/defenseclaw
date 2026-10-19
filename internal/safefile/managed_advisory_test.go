@@ -60,3 +60,33 @@ func TestValidatePrivateTypeVerdictNeverFollowsManagedAdvisory(t *testing.T) {
 		t.Fatal("ValidatePrivateDirectory(regular file) = nil, want a type error")
 	}
 }
+
+// A managed advisory may pass a group/other read bit, never a write bit: a
+// writable "private" path can be changed by someone other than its owner.
+func TestValidatePrivateDirectoryWriteBitsNeverFollowManagedAdvisory(t *testing.T) {
+	withManagedModeAdvisory(t, func(string, string) bool { return true })
+	for _, tc := range []struct {
+		mode os.FileMode
+		ok   bool
+	}{
+		{0o750, true},
+		{0o755, true},
+		{0o705, true},
+		{0o770, false},
+		{0o730, false},
+		{0o752, false},
+		{0o777, false},
+	} {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidatePrivateDirectory(dir)
+		if tc.ok && err != nil {
+			t.Errorf("ValidatePrivateDirectory(%#o) with the advisory = %v, want nil", tc.mode, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("ValidatePrivateDirectory(%#o) with the advisory = nil, want a too-broad error", tc.mode)
+		}
+	}
+}

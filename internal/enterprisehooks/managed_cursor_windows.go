@@ -2085,19 +2085,44 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 	); err != nil {
 		return err
 	}
+	type cursorRestoreItem struct {
+		snapshot        windowsManagedFileSnapshot
+		metadata        windowsCursorManagedFileMetadata
+		current         windowsManagedFileSnapshot
+		currentMetadata windowsCursorManagedFileMetadata
+	}
+	items := []cursorRestoreItem{
+		{snapshot: windowsManagedFileSnapshot{path: adapterPath, existed: snapshot.AdapterExisted, data: snapshot.Adapter}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.AdapterSecurityDescriptor, attributes: snapshot.AdapterAttributes}, current: current.adapter, currentMetadata: current.adapterMetadata},
+		{snapshot: windowsManagedFileSnapshot{path: receiptPath, existed: snapshot.ReceiptExisted, data: snapshot.Receipt}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.ReceiptSecurityDescriptor, attributes: snapshot.ReceiptAttributes}, current: current.receipt, currentMetadata: current.receiptMetadata},
+		{snapshot: windowsManagedFileSnapshot{path: statePath, existed: snapshot.StateExisted, data: snapshot.State}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.StateSecurityDescriptor, attributes: snapshot.StateAttributes}, current: current.state, currentMetadata: current.stateMetadata},
+		{snapshot: windowsManagedFileSnapshot{path: hooksPath, existed: snapshot.HooksExisted, data: snapshot.Hooks}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.HooksSecurityDescriptor, attributes: snapshot.HooksAttributes}, current: current.hooks, currentMetadata: current.hooksMetadata},
+	}
+	// On standalone only a file the snapshot does not already match is
+	// written back, and only those are put back on a failed restore. A
+	// teardown that never touched a file (an administrator's hooks.json under
+	// an inactive policy, GAP-0028) must not have its bytes, owner or access
+	// list rewritten by the rollback: re-applying its inherited descriptor and
+	// requiring DefenseClaw's file trust failed the rollback, which left the
+	// refused uninstall pending with every service stopped and disabled.
+	// Secure Client keeps its earlier restore, which writes every file back
+	// and puts every file back on failure (Secure Client is out of scope for
+	// this fix).
+	standalone := windowsEnterpriseStandaloneProcess()
+	var written []cursorRestoreItem
 	rollback := func(cause error) error {
 		var failures []string
-		for _, item := range []struct {
-			snapshot windowsManagedFileSnapshot
-			metadata windowsCursorManagedFileMetadata
-		}{
-			{current.adapter, current.adapterMetadata},
-			{current.receipt, current.receiptMetadata},
-			{current.state, current.stateMetadata},
-			{current.hooks, current.hooksMetadata},
-		} {
-			if restoreErr := restoreWindowsCursorManagedFile(item.snapshot, item.metadata); restoreErr != nil {
-				failures = append(failures, restoreErr.Error())
+		if standalone {
+			for index := len(written) - 1; index >= 0; index-- {
+				item := written[index]
+				if restoreErr := restoreWindowsCursorManagedFile(item.current, item.currentMetadata); restoreErr != nil {
+					failures = append(failures, restoreErr.Error())
+				}
+			}
+		} else {
+			for _, item := range items {
+				if restoreErr := restoreWindowsCursorManagedFile(item.current, item.currentMetadata); restoreErr != nil {
+					failures = append(failures, restoreErr.Error())
+				}
 			}
 		}
 		if len(failures) != 0 {
@@ -2105,16 +2130,11 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 		}
 		return cause
 	}
-	items := []struct {
-		snapshot windowsManagedFileSnapshot
-		metadata windowsCursorManagedFileMetadata
-	}{
-		{snapshot: windowsManagedFileSnapshot{path: adapterPath, existed: snapshot.AdapterExisted, data: snapshot.Adapter}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.AdapterSecurityDescriptor, attributes: snapshot.AdapterAttributes}},
-		{snapshot: windowsManagedFileSnapshot{path: receiptPath, existed: snapshot.ReceiptExisted, data: snapshot.Receipt}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.ReceiptSecurityDescriptor, attributes: snapshot.ReceiptAttributes}},
-		{snapshot: windowsManagedFileSnapshot{path: statePath, existed: snapshot.StateExisted, data: snapshot.State}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.StateSecurityDescriptor, attributes: snapshot.StateAttributes}},
-		{snapshot: windowsManagedFileSnapshot{path: hooksPath, existed: snapshot.HooksExisted, data: snapshot.Hooks}, metadata: windowsCursorManagedFileMetadata{securityDescriptor: snapshot.HooksSecurityDescriptor, attributes: snapshot.HooksAttributes}},
-	}
 	for _, item := range items {
+		if standalone && windowsCursorManagedFileSnapshotEqual(item.current, item.currentMetadata, item.snapshot, item.metadata) {
+			continue
+		}
+		written = append(written, item)
 		if err := restoreWindowsCursorManagedFile(item.snapshot, item.metadata); err != nil {
 			return rollback(err)
 		}

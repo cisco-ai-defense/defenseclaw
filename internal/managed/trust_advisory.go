@@ -282,10 +282,36 @@ func relaxAncestorTrustJudgement(advisory bool, path, label string, err error) e
 
 func init() {
 	safefile.ManagedModeAdvisory = managedModeAdvisory
+	safefile.ManagedWriteModeAdvisory = secureClientInstallPath
 }
 
-// managedModeAdvisory downgrades a safefile group/other mode verdict on a path
-// inside PlatformInstallerOwnedRoots to an advisory. The managed install below
+// secureClientInstallPath reports whether path is in the Secure Client
+// install (/opt/cisco/secureclient, and /Library/Logs/Cisco/SecureClient on
+// macOS). A group or world write bit there still reaches managedModeAdvisory,
+// as before GAP-0026, because Secure Client is out of scope for that fix. The
+// standalone install below the same roots (/opt/cisco/defenseclaw,
+// /Library/Logs/Cisco/DefenseClaw) keeps write bits fatal.
+func secureClientInstallPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	roots := []string{"/opt/cisco/secureclient"}
+	if runtime.GOOS == "darwin" {
+		roots = append(roots, "/Library/Logs/Cisco/SecureClient")
+	}
+	clean := filepath.Clean(path)
+	for _, root := range roots {
+		if pathAtOrUnder(clean, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedModeAdvisory downgrades a safefile group/other read mode verdict on a
+// path inside PlatformInstallerOwnedRoots to an advisory; safefile keeps a
+// group or world write bit fatal before it asks, outside the Secure Client
+// install (secureClientInstallPath). The managed install below
 // those roots is root-owned and laid out by the platform installer (the macOS
 // runtime directory is root:wheel 0750, wheel holds only root); the managed
 // release line never enforced owner-only modes there, and enforcing them made

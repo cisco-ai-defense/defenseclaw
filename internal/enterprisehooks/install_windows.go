@@ -81,12 +81,20 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // unset and "open" resolve to open, an explicit or invalid non-empty value to
 // closed.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
+	return windowsEnterpriseHookFailModeFor(connectorName, configured, secureClientHookDelivery())
+}
+
+// windowsEnterpriseHookFailModeFor is windowsEnterpriseHookFailMode for an
+// explicit profile: secureClient is true only for a resolved Secure Client
+// install. Status passes the profile of the loaded config, so it reports what
+// the pinned guardian renders whatever the caller's environment (GAP-0014).
+func windowsEnterpriseHookFailModeFor(connectorName, configured string, secureClient bool) string {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser && !secureClientHookDelivery() {
+	if _, perUser := windowsStandalonePerUserConnector(name); perUser && !secureClient {
 		return "closed"
 	}
-	if secureClientHookDelivery() {
-		return canonicalHookFailMode(configured)
+	if secureClient {
+		return canonicalHookFailModeFor(configured, true)
 	}
 	switch name {
 	case "codex", "claudecode", "cursor":

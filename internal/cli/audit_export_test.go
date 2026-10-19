@@ -282,7 +282,7 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 		t.Fatalf("--db export rows:\n%s", other)
 	}
 	auditExportDB = dir + "/missing.db"
-	if err := runAuditExport(nil, nil); err == nil || !strings.Contains(err.Error(), "is not an audit database file") {
+	if err := runAuditExport(nil, nil); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("--db with a missing file error = %v", err)
 	}
 }

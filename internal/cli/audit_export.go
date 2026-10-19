@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"sort"
@@ -242,6 +243,37 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
+// checkAuditExportDB says why --db cannot be exported: a missing path, a
+// file this account may not read (another account's data directory is
+// 0700) or a path that is not a file. Each used to read "is not an audit
+// database file", which sent a user who lacked access looking for a
+// corrupt database (GAP-0008).
+func checkAuditExportDB(path string) error {
+	denied := func() error {
+		return fmt.Errorf("audit export: cannot read --db %s: permission denied; "+
+			"another account's audit database can be read only by that account or an administrator", path)
+	}
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("audit export: --db %s does not exist", path)
+	case errors.Is(err, fs.ErrPermission):
+		return denied()
+	case err != nil:
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("audit export: --db %s is not an audit database file", path)
+	}
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrPermission) {
+		return denied()
+	}
+	if err != nil {
+		return fmt.Errorf("audit export: cannot read --db %s: %w", path, err)
+	}
+	return f.Close()
+}
+
 func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	auditPath := auditExportDB
 	if auditPath == "" {
@@ -249,8 +281,8 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 			return fmt.Errorf("audit export: config not loaded")
 		}
 		auditPath = cfg.AuditDB
-	} else if info, statErr := os.Stat(auditPath); statErr != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("audit export: --db %s is not an audit database file", auditPath)
+	} else if err := checkAuditExportDB(auditPath); err != nil {
+		return err
 	}
 	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
 	// before the database is opened or an -o file is created.

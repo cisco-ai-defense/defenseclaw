@@ -404,6 +404,10 @@ observability:
 (`~/.defenseclaw` for a per-user install). `defenseclaw doctor` reports an
 outside path as a custody failure; move the database under that directory.
 
+These paths, and the `path` of a `kind: jsonl` destination, can start with `~`
+for your home folder or be relative to the data directory. The gateway,
+`defenseclaw status` and `defenseclaw doctor` resolve them the same way.
+
 If a write to the local history fails, for example because the disk is full,
 the record still goes to the optional destinations and gateway health counts
 it as `dropped` on the `local-sqlite` destination. When writes resume, the

@@ -575,7 +575,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		if watchdogWasRunning && !cfg.Gateway.Watchdog.Enabled {
 			return errors.New("rotation watchdog is running while disabled in configuration")
 		}
-		if err := runWatchdogStop(nil, nil); err != nil {
+		if err := stopWatchdogForGateway(); err != nil {
 			if watchdogWasRunning {
 				if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
 					return fmt.Errorf("rotation stop watchdog ownership: %w; restore failed: %v", err, restoreErr)
@@ -586,7 +586,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	} else {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
-		_ = runWatchdogStop(nil, nil)
+		_ = stopWatchdogForGateway()
 		if hookColdStartSupported() && !secureClientHost() {
 			// The watchdog can be waiting for an independent cold-start child
 			// when it exits. Wait for that child's start lock before taking the
@@ -601,7 +601,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 			// The child may have started a fresh watchdog while finishing.
 			// With its start lock held, stop that instance before checking
 			// the gateway and writing the final marker.
-			_ = runWatchdogStop(nil, nil)
+			_ = stopWatchdogForGateway()
 			running, pid = d.IsRunning()
 		}
 	}
@@ -649,7 +649,7 @@ var stopLeftoverWatchdogOnManagedHost = func() {
 	if err != nil || !running {
 		return
 	}
-	if err := runWatchdogStop(nil, nil); err != nil {
+	if err := stopWatchdogForGateway(); err != nil {
 		fmt.Fprintf(os.Stderr, "could not stop this account's watchdog: %v\n", err)
 	}
 }
@@ -771,7 +771,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if running {
 		// Stop the watchdog only after proving the configured listener belongs to
 		// this managed instance; a foreign collision must have no side effects.
-		_ = runWatchdogStop(nil, nil)
+		_ = stopWatchdogForGateway()
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 		if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 			fmt.Println(Style("FAILED", "fg=red", "bold"))

@@ -3074,19 +3074,14 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 	case policy == SkillScannerPolicyCustom && v8YAMLMapValue(skill, "policy_file") != nil:
 		// Already the config_version 9 form: the name and its pinned file.
 	default:
-		// Any other value is the path of a policy file, which 0.8.x read
-		// relative to the working directory. That includes a file named
-		// custom: 0.8.x had no custom name, and keeping it as one, with no
-		// policy_file, failed the upgrade (GAP-1286). A relative path is
-		// pinned as the absolute path of the file read here, so the 1.0
+		// Any other value is the path of a policy file. That includes a
+		// file named custom: 0.8.x had no custom name, and keeping it as
+		// one, with no policy_file, failed the upgrade (GAP-1286). The
+		// file is pinned at the absolute path read here, so the 1.0
 		// gateway finds it whatever directory it starts in.
-		raw, err := os.ReadFile(policy)
+		pinned, raw, err := m.v8SkillScannerPolicyFile(policy)
 		if err != nil {
-			return fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
-		}
-		pinned := policy
-		if abs, err := filepath.Abs(policy); err == nil && !filepath.IsAbs(policy) {
-			pinned = abs
+			return err
 		}
 		v9Set(skill, v9Scalar(SkillScannerPolicyCustom), "policy")
 		ref := v9Mapping("path", v9Scalar(pinned), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
@@ -3133,6 +3128,40 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 		m.moved("config", prefix+"llm", prefix+"judge_source", ScannerJudgeOverride)
 	}
 	return nil
+}
+
+// v8SkillScannerPolicyFile reads the policy file a 0.8.x
+// scanners.skill_scanner.policy names. 0.8.x passed a relative path to the
+// scanner as written, so it resolved against the working directory of the
+// scanning process: the gateway, which the 0.8.x daemon started in data_dir,
+// or `defenseclaw skill scan` in the user's shell. The migration looks in
+// data_dir first, then in its own working directory, so `defenseclaw migrate`
+// upgrades the same home the same way from any directory (GAP-0004).
+func (m *v9Migrator) v8SkillScannerPolicyFile(policy string) (string, []byte, error) {
+	candidates := []string{policy}
+	if !filepath.IsAbs(policy) {
+		candidates = candidates[:0]
+		if dir := strings.TrimSpace(m.dataDir()); dir != "" {
+			if abs, err := filepath.Abs(filepath.Join(expandPath(dir), policy)); err == nil {
+				candidates = append(candidates, abs)
+			}
+		}
+		if abs, err := filepath.Abs(policy); err == nil && !slices.Contains(candidates, abs) {
+			candidates = append(candidates, abs)
+		}
+	}
+	for _, path := range candidates {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			return path, raw, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", nil, fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
+		}
+	}
+	return "", nil, fmt.Errorf("config: custom skill-scanner policy %q not found (looked for %s); "+
+		"set scanners.skill_scanner.policy to the policy file's absolute path, then run `defenseclaw migrate`",
+		policy, strings.Join(candidates, " and "))
 }
 
 func v9NonEmptyLLM(node *yaml.Node) bool {

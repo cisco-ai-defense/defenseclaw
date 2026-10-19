@@ -56,8 +56,12 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		// The Windows renderer pins every standalone per-user connector closed
-		// whatever the config says (windowsEnterpriseHookFailMode).
+		// whatever the config says (windowsEnterpriseHookFailMode), and
+		// Copilot's machine policy runs defenseclaw-hook.exe on the closed
+		// per-user runtime the guardian writes, so it is not lowered
+		// (GAP-0014).
 		want["amp"] = "closed"
+		want["copilot"] = "closed"
 	}
 	for name, mode := range want {
 		if got := ManagedHookFailMode(cfg, name); got != mode {

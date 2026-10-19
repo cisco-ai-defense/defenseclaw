@@ -820,12 +820,25 @@ func (c *execCommand) start() error {
 }
 
 func runWatchdogStop(_ *cobra.Command, _ []string) error {
-	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout)
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout, true)
+}
+
+// stopWatchdogForGateway stops this account's watchdog as part of a gateway
+// stop or restart. It reports a watchdog it stops, and says nothing when none
+// runs: gateway stop checks twice, and two "Watchdog is not running" lines
+// after a stop read as a failure (GAP-0007).
+func stopWatchdogForGateway() error {
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout, false)
 }
 
 // stopWatchdogAt stops the watchdog that runs for dataDir, writing its
-// progress to out. Not running is not an error.
-func stopWatchdogAt(dataDir string, out io.Writer) error {
+// progress to out. Not running is not an error; reportNotRunning says so.
+func stopWatchdogAt(dataDir string, out io.Writer, reportNotRunning bool) error {
+	notRunning := func(line string) {
+		if reportNotRunning {
+			fmt.Fprintln(out, Dim(line))
+		}
+	}
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -848,9 +861,9 @@ func stopWatchdogAt(dataDir string, out io.Writer) error {
 			return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
 		}
 		if removed {
-			fmt.Fprintln(out, Dim("Watchdog is not running (stale or invalid PID file repaired)"))
+			notRunning("Watchdog is not running (stale or invalid PID file repaired)")
 		} else {
-			fmt.Fprintln(out, Dim("Watchdog is not running"))
+			notRunning("Watchdog is not running")
 		}
 		return nil
 	}
@@ -867,7 +880,7 @@ func stopWatchdogAt(dataDir string, out io.Writer) error {
 
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
-		fmt.Fprintln(out, Dim("Watchdog is not running"))
+		notRunning("Watchdog is not running")
 		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}

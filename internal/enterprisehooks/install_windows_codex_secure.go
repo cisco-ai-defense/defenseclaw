@@ -545,6 +545,7 @@ func defaultWindowsCodexRequirementsOptions(
 		AgentApplicationControlEnforced: applicationControl,
 		CodexTargetEnabled:              true,
 		HookContractID:                  connector.WindowsCodexManagedHookContract(hookExecutable),
+		SecureClient:                    secureClientHookDelivery(),
 	}
 	return opts, nil
 }

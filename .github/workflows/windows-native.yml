@@ -551,6 +551,10 @@ jobs:
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
       - name: Shared hook install scope preflight regression
         run: ./packaging/windows/tests/enterprise-cross-scope-install-preflight-smoke.ps1
+      - name: Managed path ACL verdict regression
+        run: ./packaging/windows/tests/enterprise-path-acl-verdict-smoke.ps1
+      - name: Standalone forced uninstall restores the administrator Codex policy
+        run: ./packaging/windows/tests/enterprise-forced-uninstall-codex-policy-smoke.ps1
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS

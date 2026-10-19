@@ -12,6 +12,7 @@ package config
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -380,10 +381,10 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 	if c == nil {
 		return "closed"
 	}
-	if c.SecureClientIntegration() {
+	if c.secureClientHookFailModes() {
 		return c.secureClientHookFailModeForConnector(connector)
 	}
-	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
+	if normalizeConnectorKey(connector) == "cursor" {
 		if actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
 			return "closed"
 		}
@@ -407,6 +408,17 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 		}
 	}
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
+}
+
+// secureClientHookFailModes reports whether the Secure Client hook fail-mode
+// contract (#1163: unset is open) applies. A managed Config whose profile the
+// loader never resolved (a struct literal) reports Secure Client elsewhere
+// (EnterpriseProfile), but not for hook fail modes on Linux, where Secure
+// Client does not exist and the loader resolves standalone: an unresolved
+// profile can never open hooks there (GAP-0002).
+func (c *Config) secureClientHookFailModes() bool {
+	return c.SecureClientIntegration() &&
+		(runtime.GOOS != "linux" || managed.NormalizeEnterpriseProfile(c.Enterprise.Profile) != "")
 }
 
 // effectiveManagedEnterpriseHookFailMode keeps the protected deployment

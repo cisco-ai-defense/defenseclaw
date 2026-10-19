@@ -76,6 +76,7 @@ func TestStandaloneKiroFollowsCLIUpgradesAtOrAboveTheFloor(t *testing.T) {
 // change is no longer refused as drift (#1163): Kiro's hooks are not
 // version-gated, so the repair keeps the configured delivery policy.
 func TestKiroFloorIsStandaloneOnly(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	skipIfRoot(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	setStandaloneProfileForTest(t, false)

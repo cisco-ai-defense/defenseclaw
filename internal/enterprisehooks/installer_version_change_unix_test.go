@@ -22,6 +22,7 @@ import (
 // re-renders the hooks and writes a lock for the new contract, and verify
 // then passes. Outside the standalone profile the same repair is refused.
 func TestStandaloneRepairFollowsAnEnrolledUsersAgentUpgrade(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	skipIfRoot(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	home := newTestHome(t)

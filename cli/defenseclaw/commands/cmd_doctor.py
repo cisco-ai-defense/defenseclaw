@@ -14636,12 +14636,29 @@ def _check_connector_inventory(
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
             if mode in {"observe", "action"}:
                 fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
-                _emit(
-                    "pass",
-                    "Mode",
-                    f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; provenance={fail_mode['provenance']}",
-                    r=r,
+                detail = (
+                    f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; "
+                    f"provenance={fail_mode['provenance']}"
                 )
+                desired = fail_mode.get("desired")
+                if fail_mode.get("runtime") is not None and desired in {"open", "closed"} and (
+                    fail_mode.get("effective") != desired
+                ):
+                    # The hooks run another fail mode than config.yaml asks
+                    # for (GAP-0009): an open hook while config says closed
+                    # lets calls through with the gateway down.
+                    _emit(
+                        "fail" if desired == "closed" else "warn",
+                        "Mode",
+                        f"{detail}; config wants fail-mode={desired}",
+                        r=r,
+                        remediation=(
+                            "re-render the hooks: defenseclaw-gateway start (or restart), or "
+                            f"defenseclaw guardrail fail-mode {desired} --connector {connector}"
+                        ),
+                    )
+                else:
+                    _emit("pass", "Mode", detail, r=r)
             else:
                 # An invalid mode never gets a green tick (GAP-1363); the
                 # Config validation row names the same field.

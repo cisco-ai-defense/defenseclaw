@@ -240,6 +240,7 @@ func prepareHookContractErr(guardrailMode string, conn connector.Connector, opts
 }
 
 func TestPrepareHookContractUsesFailOpenOnlyForUnverifiedOrIncompatibleContracts(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -277,6 +278,7 @@ func TestPrepareHookContractUsesFailOpenOnlyForUnverifiedOrIncompatibleContracts
 }
 
 func TestPrepareHookContractDistinguishesVersionDriftFromContractDrift(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -334,6 +336,7 @@ func TestPrepareHookContractDistinguishesVersionDriftFromContractDrift(t *testin
 }
 
 func TestPrepareClaudeCodePatchVersionDriftRetainsConfiguredMode(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -364,6 +367,7 @@ func TestPrepareClaudeCodePatchVersionDriftRetainsConfiguredMode(t *testing.T) {
 }
 
 func TestPrepareHookContractDriftOverridePreservesConfiguredMode(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -382,6 +386,7 @@ func TestPrepareHookContractDriftOverridePreservesConfiguredMode(t *testing.T) {
 }
 
 func TestInstallUnversionedCodexUsesBestEffortFailOpenContract(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -429,6 +434,7 @@ func TestInstallUnversionedCodexUsesBestEffortFailOpenContract(t *testing.T) {
 }
 
 func TestInstallUnversionedClaudeCodeUsesBestEffortFailOpenContract(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -470,6 +476,7 @@ func TestInstallUnversionedClaudeCodeUsesBestEffortFailOpenContract(t *testing.T
 }
 
 func TestInstallUnversionedCursorUsesBestEffortFailOpenContract(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -511,6 +518,7 @@ func TestInstallUnversionedCursorUsesBestEffortFailOpenContract(t *testing.T) {
 }
 
 func TestInstallContractDriftFallsOpenThenPromotesAfterVerification(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	requireEnterpriseHookInstaller(t)
 	// Secure Client only (#1163).
 	setStandaloneProfileForTest(t, false)
@@ -2308,6 +2316,7 @@ func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T
 // without one (reported as hook_contract_unverified). The Secure Client
 // profile installs a changed version in open delivery instead (#1163).
 func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	// On Windows, strictManagedRuntime (opts.ManagedEnterprise) requires
 	// WindowsGatewayServiceNameEnv to be set so NewHookContractLockEntryForMode
@@ -2476,6 +2485,7 @@ func TestPrepareHookContractRefusesUnverifiedOutsideSecureClient(t *testing.T) {
 // TestCanonicalHookFailModeUnsetIsOpenOnlyUnderSecureClient: an unset
 // delivery policy is open only under Secure Client (#1163).
 func TestCanonicalHookFailModeUnsetIsOpenOnlyUnderSecureClient(t *testing.T) {
+	useSecureClientHookDelivery(t)
 	for _, tc := range []struct {
 		standalone bool
 		want       string

@@ -47,7 +47,7 @@ func ReclaimToDirectoryOwner(path string) error {
 		return fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)
 	}
 	if dirInfo.Mode().Perm()&0o077 != 0 {
-		if err := relaxModeVerdict(dir, fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)); err != nil {
+		if err := relaxModeVerdict(dir, dirInfo.Mode().Perm(), fmt.Errorf("safefile: private directory is not a trusted directory: %s", dir)); err != nil {
 			return err
 		}
 	}
@@ -84,7 +84,7 @@ func ReclaimToDirectoryOwner(path string) error {
 		return fmt.Errorf("safefile: private file is not regular: %s", path)
 	}
 	if fileInfo.Mode().Perm()&0o077 != 0 {
-		if err := relaxModeVerdict(path, fmt.Errorf("safefile: private file permissions are too broad: %s", path)); err != nil {
+		if err := relaxModeVerdict(path, fileInfo.Mode().Perm(), fmt.Errorf("safefile: private file permissions are too broad: %s", path)); err != nil {
 			return err
 		}
 	}

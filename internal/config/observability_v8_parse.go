@@ -95,6 +95,7 @@ func ParseCompileObservabilityV8(
 		source.Local.JudgeBodiesPath = filepath.Join(dataDir, DefaultJudgeBodiesDBName)
 		source.judgePathDefaulted = true
 	}
+	resolveObservabilityV8StorePaths(&source, dataDir)
 	configuredFiles := append([]string(nil), options.ConfiguredFilePaths...)
 	if observabilityV8SourceNameIsPath(sourceName) {
 		configuredFiles = append(configuredFiles, sourceName)

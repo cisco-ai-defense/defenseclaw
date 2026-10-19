@@ -1406,8 +1406,15 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 // the standalone profile; standalone keeps fail-closed delivery, its version
 // gates and its refusals.
 func secureClientHookDelivery() bool {
-	return !standaloneProfileProcess()
+	return secureClientHookDeliveryHost && !standaloneProfileProcess()
 }
+
+// secureClientHookDeliveryHost reports whether this OS has a Secure Client
+// profile at all. Linux has none (managed.ResolveEnterpriseProfile refuses
+// it), so no Linux process renders the Secure Client fail-open delivery
+// contract, even one that never set the standalone process mode (GAP-0002).
+// A seam for tests of the Secure Client contract on Linux CI.
+var secureClientHookDeliveryHost = runtime.GOOS != "linux"
 
 // defaultHookContractID is the contract an install renders when the caller
 // did not pin one: the reviewed best-effort contract under Secure Client, and
@@ -1445,8 +1452,14 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 // case) is open and every other non-empty value is closed. Unset policy is
 // open only under Secure Client (#1163) and closed for every other profile.
 func canonicalHookFailMode(mode string) string {
+	return canonicalHookFailModeFor(mode, secureClientHookDelivery())
+}
+
+// canonicalHookFailModeFor is canonicalHookFailMode for an explicit profile:
+// an unset mode is open only under Secure Client (#1163).
+func canonicalHookFailModeFor(mode string, secureClient bool) string {
 	trimmed := strings.TrimSpace(mode)
-	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClientHookDelivery()) {
+	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClient) {
 		return "open"
 	}
 	return "closed"

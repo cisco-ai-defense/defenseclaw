@@ -7217,17 +7217,30 @@ def _exact_config_version(value: Any) -> int:
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
-    """Resolve Python readers/writers to the same local store as config v8."""
+    """Resolve Python readers/writers to the same local store as config v8.
+
+    A leading ``~`` is the home folder and a relative path is under data_dir,
+    as the Go compiler resolves it. ``~/x`` used to be joined to data_dir
+    first, so it named ``<data_dir>/~/x`` (GAP-0005).
+    """
 
     observability = raw.get("observability")
     local = observability.get("local") if isinstance(observability, dict) else None
     configured = local.get("path") if isinstance(local, dict) else None
-    path = configured.strip() if isinstance(configured, str) else ""
+    path = _expand_store_home(configured.strip()) if isinstance(configured, str) else ""
     if not path:
         path = os.path.join(data_dir, AUDIT_DB_NAME)
     elif not os.path.isabs(path):
         path = os.path.join(data_dir, path)
-    return os.path.normpath(os.path.expanduser(path))
+    return os.path.normpath(path)
+
+
+def _expand_store_home(path: str) -> str:
+    """Expand ``~`` and ``~/`` (``~\\`` on Windows) like the Go compiler; not ``~user``."""
+    prefixes = ("~/", "~\\") if os.name == "nt" else ("~/",)
+    if path == "~" or path.startswith(prefixes):
+        return os.path.expanduser(path)
+    return path
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:

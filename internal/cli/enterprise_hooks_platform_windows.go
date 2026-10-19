@@ -609,8 +609,33 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 			loaded.DeploymentMode,
 		)
 	}
+	if err := adoptWindowsEnterpriseProfilePin(loaded); err != nil {
+		return err
+	}
 	cfg = loaded
 	version.SetBinaryVersion(appVersion)
+	return nil
+}
+
+// adoptWindowsEnterpriseProfilePin gives this process the standalone profile
+// pin when the protected config it loaded resolves the standalone profile.
+// The enterprisehooks renderer, its version gates and its delivery contract
+// read the process pin; an unpinned LocalSystem or administrator run against
+// a standalone install (no DEFENSECLAW_ENTERPRISE_PROFILE in its
+// environment) otherwise took the Secure Client path: the best-effort
+// contract, open delivery for unset or unversioned agents, no agent-version
+// gate (GAP-0013). The resolved profile of the install decides, as the Unix
+// guardian's configureEnterpriseHooksStandaloneUnix does; a Secure Client
+// install never gets the pin, and a pin that contradicts the config already
+// failed the load.
+func adoptWindowsEnterpriseProfilePin(loaded *config.Config) error {
+	if loaded == nil || !loaded.StandaloneEnterprise() ||
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		return nil
+	}
+	if err := os.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone); err != nil {
+		return fmt.Errorf("pin the standalone enterprise profile for this process: %w", err)
+	}
 	return nil
 }
 

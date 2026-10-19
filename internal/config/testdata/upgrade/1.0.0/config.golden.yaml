@@ -10,7 +10,7 @@ guardrail:
   custom_packs:
     team:
       path: @HOME@/policies/guardrail/team
-      digest: sha256:723919560cad01dd787dcf3c97e83755fea957570c62d9970da65f944b3c5d28
+      digest: sha256:915047a334cc0d6800141e1f4c52df2978505f951a98911001a9d70ca7e6d03c
   rule_pack: team
 scanners:
   skill_scanner:

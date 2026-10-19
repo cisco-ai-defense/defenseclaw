@@ -141,7 +141,8 @@ def refuse_first_run_when_managed() -> None:
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
         "'closed' (the default on a new install) = block where the hook supports "
-        "a blocking response; 'open' = allow + log. Omitted, the wizard asks and "
+        "a blocking response; 'open' = allow + log. It applies to connectors in "
+        "action mode; an observe-mode connector's hooks stay fail-open. Omitted, the wizard asks and "
         "--non-interactive keeps the current setting (closed on a new install). "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."

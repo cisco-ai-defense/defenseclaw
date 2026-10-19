@@ -52,8 +52,9 @@ func TestUpgradeFixturesMigrateRollBackAndReUpgrade(t *testing.T) {
 			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 			home := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", home)
-			// 0.8.x read a relative policy file from the working directory.
-			t.Chdir(home)
+			// The 0.8.x gateway read a relative policy file from data_dir,
+			// so the upgrade must not depend on its own working directory.
+			t.Chdir(t.TempDir())
 			copyUpgradeFixture(t, filepath.Join(fixture, "home"), home)
 			before := upgradeFixtureTree(t, home)
 			configPath := filepath.Join(home, "config.yaml")
@@ -83,10 +84,13 @@ func TestUpgradeFixturesMigrateRollBackAndReUpgrade(t *testing.T) {
 	}
 }
 
-// upgradeFixtureDigest pins a rule pack by its files (guardrail.RulePackDigest
-// is not importable here; the fixtures need only a stable digest).
+// upgradeFixtureDigest is guardrail.RulePackDigest for a pack of plain rule
+// files (guardrail is not importable here): each relative path and the sha256
+// of its bytes, in path order. The goldens hold the real pin, which
+// TestConfigMigrateUpgradeFixturesWithTheRealRulePackLoader in internal/cli
+// checks with the real loader.
 func upgradeFixtureDigest(dir string) (string, error) {
-	sum := sha256.New()
+	sums := map[string]string{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -96,11 +100,15 @@ func upgradeFixtureDigest(dir string) (string, error) {
 			return err
 		}
 		rel, _ := filepath.Rel(dir, path)
-		sum.Write([]byte(filepath.ToSlash(rel) + "\x00"))
-		sum.Write(raw)
+		sum := sha256.Sum256(raw)
+		sums[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])
 		return nil
 	})
-	return hex.EncodeToString(sum.Sum(nil)), err
+	h := sha256.New()
+	for _, rel := range slices.Sorted(maps.Keys(sums)) {
+		h.Write([]byte(rel + "\n" + sums[rel] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil)), err
 }
 
 func copyUpgradeFixture(t *testing.T, src, dst string) {
@@ -185,9 +193,6 @@ func compareUpgradeGolden(t *testing.T, stage, golden, home string, raw []byte) 
 	t.Helper()
 	got := string(raw)
 	homes := []string{home}
-	if cwd, err := os.Getwd(); err == nil && cwd != home {
-		homes = append(homes, cwd)
-	}
 	if real, err := filepath.EvalSymlinks(home); err == nil && real != home {
 		homes = append(homes, real)
 	}
@@ -211,5 +216,50 @@ func compareUpgradeGolden(t *testing.T, stage, golden, home string, raw []byte) 
 	want := strings.ReplaceAll(string(wantRaw), "\r\n", "\n")
 	if got != want {
 		t.Fatalf("%s: config.yaml differs from %s:\n--- got\n%s\n--- want\n%s", stage, golden, got, want)
+	}
+}
+
+// A relative 0.8.x skill-scanner policy is read from data_dir (the 0.8.x
+// gateway's working directory), then from the working directory (the 0.8.x
+// CLI's), and pinned at the absolute path read (GAP-0004).
+func TestMigrateV9ResolvesARelativeSkillScannerPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string // in: where the policy file is (data, cwd, both, none)
+		want     string
+	}{
+		{name: "in data_dir", in: "data", want: "data"},
+		{name: "in the working directory only", in: "cwd", want: "cwd"},
+		{name: "in both: data_dir wins", in: "both", want: "data"},
+		{name: "in neither", in: "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dirs := map[string]string{"data": t.TempDir(), "cwd": t.TempDir()}
+			t.Chdir(dirs["cwd"])
+			for _, where := range []string{"data", "cwd"} {
+				if tc.in == where || tc.in == "both" {
+					if err := os.WriteFile(filepath.Join(dirs[where], "team-policy.yaml"), []byte("policy_name: "+where+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			configPath := filepath.Join(dirs["data"], "config.yaml")
+			raw := []byte("config_version: 8\ndata_dir: '" + dirs["data"] + "'\nscanners:\n  skill_scanner:\n    policy: team-policy.yaml\nobservability: {}\n")
+			out, err := MigrateV8InMemory(configPath, raw, upgradeFixtureDigest)
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "not found") ||
+					!strings.Contains(err.Error(), filepath.Join(dirs["data"], "team-policy.yaml")) ||
+					!strings.Contains(err.Error(), filepath.Join(dirs["cwd"], "team-policy.yaml")) {
+					t.Fatalf("err = %v, want a not-found error naming both places", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "path: " + filepath.Join(dirs[tc.want], "team-policy.yaml"); !strings.Contains(string(out), want) {
+				t.Fatalf("migrated config does not pin %q:\n%s", want, out)
+			}
+		})
 	}
 }
