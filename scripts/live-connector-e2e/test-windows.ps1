@@ -2830,7 +2830,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
