@@ -13108,7 +13108,8 @@ function Add-DefenseClawStandalonePurgeMachineLeftovers {
     }
     $remaining = [string[]]@(
         @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $Layout) +
-        @(Remove-DefenseClawStandaloneHookRuntimeLeftovers)
+        @(Remove-DefenseClawStandaloneHookRuntimeLeftovers) +
+        @(Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt -Layout $Layout)
     )
     $existing = $Result.PSObject.Properties['machine_state_remaining']
     if ($null -ne $existing -and $null -ne $existing.Value) {
@@ -14472,20 +14473,25 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
             # Only a prepared receipt can belong to the teardown being rolled
             # back. Bind it to restored deployment metadata before retirement;
             # a finalized receipt is a predecessor preimage and must survive.
+            # A prepared receipt of another deployment generation is no
+            # teardown's: it is retired without binding (GAP-0029).
             $restoredMetadata = Get-DefenseClawDeploymentMetadata `
                 -Layout $Layout `
                 -Required
-            [void](Get-DefenseClawManagedHookContractCleanupReceipt `
-                -Layout $Layout `
-                -GatewayServiceName ([string]$snapshot.gateway_service) `
-                -GuardianServiceName ([string]$snapshot.guardian_service) `
-                -Metadata $restoredMetadata `
-                -Required)
+            if (-not (Test-DefenseClawContractCleanupReceiptOfRemovedDeployment `
+                    -Receipt $rollbackReceipt `
+                    -Metadata $restoredMetadata)) {
+                [void](Get-DefenseClawManagedHookContractCleanupReceipt `
+                    -Layout $Layout `
+                    -GatewayServiceName ([string]$snapshot.gateway_service) `
+                    -GuardianServiceName ([string]$snapshot.guardian_service) `
+                    -Metadata $restoredMetadata `
+                    -Required)
+            }
             [void](Remove-DefenseClawManagedHookContractCleanupReceipt `
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service) `
-                -Metadata $restoredMetadata `
                 -AllowPrepared)
         }
     }
@@ -27154,6 +27160,78 @@ function Get-DefenseClawManagedHookContractCleanupReceipt {
         }
     }
     return $receipt
+}
+
+function Test-DefenseClawContractCleanupReceiptOfRemovedDeployment {
+    <#
+        Whether a managed-hook contract cleanup receipt is a prepared receipt
+        of a deployment that no longer exists: its deployment generation is
+        not the one the protected deployment metadata records. A
+        retained-state Install applies its predecessor's receipt before that
+        deployment is created, so no lifecycle can use such a receipt. A
+        forced or state-absent purge used to leave one in the lifecycle
+        folder, and every later uninstall of every new deployment then failed
+        "does not match the authenticated retired scope", with a rollback that
+        failed "does not match the inactive deployment tombstone" (GAP-0029).
+        False when the metadata records no activation: the caller's binding
+        check then refuses as before.
+    #>
+    param(
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $activationProperty = $Metadata.PSObject.Properties['managed_hooks_activation']
+    if ($null -eq $activationProperty -or $null -eq $activationProperty.Value) {
+        return $false
+    }
+    $activation = Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $activationProperty.Value
+    return ([string]$Receipt.phase -ceq 'prepared' -and
+        [string]$Receipt.deployment_generation_id -cne
+            [string]$activation.deployment_generation_id)
+}
+
+function Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt {
+    <#
+        Standalone purge. With StateRoot gone and no state-purge intent
+        pending, no lifecycle can authenticate the managed-hook contract
+        cleanup receipt or its report in the lifecycle folder: the deployment
+        metadata it binds to went with StateRoot. Setup /uninstall FORCE=1
+        moves StateRoot aside and so left a prepared receipt there, and every
+        later uninstall of a new deployment failed on it (GAP-0029). The purge
+        removes both files, never through a link, and returns "path: reason"
+        for each one it had to keep.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if ((Test-DefenseClawPathPresentNoFollow -Path ([string]$Layout.StateRoot)) -or
+        (Test-DefenseClawPathPresentNoFollow -Path ([string]$Layout.PurgeIntentPath))) {
+        return [string[]]@()
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    foreach ($candidate in @(
+            [string]$Layout.ManagedHookContractCleanupReceiptPath,
+            [string]$Layout.ManagedHookContractCleanupReportPath
+        )) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or
+            -not (Test-DefenseClawPathPresentNoFollow -Path $candidate)) {
+            continue
+        }
+        try {
+            $path = Assert-DefenseClawDescendant `
+                -Path $candidate `
+                -Root ([string]$Layout.LifecycleLockDirectory) `
+                -Label 'managed hook contract cleanup receipt'
+            Assert-DefenseClawNoReparsePath -Path $path
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw 'it is not a file'
+            }
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        }
+        catch {
+            $kept.Add($candidate + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+        }
+    }
+    return [string[]]$kept.ToArray()
 }
 
 function Remove-DefenseClawManagedHookContractCleanupReceipt {

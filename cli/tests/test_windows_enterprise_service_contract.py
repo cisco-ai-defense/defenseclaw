@@ -5794,6 +5794,9 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         assert f"'{prefix}'" in sweep
     assert "[string]$PSScriptRoot" in sweep
     assert "-Name machine_state_remaining" in module
+    # GAP-0029: with StateRoot gone, the purge also removes the contract
+    # cleanup receipt a forced uninstall left in the lifecycle folder.
+    assert "@(Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt -Layout $Layout)" in module
 
     # The traverse grant names a virtual account that only exists while the
     # service does, so it is dropped by the caller that deleted the service.

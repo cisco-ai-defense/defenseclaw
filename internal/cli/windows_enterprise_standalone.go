@@ -1185,6 +1185,7 @@ func applyWindowsEnterpriseInstallerReport(
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
+			windowsEnterpriseLiveStandaloneServices(),
 		); next != "" {
 			result.Errors[firstError].Message += " " + next
 		}
@@ -2409,6 +2410,27 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
 		return
 	}
+}
+
+// windowsEnterpriseLiveStandaloneServices are the standalone DefenseClaw
+// services that exist, with their states as the service manager reports them
+// now. A failed lifecycle's report can name none of them, and a rollback can
+// have restarted them after its report was taken.
+func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
+	var services []enterprisestatus.Service
+	for _, service := range []struct{ name, kind string }{
+		{"DefenseClawGateway", "gateway"},
+		{"DefenseClawHookGuardian", "guardian"},
+		{"DefenseClawHookEnumerator", "enumerator"},
+		{"DefenseClawSensorHelper", "sensor_helper"},
+	} {
+		if state := windowsEnterpriseServiceState(service.name); state != "absent" {
+			services = append(services, enterprisestatus.Service{
+				Name: service.name, Kind: service.kind, State: state, Required: true,
+			})
+		}
+	}
+	return services
 }
 
 // windowsEnterpriseSCMServiceState reads a service's state from the service

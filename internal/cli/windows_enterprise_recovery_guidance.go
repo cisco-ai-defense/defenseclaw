@@ -442,10 +442,34 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
 
+// windowsEnterprisePendingLead says what a pending transaction means for the
+// DefenseClaw services, from their states when the result is written. It said
+// "the DefenseClaw services stay stopped" also after a rollback had restarted
+// every one of them (GAP-0029).
+func windowsEnterprisePendingLead(services []enterprisestatus.Service) string {
+	switch stopped := windowsEnterpriseStoppedRequiredServices(services); {
+	case len(stopped) == 1:
+		return "The transaction is still pending: the " + stopped[0] + " service stays stopped until it is recovered."
+	case len(stopped) > 1:
+		return "The transaction is still pending: the " + strings.Join(stopped, ", ") + " services stay stopped until it is recovered."
+	}
+	running := len(services) != 0
+	for _, service := range services {
+		if !strings.EqualFold(strings.TrimSpace(service.State), "running") {
+			running = false
+		}
+	}
+	if running {
+		return "The transaction is still pending: the DefenseClaw services are running and keep enforcing, but the deployment cannot be changed until the transaction is recovered."
+	}
+	return "The transaction is still pending, so the deployment cannot be changed until it is recovered."
+}
+
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
-// It is empty when nothing is pending.
+// services are the DefenseClaw services as the service manager reports them
+// now. It is empty when nothing is pending.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
@@ -453,12 +477,13 @@ func windowsEnterpriseStandaloneNextStep(
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
+	services []enterprisestatus.Service,
 ) string {
 	if !pending {
 		return ""
 	}
 	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
-	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
+	lead := windowsEnterprisePendingLead(services)
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).

@@ -1086,9 +1086,10 @@ its record from the elevated prompt with `audit export`, as in
 
 A lifecycle that fails normally rolls back. If the rollback itself cannot
 finish, the transaction stays pending: the result reports
-`transaction_pending: true`, the DefenseClaw services stay stopped, and
-vendor machine policy the transaction had already published can still point
-at the stopped gateway. `status` shows the state; `verify` refuses until the
+`transaction_pending: true` and names the DefenseClaw services that stay
+stopped (a rollback that got far enough restarts them, and the result then
+says they are running), and vendor machine policy the transaction had
+already published can still point at a stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
 A run that Setup stopped at its `TIMEOUTSECONDS=` limit (error
 `lifecycle_timeout`) can leave a transaction pending too, and its result

@@ -133,15 +133,42 @@ func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing
 	original := windowsEnterpriseRunningAsLocalSystem
 	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
-	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil)
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
 		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
 		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
-	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
 		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
+	}
+}
+
+// GAP-0029: a pending transaction says the services stay stopped only for
+// the ones that are stopped; a rollback that restarted every service said
+// they all stayed stopped.
+func TestWindowsEnterprisePendingLeadFollowsTheServiceStates(t *testing.T) {
+	service := func(name, state string) enterprisestatus.Service {
+		return enterprisestatus.Service{Name: name, State: state, Required: true}
+	}
+	for _, tc := range []struct {
+		name     string
+		services []enterprisestatus.Service
+		want     string
+	}{
+		{"all running", []enterprisestatus.Service{service("DefenseClawGateway", "running"), service("DefenseClawHookGuardian", "running")}, "services are running and keep enforcing"},
+		{"one stopped", []enterprisestatus.Service{service("DefenseClawGateway", "stopped"), service("DefenseClawHookGuardian", "running")}, "the DefenseClawGateway service stays stopped"},
+		{"two stopped", []enterprisestatus.Service{service("DefenseClawGateway", "stopped"), service("DefenseClawHookGuardian", "stopped")}, "the DefenseClawGateway, DefenseClawHookGuardian services stay stopped"},
+		{"none present", nil, "the deployment cannot be changed until it is recovered"},
+		{"state unknown", []enterprisestatus.Service{service("DefenseClawGateway", "unknown")}, "the deployment cannot be changed until it is recovered"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := windowsEnterprisePendingLead(tc.services)
+			if !strings.Contains(got, tc.want) || (tc.name == "all running" && strings.Contains(got, "stopped")) {
+				t.Fatalf("lead = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

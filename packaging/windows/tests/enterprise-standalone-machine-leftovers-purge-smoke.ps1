@@ -23,6 +23,8 @@
 # preimage of a requirements.toml the managed-hook teardown already removed.
 # GAP-1145: a purge removes, and re-permissions, a tree that holds names
 # Win32 path normalization changes (a skill quarantined as 'tdot.').
+# GAP-0029: with StateRoot gone, a purge removes the managed-hook contract
+# cleanup receipt a forced uninstall left in the lifecycle folder.
 # Runs in a disposable scratch directory; no service or machine root is
 # touched.
 
@@ -406,6 +408,69 @@ $failures = & $module {
         }
         finally {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0029: Setup /uninstall FORCE=1 left a prepared managed-hook
+        # contract cleanup receipt in the lifecycle folder, and every later
+        # uninstall of a new deployment failed on it. With StateRoot gone and
+        # no state-purge intent pending, a purge removes the receipt and its
+        # report; otherwise both stay, and a folder in their place is named.
+        # A rollback retires, without binding it, only a prepared receipt of
+        # another deployment generation than the metadata records.
+        $lifecycle = Microsoft.PowerShell.Management\Join-Path $Scratch 'lifecycle'
+        [void][IO.Directory]::CreateDirectory($lifecycle)
+        $receiptLayout = @{
+            StateRoot = [IO.Path]::Combine($Scratch, 'receipt-state')
+            PurgeIntentPath = [IO.Path]::Combine($lifecycle, 'state-purge-intent.json')
+            LifecycleLockDirectory = $lifecycle
+            ManagedHookContractCleanupReceiptPath = [IO.Path]::Combine($lifecycle, 'managed-hook-contract-cleanup-receipt.json')
+            ManagedHookContractCleanupReportPath = [IO.Path]::Combine($lifecycle, 'managed-hook-contract-cleanup-receipt.report.json')
+        }
+        foreach ($case in @(
+                @('StateRoot gone and no intent', '', $false),
+                @('StateRoot present', 'state', $true),
+                @('state-purge intent pending', 'intent', $true))) {
+            if ([IO.Directory]::Exists($receiptLayout.StateRoot)) { [IO.Directory]::Delete($receiptLayout.StateRoot) }
+            if ([IO.File]::Exists($receiptLayout.PurgeIntentPath)) { [IO.File]::Delete($receiptLayout.PurgeIntentPath) }
+            [IO.File]::WriteAllText($receiptLayout.ManagedHookContractCleanupReceiptPath, '{"phase":"prepared"}')
+            [IO.File]::WriteAllText($receiptLayout.ManagedHookContractCleanupReportPath, '{}')
+            if ($case[1] -ceq 'state') { [void][IO.Directory]::CreateDirectory($receiptLayout.StateRoot) }
+            if ($case[1] -ceq 'intent') { [IO.File]::WriteAllText($receiptLayout.PurgeIntentPath, '{}') }
+            $left = @(Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt -Layout $receiptLayout)
+            $receiptKept = [IO.File]::Exists($receiptLayout.ManagedHookContractCleanupReceiptPath)
+            $reportKept = [IO.File]::Exists($receiptLayout.ManagedHookContractCleanupReportPath)
+            if ($left.Count -ne 0 -or $receiptKept -ne $case[2] -or $reportKept -ne $case[2]) {
+                $failures.Add("$($case[0]): receipt kept=$receiptKept, report kept=$reportKept, named: $($left -join '; ')")
+            }
+        }
+        foreach ($leaf in @($receiptLayout.PurgeIntentPath, $receiptLayout.ManagedHookContractCleanupReceiptPath, $receiptLayout.ManagedHookContractCleanupReportPath)) {
+            if ([IO.File]::Exists($leaf)) { [IO.File]::Delete($leaf) }
+        }
+        [void][IO.Directory]::CreateDirectory($receiptLayout.ManagedHookContractCleanupReceiptPath)
+        $left = @(Remove-DefenseClawStandaloneOrphanedContractCleanupReceipt -Layout $receiptLayout)
+        if (-not [IO.Directory]::Exists($receiptLayout.ManagedHookContractCleanupReceiptPath) -or $left.Count -ne 1 -or
+            -not ([string]$left[0]).StartsWith($receiptLayout.ManagedHookContractCleanupReceiptPath + ': ')) {
+            $failures.Add("a folder at the receipt path was not kept and named: $($left -join '; ')")
+        }
+        [IO.Directory]::Delete($receiptLayout.ManagedHookContractCleanupReceiptPath)
+        $activation = [pscustomobject]@{
+            schema_version = 1
+            deployment_generation_id = ('a' * 32)
+            state = 'activated'
+            manifest_sha256 = ('b' * 64)
+            target_count = 2
+        }
+        foreach ($case in @(
+                @('prepared, another generation', 'prepared', ('c' * 32), $true, $true),
+                @('prepared, this generation', 'prepared', ('a' * 32), $true, $false),
+                @('finalized, another generation', 'finalized', ('c' * 32), $true, $false),
+                @('metadata without activation', 'prepared', ('c' * 32), $false, $false))) {
+            $receipt = [pscustomobject]@{ phase = $case[1]; deployment_generation_id = $case[2] }
+            $metadata = if ($case[3]) { [pscustomobject]@{ managed_hooks_activation = $activation } } else { [pscustomobject]@{ product_version = '9.9.9' } }
+            $orphan = Test-DefenseClawContractCleanupReceiptOfRemovedDeployment -Receipt $receipt -Metadata $metadata
+            if ([bool]$orphan -ne $case[4]) {
+                $failures.Add("$($case[0]): removed deployment=$orphan, want $($case[4])")
+            }
         }
     }
     finally {

@@ -121,3 +121,89 @@ func TestManagedHookContractCleanupCapturedEntryAlreadyAbsentRequiresBarrier(t *
 		t.Fatalf("post-barrier completed absence was rejected: %v", err)
 	}
 }
+
+// GAP-0029: native prepare resumes only this deployment's prepared receipt.
+// A prepared receipt that an earlier, removed deployment left at the
+// scope-stable path is replaced, so it no longer fails every later uninstall.
+// A same-generation mismatch, or a receipt for another scope or gateway
+// service, still refuses.
+func TestManagedHookContractCleanupPrepareReusesOnlyThisDeploymentsReceipt(t *testing.T) {
+	const scope = "1111111111111111111111111111111111111111111111111111111111111111"
+	identity := windowsManagedHooksTeardownJournal{
+		ManifestSHA256:         "2222222222222222222222222222222222222222222222222222222222222222",
+		ManifestFingerprint:    "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+		DeploymentGenerationID: "44444444444444444444444444444444",
+		GatewayServiceName:     "DefenseClawGateway",
+		Targets: []windowsManagedHooksTeardownTarget{{
+			Connector: "codex",
+			SID:       "S-1-5-21-1-2-3-1001",
+			DataDir:   `C:\Users\fixture\.defenseclaw`,
+		}},
+	}
+	receipt := func(mutate func(*windowsManagedHookContractCleanupReceipt)) windowsManagedHookContractCleanupReceipt {
+		r := windowsManagedHookContractCleanupReceipt{
+			SchemaVersion:          windowsManagedHookContractCleanupReceiptSchema,
+			Phase:                  windowsManagedHookContractCleanupPrepared,
+			ScopeSHA256:            scope,
+			ManifestSHA256:         identity.ManifestSHA256,
+			ManifestFingerprint:    identity.ManifestFingerprint,
+			DeploymentGenerationID: identity.DeploymentGenerationID,
+			GatewayServiceName:     identity.GatewayServiceName,
+			Claims: []connector.WindowsManagedHookContractCleanupClaim{{
+				SchemaVersion:      connector.WindowsManagedHookContractCleanupClaimSchema,
+				Connector:          "codex",
+				SID:                "S-1-5-21-1-2-3-1001",
+				DataDir:            `C:\Users\fixture\.defenseclaw`,
+				GatewayServiceName: "DefenseClawGateway",
+			}},
+		}
+		if mutate != nil {
+			mutate(&r)
+		}
+		identitySHA256, err := windowsManagedHookContractCleanupIdentitySHA256(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.IdentitySHA256 = identitySHA256
+		return r
+	}
+	otherGeneration := func(r *windowsManagedHookContractCleanupReceipt) {
+		r.DeploymentGenerationID = "c3d039e5f86f49baae75aa3261797cf7"
+		r.ManifestSHA256 = "2026be56e484c4c8d82d601a3a804b414db7c34a2501e4d5e727145bbceeedfb"
+	}
+	for _, tc := range []struct {
+		name    string
+		receipt windowsManagedHookContractCleanupReceipt
+		reuse   bool
+		refuse  bool
+	}{
+		{name: "this deployment's prepared receipt is resumed", receipt: receipt(nil), reuse: true},
+		{name: "a finalized predecessor is replaced", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
+			otherGeneration(r)
+			r.Phase = windowsManagedHookContractCleanupFinalized
+		})},
+		{name: "a removed deployment's prepared receipt is replaced", receipt: receipt(otherGeneration)},
+		{name: "same generation with other claims refuses", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
+			r.Claims[0].SID = "S-1-5-21-1-2-3-1002"
+		}), refuse: true},
+		{name: "same generation with another manifest refuses", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
+			r.ManifestSHA256 = "5555555555555555555555555555555555555555555555555555555555555555"
+		}), refuse: true},
+		{name: "another scope refuses", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
+			otherGeneration(r)
+			r.ScopeSHA256 = "6666666666666666666666666666666666666666666666666666666666666666"
+		}), refuse: true},
+		{name: "another gateway service refuses", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
+			otherGeneration(r)
+			r.GatewayServiceName = "DefenseClawGatewayOther"
+			r.Claims[0].GatewayServiceName = "DefenseClawGatewayOther"
+		}), refuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reuse, err := windowsManagedHookContractCleanupPrepareReuses(tc.receipt, identity, scope)
+			if tc.refuse != (err != nil) || reuse != tc.reuse {
+				t.Fatalf("reuse=%v err=%v, want reuse=%v refuse=%v", reuse, err, tc.reuse, tc.refuse)
+			}
+		})
+	}
+}
