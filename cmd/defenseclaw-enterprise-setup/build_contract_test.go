@@ -182,7 +182,8 @@ func TestEnterpriseWorkflowValidatesPublicContractsWithoutPrivateRepositoryAcces
 	// The same public checks run for pull requests to main (the
 	// enterprise-setup-contracts job in ci.yml, gated by the Enterprise
 	// Required aggregate) and to the AVC machine-installer branch.
-	ci := readEnterpriseSetupContractFile(t, ".github/workflows/ci.yml")
+	// A Windows checkout can have CRLF line endings.
+	ci := strings.ReplaceAll(readEnterpriseSetupContractFile(t, ".github/workflows/ci.yml"), "\r\n", "\n")
 	start := strings.Index(ci, "\n  enterprise-setup-contracts:\n")
 	if start < 0 {
 		t.Fatal("ci.yml has no enterprise-setup-contracts job")
