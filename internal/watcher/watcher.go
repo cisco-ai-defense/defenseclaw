@@ -930,6 +930,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Printf("[watch] %s dir %s does not exist yet; watching it once the agent creates it\n", kind, dir)
 			return false
 		}
+		if isAbsentVendorSystemDir(dir) {
+			// Never created by the watcher: the agent treats the folder's
+			// presence as administrator policy. Watched once it exists.
+			deferredDirs = append(deferredDirs, [2]string{dir, kind})
+			fmt.Printf("[watch] %s dir %s does not exist; watching it once an administrator creates it\n", kind, dir)
+			return false
+		}
 		created, err := ensureAndWatch(fsw, dir)
 		if len(created) > 0 {
 			// Uninstall removes these again while they are empty (and the
@@ -3335,10 +3342,79 @@ func createsAgentOwnedDir(dir string) bool {
 	}
 }
 
+// vendorSystemRoots hold the machine-wide folders agents read administrator
+// policy and skills from: Codex /etc/codex, Cursor /etc/cursor, Copilot
+// /etc/github-copilot, Claude Code and OpenCode under /Library/Application
+// Support, and %ProgramData% on Windows. The watcher only observes them.
+// Creating one changes the agent's own behavior: Codex treats an existing
+// /etc/codex as an administrator policy layer and pauses with "organization
+// settings could not be loaded" when it cannot read it, which is what a
+// gateway running as root did by creating /etc/codex (mode 0700) for its
+// /etc/codex/skills watch. An absent vendor system folder is watched once an
+// administrator or installer creates it, like an agent-owned folder
+// (GAP-2354). Tests substitute a private root.
+var vendorSystemRoots = defaultVendorSystemRoots()
+
+func defaultVendorSystemRoots() []string {
+	if runtime.GOOS == "windows" {
+		var roots []string
+		for _, name := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot"} {
+			if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+				roots = append(roots, filepath.Clean(value))
+			}
+		}
+		return roots
+	}
+	return []string{"/etc", "/private/etc", "/Library"}
+}
+
+// errAbsentVendorSystemDir reports a watch root under vendorSystemRoots that
+// does not exist; the watcher never creates it.
+var errAbsentVendorSystemDir = errors.New("vendor system folder is absent; the watcher does not create it")
+
+// isAbsentVendorSystemDir reports whether dir does not exist and lies under
+// one of vendorSystemRoots. The absolute path is compared without resolving
+// symlinks, so /etc/codex on macOS (where /etc links to /private/etc) matches
+// through either spelling.
+func isAbsentVendorSystemDir(dir string) bool {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	if _, err := os.Lstat(absolute); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return underVendorSystemRoot(absolute)
+}
+
+func underVendorSystemRoot(absolute string) bool {
+	cleaned := filepath.Clean(absolute)
+	for _, root := range vendorSystemRoots {
+		root = filepath.Clean(root)
+		if root == "" || root == "." || root == string(filepath.Separator) {
+			continue
+		}
+		if runtime.GOOS == "windows" {
+			if strings.EqualFold(cleaned, root) ||
+				strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(root)+string(filepath.Separator)) {
+				return true
+			}
+			continue
+		}
+		if cleaned == root || strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // ensureAndWatch creates dir when it is missing and watches it. It returns
 // the absolute paths of the folders it created: dir and any missing parents.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	var created []string
+	if isAbsentVendorSystemDir(dir) {
+		return nil, errAbsentVendorSystemDir
+	}
 	if current, err := filepath.Abs(dir); err == nil {
 		for {
 			if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
