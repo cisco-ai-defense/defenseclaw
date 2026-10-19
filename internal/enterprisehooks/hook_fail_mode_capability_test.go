@@ -18,11 +18,28 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// managedConfigForProfile returns a managed-enterprise config on profile, and
+// pins this process to the same profile: on Windows the renderer reads the
+// process's protected profile pin (windowsEnterpriseStandaloneProcess), not
+// the config. A config with no profile resolves to Secure Client.
+func managedConfigForProfile(t *testing.T, profile string) *config.Config {
+	t.Helper()
+	pin := ""
+	if profile == managed.ProfileStandalone {
+		pin = profile
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, pin)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = profile
+	return cfg
+}
+
 // ManagedHookFailMode is the value the renderer writes: a connector whose
 // agent cannot fail closed (Hermes, Copilot) gets an open hook even when the
-// config resolves closed, so status must not say closed (GAP-0001).
+// config resolves closed, so status must not say closed (GAP-0001). Outside
+// Secure Client, managed Codex and Claude Code hooks always fail closed.
 func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
-	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg := managedConfigForProfile(t, managed.ProfileStandalone)
 	closed := config.PerConnectorGuardrailConfig{HookFailMode: "closed"}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"hermes": closed, "copilot": closed, "opencode": closed, "amp": {HookFailMode: "open"},
@@ -49,5 +66,31 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	}
 	if got := renderedHookFailModeFor("not-a-connector", "closed"); got != "closed" {
 		t.Errorf("unknown connector = %q", got)
+	}
+}
+
+// Under Secure Client (#1163, spec 007) an unset hook fail mode resolves open
+// for every connector, Codex and Claude Code included, and an explicit
+// closed stays closed except for an agent that cannot fail closed.
+func TestSecureClientManagedHookFailModeFollowsTheConfig(t *testing.T) {
+	cfg := managedConfigForProfile(t, managed.ProfileSecureClient)
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("the test needs the Secure Client profile")
+	}
+	closed := config.PerConnectorGuardrailConfig{HookFailMode: "closed"}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": closed, "hermes": closed, "amp": {HookFailMode: "open"},
+	}
+	want := map[string]string{
+		"codex":      "open",   // unset
+		"opencode":   "open",   // unset
+		"claudecode": "closed", // explicit closed is kept
+		"hermes":     "open",   // explicit closed, but the agent cannot fail closed
+		"amp":        "open",   // explicit open
+	}
+	for name, mode := range want {
+		if got := ManagedHookFailMode(cfg, name); got != mode {
+			t.Errorf("%s: ManagedHookFailMode = %q, want %q", name, got, mode)
+		}
 	}
 }
