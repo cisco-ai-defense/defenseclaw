@@ -60,11 +60,11 @@ secrets, so they are fork-safe. The gaps were in the wiring:
 
 | # | Gap | Status |
 | --- | --- | --- |
-| 1 | **No managed check is a required status check.** The live ruleset requires only the 11 `ci.yml` checks and `Contract codex / macos-latest`. The `ci.yml` comment claimed it required `Enterprise Required`. | Fixed: D1 |
-| 2 | Python changes never set `enterprise`, including `uv.lock` and `pyproject.toml`, which the enterprise Setup embeds. | Fixed: manifest |
+| 1 | **No managed check was a required status check.** Before D1 the live ruleset required only the 11 `ci.yml` checks and `Contract codex / macos-latest`, although the `ci.yml` comment claimed it required `Enterprise Required`. | Fixed: D1 |
+| 2 | Python changes did not set `enterprise`, including `uv.lock` and `pyproject.toml`, which the enterprise Setup embeds. | Fixed: manifest |
 | 3 | Go-only managed changes skipped the Windows enterprise PowerShell smokes (`windows_python` did not include `go`). | Fixed: manifest |
-| 4 | Workflow edits never ran the lanes they change. | Fixed: the managed workflows are in the manifest |
-| 5 | Managed `*.md` files never set `enterprise` (the `*.md` rule won first). | Fixed: the manifest applies on top of the first-match rule |
+| 4 | Workflow edits did not run the lanes they change. | Fixed: the managed workflows are in the manifest |
+| 5 | Managed `*.md` files did not set `enterprise` (the `*.md` rule won first). | Fixed: the manifest applies on top of the first-match rule |
 | 6 | `macos-enterprise-packaging` was not in `Enterprise Required`. | Fixed |
 | 7 | The public enterprise Setup contracts and the spec-004 `-tags ga` IPC gate ran only on PRs to `windows-avc-machine-installer`. | Fixed: `enterprise-setup-contracts` job in `ci.yml` |
 | 8 | No PR job parsed `packaging/**/*.ps1` or any `*.psm1`. | Fixed: `powershell-static` parses `scripts` and `packaging` |
