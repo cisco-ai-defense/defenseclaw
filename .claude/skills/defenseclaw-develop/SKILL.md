@@ -64,7 +64,7 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | A `DEFENSECLAW_*` environment variable | CFG, DEP, DOC | `internal/envvars/registry.json` |
 | Rego, admission, rule packs, detections | POL, TST, PERF | `docs/GUARDRAIL_RULE_PACKS.md` |
 | Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/guardrail/user-and-group-policies.mdx` |
-| Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/machine-policy.mdx` |
+| Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/machine-policy.mdx`, `.github/managed-paths.txt` |
 | Sandboxes, OpenShell, drivers | SBX, REQ, DEP | `docs/SANDBOX.md` (contributor notes) |
 | Scanners, judges, local models | SCN, REQ | `reference/requirements-and-sandboxes.md` |
 | A new tool, model, daemon, package or network call | REQ, DEP, DOC | `internal/openshell/doctor.go` as the detection model |
@@ -72,7 +72,7 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | Audit actions, error codes, telemetry, redaction, dashboards | OBS, DOC, TST | `schemas/README.md` |
 | Docs, CHANGELOG, generated references | DOC, PR | `docs-site/README.md` |
 | Installers, packages, upgrade, release, versions | PKG, TST, SEC | `docs/RELEASE_RUNBOOK.md` |
-| Workflows, CI path rules | TST, SEC | `scripts/ci_changes.py` |
+| Workflows, CI path rules | TST, SEC | `scripts/ci_changes.py`, `.github/managed-paths.txt` |
 | Any pull request | PR | `.github/pull_request_template.md` |
 | TUI | TST, PERF | `defenseclaw-tui` skill |
 | Audit store schema, inventory or other on-disk state format | PKG, PERF, TST | `internal/audit/pending_migrations.go` |

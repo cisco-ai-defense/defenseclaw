@@ -20,8 +20,9 @@ package ipc
 // "undefined: authpostureGAApproved"); `go build` (no tag) succeeds
 // normally because this file is excluded by //go:build ga.
 //
-// The CI job in .github/workflows/windows-enterprise-setup.yml
-// asserts the PRIMARY invariant — `go build -tags ga` exits non-
+// The enterprise-setup-contracts job in .github/workflows/ci.yml (pull
+// requests to main) and .github/workflows/windows-enterprise-setup.yml
+// assert the PRIMARY invariant — `go build -tags ga` exits non-
 // zero — and emits the "authpostureGAApproved"-in-stderr check as
 // a diagnostic hint only. This shape refuses three bypass attempts:
 //

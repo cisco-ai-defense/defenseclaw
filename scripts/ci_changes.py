@@ -4,16 +4,21 @@
 
 """Choose the CI suites a pull request needs from the files it changes.
 
-ci.yml, windows-native.yml and connector-live-e2e.yml call this from a small
-"changes" job. Every event other than pull_request (push to main, schedule,
-workflow_dispatch, release tags) runs everything. A pull request runs only the
-suites its files feed, plus the tests that read a changed file by name:
+ci.yml, windows-native.yml, windows-deterministic-build.yml and
+connector-live-e2e.yml call this from a small "changes" job. Every event other
+than pull_request (push to main, schedule, workflow_dispatch, release tags)
+runs everything. A pull request runs only the suites its files feed, plus the
+tests that read a changed file by name:
 
 * A Python test that names a changed file runs even when no Python changed.
   A docs, workflow or script change therefore runs the tests that pin it.
 * A Go test that names a changed non-Go file runs alone in "Go Pinned Tests".
 * A script or Makefile that names a changed file runs the parity checks.
 * A PowerShell harness that names a changed file runs the PowerShell job.
+
+A path in the managed path manifest (.github/managed-paths.txt) also sets
+"managed", which runs the enterprise lanes and the Windows enterprise suites
+whatever suites the path's rule picks.
 
 Unknown paths, large pull requests and any git failure run everything.
 """
@@ -47,8 +52,31 @@ SUITES = (
     "checks",
     "pwsh",
     "workflows",
+    "managed",
 )
 EVERYTHING = frozenset(SUITES)
+
+# Paths whose change must run the managed-mode CI (spec 008).
+MANAGED_MANIFEST = ".github/managed-paths.txt"
+MANAGED_SECTIONS = ("managed", "managed_impacting", "excluded")
+
+# The inputs of the Windows deterministic-build gate
+# (windows-deterministic-build.yml): the AVC build kit, its fixture, the
+# reproducibility lints and the toolchain pin. The gate compares two builds of
+# the same tree on two hosts, so other source changes cannot break it.
+REPRO_PATHS = (
+    "cmd/windows-repro-manifest/",
+    "cmd/defenseclaw-enterprise-setup/",
+    "packaging/scripts/lib/",
+    "packaging/scripts/build-managed-windows-bundle.sh",
+    "internal/build-repro/testdata/",
+    "scripts/check-go-mod-no-toolchain.sh",
+    "scripts/check-repro-flags-parity.sh",
+    "scripts/check-assemble-parity.sh",
+    "scripts/generate-repro-fixture.sh",
+    ".github/workflows/windows-deterministic-build.yml",
+    "go.mod",
+)
 
 # First match wins. A pattern ending in "/" is a directory prefix; any other
 # pattern is an fnmatch glob over the whole path, where "*" also crosses "/".
@@ -64,17 +92,6 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     (("*.md", "*.mdx"), frozenset({"docs"})),
     (("macos/",), frozenset({"macos_app"})),
     (("third_party/",), frozenset({"go"})),
-    # The enterprise lifecycle, its result contract and the v9 config
-    # migration are what the enterprise install and upgrade lanes exercise.
-    (
-        (
-            "internal/enterpriseunix/",
-            "internal/enterprisestatus/",
-            "internal/managed/",
-            "internal/config/migrate_v9.go",
-        ),
-        frozenset({"go", "packaging"}),
-    ),
     (("*.go", "go.mod", "go.sum"), frozenset({"go"})),
     (("cli/defenseclaw/tui/", "cli/tests/tui/"), frozenset({"tui"})),
     (
@@ -140,6 +157,46 @@ def suites_for(path: str) -> frozenset[str] | None:
     return None
 
 
+def parse_managed_manifest(text: str) -> dict[str, tuple[str, ...]]:
+    """Return the patterns of each manifest section.
+
+    Raises ValueError on a malformed manifest; the caller then runs everything.
+    """
+
+    sections: dict[str, list[str]] = {name: [] for name in MANAGED_SECTIONS}
+    current: list[str] | None = None
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1]
+            if name not in sections:
+                raise ValueError(f"{MANAGED_MANIFEST}:{number}: unknown section [{name}]")
+            current = sections[name]
+            continue
+        if current is None:
+            raise ValueError(f"{MANAGED_MANIFEST}:{number}: pattern before the first section")
+        current.append(line)
+    if not sections["managed"]:
+        raise ValueError(f"{MANAGED_MANIFEST}: [managed] is empty")
+    return {name: tuple(patterns) for name, patterns in sections.items()}
+
+
+def managed_patterns() -> tuple[str, ...]:
+    """Return the patterns whose paths set the managed flag."""
+
+    try:
+        sections = parse_managed_manifest(_read(MANAGED_MANIFEST))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"managed path manifest: {exc}") from exc
+    return sections["managed"] + sections["managed_impacting"]
+
+
+def is_managed(path: str, patterns: Iterable[str]) -> bool:
+    return any(_matches(path, pattern) for pattern in patterns)
+
+
 def git_references(needles: Iterable[str], pathspecs: Iterable[str]) -> list[str]:
     needles = sorted(set(needles))
     if not needles:
@@ -182,13 +239,14 @@ def _read(path: str) -> str:
 
 
 def everything(reason: str) -> dict[str, object]:
-    return _outputs(set(EVERYTHING), [], [], reason)
+    return _outputs(set(EVERYTHING), [], [], reason, repro=True)
 
 
 def classify(
     files: list[str],
     references: References = git_references,
     read: Callable[[str], str] = _read,
+    managed: Callable[[], tuple[str, ...]] = managed_patterns,
 ) -> dict[str, object]:
     """Return the CI outputs for a pull request that changes *files*."""
 
@@ -208,6 +266,9 @@ def classify(
             flags |= suites
     if unknown:
         return everything("unclassified path: " + ", ".join(unknown[:5]))
+    patterns = managed()
+    if any(is_managed(path, patterns) for path in files):
+        flags.add("managed")
 
     basenames = {path.rsplit("/", 1)[-1] for path in files}
     py_tests = []
@@ -236,7 +297,8 @@ def classify(
     if "pwsh" not in flags and references(basenames, ["scripts/*.ps1"]):
         flags.add("pwsh")
 
-    return _outputs(flags, py_tests, go_tests, "pull request paths")
+    repro = any(_matches(path, pattern) for path in files for pattern in REPRO_PATHS)
+    return _outputs(flags, py_tests, go_tests, "pull request paths", repro=repro)
 
 
 def _is_test_module(path: str) -> bool:
@@ -245,13 +307,21 @@ def _is_test_module(path: str) -> bool:
 
 
 def _outputs(
-    flags: set[str], py_tests: list[str], go_tests: list[dict[str, str]], reason: str
+    flags: set[str],
+    py_tests: list[str],
+    go_tests: list[dict[str, str]],
+    reason: str,
+    repro: bool = False,
 ) -> dict[str, object]:
     def on(*names: str) -> bool:
         return any(name in flags for name in names)
 
     go = on("go")
     python = on("python")
+    # A managed path runs every managed lane: the Linux, macOS and Windows
+    # install and upgrade lanes, the Windows Go suite and the Windows Python
+    # suite, which is where the PowerShell enterprise smokes execute.
+    managed = on("managed")
     outputs: dict[str, object] = {name: name in flags for name in SUITES}
     outputs.update(
         {
@@ -266,12 +336,13 @@ def _outputs(
             "go_tests": json.dumps(go_tests, separators=(",", ":")),
             "checks": on("go", "python", "ts", "checks"),
             "install": on("go", "python", "packaging", "windows"),
-            "enterprise": on("go", "packaging", "windows"),
-            "windows_go": on("go", "windows"),
-            "windows_python": on("python", "windows"),
+            "enterprise": managed or on("go", "packaging", "windows"),
+            "windows_go": managed or on("go", "windows"),
+            "windows_python": managed or on("python", "windows"),
             "windows_pkg": on("go", "python", "ts", "windows"),
-            "pwsh": on("go", "python", "ts", "windows", "pwsh"),
+            "pwsh": managed or on("go", "python", "ts", "windows", "pwsh"),
             "code": on("go", "python", "tui", "ts", "rego", "windows", "packaging"),
+            "repro": repro,
             "reason": reason,
         }
     )

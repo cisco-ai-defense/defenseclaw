@@ -459,10 +459,12 @@ jobs:
           $gateway = Join-Path $helperRoot 'defenseclaw-gateway.exe'
           go build -o $gateway ./cmd/defenseclaw
           "DEFENSECLAW_GATEWAY_BIN=$gateway" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Parse every PowerShell script
+      - name: Parse every PowerShell script and module
         run: |
+          # packaging/ holds the enterprise lifecycle (DefenseClawEnterprise.psm1,
+          # install-enterprise.ps1), the MDM kits and the AVC build kit.
           $failures = [Collections.Generic.List[string]]::new()
-          Get-ChildItem scripts -Recurse -Filter '*.ps1' | ForEach-Object {
+          Get-ChildItem scripts, packaging -Recurse -File -Include '*.ps1', '*.psm1' | ForEach-Object {
             $tokens = $null
             $errors = $null
             [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null

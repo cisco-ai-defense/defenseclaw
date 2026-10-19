@@ -11,7 +11,7 @@
 | Server | `internal/ipc/server.go` | Startup log lines, gRPC serve, teardown |
 | Service | `internal/ipc/service.go` | Health, stats and notification streams |
 | Config | `internal/config/managed.go`, `config.go` | `ManagedIPCEnabled`, `EffectivePeerAuthKind`, Windows allowlist refusal |
-| Release gate | `internal/ipc/authposture_gagate.go`, `.github/workflows/windows-enterprise-setup.yml` | REQ-18, REQ-19 |
+| Release gate | `internal/ipc/authposture_gagate.go`, `.github/workflows/ci.yml` (`enterprise-setup-contracts`), `.github/workflows/windows-enterprise-setup.yml` | REQ-18, REQ-19 |
 
 ## Bind sequence (Windows)
 

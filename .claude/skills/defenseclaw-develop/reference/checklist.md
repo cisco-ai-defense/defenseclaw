@@ -197,6 +197,8 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: Test Plan lists host, commands and observed results. Evidence: `.github/workflows/connector-live-e2e.yml`.
 - [ ] **M-TST-11** Connector changes run `make connector-matrix-test`. Why: the matrix runs on every PR.
   Check: `make connector-matrix-test`. Evidence: `test/e2e/connectormatrix.go`.
+- [ ] **M-TST-12** A new managed file, or a new managed branch in a shared file, is listed in `.github/managed-paths.txt`. Why: the manifest decides which pull requests run the managed lanes; an unlisted file skips them.
+  Check: `make check-managed-paths`. Evidence: `scripts/check_managed_paths.py`.
 - [ ] **S-TST-1** Iterate with the cheapest focused test, then run the full gate once. Gateway tests need an explicit `-timeout`. Why: the package exceeds the default deadline.
   Check: `make test-file FILE=<module>`. Evidence: `docs/TESTING.md`.
 - [ ] **S-TST-2** TUI tests: unit-test models first, at most two Pilot tests per new screen at 80x24, no sleeps, no copy assertions. Why: Pilot tests are slow and brittle.
