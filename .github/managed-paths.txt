@@ -1,0 +1,127 @@
+# Managed (enterprise) path manifest.
+#
+# A pull request that changes any [managed] or [managed_impacting] path runs
+# the managed-mode CI: scripts/ci_changes.py sets its `managed` output, which
+# turns on the Enterprise Required lanes in ci.yml and the Windows enterprise
+# lanes in windows-native.yml. scripts/check_managed_paths.py (make check)
+# fails when a tracked file whose path looks managed is in no section here, so
+# new managed code cannot land outside this list.
+#
+# Spec: docs/specs/008-managed-path-ci-gating/README.md
+#
+# Pattern syntax (the same as scripts/ci_changes.py RULES): a pattern ending in
+# "/" is a directory prefix; any other pattern is an fnmatch glob over the
+# whole repo-relative path, where "*" also crosses "/".
+
+[managed]
+# Code that exists only for managed mode.
+
+# This manifest: a change to it changes what runs, so it runs everything managed.
+.github/managed-paths.txt
+
+# Go packages.
+internal/managed/
+internal/enterprisebundle/
+internal/enterprisehooks/
+internal/enterprisepolicy/
+internal/enterprisestatus/
+internal/enterpriseunix/
+internal/unixidentity/
+internal/setuppayload/
+internal/winsession/
+internal/posixacl/
+internal/build-repro/
+internal/observability/destinations/managedaid/
+cmd/defenseclaw-enterprise-setup/
+cmd/defenseclaw-cmid-broker/
+cmd/windows-avc-assembler/
+cmd/windows-repro-manifest/
+cmd/defenseclaw-scanners/
+
+# Managed files inside shared Go packages (internal/cli, internal/gateway,
+# internal/config, internal/acp and others) and binaries. The name prefixes
+# are the convention: keep new managed files on them.
+internal/*enterprise*
+internal/*managed*
+internal/*standalone*
+internal/*secure_client*
+internal/*secure-client*
+cmd/*enterprise*
+cmd/*managed*
+cmd/*standalone*
+
+# Secure Client gRPC contract.
+proto/defenseclaw/secureclient/
+
+# Packaging: MDM kits, the Windows standalone lifecycle, service units, the
+# Linux and macOS enterprise packages and the AVC build kit.
+packaging/mdm/
+packaging/windows/
+packaging/launchd/
+packaging/launchd-standalone/
+packaging/systemd/
+packaging/selinux/
+packaging/linux/
+packaging/macos/
+packaging/scripts/
+packaging/identity/
+
+# Enterprise build and test scripts.
+scripts/*enterprise*
+scripts/build-macos-bundle.sh
+scripts/write-macos-bundle-readme.sh
+scripts/check-assemble-parity.sh
+scripts/check-repro-flags-parity.sh
+scripts/generate-repro-fixture.sh
+
+# Fixtures and the Python tests that pin managed behavior.
+testdata/enterprise-configs/
+testdata/enterprise_install_lane/
+cli/tests/*enterprise*
+cli/tests/*managed*
+cli/tests/*secure_client*
+cli/tests/test_mdm_*
+cli/tests/test_p0_mdm_docs.py
+
+[managed_impacting]
+# Shared code with managed branches inside, and the inputs managed packages
+# are built from. Add a shared file here when you add a managed branch to it.
+
+# Python predicates that decide managed behavior.
+cli/defenseclaw/config.py
+cli/defenseclaw/config_writer.py
+cli/defenseclaw/envvars.py
+cli/defenseclaw/upgrade_shim.py
+cli/defenseclaw/windows_acl.py
+cli/defenseclaw/commands/windows_uninstall_helper.py
+
+# The enterprise Setup and packages embed the CLI and its locked dependencies.
+pyproject.toml
+uv.lock
+.goreleaser.yaml
+
+# Go files with the most managed branches. Any Go change already runs the
+# enterprise lanes; listing these also runs the Windows enterprise smokes.
+internal/gateway/sidecar.go
+internal/gateway/api.go
+internal/gateway/config_manager.go
+internal/gateway/connector/hookexec/
+internal/config/config.go
+internal/config/migrate_v9.go
+
+# Workflows that define or feed the managed lanes.
+.github/workflows/ci.yml
+.github/workflows/windows-native.yml
+.github/workflows/windows-enterprise-setup.yml
+.github/workflows/windows-deterministic-build.yml
+.github/workflows/release.yaml
+
+[excluded]
+# Paths that look managed but do not change managed behavior. The docs tests
+# that pin enterprise pages run through the classifier's name references.
+docs/
+docs-site/
+.claude/
+policies/*enterprise-data.yaml
+# The manifest's own checker; its tests run through name references.
+scripts/check_managed_paths.py

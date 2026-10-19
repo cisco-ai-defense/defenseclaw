@@ -104,17 +104,43 @@ def python_timings(files: list[Path]) -> dict:
 WINDOWS_LINK_SECONDS = 6.0
 
 
+# A Go result line ("ok  <package>\t<seconds>s" or "FAIL\t<package>\t<seconds>s"),
+# optionally after the runner's timestamp.
+GO_RESULT = re.compile(r"^(?:\S+\s+)?(?:ok|FAIL)\s+(\S+)\s+([0-9.]+)s\b")
+# `gh run view --log` puts "<job name>\t<step name>\t" before every line, and
+# both names may contain spaces.
+GH_LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t")
+
+
+def go_ci_log_results(text: str) -> list[tuple[str, str]]:
+    """Return the (package, seconds) of every Go result line in a CI log.
+
+    Reads a raw job log (a timestamp before each line) and the output of
+    `gh run view --log` (job and step name columns before the timestamp).
+    """
+
+    results = []
+    for line in text.splitlines():
+        match = GO_RESULT.match(line)
+        if match is None:
+            # Strip the gh columns only when the line does not match as it is:
+            # Go's own result line holds tabs too.
+            match = GO_RESULT.match(GH_LOG_PREFIX.sub("", line, count=1))
+        if match is not None:
+            results.append((match.group(1), match.group(2)))
+    return results
+
+
 def go_ci_log_timings(files: list[Path], current: Path) -> dict:
     # A package split into -run parts reports once per part: sum them.
-    pattern = re.compile(r"^\S*\s*(?:ok|FAIL)\s+(\S+)\s+([0-9.]+)s\b", re.MULTILINE)
     measured: dict[str, float] = {}
     for file in files:
         seen: set[tuple[str, str]] = set()
-        for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
-            if (match.group(1), match.group(2)) in seen:
+        for package, seconds in go_ci_log_results(file.read_text(encoding="utf-8", errors="replace")):
+            if (package, seconds) in seen:
                 continue
-            seen.add((match.group(1), match.group(2)))
-            measured[match.group(1)] = measured.get(match.group(1), 0.0) + float(match.group(2))
+            seen.add((package, seconds))
+            measured[package] = measured.get(package, 0.0) + float(seconds)
     data = json.loads(current.read_text(encoding="utf-8")) if current.is_file() else {"packages": {}, "tests": {}}
     data["packages"].update({package: round(seconds, 1) for package, seconds in measured.items()})
     data["packages"] = dict(sorted(data["packages"].items()))

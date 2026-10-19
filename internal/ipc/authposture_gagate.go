@@ -20,10 +20,12 @@ package ipc
 // "undefined: authpostureGAApproved"); `go build` (no tag) succeeds
 // normally because this file is excluded by //go:build ga.
 //
-// The CI job in .github/workflows/windows-enterprise-setup.yml
-// asserts the PRIMARY invariant — `go build -tags ga` exits non-
-// zero — and emits the "authpostureGAApproved"-in-stderr check as
-// a diagnostic hint only. This shape refuses three bypass attempts:
+// The enterprise-setup-contracts job in .github/workflows/ci.yml (pull
+// requests to main) and .github/workflows/windows-enterprise-setup.yml
+// assert that `go build -tags ga` exits non-zero AND that the error
+// names this file and authpostureGAApproved, so an unrelated compile
+// or dependency failure cannot pass for the gate. This shape refuses
+// three bypass attempts:
 //
 //  1. Rename the "UnixPeerUnauthenticated" const literal to look
 //     benign. The gate does not compare strings — it looks for an

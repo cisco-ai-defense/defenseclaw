@@ -12,6 +12,7 @@ a spec records the intended contract and the open work.
 | [003](003-windows-deferred-config/README.md) | Late config and target manifest for the Secure Client lifecycle: bounded gateway and guardian waits, and the health `configuration` state | Partly implemented: the waits and health ship; the lifecycle refuses `-DeferredConfig` |
 | [004](004-windows-ui-ipc/README.md) | The Secure Client UI IPC socket on Windows: path, DACL, deferred peer authentication and the GA release gate | Implemented (beta posture) |
 | [005](005-windows-per-user-hook-lifecycle/README.md) | The `DefenseClawHookEnumerator` service that keeps the Windows target manifest in step with user profiles | Implemented; cross-process health and targeted uninstall open |
+| [008](008-managed-path-ci-gating/README.md) | A managed path manifest that drives managed-mode CI on every PR that touches managed code | Implemented; required checks (ruleset) open |
 
 The operator-facing behavior of specs 003 to 005 is also documented in
 [`WINDOWS-ENTERPRISE-THREAT-MODEL.md`](../WINDOWS-ENTERPRISE-THREAT-MODEL.md)

@@ -17,22 +17,15 @@ name: Windows deterministic-build (Workstream E)
 #   catches ~all the shell-host variance the reproducibility contract
 #   is meant to remove (sorted keys, LF endings, no HTML escaping).
 
+#
+# Every pull request starts this workflow so "Windows Deterministic Build
+# Required" always reports and can be a required check. The changes job
+# (scripts/ci_changes.py REPRO_PATHS, which mirrors the push paths below)
+# skips the gate jobs when the pull request touches none of their inputs.
+
 on:
   pull_request:
-    paths:
-      - cmd/windows-repro-manifest/**
-      - cmd/defenseclaw-enterprise-setup/**
-      - packaging/scripts/lib/**
-      - packaging/scripts/build-managed-windows-bundle.sh
-      - internal/build-repro/testdata/**
-      - scripts/check-go-mod-no-toolchain.sh
-      - scripts/check-repro-flags-parity.sh
-      - scripts/check-assemble-parity.sh
-      - scripts/generate-repro-fixture.sh
-      - .github/workflows/windows-deterministic-build.yml
-      # setup-go@v5 reads go.mod; check-go-mod-no-toolchain.sh polices it.
-      # Either can change repository-wide reproducibility semantics.
-      - go.mod
+  workflow_dispatch:
   push:
     branches:
       - windows-enterprise-integration
@@ -48,6 +41,7 @@ on:
       - scripts/check-assemble-parity.sh
       - scripts/generate-repro-fixture.sh
       - .github/workflows/windows-deterministic-build.yml
+      - scripts/ci_changes.py
       - go.mod
 
 permissions:
@@ -67,11 +61,32 @@ env:
   EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-acp.exe,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw-sensor-helper.exe,defenseclaw.exe,install-enterprise.ps1"
 
 jobs:
+  changes:
+    # Every event other than pull_request runs the gate (repro=true).
+    name: Select deterministic-build gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repro: ${{ steps.classify.outputs.repro }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          # The pull_request merge commit and its base parent.
+          fetch-depth: 2
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_changes.py --event "$EVENT_NAME" --github-output "$GITHUB_OUTPUT"
+
   # Fast lint job that runs both reproducibility lints on every PR to
   # this workflow's paths. Fails fast — cheaper than blocking on the
   # 10-minute cross-platform emit fan-out to catch a one-line drift.
   repro-lints:
     name: reproducibility lints
+    needs: changes
+    # != 'false', so a failed classifier runs the gate.
+    if: ${{ !cancelled() && needs.changes.outputs.repro != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -453,3 +468,46 @@ jobs:
           cat linux/sha256sums.txt
           echo "--- macos ---"
           cat macos/sha256sums.txt
+
+  deterministic-build-required:
+    # One check for the whole gate. It runs even when a job fails or is
+    # skipped, and accepts skips only when the changes job selected the gate
+    # away, so the main branch ruleset can require it (spec 008).
+    name: Windows Deterministic Build Required
+    needs:
+      - changes
+      - repro-lints
+      - emit-linux
+      - emit-macos
+      - compare
+      - assemble-linux
+      - assemble-macos
+      - compare-assemble
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every deterministic-build job
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          REPRO: ${{ needs.changes.outputs.repro }}
+          REPRO_LINTS: ${{ needs.repro-lints.result }}
+          EMIT_LINUX: ${{ needs.emit-linux.result }}
+          EMIT_MACOS: ${{ needs.emit-macos.result }}
+          COMPARE: ${{ needs.compare.result }}
+          ASSEMBLE_LINUX: ${{ needs.assemble-linux.result }}
+          ASSEMBLE_MACOS: ${{ needs.assemble-macos.result }}
+          COMPARE_ASSEMBLE: ${{ needs.compare-assemble.result }}
+        shell: bash
+        run: |
+          [ "$CHANGES" = success ] || { echo "changes: $CHANGES"; exit 1; }
+          status=0
+          for gate in REPRO_LINTS EMIT_LINUX EMIT_MACOS COMPARE ASSEMBLE_LINUX ASSEMBLE_MACOS COMPARE_ASSEMBLE; do
+            result=${!gate}
+            echo "$gate: $result"
+            if [ "$REPRO" = false ] && [ "$result" = skipped ]; then
+              continue
+            fi
+            [ "$result" = success ] || status=1
+          done
+          exit "$status"

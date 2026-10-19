@@ -131,7 +131,8 @@ They install and remove system services, so run them only on a disposable
 host (a CI runner, a container or a throwaway VM), as root or from an
 elevated shell.
 
-CI runs these lanes on each pull request: the `.deb` on Ubuntu 24.04, the
+CI runs these lanes on each pull request that changes managed code: the
+`.deb` on Ubuntu 24.04, the
 `.rpm` in RHEL 9 and RHEL 8 containers that boot systemd, the macOS `.pkg` on
 a macOS runner, and the unsigned Windows Setup on a Windows runner. Each lane
 runs install, a second `ensure` that must change nothing, `verify`, `status`,
@@ -193,6 +194,19 @@ administrator records the live Claude Code policy proof
 so the Windows lane requires `coverage_complete` and requires
 `security_complete` to stay false.
 
+### Which pull requests run the managed lanes
+
+`.github/managed-paths.txt` lists the managed code: whole managed packages and
+directories in `[managed]`, and shared files with managed branches in
+`[managed_impacting]`. A pull request that changes a listed path runs
+`Enterprise Required` in `ci.yml` (the install, upgrade, Setup-contract and
+lifecycle lanes) and the Windows Go, Windows Python and PowerShell suites in
+`windows-native.yml`. Those are where the PowerShell enterprise smokes run.
+Any Go change also runs the enterprise lanes. `make check-managed-paths`
+fails when a tracked file whose path looks managed is in no section. When
+you add a managed file, or add a managed branch to a shared file, add it to
+the manifest. See [spec 008](specs/008-managed-path-ci-gating/README.md).
+
 ## CI Workflows
 
 Ordinary PRs stay fast, while the release dispatch tests the final signed
@@ -202,6 +216,8 @@ assets on every platform before publishing them. See the
 | Workflow | Purpose |
 |----------|---------|
 | `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services). Each push to a pull request cancels its running CI, so on a busy branch run `gh workflow run ci.yml --ref <branch>` (and `windows-native.yml`): a dispatch tests that commit to the end and later pushes do not cancel it |
+| `.github/workflows/windows-native.yml` | Native Windows Go, Python and PowerShell suites, aggregated by `Windows Native Required`; the Windows Python shards run the `packaging/windows/tests` enterprise smokes |
+| `.github/workflows/windows-deterministic-build.yml` | The AVC reproducibility gate: byte-identical repro JSON and `assemble.sh` output on Linux and macOS. It runs when a pull request changes the build kit, its fixture or `go.mod` (`REPRO_PATHS` in `scripts/ci_changes.py`), and `Windows Deterministic Build Required` always reports |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, install-gate, `enterprise-upgrade-gate` and publish pipeline for a reviewed `main` commit. The `enterprise-upgrade-gate` job upgrades the previous 1.x enterprise package on a deb, rpm, pkg and Windows host and checks that the administrator config kept its intent; see [The enterprise upgrade gate](RELEASE_RUNBOOK.md#the-enterprise-upgrade-gate) |

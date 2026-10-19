@@ -9,7 +9,7 @@
 | Refuse codesign allowlists on Windows | Done | `internal/config/config.go` |
 | `EffectivePeerAuthKind` table | Done | `internal/config/managed_peerauth_test.go` |
 | `configuration_state` on the health stream | Done | `internal/ipc/service.go`, `service_configuration_state_test.go` |
-| GA release gate and CI check | Done | `internal/ipc/authposture_gagate.go`, `windows-enterprise-setup.yml` |
+| GA release gate and CI check | Done | `internal/ipc/authposture_gagate.go`, `ci.yml` (`enterprise-setup-contracts`), `windows-enterprise-setup.yml` |
 | Shared bind rules for other local sockets | Done | `internal/ipc/listen.go` |
 | Windows peer authentication | Not done | follow-up spec; defines `authpostureGAApproved` |
 | Decide the Windows socket path override | Open | design.md, Open questions |

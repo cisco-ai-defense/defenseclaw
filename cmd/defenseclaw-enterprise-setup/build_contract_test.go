@@ -179,36 +179,64 @@ func TestOrdinarySetupBuilderCannotBeRelabeledAsEnterprise(t *testing.T) {
 }
 
 func TestEnterpriseWorkflowValidatesPublicContractsWithoutPrivateRepositoryAccess(t *testing.T) {
-	workflow := readEnterpriseSetupContractFile(t, ".github/workflows/windows-enterprise-setup.yml")
-	for _, required := range []string{
-		"packaging/scripts/lib/assemble.ps1",
-		"DefenseClawSetup-Enterprise-x64.exe",
-		"Validate public enterprise Setup contracts",
-		"pull_request:",
-		"github.event.pull_request.head.sha || github.sha",
-		"persist-credentials: false",
-		"go test -count=1",
-		"go vet",
-		"GOOS: windows",
-		"GOARCH: amd64",
-		"go build -trimpath",
-		"[Management.Automation.Language.Parser]::ParseFile",
-		"bash -n packaging/scripts/build-managed-windows-bundle.sh",
-	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("enterprise workflow is missing %q", required)
+	// The same public checks run for pull requests to main (the
+	// enterprise-setup-contracts job in ci.yml, gated by the Enterprise
+	// Required aggregate) and to the AVC machine-installer branch.
+	// A Windows checkout can have CRLF line endings.
+	ci := strings.ReplaceAll(readEnterpriseSetupContractFile(t, ".github/workflows/ci.yml"), "\r\n", "\n")
+	start := strings.Index(ci, "\n  enterprise-setup-contracts:\n")
+	if start < 0 {
+		t.Fatal("ci.yml has no enterprise-setup-contracts job")
+	}
+	end := strings.Index(ci[start+1:], "\n  enterprise-required:\n")
+	if end < 0 {
+		t.Fatal("ci.yml enterprise-setup-contracts job is not followed by enterprise-required")
+	}
+	workflows := map[string]string{
+		"ci.yml enterprise-setup-contracts": ci[start : start+1+end],
+		"windows-enterprise-setup.yml":      readEnterpriseSetupContractFile(t, ".github/workflows/windows-enterprise-setup.yml"),
+	}
+	for name, workflow := range workflows {
+		for _, required := range []string{
+			"packaging/scripts/lib/assemble.ps1",
+			"DefenseClawSetup-Enterprise-x64.exe",
+			"Validate public enterprise Setup contracts",
+			"persist-credentials: false",
+			"go test -count=1",
+			"go vet",
+			"GOOS: windows",
+			"GOARCH: amd64",
+			"go build -trimpath",
+			"[Management.Automation.Language.Parser]::ParseFile",
+			"bash -n packaging/scripts/build-managed-windows-bundle.sh",
+			"go build -tags ga ./internal/ipc/...",
+			// The refusal must come from the gate, not an unrelated build error.
+			`authposture_gagate\.go:.*authpostureGAApproved`,
+		} {
+			if !strings.Contains(workflow, required) {
+				t.Errorf("%s is missing %q", name, required)
+			}
+		}
+		for _, forbidden := range []string{
+			"AI_COMMON_READ_TOKEN",
+			"secrets.",
+			"cisco-aispg/ai-common",
+			"environment:",
+			"actions/upload-artifact",
+			"needs.managed-gateway",
+		} {
+			if strings.Contains(workflow, forbidden) {
+				t.Errorf("%s must not contain %q", name, forbidden)
+			}
 		}
 	}
-	for _, forbidden := range []string{
-		"AI_COMMON_READ_TOKEN",
-		"secrets.",
-		"cisco-aispg/ai-common",
-		"environment:",
-		"actions/upload-artifact",
-		"needs.managed-gateway",
-	} {
-		if strings.Contains(workflow, forbidden) {
-			t.Errorf("public enterprise workflow must not contain %q", forbidden)
+	if !strings.Contains(ci, "      - enterprise-setup-contracts\n") {
+		t.Error("Enterprise Required does not need enterprise-setup-contracts")
+	}
+	branch := workflows["windows-enterprise-setup.yml"]
+	for _, required := range []string{"pull_request:", "github.event.pull_request.head.sha || github.sha"} {
+		if !strings.Contains(branch, required) {
+			t.Errorf("windows-enterprise-setup.yml is missing %q", required)
 		}
 	}
 }
