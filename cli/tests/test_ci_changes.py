@@ -389,6 +389,7 @@ def test_aggregates_accept_skips_only_from_the_classifier() -> None:
         assert job["if"] == "${{ always() }}"
         assert "changes" in job["needs"]
     native = _workflow("windows-native.yml")["jobs"]["windows-native-required"]
+    assert native["if"] == "${{ always() }}"
     assert "changes" in native["needs"]
     assert "$results.changes.result -eq 'success'" in native["steps"][0]["run"]
     repro = _workflow("windows-deterministic-build.yml")["jobs"]
