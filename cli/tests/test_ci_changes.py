@@ -37,7 +37,11 @@ REQUIRED_CHECKS = {
         "make test (unified)",
         "Go Test",
         "Rego Policy Tests",
+        # The managed-mode aggregates (spec 008).
+        "Enterprise Required",
     },
+    "windows-native.yml": {"Windows Native Required"},
+    "windows-deterministic-build.yml": {"Windows Deterministic Build Required"},
 }
 # connector-live-e2e.yml builds its matrix at run time; every matrix it can
 # choose must contain this cell (see the no-op test below).
@@ -385,6 +389,7 @@ def test_aggregates_accept_skips_only_from_the_classifier() -> None:
         assert job["if"] == "${{ always() }}"
         assert "changes" in job["needs"]
     native = _workflow("windows-native.yml")["jobs"]["windows-native-required"]
+    assert native["if"] == "${{ always() }}"
     assert "changes" in native["needs"]
     assert "$results.changes.result -eq 'success'" in native["steps"][0]["run"]
     repro = _workflow("windows-deterministic-build.yml")["jobs"]
