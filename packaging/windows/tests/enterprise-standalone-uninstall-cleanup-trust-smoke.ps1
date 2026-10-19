@@ -34,7 +34,15 @@ $root = [IO.Path]::Combine(
 [void][IO.Directory]::CreateDirectory($root)
 $cli = [IO.Path]::Combine($root, 'defenseclaw.exe')
 [IO.File]::WriteAllBytes($cli, [Text.Encoding]::ASCII.GetBytes('unsigned test CLI ' + [Guid]::NewGuid()))
-$cliHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash.ToLowerInvariant()
+# Hashed in .NET: Windows PowerShell 5.1 does not resolve the module-qualified
+# Get-FileHash here.
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $cliHash = ([BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($cli)))).Replace('-', '').ToLowerInvariant()
+}
+finally {
+    $sha256.Dispose()
+}
 $otherHash = ('0' * 64)
 
 $cases = @(
