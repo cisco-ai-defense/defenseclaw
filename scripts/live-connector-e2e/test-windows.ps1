@@ -2844,12 +2844,13 @@ threading.Event().wait()
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
+        '-Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
         "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
@@ -2880,7 +2881,7 @@ threading.Event().wait()
         'native self-test rebinds child-only authority below the Profile Known Folder without weakening the shared guard'
     Assert-True ($nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$DiagnosticsLeaf' -and
         $nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$ArtifactLeaf' -and
-        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 3) `
+        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 4) `
         'shared initializer keeps diagnostics and artifacts under RUNNER_TEMP'
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
