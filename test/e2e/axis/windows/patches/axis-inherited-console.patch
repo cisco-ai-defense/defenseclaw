@@ -1,0 +1,65 @@
+--- a/crates/axis-sandbox/src/windows/mxc.rs
++++ b/crates/axis-sandbox/src/windows/mxc.rs
+@@ -452,10 +452,28 @@
+ }
+ 
+ fn validate_tier_policy(interactive_terminal: bool) -> Result<(), MxcWindowsError> {
+-    if interactive_terminal {
++    if !interactive_terminal {
++        return Ok(());
++    }
++    use windows::Win32::System::Console::{
++        CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
++        STD_OUTPUT_HANDLE,
++    };
++
++    // Contributor experiment: inherit a console already owned by the caller.
++    // No pseudoconsole attribute is passed to CreateProcessInSandbox, and no
++    // alternate isolation tier or uncontained host execution is selected.
++    let console_handles = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|kind| {
++        let mut mode = CONSOLE_MODE::default();
++        unsafe { GetStdHandle(kind).and_then(|handle| GetConsoleMode(handle, &mut mode)) }.is_ok()
++    });
++    validate_inherited_console_handles(console_handles)
++}
++
++fn validate_inherited_console_handles(console_handles: [bool; 3]) -> Result<(), MxcWindowsError> {
++    if !console_handles.into_iter().all(|valid| valid) {
+         return Err(MxcWindowsError::UnsupportedPolicy(
+-            "interactive ConPTY is unsupported because Experimental_CreateProcessInSandbox rejects PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE with ERROR_INVALID_HANDLE on supported BaseContainer builds; AXIS does not downgrade to AppContainer/DACL to obtain terminal support"
+-                .into(),
++            "interactive Windows MXC inherited-console mode requires existing console stdin, stdout and stderr; direct BaseContainer ConPTY startup handles remain unsupported, and AXIS does not downgrade to AppContainer/DACL".into(),
+         ));
+     }
+     Ok(())
+@@ -1167,10 +1185,16 @@
+     }
+ 
+     #[test]
+-    fn interactive_terminal_rejects_instead_of_downgrading() {
+-        let error = validate_tier_policy(true).unwrap_err();
+-        assert!(error.to_string().contains("ERROR_INVALID_HANDLE"));
+-        assert!(error.to_string().contains("AppContainer/DACL"));
++    fn inherited_console_requires_every_standard_handle() {
++        for mask in 0..8 {
++            let handles = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0];
++            let result = validate_inherited_console_handles(handles);
++            assert_eq!(result.is_ok(), mask == 7);
++            if let Err(error) = result {
++                assert!(error.to_string().contains("requires existing console"));
++                assert!(error.to_string().contains("does not downgrade"));
++            }
++        }
+         validate_tier_policy(false).unwrap();
+     }
+ 
+--- a/crates/axis-sandbox/Cargo.toml
++++ b/crates/axis-sandbox/Cargo.toml
+@@ -31,6 +31,7 @@
+     "Win32_NetworkManagement_WindowsFilteringPlatform",
+     "Win32_Security",
+     "Win32_Security_Authorization",
++    "Win32_System_Console",
+     "Win32_System_Diagnostics_ToolHelp",
+     "Win32_System_IO",
+     "Win32_System_JobObjects",

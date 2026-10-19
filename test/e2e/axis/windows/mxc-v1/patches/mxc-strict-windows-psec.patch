@@ -1,0 +1,177 @@
+--- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+@@ -1537,10 +1537,9 @@
+                 )));
+             }
+             if let Err(drain_warning) = job.wait_for_empty() {
+-                write_stderr_line_best_effort(format_args!(
+-                    "sandbox job did not fully drain within the teardown window \
+-                     (continuing): {drain_warning}"
+-                ));
++                return Err(std::io::Error::other(format!(
++                    "strict PSEC teardown cannot confirm an empty sandbox job: {drain_warning}"
++                )));
+             }
+         } else if let Err(error) = unsafe { TerminateProcess(self.process.get(), u32::MAX) } {
+             self.record_kill_failure(KillMethod::TerminateProcess, &error);
+--- a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+@@ -119,7 +119,7 @@
+ /// lower tier, or tell a rejected request from a broken one) and folding any
+ /// `extended_error` detail into the message — rather than flattening
+ /// everything to a generic `BackendError`.
+-fn map_spawn_error(resp: ScriptResponse) -> MxcError {
++pub(super) fn map_spawn_error(resp: ScriptResponse) -> MxcError {
+     use crate::mxc_common::models::FailurePhase;
+ 
+     let mut message = resp.error_message;
+--- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+@@ -107,6 +107,108 @@
+     request: &ExecutionRequest,
+ ) -> Result<Box<dyn SandboxProcess>, Error> {
+     spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer))
++}
++
++/// Contributor-only native Windows PSEC path. Validation and spawn happen on
++/// the same direct backend; the fallback dispatcher is never called.
++#[cfg(target_os = "windows")]
++pub fn spawn_windows_psec(
++    request: &ExecutionRequest,
++) -> Result<Box<dyn SandboxProcess>, Error> {
++    validate_contributor_psec_request(request)?;
++    spawn_execution_request_with_logger_and(request, Logger::new(Mode::Buffer), |request, logger| {
++        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
++        crate::mxc_engine::run::log_policy_hash(request, logger);
++        let mut native = crate::process_container_common::base_container_runner::BaseContainerRunner::new();
++        // new() leaves request serviceability unconfirmed. SandboxBackend's
++        // spawn() invokes native validation for this exact request before
++        // entering spawn_validated(); construction itself is not validation.
++        native.spawn(request, logger, StdioMode::Pipes).map_err(dispatch::map_spawn_error)
++    })
++}
++
++#[cfg(target_os = "windows")]
++fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), MxcError> {
++    use crate::mxc_common::models::NetworkAction;
++    if !matches!(request.containment, ContainmentBackend::ProcessContainer)
++        || request.policy.fallback.allow_dacl_mutation
++        || request.dry_run
++    {
++        return Err(MxcError::malformed_request(
++            "strict PSEC requires explicit ProcessContainer, no DACL fallback and a live request",
++        ));
++    }
++    let offline_egress = request.policy.network_egress.as_ref().is_some_and(|policy| {
++        policy.default == NetworkAction::Deny && policy.allow.is_empty() && policy.deny.is_empty()
++    });
++    let offline_ingress = request.policy.network_ingress.as_ref().is_some_and(|policy| {
++        policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
++    });
++    if !offline_egress || !offline_ingress
++        || request.policy.network_proxy.is_enabled()
++        || request.policy.runtime_network_proxy_specified
++        || request.policy.allowed_proxy_peer.is_some()
++        || !request.policy.capabilities.is_empty()
++        || request.policy.capture_denials.is_some()
++    {
++        return Err(MxcError::malformed_request(
++            "contributor PSEC entry point requires explicit offline deny policy without proxy, capabilities or denial capture",
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(all(test, target_os = "windows"))]
++mod strict_psec_tests {
++    use super::*;
++
++    fn offline_request() -> ExecutionRequest {
++        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
++        let mut request = ExecutionRequest::default();
++        request.containment = ContainmentBackend::ProcessContainer;
++        request.policy.fallback.allow_dacl_mutation = false;
++        request.policy.network_egress = Some(NetworkEgressPolicy::default());
++        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
++        request
++    }
++
++    #[test]
++    fn strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn() {
++        let baseline = offline_request();
++        assert!(validate_contributor_psec_request(&baseline).is_ok());
++        let mut request = baseline.clone();
++        request.policy.fallback.allow_dacl_mutation = true;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        let mut request = baseline.clone();
++        request.dry_run = true;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        let mut request = baseline;
++        request.containment = ContainmentBackend::Bubblewrap;
++        assert!(validate_contributor_psec_request(&request).is_err());
++    }
++
++    #[test]
++    fn contributor_psec_admission_only_accepts_fixed_offline_posture() {
++        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
++        let mut request = ExecutionRequest::default();
++        request.containment = ContainmentBackend::ProcessContainer;
++        request.policy.fallback.allow_dacl_mutation = false;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        request.policy.network_egress = Some(NetworkEgressPolicy::default());
++        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
++        assert!(validate_contributor_psec_request(&request).is_ok());
++        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Allow;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Deny;
++        request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Allow;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Deny;
++        request.policy.network_egress.as_mut().unwrap().default = NetworkAction::Allow;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        request.policy.network_egress.as_mut().unwrap().default = NetworkAction::Deny;
++        request.policy.capabilities.push("internetClient".into());
++        assert!(validate_contributor_psec_request(&request).is_err());
++    }
+ }
+ 
+ /// Spawn a raw exact-version one-shot JSON request as a streaming process.
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -333,6 +333,36 @@
+         crate::mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
+     }
+ 
++    /// Contributor-only strict Windows PSEC entry point. Never selects an
++    /// AppContainer/BFS/DACL fallback. No inherited console or PTY is implied.
++    #[cfg(target_os = "windows")]
++    pub fn spawn_windows_psec(
++        request: ContainerRequest,
++        options: SpawnOptions,
++    ) -> Result<MxcProcess, Error> {
++        if !matches!(request.containment, Containment::ProcessContainer(_)) {
++            return Err(crate::mxc_common::mxc_error::MxcError::unsupported_containment(
++                "strict Windows PSEC requires explicit ProcessContainer containment",
++            ).into());
++        }
++        let mut prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
++        let filesystem = request.filesystem.as_ref().ok_or_else(|| {
++            crate::mxc_common::mxc_error::MxcError::malformed_request(
++                "contributor PSEC requires an explicit filesystem policy",
++            )
++        })?;
++        if filesystem.readwrite_paths.iter().any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
++            || filesystem.readonly_paths.iter().any(|path| !prepared.inner.policy.readonly_paths.contains(path))
++            || filesystem.denied_paths.iter().any(|path| !prepared.inner.policy.denied_paths.contains(path))
++        {
++            return Err(crate::mxc_common::mxc_error::MxcError::malformed_request(
++                "contributor PSEC refuses normalization that drops explicit filesystem grants or denies",
++            ).into());
++        }
++        prepared.inner.policy.fallback.allow_dacl_mutation = false;
++        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
++    }
++
+     /// Spawn a [`ContainerRequest`] attached to a caller-controlled PTY.
+     pub fn spawn_with_pty(
+         request: ContainerRequest,

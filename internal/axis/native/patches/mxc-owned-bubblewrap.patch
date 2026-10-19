@@ -1,0 +1,637 @@
+diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+index 95d3b27..88ad51c 100644
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -206,6 +206,8 @@ mod literal_argv;
+ mod options;
+ mod policy;
+ mod sandbox;
++#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++mod owned_bubblewrap;
+ mod state_aware_sdk;
+ 
+ mod telemetry;
+@@ -309,6 +311,10 @@ pub mod v1 {
+         NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
+         NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
+     };
++    /// Private owned-object contributor seam; never selects a fallback backend.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    pub use crate::owned_bubblewrap::{OwnedMount, PreparedOwnedBubblewrap};
++
+     pub use crate::sandbox::{
+         CaptureDenialsError, CaptureDenialsResult, ExecutionMetadata, ExecutionResult, MxcProcess,
+         MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult,
+diff --git a/src/mxc-sdk/src/owned_bubblewrap.rs b/src/mxc-sdk/src/owned_bubblewrap.rs
+new file mode 100644
+index 0000000..134b885
+--- /dev/null
++++ b/src/mxc-sdk/src/owned_bubblewrap.rs
+@@ -0,0 +1,607 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++//! Private contributor seam. Requires the separately reviewed static-musl
++//! Bubblewrap owned-FD extension; this is not stock SDK backend selection.
++
++use crate::mxc_common::sandbox_process::{NativeStdio, SandboxProcess};
++use crate::sandbox::MxcProcess;
++use std::ffi::{CString, OsString};
++use std::fs::File;
++use std::io::{self, Read, Write};
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++use std::os::unix::ffi::OsStrExt;
++use std::os::unix::fs::{FileExt, MetadataExt};
++use std::os::unix::process::CommandExt;
++use std::process::{Child, Command, Stdio};
++use std::time::{Duration, Instant};
++
++const PAYLOAD: &str = "/.defenseclaw/payload";
++const SEALED: i32 =
++    libc::F_SEAL_SEAL | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_WRITE;
++
++fn invalid() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidInput,
++        "invalid private owned-FD request",
++    )
++}
++
++fn guest_path(path: &str) -> bool {
++    path.starts_with('/')
++        && path.len() > 1
++        && path.len() < 32768
++        && path[1..]
++            .split('/')
++            .all(|part| !part.is_empty() && part != "." && part != "..")
++        && !path.contains('\0')
++}
++
++fn prefix(path: &str, ancestor: &str) -> bool {
++    path == ancestor
++        || path
++            .strip_prefix(ancestor)
++            .is_some_and(|rest| rest.starts_with('/'))
++}
++
++fn reserved(path: &str) -> bool {
++    ["/proc", "/dev", "/.defenseclaw"]
++        .iter()
++        .any(|root| prefix(path, root) || prefix(root, path))
++}
++
++fn sealed(file: &File, bound: u64) -> io::Result<()> {
++    let metadata = file.metadata()?;
++    // SAFETY: queries the held file descriptor only.
++    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
++    if !metadata.is_file()
++        || metadata.len() == 0
++        || metadata.len() > bound
++        || metadata.mode() & 0o6000 != 0
++        || flags < 0
++        || flags & SEALED != SEALED
++    {
++        return Err(invalid());
++    }
++    Ok(())
++}
++
++/// Structural admission only: the trusted factory separately verifies the
++/// complete static-musl build provenance and image digest. ELF metadata alone
++/// cannot prove the absence of static-libc runtime module loading.
++fn static_image(file: &File) -> io::Result<()> {
++    sealed(file, 512 << 20)?;
++    let mut header = [0; 64];
++    file.read_exact_at(&mut header, 0)?;
++    let length = file.metadata()?.len();
++    let offset = u64::from_le_bytes(header[32..40].try_into().unwrap());
++    let count = u16::from_le_bytes(header[56..58].try_into().unwrap()) as u64;
++    if &header[..6] != b"\x7fELF\x02\x01"
++        || u16::from_le_bytes(header[16..18].try_into().unwrap()) != 2
++        || u16::from_le_bytes(header[18..20].try_into().unwrap()) != 62
++        || u16::from_le_bytes(header[52..54].try_into().unwrap()) != 64
++        || u16::from_le_bytes(header[54..56].try_into().unwrap()) != 56
++        || count == 0
++        || count > 128
++        || offset < 64
++        || offset
++            .checked_add(count * 56)
++            .is_none_or(|end| end > length)
++    {
++        return Err(invalid());
++    }
++    for index in 0..count {
++        let mut entry = [0; 56];
++        file.read_exact_at(&mut entry, offset + index * 56)?;
++        if matches!(u32::from_le_bytes(entry[..4].try_into().unwrap()), 2 | 3) {
++            return Err(invalid());
++        }
++    }
++    Ok(())
++}
++
++fn retain(file: &File) -> io::Result<File> {
++    // SAFETY: duplicates an owned descriptor; a new File takes the result once.
++    let descriptor = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
++    if descriptor < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    Ok(unsafe { File::from_raw_fd(descriptor) })
++}
++
++fn private_filter(file: &File) -> io::Result<File> {
++    sealed(file, 1 << 20)?;
++    let length = file.metadata()?.len();
++    if length % 8 != 0 {
++        return Err(invalid());
++    }
++    let mut bytes = vec![0; length as usize];
++    file.read_exact_at(&mut bytes, 0)?;
++    // SAFETY: creates one owned anonymous file; no namespace or workload runs.
++    let descriptor = unsafe {
++        libc::memfd_create(
++            c"dc-axis-private-seccomp".as_ptr(),
++            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
++        )
++    };
++    if descriptor < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: the successful descriptor is transferred to exactly one File.
++    let mut copy = unsafe { File::from_raw_fd(descriptor) };
++    copy.write_all(&bytes)?;
++    // bwrap reads the current offset. A private open-file description prevents
++    // retained caller duplicates from changing it after constructor return.
++    if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, SEALED) } != 0
++        || unsafe { libc::lseek(descriptor, 0, libc::SEEK_SET) } != 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    retain(&copy)
++}
++
++pub struct OwnedMount {
++    object: File,
++    destination: String,
++    readonly: bool,
++}
++
++impl OwnedMount {
++    pub fn new(object: File, destination: String, readonly: bool) -> io::Result<Self> {
++        let metadata = object.metadata()?;
++        if !guest_path(&destination)
++            || reserved(&destination)
++            || (!metadata.is_dir() && !metadata.is_file())
++        {
++            return Err(invalid());
++        }
++        Ok(Self {
++            object,
++            destination,
++            readonly,
++        })
++    }
++}
++
++/// Single-use custody; no host source pathname is carried by this type.
++pub struct PreparedOwnedBubblewrap {
++    image: File,
++    inherited: Vec<File>,
++    argv: Vec<CString>,
++}
++
++impl PreparedOwnedBubblewrap {
++    pub fn new(
++        image: File,
++        payload: File,
++        filter: File,
++        mut mounts: Vec<OwnedMount>,
++        argv: Vec<OsString>,
++        environment: Vec<(OsString, OsString)>,
++        workdir: String,
++    ) -> io::Result<Self> {
++        if unsafe { libc::geteuid() } == 0
++            || argv.is_empty()
++            || argv.len() > 4096
++            || argv[0] != PAYLOAD
++            || !guest_path(&workdir)
++            || reserved(&workdir)
++            || mounts.len() > 768
++            || environment.len() > 256
++            || !mounts.iter().any(|mount| {
++                mount.destination == workdir
++                    && mount
++                        .object
++                        .metadata()
++                        .is_ok_and(|metadata| metadata.is_dir())
++            })
++        {
++            return Err(invalid());
++        }
++        static_image(&image)?;
++        let image = retain(&image)?;
++        sealed(&payload, 512 << 20)?;
++        let filter = private_filter(&filter)?;
++        let mut names = std::collections::HashSet::new();
++        let mut total = 0usize;
++        for (name, value) in &environment {
++            let bytes = name.as_bytes();
++            total = total
++                .checked_add(bytes.len() + value.as_bytes().len() + 2)
++                .ok_or_else(invalid)?;
++            if bytes.is_empty()
++                || bytes.len() > 128
++                || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
++                || !bytes
++                    .iter()
++                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
++                || value.as_bytes().contains(&0)
++                || !names.insert(name.clone())
++                || total > 64 << 10
++            {
++                return Err(invalid());
++            }
++        }
++        for (index, mount) in mounts.iter().enumerate() {
++            if mounts[index + 1..].iter().any(|other| {
++                prefix(&mount.destination, &other.destination)
++                    || prefix(&other.destination, &mount.destination)
++            }) {
++                return Err(invalid());
++            }
++        }
++        // A covering grant is attached before a nested grant, independently
++        // of caller list ordering. The C seam refuses missing nested targets
++        // instead of creating entries through the covering source mount.
++        mounts.sort_by_key(|mount| mount.destination.matches('/').count());
++        let mut inherited = Vec::with_capacity(mounts.len() + 2);
++        let mut args: Vec<OsString> = [
++            "bwrap-owned-fd",
++            "--unshare-user",
++            "--unshare-pid",
++            "--unshare-net",
++            "--unshare-ipc",
++            "--unshare-uts",
++            "--die-with-parent",
++            "--new-session",
++            "--cap-drop",
++            "ALL",
++            "--clearenv",
++            "--proc",
++            "/proc",
++            "--dev",
++            "/dev",
++        ]
++        .into_iter()
++        .map(OsString::from)
++        .collect();
++        for mount in mounts {
++            let object = retain(&mount.object)?;
++            args.extend([
++                OsString::from(if mount.readonly {
++                    "--dc-ro-bind-fd"
++                } else {
++                    "--dc-bind-fd"
++                }),
++                object.as_raw_fd().to_string().into(),
++                mount.destination.into(),
++            ]);
++            inherited.push(object);
++        }
++        let payload = retain(&payload)?;
++        // Anonymous sealed images have no namespace-local pathname. The C seam
++        // creates and verifies a private copy, with no mutable-source fallback.
++        args.extend([
++            "--dc-ro-image-fd".into(),
++            payload.as_raw_fd().to_string().into(),
++            PAYLOAD.into(),
++        ]);
++        inherited.push(payload);
++        args.extend([
++            "--seccomp".into(),
++            filter.as_raw_fd().to_string().into(),
++            "--chdir".into(),
++            workdir.into(),
++        ]);
++        inherited.push(filter);
++        for (name, value) in environment {
++            args.extend(["--setenv".into(), name, value]);
++        }
++        args.push("--".into());
++        args.extend(argv);
++        let mut total = 0usize;
++        let argv = args
++            .into_iter()
++            .map(|arg| {
++                total = total
++                    .checked_add(arg.as_bytes().len() + 1)
++                    .ok_or_else(invalid)?;
++                if total > 256 << 10 {
++                    return Err(invalid());
++                }
++                CString::new(arg.as_bytes()).map_err(|_| invalid())
++            })
++            .collect::<io::Result<Vec<_>>>()?;
++        Ok(Self {
++            image,
++            inherited,
++            argv,
++        })
++    }
++
++    pub fn spawn(self) -> io::Result<MxcProcess> {
++        let Self {
++            image,
++            inherited,
++            argv,
++        } = self;
++        let image_fd = image.as_raw_fd();
++        let passed: Vec<_> = inherited.iter().map(AsRawFd::as_raw_fd).collect();
++        let mut pointers: Vec<_> = argv.iter().map(|arg| arg.as_ptr()).collect();
++        pointers.push(std::ptr::null());
++        // Raw pointer values remain valid because argv is held by the closure.
++        let pointers: Vec<usize> = pointers
++            .into_iter()
++            .map(|pointer| pointer as usize)
++            .collect();
++        let parent = unsafe { libc::getpid() };
++        // This target is never executed. Any execveat failure is returned from
++        // pre_exec, so Command cannot fall back to this or any PATH entry.
++        let mut command = Command::new("/__defenseclaw_no_path_fallback__");
++        command
++            .env_clear()
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::piped());
++        // SAFETY: the child callback only queries/sets descriptor flags, sets
++        // process attributes and calls execveat. All allocations/CStrings and
++        // pointers were prepared before fork; held Files outlive that syscall.
++        unsafe {
++            command.pre_exec(move || {
++                let _keep = (&image, &inherited, &argv);
++                if libc::syscall(
++                    libc::SYS_close_range,
++                    3u32,
++                    u32::MAX,
++                    libc::CLOSE_RANGE_CLOEXEC,
++                ) < 0
++                {
++                    return Err(io::Error::last_os_error());
++                }
++                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
++                    || libc::getppid() != parent
++                    || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
++                {
++                    return Err(io::Error::last_os_error());
++                }
++                for fd in &passed {
++                    let flags = libc::fcntl(*fd, libc::F_GETFD);
++                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
++                    {
++                        return Err(io::Error::last_os_error());
++                    }
++                }
++                let empty_environment = [std::ptr::null::<libc::c_char>()];
++                libc::syscall(
++                    libc::SYS_execveat,
++                    image_fd,
++                    c"".as_ptr(),
++                    pointers.as_ptr().cast::<*const libc::c_char>(),
++                    empty_environment.as_ptr(),
++                    libc::AT_EMPTY_PATH,
++                );
++                Err(io::Error::last_os_error())
++            });
++        }
++        let mut child = command.spawn()?;
++        // No wait/reaper exists yet, so this owned Child's pid cannot be reused
++        // between spawn and pidfd_open. After this point signals use pidfd only.
++        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
++        if descriptor < 0 {
++            let _ = child.kill();
++            // No unbounded wait: caller-owned helper custody must observe the
++            // failed launch. The std Child has not been reaped/reused here.
++            return Err(io::Error::last_os_error());
++        }
++        let process = OwnedProcess {
++            child,
++            pidfd: unsafe { OwnedFd::from_raw_fd(descriptor as i32) },
++            terminal: None,
++        };
++        Ok(MxcProcess::new(Box::new(process)))
++    }
++}
++
++struct OwnedProcess {
++    child: Child,
++    pidfd: OwnedFd,
++    terminal: Option<i32>,
++}
++
++impl SandboxProcess for OwnedProcess {
++    fn take_native_stdio(&mut self) -> io::Result<Option<NativeStdio>> {
++        Ok(Some(NativeStdio {
++            stdin: self.child.stdin.take().map(OwnedFd::from),
++            stdout: self.child.stdout.take().map(OwnedFd::from),
++            stderr: self.child.stderr.take().map(OwnedFd::from),
++        }))
++    }
++    fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
++        self.child.stdin.take().map(|value| Box::new(value) as _)
++    }
++    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
++        self.child.stdout.take().map(|value| Box::new(value) as _)
++    }
++    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
++        self.child.stderr.take().map(|value| Box::new(value) as _)
++    }
++    fn id(&self) -> u32 {
++        self.child.id()
++    }
++    fn try_wait(&mut self) -> io::Result<Option<i32>> {
++        if self.terminal.is_none() {
++            self.terminal = self
++                .child
++                .try_wait()?
++                .map(|status| status.code().unwrap_or(-1));
++        }
++        Ok(self.terminal)
++    }
++    fn kill(&mut self) -> io::Result<()> {
++        if self.terminal.is_some() {
++            return Ok(());
++        }
++        // SAFETY: this owned pidfd identifies the exact spawned process even
++        // after exit/reap. No caller-supplied PID or numeric process group used.
++        let result = unsafe {
++            libc::syscall(
++                libc::SYS_pidfd_send_signal,
++                self.pidfd.as_raw_fd(),
++                libc::SIGKILL,
++                std::ptr::null::<libc::siginfo_t>(),
++                0,
++            )
++        };
++        if result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(())
++    }
++    fn wait(&mut self) -> io::Result<i32> {
++        // The peer takes native stdio and drains it without blocking. Refuse a
++        // generic blocking wait that could deadlock behind unclaimed pipes.
++        if self.child.stdin.is_some() || self.child.stdout.is_some() || self.child.stderr.is_some()
++        {
++            return Err(io::Error::new(
++                io::ErrorKind::Unsupported,
++                "take native pipes before private wait",
++            ));
++        }
++        let deadline = Instant::now() + Duration::from_secs(2);
++        loop {
++            if let Some(code) = self.try_wait()? {
++                return Ok(code);
++            }
++            if Instant::now() >= deadline {
++                return Err(io::Error::new(
++                    io::ErrorKind::TimedOut,
++                    "private wait deadline",
++                ));
++            }
++            std::thread::sleep(Duration::from_millis(5));
++        }
++    }
++}
++
++impl Drop for OwnedProcess {
++    fn drop(&mut self) {
++        // Drop does not claim cleanup and never blocks on a child/pipe. The
++        // owning actor must observe terminal + EOF before success; the trusted
++        // host's outer custody remains mandatory on every failed peer path.
++        let _ = self.kill();
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn inert_image(kind: u32, seal: bool) -> File {
++        // This is deliberately not executable code and is never spawned.
++        let descriptor = unsafe {
++            libc::memfd_create(
++                c"inert-static-image".as_ptr(),
++                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
++            )
++        };
++        assert!(descriptor >= 0);
++        let mut file = unsafe { File::from_raw_fd(descriptor) };
++        let mut bytes = [0; 120];
++        bytes[..6].copy_from_slice(b"\x7fELF\x02\x01");
++        bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
++        bytes[18..20].copy_from_slice(&62u16.to_le_bytes());
++        bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
++        bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
++        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
++        bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
++        bytes[64..68].copy_from_slice(&kind.to_le_bytes());
++        file.write_all(&bytes).unwrap();
++        if seal {
++            assert_eq!(
++                unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, SEALED) },
++                0
++            );
++        }
++        file
++    }
++
++    #[test]
++    fn filter_copy_starts_at_zero_and_ignores_caller_offset_changes() {
++        let original = inert_image(1, true);
++        let length = original.metadata().unwrap().len();
++        assert_eq!(
++            unsafe { libc::lseek(original.as_raw_fd(), 0, libc::SEEK_CUR) },
++            length as i64
++        );
++        let copy = private_filter(&original).unwrap();
++        assert_eq!(
++            unsafe { libc::lseek(original.as_raw_fd(), 8, libc::SEEK_SET) },
++            8
++        );
++        assert_eq!(
++            unsafe { libc::lseek(copy.as_raw_fd(), 0, libc::SEEK_CUR) },
++            0
++        );
++        let mut expected = vec![0; length as usize];
++        original.read_exact_at(&mut expected, 0).unwrap();
++        let mut actual = Vec::new();
++        (&copy).read_to_end(&mut actual).unwrap();
++        assert_eq!(actual, expected);
++    }
++
++    #[test]
++    fn static_structure_refuses_interpreter_dynamic_and_mutable_images() {
++        assert!(static_image(&inert_image(1, true)).is_ok());
++        for kind in [2, 3] {
++            assert!(static_image(&inert_image(kind, true)).is_err());
++        }
++        assert!(static_image(&inert_image(1, false)).is_err());
++    }
++
++    #[test]
++    fn guest_destinations_refuse_alias_components_and_synthetic_roots() {
++        for path in ["/", "relative", "/a//b", "/a/../b", "/a/./b", "/a/"] {
++            assert!(!guest_path(path));
++        }
++        for path in [
++            "/dev",
++            "/dev/x",
++            "/proc",
++            "/proc/1",
++            "/.defenseclaw",
++            PAYLOAD,
++        ] {
++            assert!(reserved(path));
++        }
++        for path in ["/device", "/process", "/workspace", "/usr", "/lib"] {
++            assert!(guest_path(path));
++            assert!(!reserved(path));
++        }
++    }
++
++    #[test]
++    fn fixed_image_uses_verified_copy_route_without_path_or_legacy_data_options() {
++        let prepared = PreparedOwnedBubblewrap::new(
++            inert_image(1, true),
++            inert_image(1, true),
++            inert_image(1, true),
++            vec![OwnedMount::new(
++                File::open(std::env::temp_dir()).unwrap(),
++                "/work".into(),
++                false,
++            )
++            .unwrap()],
++            vec![PAYLOAD.into()],
++            vec![],
++            "/work".into(),
++        )
++        .unwrap();
++        let arguments: Vec<_> = prepared
++            .argv
++            .iter()
++            .map(|value| value.to_str().unwrap())
++            .collect();
++        assert_eq!(
++            arguments
++                .iter()
++                .filter(|value| **value == "--dc-ro-image-fd")
++                .count(),
++            1
++        );
++        assert!(!arguments.iter().any(|value| matches!(
++            *value,
++            "--ro-bind-data" | "--bind-data" | "--bind" | "--ro-bind"
++        )));
++        assert_eq!(arguments.last().copied(), Some(PAYLOAD));
++    }
++}

@@ -108,6 +108,11 @@ The storage paths and `deployment_mode` can not be kept that way: after a
 change to one, the gateway refuses that reload, and every later one, until you
 restart it, and `/health` shows the error as `last_reload_error`.
 
+Common sandbox changes apply through the policy-generation path without a
+gateway process restart. Changes to `sandbox.enabled`, `sandbox.runtimes`,
+`sandbox.ingress_port` or `sandbox.egress_port` rebind the sandbox listeners in
+process, as the equivalent OpenShell listener changes do.
+
 Adding, removing, enabling or disabling a connector
 (`guardrail.connectors.<c>.enabled`) applies in place: the gateway sets up or
 removes that connector's hooks and restarts its install watcher, without a

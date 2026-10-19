@@ -1,0 +1,135 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+name: AXIS native Windows peer source build
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-native-peer-windows-build.yml
+      - internal/axis/native/**
+      - test/e2e/axis/windows/mxc-v1/patches/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-windows-peer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          persist-credentials: false
+          sparse-checkout: |
+            internal/axis/native
+            test/e2e/axis/windows/mxc-v1/patches
+            test/e2e/axis/patches/mxc-literal-argv.patch
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.6'
+      - name: Stage complete exact Git bytes without Windows checkout conversion
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          checkout, root = Path('defenseclaw-source'), Path('peer')
+          head = os.environ['GITHUB_SHA']
+          assert os.environ['GITHUB_REPOSITORY'] == 'cisco-ai-defense/defenseclaw'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/codex/axis-sandbox-feasibility'
+          def git(*args):
+              return subprocess.run(['git', '-C', str(checkout), *args], check=True, capture_output=True, timeout=30).stdout
+          assert git('rev-parse', 'HEAD').decode().strip() == head
+          assert not git('status', '--porcelain').strip()
+          root.mkdir()
+          prefix = 'internal/axis/native/'
+          paths = git('ls-tree', '-r', '--name-only', head, '--', prefix).decode().splitlines()
+          assert 1 <= len(paths) <= 240
+          mapping = {name[len(prefix):]: name for name in paths}
+          mapping['build-workflow.yml'] = '.github/workflows/axis-native-peer-windows-build.yml'
+          for name in ('mxc-strict-windows-psec.patch', 'mxc-windows-literal-argv.patch', 'mxc-windows-process-identity.patch'):
+              mapping['windows-patches/' + name] = 'test/e2e/axis/windows/mxc-v1/patches/' + name
+          mapping['windows-patches/mxc-literal-argv.patch'] = 'test/e2e/axis/patches/mxc-literal-argv.patch'
+          files = {}
+          for target_name, source_name in sorted(mapping.items()):
+              relative = Path(target_name)
+              assert not relative.is_absolute() and '..' not in relative.parts and '\\' not in target_name
+              raw = git('cat-file', 'blob', head + ':' + source_name)
+              assert 0 < len(raw) <= 2 << 20
+              target = root / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              with target.open('xb') as stream: stream.write(raw)
+              files[target_name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+          (root / 'STAGING.json').write_text(json.dumps({'commit': head, 'repository': os.environ['GITHUB_REPOSITORY'], 'files': files, 'source_paths': mapping}, indent=2) + '\n', encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Exact peer source staging failed' }
+      - name: Check out exact AXIS policy source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: peer/axis-source
+          persist-credentials: false
+      - name: Check out exact MXC stable source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: peer/mxc-source
+          persist-credentials: false
+      - name: Build and run only reviewed inert tests; never launch peer or PSEC
+        working-directory: peer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust provisioning failed' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installations = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $installations.Count -ne 1) { throw 'One installed MSVC toolchain required' }
+          $visualStudioRoot = (Resolve-Path -LiteralPath $installations[0]).Path
+          & (Join-Path $visualStudioRoot 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $nativeLinker = (Resolve-Path -LiteralPath (Get-Command link.exe -CommandType Application -ErrorAction Stop).Source).Path
+          if (-not $nativeLinker.StartsWith($visualStudioRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Native linker escaped selected MSVC toolchain' }
+          if (-not $env:LIB -or -not $env:INCLUDE) { throw 'Installed MSVC/SDK environment missing' }
+          cargo +1.95.0 fmt -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Peer formatting failed' }
+          python prepare_windows_build.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows peer source build failed' }
+      - name: Preserve workflow identity on success or refusal
+        if: ${{ always() }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import json
+          import os
+          from pathlib import Path
+          root = Path('peer/windows-build-artifact')
+          root.mkdir(parents=True, exist_ok=True)
+          value = {key: os.environ[key] for key in ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')}
+          value.update(peer_or_payload_or_psec_execution=False, production_certification=False)
+          (root / 'WORKFLOW.json').write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Workflow identity capture failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: axis-native-windows-peer-${{ github.sha }}
+          path: peer/windows-build-artifact/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

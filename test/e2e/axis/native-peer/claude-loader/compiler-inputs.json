@@ -1,0 +1,72 @@
+{
+  "ar": {
+    "path": "/usr/bin/x86_64-linux-gnu-ar",
+    "sha256": "6452af2eea333b8c65e1adb92964fc8f97863ab003fa13f9d12bff5345cd7dbe",
+    "size": 55792
+  },
+  "as": {
+    "path": "/usr/bin/x86_64-linux-gnu-as",
+    "sha256": "21aff249b692b5c31a44007491f922dcb49f41323e362c57d2ada3f52eddb7f0",
+    "size": 745768
+  },
+  "cc1": {
+    "path": "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1",
+    "sha256": "5d1679131184e2de4435b426eb264bf13472fe026db8e5c6bc97445814e8e2f4",
+    "size": 30487984
+  },
+  "collect2": {
+    "path": "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+    "sha256": "4d1f341ae5b763b513258ee2812422a45e063c30a2f1924a0cf63d3699f3a158",
+    "size": 336056
+  },
+  "crtbeginS.o": {
+    "path": "/usr/lib/gcc/x86_64-linux-gnu/13/crtbeginS.o",
+    "sha256": "667ff5f1edc931d44d1f2bb44d313907aa274bcc207c0beff71a398335f0d29f",
+    "size": 2752
+  },
+  "crtendS.o": {
+    "path": "/usr/lib/gcc/x86_64-linux-gnu/13/crtendS.o",
+    "sha256": "9c8b2caad195193301ef072895dc89bea1d23371d4c19accd821debe27773063",
+    "size": 1168
+  },
+  "gcc": {
+    "path": "/usr/bin/x86_64-linux-gnu-gcc-13",
+    "sha256": "1b99826121ae6682a634e5efe09bd3e3df58ce58e0b28f849114ab5b89139c26",
+    "size": 1023032
+  },
+  "ld": {
+    "path": "/usr/bin/x86_64-linux-gnu-ld.bfd",
+    "sha256": "e9ceb054c12207970f2726dfc07e9a66b411602748628baf27399f02a9bbb31b",
+    "size": 1359128
+  },
+  "libgcc.a": {
+    "path": "/usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a",
+    "sha256": "d9376c55f97863a4e5fbb6c6beca2591b319bf786f3a7ca56da8964c5662171f",
+    "size": 3093656
+  },
+  "libgcc_eh.a": {
+    "path": "/usr/lib/gcc/x86_64-linux-gnu/13/libgcc_eh.a",
+    "sha256": "f853cbbf842ff8714cc8dd986e2fd5bb309d34d490b0707203223ee4d52c76bc",
+    "size": 66708
+  },
+  "make": {
+    "path": "/usr/bin/make",
+    "sha256": "d78b8f1d099fbcfb6f2f49ab87223b9b68fb3956642f92d6ec6de812e8afa965",
+    "size": 259808
+  },
+  "nm": {
+    "path": "/usr/bin/x86_64-linux-gnu-nm",
+    "sha256": "3708df3d7ce16e2c1dcdcd722784ae382d4d582276a71ab7bbe2d542f5621202",
+    "size": 44544
+  },
+  "ranlib": {
+    "path": "/usr/bin/x86_64-linux-gnu-ranlib",
+    "sha256": "60254978b8ee2c1b21b41d16a18a621dbbcc72e43eb2fa9f916818256c77e9ee",
+    "size": 55792
+  },
+  "readelf": {
+    "path": "/usr/bin/x86_64-linux-gnu-readelf",
+    "sha256": "64c58e15274bbbb5153f31078e455e9e77ee5f51489e709bba5bb788ce9df2b0",
+    "size": 789280
+  }
+}

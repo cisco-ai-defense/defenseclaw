@@ -80,7 +80,7 @@ func TestMountPlanNeedsHostMounts(t *testing.T) {
 	b, err := e.m.reserve("guardbox", e.project, eff.Workspace.Mode)
 	must(t, err)
 	rb := &rollback{}
-	_, err = e.m.create(t.Context(), e.gw, b, createInput{name: "guardbox", project: e.project, harness: spec, eff: eff,
+	_, err = e.m.create(t.Context(), e.gw, b, createInput{config: e.config(), name: "guardbox", project: e.project, harness: spec, eff: eff,
 		mode: eff.Workspace.Mode, resources: &eff.Resources}, rb)
 	rb.run(e.m, "guardbox")
 	wantCode(t, err, sandboxapi.CodeInternal)

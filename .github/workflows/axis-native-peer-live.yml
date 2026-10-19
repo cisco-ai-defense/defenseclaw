@@ -1,0 +1,134 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS fixed Linux native peer canary
+
+# One fixed contributor attempt. No caller-selected artifact, command or policy.
+on:
+  # Registration only: GitHub does not dispatch a new branch-only workflow
+  # until it has been registered. The complete job is skipped for push events.
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-native-peer-live.yml]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Exact independently reviewed fixed suite
+        type: choice
+        options: [lifecycle, claude-version]
+        default: lifecycle
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: axis-fixed-native-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fixed-canary:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FIXED_SUITE: ${{ inputs.suite || 'lifecycle' }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.6'
+      - name: Refuse a different source route before artifact preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = cisco-ai-defense/defenseclaw
+          test "$GITHUB_REF" = refs/heads/codex/axis-sandbox-feasibility
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$FIXED_SUITE" in lifecycle|claude-version) ;; *) exit 1 ;; esac
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(id -u)" != 0
+          test "$(uname -m)" = x86_64
+          python -m unittest discover -s test/e2e/axis/native-peer/live -p 'test_*.py' -v
+      - name: Prepare only exact independently reviewed artifact bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          case "$FIXED_SUITE" in
+            lifecycle) python test/e2e/axis/native-peer/live/prepare.py ;;
+            claude-version) python test/e2e/axis/native-peer/live/prepare_version.py ;;
+            *) exit 1 ;;
+          esac
+      - name: One fixed run with bounded whole-wrapper custody
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir live-evidence
+          uname -a >live-evidence/kernel.txt
+          id >live-evidence/runner-identity.txt
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          original=absent
+          if test -r "$knob"; then original="$(cat "$knob")"; fi
+          changed=0
+          restore_userns() {
+            result=$?
+            trap - EXIT
+            if test "$changed" = 1; then
+              if ! sudo -n /usr/sbin/sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" >live-evidence/userns-restore.log 2>&1; then result=1; fi
+              if test "$(cat "$knob")" != "$original"; then result=1; fi
+            fi
+            printf 'original=%s changed=%s current=%s\n' "$original" "$changed" "$(cat "$knob" 2>/dev/null || printf absent)" >live-evidence/userns-preparation.txt
+            exit "$result"
+          }
+          trap restore_userns EXIT
+          # Explicit host-floor preparation for this disposable GitHub VM only.
+          # Production readiness reports this requirement instead of changing it.
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if test "$original" = 1; then
+            changed=1
+            sudo -n /usr/sbin/sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >live-evidence/userns-prepare.log 2>&1
+            test "$(cat "$knob")" = 0
+          else
+            test "$original" = absent -o "$original" = 0
+          fi
+          # The admitted driver owns the complete fixed wrapper PID namespace.
+          # Its internal deadline is 120s, followed by bounded cleanup/retry.
+          # This outer trusted timeout also bounds a failed driver implementation.
+          /usr/bin/timeout --signal=TERM --kill-after=5s 160s \
+            /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed --suite "$FIXED_SUITE" \
+            --receipt "$(pwd)/live-inputs/REVIEWED-ARTIFACTS.json" \
+            --evidence "$(pwd)/live-evidence/native-peer-fixed-wrapper" \
+            >live-evidence/DRIVER-RESULT.json 2>live-evidence/driver-stderr.log
+      - name: Collect only the exact fixed fixture after whole-wrapper cleanup
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          case "$FIXED_SUITE" in
+            lifecycle) python test/e2e/axis/native-peer/live/prepare.py --collect-fixed-evidence ;;
+            claude-version) python test/e2e/axis/native-peer/live/prepare_version.py --collect-fixed-evidence ;;
+            *) exit 1 ;;
+          esac
+      - name: Retain bounded evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-fixed-native-peer-live-${{ github.sha }}
+          path: |
+            live-evidence/**
+            live-inputs/preparation-evidence/**
+            live-inputs/REVIEWED-ARTIFACTS.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6

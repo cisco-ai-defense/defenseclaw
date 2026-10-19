@@ -126,6 +126,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	if a.Cfg == nil {
 		return errors.New("DefenseClaw is not set up yet; run `defenseclaw init` first")
 	}
+	if err := a.checkSetupRuntime(); err != nil {
+		return err
+	}
 	// Setup asks before it changes the OpenShell gateway (and restarts it),
 	// the configuration and the shell rc files. Without a terminal nothing
 	// answers, and a question further on would fail with the earlier steps

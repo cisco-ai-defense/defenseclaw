@@ -25,7 +25,11 @@ agent hook / plugin / proxy / ACP
   -> defenseclaw-hook (cmd/defenseclaw-hook): one bounded local call
   -> defenseclaw-gateway (cmd/defenseclaw): config generation snapshot, policy (internal/policy, Rego + Go twin),
      guardrail rule packs (internal/guardrail), identity -> profile (internal/useridentity), audit SQLite (internal/audit),
-     telemetry (internal/observability), sandboxes (internal/openshell)
+     telemetry (internal/observability), sandbox controller and runtime contracts (internal/sandboxruntime),
+     private AXIS helper protocol, pipe owner and native custody (internal/axis/bridgeproto,
+     internal/axis/bridgeowner, internal/axis/bridgeprocess),
+     OpenShell implementation (internal/openshell), private held-source Windows host staging
+     (internal/openshell/workspace/host_stage.go; no provider activation)
 defenseclaw CLI + TUI (cli/defenseclaw): writes config.yaml only through the shared writer; doctor, setup, migrate
 managed hosts: lifecycle transaction (internal/enterpriseunix, packaging/windows), guardian and enumerator
   (internal/enterprisehooks), packages (.goreleaser.yaml, packaging/)

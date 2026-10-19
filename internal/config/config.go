@@ -356,6 +356,7 @@ type Config struct {
 	CiscoAIDefense  CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners        ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
 	OpenShell       OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Sandbox         *SandboxConfig       `mapstructure:"sandbox"          yaml:"sandbox,omitempty"`
 	Watch           WatchConfig          `mapstructure:"watch"            yaml:"watch"`
 	Firewall        FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
 	Guardrail       GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
@@ -2817,11 +2818,19 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 			standaloneRulePackDefault(candidate, dataDir, goos)
 		}
 	}
-	if !has("openshell", "pack_dir") {
+	if !has("openshell", "pack_dir") && (candidate.Sandbox == nil || !has("sandbox", "pack_dir")) {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 		if candidate.StandaloneEnterprise() {
 			standaloneOpenShellPackDirDefault(candidate, dataDir)
 		}
+	}
+	if candidate.Sandbox != nil && !has("sandbox", "pack_dir") && !has("openshell", "pack_dir") {
+		view := *candidate
+		view.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
+		if view.StandaloneEnterprise() {
+			standaloneOpenShellPackDirDefault(&view, dataDir)
+		}
+		candidate.Sandbox.PackDir = view.OpenShell.PackDir
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = join(dataDir, "device.key")
@@ -2942,6 +2951,9 @@ func loadConfigSourceCheckedWithLayout(
 			}
 			return nil, fmt.Errorf("config: unmarshal: %w", err)
 		}
+	}
+	if err := restoreSandboxConfig(&cfg, sourceBytes, dataDir); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
@@ -3113,11 +3125,23 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: application_protection: %w", err)
 	}
-	if err := cfg.ValidateOpenShell(); err != nil {
+	legacyValidation := cfg
+	if cfg.Sandbox != nil {
+		// Common enablement owns listener activation; validate legacy vendor
+		// values without treating its old enabled switch as a running adapter.
+		legacyValidation.OpenShell.Enabled = false
+	}
+	if err := legacyValidation.ValidateOpenShell(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
+	}
+	if err := cfg.ValidateSandbox(); err != nil {
+		return nil, fmt.Errorf("config: %w", sandboxSettingError("sandbox", err))
+	}
+	if err := cfg.applySandboxPolicy(); err != nil {
+		return nil, fmt.Errorf("config: %w", sandboxSettingError("sandbox", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI

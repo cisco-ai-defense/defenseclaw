@@ -357,9 +357,10 @@ def cli(ctx: click.Context) -> None:
     if _is_audit_export(ctx):
         return
     if invoked == "sandbox" and platform_support.host_os() == "windows":
-        # Every sandbox command refuses Windows (exit 3) before it would use
-        # the configuration, so a broken config.yaml is not the first thing
-        # to fix for a feature that cannot run there (GAP-0242).
+        # The sandbox stub answers explicit refusals directly. Implicit/auto
+        # run selection delegates configuration loading to the Go gateway so
+        # its selected runtime is known before OpenShell's platform check.
+        # Other commands preserve their platform-first refusal (GAP-0242).
         return
 
     from defenseclaw import config as cfg_mod
@@ -407,9 +408,7 @@ def cli(ctx: click.Context) -> None:
         # a malformed file (GAP-1633).
         from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
 
-        app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(
-            cfg_mod.ConfigVersionError(damage)
-        )
+        app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(cfg_mod.ConfigVersionError(damage))
         app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
         return
 
@@ -862,8 +861,7 @@ def main() -> None:
             # GAP-0264: a shell left in a folder that was deleted made the
             # first relative path fail in os.path.abspath, with a traceback.
             click.echo(
-                "Error: the current directory no longer exists. cd to an existing directory "
-                "and run the command again.",
+                "Error: the current directory no longer exists. cd to an existing directory and run the command again.",
                 err=True,
             )
             sys.exit(1)

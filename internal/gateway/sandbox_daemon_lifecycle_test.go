@@ -84,7 +84,7 @@ func TestSandboxDaemonReleaseNeverRacesACreate(t *testing.T) {
 	checked := make(chan struct{})
 	go func() { _, _ = f.d.check(ctx); close(checked) }()
 	<-entered
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	created := make(chan error, 1)
 	go func() {
 		_, err := ctl.Create(ctx, sandboxapi.CreateRequest{Harness: "claudecode"})
@@ -131,7 +131,7 @@ func TestSandboxDaemonCreatesAreSerialized(t *testing.T) {
 		return refusingResolve(r)
 	}
 	f.run(t)
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	done := make(chan error, 2)
 	create := func() {
 		_, err := ctl.Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode"})
@@ -170,7 +170,7 @@ func TestSandboxDaemonCreatesAreSerialized(t *testing.T) {
 // leave it for the next start.
 func TestSandboxDaemonStartRevokesOnlyEndedRegistrations(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	if err := f.d.regs.put(daemonRegistration{ID: "reg-a", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}

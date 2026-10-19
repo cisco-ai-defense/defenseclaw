@@ -1,0 +1,118 @@
+cases:
+  - name: legacy_namespace_absent
+    valid: true
+    source: |
+      openshell: {enabled: true, profile: strict}
+  - name: active_axis_is_unavailable
+    valid: false
+    path: sandbox.runtime
+    source: |
+      sandbox: {enabled: true, runtime: axis, runtimes: {axis: {enabled: true}}}
+  - name: stored_axis_selection_is_not_active
+    valid: true
+    source: |
+      sandbox: {enabled: false, runtime: axis, runtimes: {axis: {enabled: true}}}
+  - name: no_implicit_enablement
+    valid: true
+    source: |
+      sandbox: {runtime: axis}
+  - name: implicit_defaults_are_not_conflicts
+    valid: true
+    source: |
+      openshell: {binary: reviewed-openshell}
+      sandbox: {llm: none, workdir: {git_depth: 12}}
+  - name: matching_explicit_duplicates
+    valid: true
+    source: |
+      openshell: {profile: strict, yolo: false, workdir: {mode: copy}}
+      sandbox: {profile: strict, yolo: false, workdir: {mode: copy}}
+  - name: disjoint_nested_settings
+    valid: true
+    source: |
+      openshell: {workdir: {mode: copy}, admin: {allow_yolo: false}}
+      sandbox: {workdir: {masks: [.secret]}, admin: {process_tree: true}}
+  - name: conflict_explicit_false
+    valid: false
+    path: sandbox.yolo
+    source: |
+      openshell: {yolo: false}
+      sandbox: {yolo: true}
+  - name: conflict_explicit_empty
+    valid: false
+    path: sandbox.pack_dir
+    source: |
+      openshell: {pack_dir: ''}
+      sandbox: {pack_dir: /trusted/packs}
+  - name: conflict_nested_default_value
+    valid: false
+    path: sandbox.workdir.git_depth
+    source: |
+      openshell: {workdir: {git_depth: 200}}
+      sandbox: {workdir: {git_depth: 12}}
+  - name: conflict_admin_restriction
+    valid: false
+    path: sandbox.admin.allow_yolo
+    source: |
+      openshell: {admin: {allow_yolo: false}}
+      sandbox: {admin: {allow_yolo: true}}
+  - name: legacy_floor_cannot_be_dropped
+    valid: false
+    source: |
+      openshell: {admin: {required_for: [claudecode]}}
+      sandbox: {admin: {allowed: false}}
+  - name: common_floor_contradicts_profile
+    valid: false
+    source: |
+      sandbox: {admin: {allowed_harnesses: [codex]}}
+      guardrail:
+        profiles:
+          developers:
+            sandbox: {required_for: [claudecode]}
+  - name: unknown_runtime
+    valid: false
+    source: |
+      sandbox: {runtime: docker}
+  - name: unknown_lane
+    valid: false
+    source: |
+      sandbox: {runtimes: {foreign: {enabled: true}}}
+  - name: string_enablement
+    valid: false
+    source: |
+      sandbox: {runtimes: {axis: {enabled: 'true'}}}
+  - name: no_executable_override
+    valid: false
+    source: |
+      sandbox: {binary: /project/axis}
+  - name: common_egress_grammar
+    valid: false
+    source: |
+      sandbox: {egress: {allow: [https://example.com]}}
+  - name: common_resource_grammar
+    valid: false
+    source: |
+      sandbox: {resources: {cpu: '-1'}}
+  - name: listener_collision
+    valid: false
+    source: |
+      sandbox: {enabled: true, runtime: openshell, runtimes: {openshell: {enabled: true}}, ingress_port: 18970}
+  - name: inherited_listener_collision
+    valid: false
+    source: |
+      openshell: {ingress_port: 18970}
+      sandbox: {enabled: true, runtime: openshell, runtimes: {openshell: {enabled: true}}}
+  - name: common_off_disables_legacy_listener
+    valid: true
+    source: |
+      openshell: {enabled: true, ingress_port: 18970}
+      sandbox: {enabled: false}
+  - name: disabled_listener_does_not_bind
+    valid: true
+    source: |
+      sandbox: {enabled: false, ingress_port: 18970}
+  - name: secure_client_namespace_is_frozen
+    valid: false
+    source: |
+      deployment_mode: managed_enterprise
+      enterprise: {profile: secure_client}
+      sandbox: {enabled: false}

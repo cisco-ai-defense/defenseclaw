@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "scope": "fixed_linux_native_peer_offline_contributor_v1",
+  "verified": true,
+  "execution_performed": false,
+  "production_certification": false,
+  "axis_commit": "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c",
+  "mxc_commit": "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
+  "bubblewrap_commit": "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
+  "static_closure_sha256": "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
+  "payload_source_sha256": "aa695d4df73865cce90afd8dab41c819949a6f8dec66b9fe1a641be035df815e",
+  "builds": [
+    {
+      "role": "peer_and_static_bwrap",
+      "commit": "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139",
+      "run": 39158759518,
+      "artifact": 12148605722,
+      "archive_sha256": "68e5d232ed286cfbbbbcb212170cc6bf0aff4536cfbc98fb7129da1315a99085",
+      "provenance_sha256": "7d6fd05f40006e334921fa4efec58a033b3c2bbaf707d7be03b6322bc81ac59c"
+    },
+    {
+      "role": "fixed_payload",
+      "commit": "6a1f7080a39fbdfa39b98f3ea7db02516910dc3d",
+      "run": 39171740021,
+      "artifact": 12152816365,
+      "archive_sha256": "f27e44a36ff6d2349dff1ad38909f279ca027d429e85cb03a04b77322feb92db",
+      "provenance_sha256": "70979ab492b883e5c6c9d0c583477b9f1cb999b6d14fdc6a89ad356aa8134dae"
+    }
+  ],
+  "images": [
+    {
+      "role": "peer",
+      "path": "images/peer",
+      "sha256": "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665",
+      "size": 2722752
+    },
+    {
+      "role": "static_musl_bwrap",
+      "path": "images/bwrap-static-musl",
+      "sha256": "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee37d",
+      "size": 198584
+    },
+    {
+      "role": "fixed_payload",
+      "path": "images/fixed-payload",
+      "sha256": "3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d",
+      "size": 1929342
+    }
+  ]
+}

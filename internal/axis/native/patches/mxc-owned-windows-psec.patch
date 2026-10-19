@@ -1,0 +1,1369 @@
+diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+--- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+@@ -13,28 +13,27 @@
+ use std::ptr;
+ use std::sync::Arc;
+ 
+-use crate::learning_mode_core::{capture_diagnostics::CaptureAnalysis, AnalyzeError};
++use crate::learning_mode_core::{AnalyzeError, capture_diagnostics::CaptureAnalysis};
+ use crate::learning_mode_windows::{
+     EtlDenialAnalyzer, LearningModeApi, LearningModeError, LearningModeTraceSources,
+ };
+ use windows::Win32::Foundation::{
+-    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
+-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
++    CloseHandle, E_NOTIMPL, ERROR_CALL_NOT_IMPLEMENTED, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
++    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+ };
+ use windows::Win32::System::Console::{
+     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+ };
+ use windows::Win32::System::Threading::{
+-    CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
+-    EXTENDED_STARTUPINFO_PRESENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+-    STARTF_USESTDHANDLES, STARTUPINFOW,
++    CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, PROCESS_CREATION_FLAGS,
++    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+ };
+ use windows_core::{PCWSTR, PWSTR};
+ 
+ use crate::mxc_common::api_set::is_api_set_implemented;
+ use crate::mxc_common::audit::{
+-    sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
+-    TeardownStatus,
++    AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason, TeardownStatus,
++    sanitize_identity,
+ };
+ use crate::mxc_common::error::WxcError;
+ use crate::mxc_common::log_symbols::EMOJI_SECTION;
+@@ -44,17 +43,17 @@
+     FailurePhase, SandboxOutputMetadata, ScriptResponse,
+ };
+ use crate::mxc_common::process_util::{
+-    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
+-    SendOwnedHandle,
++    InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter, SendOwnedHandle,
++    create_std_pipes,
+ };
+ use crate::mxc_common::sandbox_process::{
+-    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+-    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
+-    StreamCloser,
++    NativeStdio, SandboxBackend, SandboxProcess, StdioMode, StreamCloser, boxed_closer,
++    cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard, take_boxed_read,
++    take_boxed_write,
+ };
+ use crate::mxc_common::script_runner::get_timeout_milliseconds;
+ use crate::mxc_common::string_util;
+-use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
++use crate::mxc_common::validator::{NetworkPolicySupport, validate_network_policy_support};
+ use crate::process_container_common::base_container_helpers::{
+     build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
+ };
+@@ -71,13 +70,13 @@
+ use crate::process_container_common::native_capture::CaptureSession;
+ use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
+ use crate::process_container_common::secenv::{
+-    self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
+-    SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+-    SECURITY_ENVIRONMENT_API_SET,
++    self, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE, ProcessSecurityEnvironment,
++    SECURITY_ENVIRONMENT_API_SET, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
++    SecurityEnvironmentVersion,
+ };
+ 
+ use windows::Win32::System::Threading::{
+-    ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
++    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, ResumeThread,
+ };
+ 
+ trait CaptureDenialAnalyzer {
+@@ -433,7 +432,7 @@
+ 
+ /// Pure admission: local drive or verbatim-drive syntax only. Do not normalize
+ /// a caller path first: that could traverse a remote junction on the host.
+-fn local_executable_parts(
++pub(crate) fn local_executable_parts(
+     program: &std::ffi::OsStr,
+ ) -> Result<(u16, Vec<std::ffi::OsString>), ScriptResponse> {
+     use std::os::windows::ffi::{OsStrExt, OsStringExt};
+@@ -497,13 +496,30 @@
+     ))
+ }
+ 
+-struct LocalExecutableCustody {
++pub(crate) struct LocalExecutableCustody {
+     // DOS spelling is only a CreateProcess compatibility input, not authority.
+     application: Vec<u16>,
+     // Hold directory names against rename; hold the image against writes/rename.
+     // Directory metadata and contents remain mutable under the caller's rights.
+     // This is not a digest-based executable authorization for a production host.
+     _handles: Vec<OwnedHandle>,
++}
++
++impl LocalExecutableCustody {
++    pub(crate) fn from_owned(image: std::fs::File) -> std::io::Result<Self> {
++        use std::os::windows::io::IntoRawHandle;
++        let application = crate::owned_windows_psec::actual_path(&image)?
++            .encode_utf16()
++            .chain(Some(0))
++            .collect();
++        // The input is the host's admitted immutable private COPY. Its parent
++        // keeps the section/view and directory lease. Never reopen argv[0].
++        let image = OwnedHandle::new(HANDLE(image.into_raw_handle()));
++        Ok(Self {
++            application,
++            _handles: vec![image],
++        })
++    }
+ }
+ 
+ // Native PROCESSINFOCLASS ProcessImageFileMapping (44) reads an input HANDLE
+@@ -548,12 +564,12 @@
+ ) -> Result<LocalExecutableCustody, ScriptResponse> {
+     use std::os::windows::ffi::{OsStrExt, OsStringExt};
+     use windows::Win32::Storage::FileSystem::{
+-        CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+-        QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
++        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+         FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS,
+         FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+         FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
+-        OPEN_EXISTING, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
++        GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW, OPEN_EXISTING,
++        QueryDosDeviceW, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+     };
+     let (drive, parts) = local_executable_parts(program)?;
+     let alias = [drive, 58, 0];
+@@ -805,7 +821,7 @@
+         use std::io::{Read, Seek, SeekFrom, Write};
+         use std::os::windows::io::BorrowedHandle;
+         use windows::Win32::Storage::FileSystem::{
+-            FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
++            FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+         };
+         use windows::Win32::System::Threading::GetCurrentProcess;
+         fn held_file(custody: &LocalExecutableCustody) -> std::fs::File {
+@@ -1137,6 +1153,7 @@
+         capture: bool,
+         literal_argv: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
+         literal_custody: Option<&LocalExecutableCustody>,
++        owned_stdio: Option<&crate::owned_windows_psec::OwnedWindowsStdio>,
+     ) -> Result<BaseChild, ScriptResponse> {
+         if literal_argv.is_some() != literal_custody.is_some() {
+             return Err(ScriptResponse::rejected(
+@@ -1258,8 +1275,10 @@
+         // In capture mode (`StdioMode::Pipes`) we always take the pipe
+         // path and wire the child to capture pipes that the streaming handle
+         // reads from.
+-        let pipe_mode =
+-            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
++        let pipe_mode = owned_stdio.is_some()
++            || capture
++            || !std::io::stdout().is_terminal()
++            || !std::io::stderr().is_terminal();
+ 
+         if pipe_mode {
+             if capture {
+@@ -1289,7 +1308,47 @@
+         let mut captured_stdin_write: Option<OwnedHandle> = None;
+ 
+         if pipe_mode {
+-            if capture {
++            if let Some(stdio) = owned_stdio {
++                use std::os::windows::io::AsRawHandle;
++                if capture {
++                    return Err(ScriptResponse::rejected(
++                        "owned stdio cannot use synchronous capture",
++                    ));
++                }
++                let handles = [
++                    stdio.stdin.as_raw_handle(),
++                    stdio.stdout.as_raw_handle(),
++                    stdio.stderr.as_raw_handle(),
++                ];
++                if handles
++                    .iter()
++                    .enumerate()
++                    .any(|(i, h)| h.is_null() || handles[..i].contains(h))
++                {
++                    return Err(ScriptResponse::rejected(
++                        "owned stdio requires three distinct handles",
++                    ));
++                }
++                for raw in handles {
++                    let mut flags = 0u32;
++                    unsafe {
++                        windows::Win32::Foundation::GetHandleInformation(HANDLE(raw), &mut flags)
++                    }
++                    .map_err(|_| ScriptResponse::rejected("owned stdio handle metadata refused"))?;
++                    if flags & 1 == 0
++                        || unsafe { windows::Win32::Storage::FileSystem::GetFileType(HANDLE(raw)) }
++                            .0
++                            != 3
++                    {
++                        return Err(ScriptResponse::rejected(
++                            "owned stdio requires inherited pipe endpoints",
++                        ));
++                    }
++                }
++                h_stdin = HANDLE(handles[0]);
++                h_stdout = HANDLE(handles[1]);
++                h_stderr = HANDLE(handles[2]);
++            } else if capture {
+                 let (stdin_read, stdin_write) = match create_std_pipes(false) {
+                     Ok(p) => p,
+                     Err(e) => return Err(ScriptResponse::error(&format!("stdin pipe: {e}"))),
+@@ -1528,50 +1587,48 @@
+                     .map(ProcessSecurityEnvironment::raw)
+             })
+             .expect("PSEC environment owner is initialized before launch");
+-        let extended_startup =
+-            match SecurityEnvironmentStartupInfo::new(si, environment_handle, &inherited_handles) {
+-                Ok(startup) => startup,
+-                Err(primary) => {
+-                    let cleanup_error = capture_session
+-                        .take()
+-                        .map(|session| session.finish(None))
+-                        .unwrap_or(Ok(()))
+-                        .err();
+-                    let mut msg =
+-                        format!("failed to attach the process security environment: {primary}");
+-                    if let Some(cleanup_error) = &cleanup_error {
+-                        let _ = write!(
++        let extended_startup = match SecurityEnvironmentStartupInfo::new(
++            si,
++            environment_handle,
++            &inherited_handles,
++        ) {
++            Ok(startup) => startup,
++            Err(primary) => {
++                let cleanup_error = capture_session
++                    .take()
++                    .map(|session| session.finish(None))
++                    .unwrap_or(Ok(()))
++                    .err();
++                let mut msg =
++                    format!("failed to attach the process security environment: {primary}");
++                if let Some(cleanup_error) = &cleanup_error {
++                    let _ = write!(
+                         msg,
+                         "; additionally failed to discard the learning-mode trace: {cleanup_error}"
+                     );
+-                    }
+-                    let _ = writeln!(logger, "Error: {msg}");
+-                    log_base_network_policy_audit(
+-                        request,
+-                        &identity,
+-                        OperationStatus::Failure,
+-                        logger,
+-                    );
+-                    let failure_phase = if primary.is_api_unavailable()
+-                        || cleanup_error.as_ref().is_some_and(
+-                            crate::learning_mode_windows::LearningModeError::is_api_unavailable,
+-                        ) {
+-                        FailurePhase::BackendUnavailable
+-                    } else {
+-                        FailurePhase::LaunchFailed
+-                    };
+-                    if capture_denials.is_some() {
+-                        self.cleanup_capture_begin_failure(logger);
+-                    }
+-                    return Err(ScriptResponse {
+-                        exit_code: -1,
+-                        error_message: msg.clone(),
+-                        standard_err: msg,
+-                        failure_phase,
+-                        ..Default::default()
+-                    });
+                 }
+-            };
++                let _ = writeln!(logger, "Error: {msg}");
++                log_base_network_policy_audit(request, &identity, OperationStatus::Failure, logger);
++                let failure_phase = if primary.is_api_unavailable()
++                    || cleanup_error.as_ref().is_some_and(
++                        crate::learning_mode_windows::LearningModeError::is_api_unavailable,
++                    ) {
++                    FailurePhase::BackendUnavailable
++                } else {
++                    FailurePhase::LaunchFailed
++                };
++                if capture_denials.is_some() {
++                    self.cleanup_capture_begin_failure(logger);
++                }
++                return Err(ScriptResponse {
++                    exit_code: -1,
++                    error_message: msg.clone(),
++                    standard_err: msg,
++                    failure_phase,
++                    ..Default::default()
++                });
++            }
++        };
+         let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
+         // Freeze numeric shape before the native call. UTF-16 block lengths
+         // include their NUL terminators; counts never carry source values.
+@@ -1783,8 +1840,7 @@
+                 }
+                 self.proxy_coordinator.stop(logger);
+ 
+-                const JOB_SETUP_FAILED_MSG: &str =
+-                    "BaseContainer sandbox could not be placed in a job object, so it \
++                const JOB_SETUP_FAILED_MSG: &str = "BaseContainer sandbox could not be placed in a job object, so it \
+                      could not be reliably terminated; the launch was rejected to \
+                      avoid running an uncontainable sandbox.";
+                 let mut extended_error = format!("BaseContainer job-object setup failed: {e}");
+@@ -2024,7 +2080,7 @@
+         // Pipes → capture pipes the caller drives; Inherit → the child inherits
+         // the binary's own std handles / console (a TTY when the binary has one).
+         let capture = stdio == StdioMode::Pipes;
+-        let child = self.spawn_base(request, logger, capture, None, None)?;
++        let child = self.spawn_base(request, logger, capture, None, None, None)?;
+         Ok(Box::new(BaseContainerSandboxProcess::from_child(
+             child, logger,
+         )))
+@@ -2050,6 +2106,7 @@
+             stdio == StdioMode::Pipes,
+             Some(argv),
+             Some(&custody),
++            None,
+         )?;
+         drop(custody);
+         Ok(Box::new(BaseContainerSandboxProcess::from_child(
+@@ -2915,15 +2972,15 @@
+ mod tests {
+     use super::*;
+     use crate::learning_mode_core::{
+-        capture_diagnostics::CaptureVerboseLoggingSummary, AccessType, AnalysisResult,
+-        AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
++        AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
++        capture_diagnostics::CaptureVerboseLoggingSummary,
+     };
+     use crate::mxc_common::models::{
+         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, ContainmentBackend, NetworkAction,
+         NetworkCidr, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort,
+         NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig, UiPolicy,
+     };
+-    use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
++    use crate::mxc_common::network_parser::{NetworkSections, parse_network_policy};
+     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
+     use crate::mxc_common::wire;
+     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
+@@ -3919,13 +3976,15 @@
+             spec.capabilities(),
+             Some("privateNetworkClientServer,networkLoopback")
+         );
+-        assert!(spec
+-            .capabilities()
+-            .is_none_or(|capabilities| !capabilities.contains("internetClient")));
+-        assert!(spec
+-            .network_policy()
+-            .and_then(|network| network.proxy())
+-            .is_some());
++        assert!(
++            spec.capabilities()
++                .is_none_or(|capabilities| !capabilities.contains("internetClient"))
++        );
++        assert!(
++            spec.network_policy()
++                .and_then(|network| network.proxy())
++                .is_some()
++        );
+     }
+ 
+     #[test]
+@@ -4043,16 +4102,19 @@
+                 let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+                 let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+ 
+-                assert!(!spec
+-                    .capabilities()
+-                    .unwrap_or_default()
+-                    .split(',')
+-                    .any(|capability| capability == "networkLoopback"));
+-                assert!(spec
+-                    .network_policy()
+-                    .unwrap()
+-                    .allowed_appcontainer_peer()
+-                    .is_none());
++                assert!(
++                    !spec
++                        .capabilities()
++                        .unwrap_or_default()
++                        .split(',')
++                        .any(|capability| capability == "networkLoopback")
++                );
++                assert!(
++                    spec.network_policy()
++                        .unwrap()
++                        .allowed_appcontainer_peer()
++                        .is_none()
++                );
+             }
+         }
+     }
+@@ -4513,3 +4575,142 @@
+     // BaseContainer native-PSEC exception) is exercised as a consolidated
+     // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
+ }
++
++// Contributor-only ownership adapter. The shared AXIS Owner remains the only
++// event-loop/controller. This value reuses the existing native child and Job.
++pub struct OwnedPsecProcess {
++    child: BaseChild,
++    _files: Vec<std::fs::File>,
++    stop_requested: bool,
++    code: Option<i32>,
++}
++#[repr(C)]
++struct OwnedJobAccounting {
++    times: [i64; 4],
++    faults: u32,
++    total: u32,
++    active: u32,
++    terminated: u32,
++}
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    #[link_name = "QueryInformationJobObject"]
++    fn owned_query_job(
++        job: HANDLE,
++        class: u32,
++        output: *mut c_void,
++        size: u32,
++        used: *mut u32,
++    ) -> i32;
++}
++impl OwnedPsecProcess {
++    fn empty(&self) -> std::io::Result<bool> {
++        let job = self
++            .child
++            .job
++            .as_ref()
++            .ok_or_else(|| std::io::Error::other("owned PSEC Job absent"))?;
++        let mut accounting: OwnedJobAccounting = unsafe { std::mem::zeroed() };
++        let mut used = 0;
++        if unsafe {
++            owned_query_job(
++                HANDLE(job.handle_value() as *mut c_void),
++                1,
++                (&mut accounting as *mut OwnedJobAccounting).cast(),
++                std::mem::size_of::<OwnedJobAccounting>() as u32,
++                &mut used,
++            )
++        } == 0
++            || used != std::mem::size_of::<OwnedJobAccounting>() as u32
++        {
++            return Err(std::io::Error::other("owned PSEC Job accounting refused"));
++        }
++        Ok(accounting.active == 0)
++    }
++    pub fn stop(&mut self) -> std::io::Result<()> {
++        self.stop_requested = true;
++        let job = self
++            .child
++            .job
++            .as_ref()
++            .ok_or_else(|| std::io::Error::other("owned PSEC Job absent"))?;
++        let job_result = job.terminate(u32::MAX);
++        let root = unsafe { WaitForSingleObject(self.child.process.get(), 0) };
++        let root_result = if root == WAIT_TIMEOUT {
++            unsafe { TerminateProcess(self.child.process.get(), u32::MAX) }
++                .map_err(|_| std::io::Error::other("owned PSEC root stop refused"))
++        } else if root == WAIT_OBJECT_0 {
++            Ok(())
++        } else {
++            Err(std::io::Error::other("owned PSEC root wait refused"))
++        };
++        if job_result.is_err() || root_result.is_err() {
++            return Err(std::io::Error::other("owned PSEC stop incomplete"));
++        }
++        Ok(())
++    }
++    pub fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
++        let wait = unsafe { WaitForSingleObject(self.child.process.get(), 0) };
++        if wait == WAIT_TIMEOUT {
++            return Ok(None);
++        }
++        if wait != WAIT_OBJECT_0 {
++            return Err(std::io::Error::other("owned PSEC root wait refused"));
++        }
++        if self.code.is_none() {
++            let mut code = 0;
++            unsafe { GetExitCodeProcess(self.child.process.get(), &mut code) }
++                .map_err(|_| std::io::Error::other("owned PSEC root result refused"))?;
++            self.code = Some(code as i32);
++        }
++        // Root exit alone is insufficient: stop remaining descendants, then
++        // observe Job active0 with a nonblocking accounting query before exit.
++        if !self.stop_requested {
++            self.stop()?;
++        }
++        if !self.empty()? {
++            return Ok(None);
++        }
++        self.child.security_environment.take();
++        Ok(self.code)
++    }
++}
++impl Drop for OwnedPsecProcess {
++    fn drop(&mut self) {
++        // No wait, thread join, or new launch is hidden here. The exact owned
++        // Job's kill-on-close plus the independent Go outer Job contain error
++        // exits. Only try_wait above can establish normal teardown completion.
++        let _ = self.stop();
++    }
++}
++impl BaseContainerRunner {
++    pub(crate) fn spawn_owned_psec(
++        &mut self,
++        request: ExecutionRequest,
++        argv: crate::mxc_common::literal_argv::LiteralArgv,
++        custody: LocalExecutableCustody,
++        files: Vec<std::fs::File>,
++        stdio: crate::owned_windows_psec::OwnedWindowsStdio,
++    ) -> Result<OwnedPsecProcess, ScriptResponse> {
++        crate::mxc_common::validator::validate_argv_common(&request, &argv)?;
++        self.validate(&request)?;
++        windows_literal_argv_buffers(&argv)?;
++        crate::owned_windows_psec::validate_stdio(&stdio)
++            .map_err(|_| ScriptResponse::rejected("owned synchronous workload stdio refused"))?;
++        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
++        let child = self.spawn_base(
++            &request,
++            &mut logger,
++            false,
++            Some(&argv),
++            Some(&custody),
++            Some(&stdio),
++        )?;
++        Ok(OwnedPsecProcess {
++            child,
++            _files: files,
++            stop_requested: false,
++            code: None,
++        })
++    }
++}
+diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -226,14 +226,19 @@
+ /// schema version.
+ ///
+ pub mod v1 {
++    #[cfg(target_os = "windows")]
++    pub use crate::owned_windows_psec::{OwnedWindowsStdio, PreparedOwnedWindowsPsec};
++    #[cfg(target_os = "windows")]
++    pub use crate::process_container_common::base_container_runner::OwnedPsecProcess;
++
+     /// Explicit literal OS argv; unsupported backends refuse without fallback.
+     pub mod argv {
+         pub use crate::literal_argv::{spawn, spawn_with_pty};
+     }
+ 
+     pub use crate::mxc_engine::{
+-        available_backends, platform_support, AvailableBackend, BackendCapability,
+-        BubblewrapNetworkSupport, Error, ErrorCode, PlatformSupport, ProxyEnforcement,
++        AvailableBackend, BackendCapability, BubblewrapNetworkSupport, Error, ErrorCode,
++        PlatformSupport, ProxyEnforcement, available_backends, platform_support,
+     };
+     #[cfg(target_os = "windows")]
+     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
+@@ -262,8 +267,8 @@
+         /// Host filesystem-policy discovery helpers and their options.
+         pub mod filesystem {
+             pub use crate::policy::{
++                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
+                 available_tools_policy, temporary_files_policy, user_profile_policy,
+-                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
+             };
+         }
+ 
+@@ -373,7 +378,7 @@
+     }
+ 
+     #[cfg(target_os = "windows")]
+-    fn prepare_windows_psec_argv(
++    pub(crate) fn prepare_windows_psec_argv(
+         request: &ContainerRequest,
+         values: Vec<std::ffi::OsString>,
+         telemetry: Option<TelemetryConfig>,
+@@ -685,3 +690,6 @@
+         )
+     })
+ }
++
++#[cfg(target_os = "windows")]
++mod owned_windows_psec;
+diff --git a/src/mxc-sdk/src/owned_windows_psec.rs b/src/mxc-sdk/src/owned_windows_psec.rs
+new file mode 100644
+--- /dev/null
++++ b/src/mxc-sdk/src/owned_windows_psec.rs
+@@ -0,0 +1,548 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++//! Contributor-only owned native PSEC inputs. No fallback, resolver or shell.
++//! The host must retain the immutable private image copy's section/view while
++//! this value/process exists. A read-only original is not an immutable copy.
++//! The host must also retain its no-delete-share ancestor leases above CWD
++//! and around the sealed image. A File alone does not freeze its DOS spelling.
++use crate::mxc_common::literal_argv::LiteralArgv;
++use crate::mxc_common::models::ScriptResponse;
++use crate::policy::{ContainerRequest, PreparedContainerRequest};
++use crate::process_container_common::base_container_runner::{
++    BaseContainerRunner, LocalExecutableCustody, OwnedPsecProcess,
++};
++use std::ffi::{OsString, c_void};
++use std::fs::File;
++use std::io;
++use std::mem::size_of;
++use std::os::windows::io::{AsRawHandle, OwnedHandle};
++use windows::Win32::Foundation::HANDLE;
++
++fn refused() -> io::Error {
++    io::Error::other("owned Windows PSEC admission refused")
++}
++#[repr(C, align(8))]
++struct Basic {
++    attributes: u32,
++    access: u32,
++    count: u32,
++    pointers: u32,
++    reserved: [u32; 10],
++}
++const _: () = assert!(size_of::<Basic>() == 56);
++#[repr(C)]
++struct Identity {
++    volume: u64,
++    file: [u8; 16],
++}
++#[repr(C)]
++struct Info {
++    attributes: u32,
++    times: [u32; 6],
++    volume: u32,
++    high: u32,
++    low: u32,
++    links: u32,
++    id_high: u32,
++    id_low: u32,
++}
++#[repr(C)]
++struct Name {
++    length: u16,
++    maximum: u16,
++    buffer: *mut u16,
++}
++#[repr(C)]
++struct Attributes {
++    size: u32,
++    root: HANDLE,
++    name: *mut Name,
++    attributes: u32,
++    security: *mut c_void,
++    qos: *mut c_void,
++}
++#[repr(C)]
++struct Status {
++    status: usize,
++    information: usize,
++}
++const _: () = assert!(size_of::<Identity>() == 24);
++const _: () = assert!(size_of::<Info>() == 52);
++const _: () = assert!(size_of::<Name>() == 16);
++const _: () = assert!(size_of::<Attributes>() == 48);
++const _: () = assert!(size_of::<Status>() == 16);
++#[link(name = "ntdll")]
++unsafe extern "system" {
++    fn NtQueryObject(
++        handle: HANDLE,
++        class: u32,
++        output: *mut c_void,
++        size: u32,
++        used: *mut u32,
++    ) -> i32;
++    fn NtQueryInformationFile(
++        handle: HANDLE,
++        status: *mut Status,
++        output: *mut c_void,
++        size: u32,
++        class: u32,
++    ) -> i32;
++    fn NtOpenFile(
++        output: *mut HANDLE,
++        access: u32,
++        attributes: *mut Attributes,
++        status: *mut Status,
++        share: u32,
++        options: u32,
++    ) -> i32;
++}
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn GetFileType(handle: HANDLE) -> u32;
++    fn GetHandleInformation(handle: HANDLE, flags: *mut u32) -> i32;
++    fn GetFileInformationByHandle(handle: HANDLE, info: *mut Info) -> i32;
++    fn GetFileInformationByHandleEx(
++        handle: HANDLE,
++        class: u32,
++        info: *mut c_void,
++        size: u32,
++    ) -> i32;
++    fn GetFinalPathNameByHandleW(handle: HANDLE, buffer: *mut u16, size: u32, flags: u32) -> u32;
++}
++
++pub(crate) fn actual_path(file: &File) -> io::Result<String> {
++    let mut value = vec![0u16; 32768];
++    let used = unsafe {
++        GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), value.as_mut_ptr(), 32768, 0)
++    } as usize;
++    if used == 0 || used >= value.len() {
++        return Err(refused());
++    }
++    let value = String::from_utf16(&value[..used]).map_err(|_| refused())?;
++    let value = value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned();
++    super::process_container_common::base_container_runner::local_executable_parts(
++        std::ffi::OsStr::new(&value),
++    )
++    .map_err(|_| refused())?;
++    Ok(value)
++}
++fn identity(file: &File, directory: bool) -> io::Result<Identity> {
++    let mut info: Info = unsafe { std::mem::zeroed() };
++    let mut identity = Identity {
++        volume: 0,
++        file: [0; 16],
++    };
++    if unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) } == 0
++        || info.attributes & 0x400 != 0
++        || (info.attributes & 0x10 != 0) != directory
++        || (!directory && info.links != 1)
++        || unsafe {
++            GetFileInformationByHandleEx(
++                HANDLE(file.as_raw_handle()),
++                18,
++                (&mut identity as *mut Identity).cast(),
++                24,
++            )
++        } == 0
++    {
++        return Err(refused());
++    }
++    Ok(identity)
++}
++fn access(file: &File, write: bool, image: bool) -> io::Result<()> {
++    let mut value: Basic = unsafe { std::mem::zeroed() };
++    let mut used = 0;
++    if unsafe {
++        NtQueryObject(
++            HANDLE(file.as_raw_handle()),
++            0,
++            (&mut value as *mut Basic).cast(),
++            size_of::<Basic>() as u32,
++            &mut used,
++        )
++    } != 0
++        || used != size_of::<Basic>() as u32
++    {
++        return Err(refused());
++    }
++    if !access_allowed(value.access, write, image) {
++        return Err(refused());
++    }
++    Ok(())
++}
++fn access_allowed(granted: u32, write: bool, image: bool) -> bool {
++    let required = 0x120089 | if write { 0x116 } else { 0 } | if image { 0x20 } else { 0 };
++    // No DELETE/DELETE_CHILD, security-descriptor writes, SACL access or
++    // unrecognized privilege-bearing bits. FILE_EXECUTE/TRAVERSE is the only
++    // optional readonly right beyond the exact generic-read/write role mask.
++    let allowed = required | 0x20;
++    granted & required == required && granted & !allowed == 0
++}
++
++fn relative_pin(
++    root: &File,
++    source: &File,
++    relative: &str,
++    directory: bool,
++) -> io::Result<Vec<File>> {
++    use std::os::windows::io::FromRawHandle;
++    let self_root = relative.is_empty();
++    if self_root && !directory {
++        return Err(refused());
++    }
++    let parts: Vec<_> = relative.split('\\').collect();
++    if parts.is_empty() || parts.len() > 256 {
++        return Err(refused());
++    }
++    let mut result: Vec<File> = Vec::with_capacity(parts.len());
++    for (index, part) in parts.iter().enumerate() {
++        if (!self_root && part.is_empty())
++            || *part == "."
++            || *part == ".."
++            || part.contains(['/', ':', '\0'])
++        {
++            return Err(refused());
++        }
++        let mut units: Vec<_> = part.encode_utf16().collect();
++        if (!self_root && units.is_empty()) || units.len() > 255 {
++            return Err(refused());
++        }
++        let mut name = Name {
++            length: (units.len() * 2) as u16,
++            maximum: (units.len() * 2) as u16,
++            // NT's empty ObjectName addresses the held root itself. A literal
++            // dot is not the same native operation and is never substituted.
++            buffer: if units.is_empty() {
++                std::ptr::null_mut()
++            } else {
++                units.as_mut_ptr()
++            },
++        };
++        let parent = result.last().unwrap_or(root);
++        let mut attributes = Attributes {
++            size: size_of::<Attributes>() as u32,
++            root: HANDLE(parent.as_raw_handle()),
++            name: &mut name,
++            attributes: 0x1000,
++            security: std::ptr::null_mut(),
++            qos: std::ptr::null_mut(),
++        };
++        let mut status = Status {
++            status: 0,
++            information: 0,
++        };
++        let mut handle = HANDLE::default();
++        let dir = index + 1 != parts.len() || directory;
++        let nt = unsafe {
++            NtOpenFile(
++                &mut handle,
++                0x120089,
++                &mut attributes,
++                &mut status,
++                3,
++                0x200000 | 0x20 | if dir { 1 } else { 0x40 },
++            )
++        };
++        if handle.0.is_null() || handle.0 as isize == -1 {
++            return Err(refused());
++        }
++        let file = unsafe { File::from_raw_handle(handle.0) };
++        if nt as u32 == 0x103 {
++            unsafe { ExitProcess(70) }
++        }
++        if nt != 0 {
++            return Err(refused());
++        }
++        identity(&file, dir)?;
++        result.push(file);
++    }
++    let a = identity(result.last().ok_or_else(refused)?, directory)?;
++    let b = identity(source, directory)?;
++    if a.volume != b.volume || a.file != b.file {
++        return Err(refused());
++    }
++    Ok(result)
++}
++
++// Root privacy is an explicit current-user + SYSTEM protected DACL. Paths are
++// used only to correlate held objects; no string opens an arbitrary host grant.
++include!("owned_windows_root_security.rs");
++
++fn synchronous_stdio_mode(mode: u32, access: u32, writing: bool) -> bool {
++    matches!(mode & 0x30, 0x10 | 0x20)
++        && access & (0x100000 | if writing { 2 } else { 1 })
++            == (0x100000 | if writing { 2 } else { 1 })
++}
++pub(crate) fn validate_stdio(stdio: &OwnedWindowsStdio) -> io::Result<()> {
++    for (handle, writing) in [
++        (&stdio.stdin, false),
++        (&stdio.stdout, true),
++        (&stdio.stderr, true),
++    ] {
++        let mut flags = 0;
++        if unsafe { GetFileType(HANDLE(handle.as_raw_handle())) } != 3
++            || unsafe { GetHandleInformation(HANDLE(handle.as_raw_handle()), &mut flags) } == 0
++            || flags & 1 == 0
++        {
++            return Err(refused());
++        }
++        let mut mode = 0u32;
++        let mut status = Status {
++            status: 0,
++            information: 0,
++        };
++        let result = unsafe {
++            NtQueryInformationFile(
++                HANDLE(handle.as_raw_handle()),
++                &mut status,
++                (&mut mode as *mut u32).cast(),
++                4,
++                16,
++            )
++        };
++        if result as u32 == 0x103 {
++            unsafe { ExitProcess(70) }
++        }
++        let mut basic: Basic = unsafe { std::mem::zeroed() };
++        let mut used = 0;
++        if result != 0
++            || status.information != 4
++            || unsafe {
++                NtQueryObject(
++                    HANDLE(handle.as_raw_handle()),
++                    0,
++                    (&mut basic as *mut Basic).cast(),
++                    56,
++                    &mut used,
++                )
++            } != 0
++            || used != 56
++            || !synchronous_stdio_mode(mode, basic.access, writing)
++        {
++            return Err(refused());
++        }
++    }
++    Ok(())
++}
++pub struct PreparedOwnedWindowsPsec {
++    request: PreparedContainerRequest,
++    argv: LiteralArgv,
++    custody: LocalExecutableCustody,
++    files: Vec<File>,
++}
++pub struct OwnedWindowsStdio {
++    pub(crate) stdin: OwnedHandle,
++    pub(crate) stdout: OwnedHandle,
++    pub(crate) stderr: OwnedHandle,
++}
++impl OwnedWindowsStdio {
++    pub fn new(stdin: OwnedHandle, stdout: OwnedHandle, stderr: OwnedHandle) -> io::Result<Self> {
++        let owned = Self {
++            stdin,
++            stdout,
++            stderr,
++        };
++        let values = [
++            owned.stdin.as_raw_handle(),
++            owned.stdout.as_raw_handle(),
++            owned.stderr.as_raw_handle(),
++        ];
++        if values
++            .iter()
++            .enumerate()
++            .any(|(index, value)| value.is_null() || values[..index].contains(value))
++        {
++            return Err(refused());
++        }
++        validate_stdio(&owned)?;
++        Ok(owned)
++    }
++}
++impl PreparedOwnedWindowsPsec {
++    /// The caller retains the immutable image view and the no-delete-share
++    /// parent/ancestor leases for CWD and the sealed payload until completion.
++    /// This constructor pins CWD itself and supported descendants, not parents
++    /// above the supplied root or ancestors of the separately sealed image.
++    pub fn new(
++        request: ContainerRequest,
++        values: Vec<OsString>,
++        payload: File,
++        cwd: File,
++        readonly: Vec<File>,
++        readwrite: Vec<File>,
++    ) -> io::Result<Self> {
++        let fs = request.filesystem.as_ref().ok_or_else(refused)?;
++        if fs.readonly_paths.len() != readonly.len()
++            || fs.readwrite_paths.len() != readwrite.len()
++            || !fs.denied_paths.is_empty()
++        {
++            return Err(refused());
++        }
++        access(&payload, false, true)?;
++        identity(&payload, false)?;
++        access(&cwd, false, false)?;
++        identity(&cwd, true)?;
++        private_root(&cwd)?;
++        let root = actual_path(&cwd)?;
++        if request.working_directory.as_deref() != Some(root.as_str()) {
++            return Err(refused());
++        }
++        let mut pins = relative_pin(&cwd, &cwd, "", true)?;
++        for (paths, objects, write) in [
++            (&fs.readonly_paths, &readonly, false),
++            (&fs.readwrite_paths, &readwrite, true),
++        ] {
++            for (path, object) in paths.iter().zip(objects) {
++                let directory = object.metadata().map_err(|_| refused())?.is_dir();
++                access(object, write, false)?;
++                identity(object, directory)?;
++                if actual_path(object)? != *path {
++                    return Err(refused());
++                }
++                let relative = if *path == root {
++                    ""
++                } else {
++                    path.strip_prefix(&(root.clone() + "\\"))
++                        .ok_or_else(refused)?
++                };
++                pins.extend(relative_pin(&cwd, object, relative, directory)?);
++            }
++        }
++        let payload_path = actual_path(&payload)?;
++        let mut request = request;
++        let fs = request.filesystem.as_mut().ok_or_else(refused)?;
++        // The exact frozen executable is the only extra read object; it never
++        // grants its parent directory or original caller image pathname.
++        if !fs.readonly_paths.contains(&payload_path) {
++            fs.readonly_paths.push(payload_path);
++        }
++        let (prepared, argv) = crate::v1::prepare_windows_psec_argv(
++            &request,
++            values,
++            Some(crate::options::TelemetryConfig {
++                enabled: Some(false),
++            }),
++        )
++        .map_err(|_| refused())?;
++        if prepared.inner.policy.capture_denials.is_some()
++            || prepared.inner.policy.network_proxy.address.is_some()
++            || prepared.inner.lifecycle.preserve_policy
++        {
++            return Err(refused());
++        }
++        let custody =
++            LocalExecutableCustody::from_owned(payload.try_clone().map_err(|_| refused())?)
++                .map_err(|_| refused())?;
++        let mut files = vec![payload, cwd];
++        files.extend(readonly);
++        files.extend(readwrite);
++        files.extend(pins);
++        Ok(Self {
++            request: prepared,
++            argv,
++            custody,
++            files,
++        })
++    }
++    pub fn spawn(self, stdio: OwnedWindowsStdio) -> io::Result<OwnedPsecProcess> {
++        let mut runner = BaseContainerRunner::new();
++        runner
++            .spawn_owned_psec(
++                self.request.inner,
++                self.argv,
++                self.custody,
++                self.files,
++                stdio,
++            )
++            .map_err(|_: ScriptResponse| refused())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn owned_access_requires_exact_role_rights_without_host_mutation_rights() {
++        assert!(access_allowed(0x120089, false, false));
++        assert!(access_allowed(0x1200a9, false, true));
++        assert!(access_allowed(0x12019f, true, false));
++        assert!(!access_allowed(0x120089, false, true));
++        for extra in [0x40, 0x10000, 0x40000, 0x80000, 0x01000000] {
++            assert!(!access_allowed(0x1200a9 | extra, false, true));
++            assert!(!access_allowed(0x12019f | extra, true, false));
++        }
++        for extra in [2, 4, 0x10, 0x100] {
++            assert!(!access_allowed(0x120089 | extra, false, false));
++        }
++    }
++}
++
++#[cfg(test)]
++mod stdio_tests {
++    use super::*;
++    #[test]
++    fn stdio_requires_synchronous_mode_and_direction_before_native_launch() {
++        assert!(synchronous_stdio_mode(0x20, 0x100001, false));
++        assert!(synchronous_stdio_mode(0x10, 0x100002, true));
++        assert!(!synchronous_stdio_mode(0, 0x100003, false));
++        assert!(!synchronous_stdio_mode(0x30, 0x100003, false));
++        assert!(!synchronous_stdio_mode(0x20, 0x100002, false));
++        assert!(!synchronous_stdio_mode(0x20, 0x100001, true));
++        assert!(!synchronous_stdio_mode(0x20, 1, false));
++    }
++}
++
++#[cfg(test)]
++mod native_access_tests {
++    use super::*;
++    #[test]
++    fn native_current_image_read_handle_cannot_be_promoted_to_execute_or_write() {
++        let own = std::env::current_exe().unwrap();
++        let file = File::open(own).unwrap();
++        assert!(access(&file, false, false).is_ok());
++        assert!(access(&file, false, true).is_err());
++        assert!(access(&file, true, false).is_err());
++    }
++    #[test]
++    fn native_relative_grant_pin_requires_the_exact_held_file_object() {
++        use std::os::windows::fs::OpenOptionsExt;
++        let directory = tempfile::tempdir().unwrap();
++        let root_path = directory.path().join("fixed-root");
++        let renamed = directory.path().join("fixed-root-renamed");
++        std::fs::create_dir(&root_path).unwrap();
++        std::fs::create_dir(root_path.join("fixed-subdir")).unwrap();
++        std::fs::write(
++            root_path.join("fixed-subdir/fixed.txt"),
++            b"fixed public bytes",
++        )
++        .unwrap();
++        std::fs::write(root_path.join("fixed-other.txt"), b"fixed public bytes").unwrap();
++        let root = std::fs::OpenOptions::new()
++            .read(true)
++            .share_mode(7)
++            .custom_flags(0x02200000)
++            .open(&root_path)
++            .unwrap();
++        // Input share-delete alone does not prevent renaming. The self-open
++        // must add its own same-object, no-delete-share directory lease.
++        std::fs::rename(&root_path, &renamed).unwrap();
++        std::fs::rename(&renamed, &root_path).unwrap();
++        let root_pin = relative_pin(&root, &root, "", true).unwrap();
++        assert_eq!(root_pin.len(), 1);
++        assert!(std::fs::rename(&root_path, &renamed).is_err());
++        drop(root_pin);
++        std::fs::rename(&root_path, &renamed).unwrap();
++        std::fs::rename(&renamed, &root_path).unwrap();
++        let target = File::open(root_path.join("fixed-subdir/fixed.txt")).unwrap();
++        let other = File::open(root_path.join("fixed-other.txt")).unwrap();
++        let pins = relative_pin(&root, &target, r"fixed-subdir\fixed.txt", false).unwrap();
++        assert_eq!(pins.len(), 2);
++        assert!(relative_pin(&root, &other, r"fixed-subdir\fixed.txt", false).is_err());
++        drop(pins);
++        drop(target);
++        drop(other);
++        drop(root);
++        directory.close().unwrap();
++    }
++}
+diff --git a/src/mxc-sdk/src/owned_windows_root_security.rs b/src/mxc-sdk/src/owned_windows_root_security.rs
+new file mode 100644
+--- /dev/null
++++ b/src/mxc-sdk/src/owned_windows_root_security.rs
+@@ -0,0 +1,212 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++#[repr(C)]
++struct Acl {
++    revision: u8,
++    pad: u8,
++    size: u16,
++    count: u16,
++    pad2: u16,
++}
++#[repr(C)]
++struct Ace {
++    kind: u8,
++    flags: u8,
++    size: u16,
++    access: u32,
++}
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn GetCurrentProcess() -> HANDLE;
++    fn GetCurrentThread() -> HANDLE;
++    fn GetLastError() -> u32;
++    fn LocalFree(memory: *mut c_void) -> *mut c_void;
++    fn ExitProcess(code: u32) -> !;
++}
++#[link(name = "advapi32")]
++unsafe extern "system" {
++    fn OpenProcessToken(process: HANDLE, access: u32, token: *mut HANDLE) -> i32;
++    fn OpenThreadToken(thread: HANDLE, access: u32, as_self: i32, token: *mut HANDLE) -> i32;
++    fn GetTokenInformation(
++        token: HANDLE,
++        class: u32,
++        buffer: *mut c_void,
++        size: u32,
++        used: *mut u32,
++    ) -> i32;
++    fn GetSecurityInfo(
++        object: HANDLE,
++        kind: u32,
++        information: u32,
++        owner: *mut *mut c_void,
++        group: *mut *mut c_void,
++        dacl: *mut *mut Acl,
++        sacl: *mut *mut c_void,
++        descriptor: *mut *mut c_void,
++    ) -> u32;
++    fn GetSecurityDescriptorControl(
++        descriptor: *const c_void,
++        control: *mut u16,
++        revision: *mut u32,
++    ) -> i32;
++    fn IsValidSid(sid: *const c_void) -> i32;
++    fn EqualSid(a: *const c_void, b: *const c_void) -> i32;
++    fn GetLengthSid(sid: *const c_void) -> u32;
++    fn GetAce(acl: *const Acl, index: u32, ace: *mut *mut Ace) -> i32;
++}
++struct Descriptor(*mut c_void);
++impl Drop for Descriptor {
++    fn drop(&mut self) {
++        if !self.0.is_null() && !unsafe { LocalFree(self.0) }.is_null() {
++            unsafe { ExitProcess(70) }
++        }
++    }
++}
++fn private_root(file: &File) -> io::Result<()> {
++    use std::os::windows::io::FromRawHandle;
++    let mut thread = HANDLE::default();
++    let opened = unsafe { OpenThreadToken(GetCurrentThread(), 8, 1, &mut thread) };
++    let thread_error = unsafe { GetLastError() };
++    let thread_owner = if !thread.0.is_null() && thread.0 as isize != -1 {
++        Some(unsafe { OwnedHandle::from_raw_handle(thread.0) })
++    } else {
++        None
++    };
++    if opened != 0 || thread_owner.is_some() || thread_error != 1008 {
++        return Err(refused());
++    }
++    let mut token = HANDLE::default();
++    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), 8, &mut token) };
++    if token.0.is_null() || token.0 as isize == -1 {
++        return Err(refused());
++    }
++    let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
++    if opened == 0 {
++        return Err(refused());
++    }
++    let mut buffer = [0usize; 128];
++    let mut used = 0;
++    if unsafe {
++        GetTokenInformation(
++            HANDLE(token.as_raw_handle()),
++            1,
++            buffer.as_mut_ptr().cast(),
++            1024,
++            &mut used,
++        )
++    } == 0
++        || used < 16
++        || used > 1024
++    {
++        return Err(refused());
++    }
++    let user = buffer[0] as *const c_void;
++    let start = buffer.as_ptr() as usize;
++    let user_address = user as usize;
++    if user_address < start + 16
++        || user_address
++            .checked_add(8)
++            .is_none_or(|p| p > start + used as usize)
++        || unsafe { IsValidSid(user) } == 0
++    {
++        return Err(refused());
++    }
++    let length = unsafe { GetLengthSid(user) } as usize;
++    if !(8..=68).contains(&length)
++        || user_address
++            .checked_add(length)
++            .is_none_or(|p| p > start + used as usize)
++    {
++        return Err(refused());
++    }
++    let mut owner = std::ptr::null_mut();
++    let mut acl = std::ptr::null_mut();
++    let mut descriptor = std::ptr::null_mut();
++    let status = unsafe {
++        GetSecurityInfo(
++            HANDLE(file.as_raw_handle()),
++            1,
++            5,
++            &mut owner,
++            std::ptr::null_mut(),
++            &mut acl,
++            std::ptr::null_mut(),
++            &mut descriptor,
++        )
++    };
++    let _descriptor = Descriptor(descriptor);
++    if status != 0
++        || descriptor.is_null()
++        || owner.is_null()
++        || acl.is_null()
++        || unsafe { IsValidSid(owner) } == 0
++        || unsafe { EqualSid(user, owner) } == 0
++    {
++        return Err(refused());
++    }
++    let mut control = 0;
++    let mut revision = 0;
++    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0
++        || control & 0x1004 != 0x1004
++        || revision != 1
++    {
++        return Err(refused());
++    }
++    // GetSecurityInfo returns one complete self-relative descriptor. The OS
++    // parser owns pointer bounds; the exact two ordinary allow ACEs are checked
++    // before SID comparison, with no path- or SID-bearing error formatting.
++    let acl_header = unsafe { &*acl };
++    if acl_header.revision != 2 || acl_header.count != 2 || acl_header.size < 8 {
++        return Err(refused());
++    }
++    let acl_start = acl as usize;
++    let acl_end = acl_start
++        .checked_add(acl_header.size as usize)
++        .ok_or_else(refused)?;
++    // Native SID storage must retain DWORD alignment (this target is amd64).
++    let system = [0x00000101u32, 0x05000000, 18];
++    let mut user_seen = false;
++    let mut system_seen = false;
++    for index in 0..2 {
++        let mut ace = std::ptr::null_mut();
++        if unsafe { GetAce(acl, index, &mut ace) } == 0 || ace.is_null() {
++            return Err(refused());
++        }
++        let address = ace as usize;
++        if address < acl_start + 8 || address.checked_add(8).is_none_or(|end| end > acl_end) {
++            return Err(refused());
++        }
++        let a = unsafe { &*ace };
++        if a.kind != 0
++            || a.flags & !3 != 0
++            || a.size < 16
++            || a.size % 4 != 0
++            || address
++                .checked_add(a.size as usize)
++                .is_none_or(|end| end > acl_end)
++            || a.access != 0x1f01ff
++        {
++            return Err(refused());
++        }
++        let sid = unsafe { ace.cast::<u8>().add(8) }.cast::<c_void>();
++        if unsafe { IsValidSid(sid) } == 0 {
++            return Err(refused());
++        }
++        let sid_length = unsafe { GetLengthSid(sid) } as usize;
++        if !(8..=68).contains(&sid_length) || sid_length + 8 != a.size as usize {
++            return Err(refused());
++        }
++        if unsafe { EqualSid(sid, user) } != 0 && !user_seen {
++            user_seen = true;
++        } else if unsafe { EqualSid(sid, system.as_ptr().cast()) } != 0 && !system_seen {
++            system_seen = true;
++        } else {
++            return Err(refused());
++        }
++    }
++    if !user_seen || !system_seen {
++        return Err(refused());
++    }
++    Ok(())
++}

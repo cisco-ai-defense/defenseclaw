@@ -162,7 +162,28 @@ with --output json it prints the pull's result.`
 }
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
-	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
+	return sandboxPreRunForHost(cmd, runtime.GOOS, runtime.GOARCH)
+}
+
+func sandboxPreRunForHost(cmd *cobra.Command, goos, goarch string) error {
+	if cmd.Name() == "run" {
+		requested := cmd.Flags().Lookup("runtime").Value.String()
+		if err := sandboxRunPlatformCheck(goos, goarch, requested, func() (*config.Config, error) {
+			// Windows has no managed sandbox-daemon route yet. Keep its
+			// platform-first refusal before reading any per-user config or
+			// .env on a managed host. The environment pin can only tighten.
+			_, standalone := managedHostWindowsStandalone()
+			if standalone || secureClientHost() || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || !sandboxWindowsPersonalConfigPermitted() {
+				return nil, withExitCode(sandboxHostRefusal(goos, goarch, false), 3)
+			}
+			if err := loadGatewayCommandConfigOnly(); err != nil {
+				return nil, err
+			}
+			return cfg, nil
+		}); err != nil {
+			return err
+		}
+	} else if err := sandboxHostRefusal(goos, goarch, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
 		return withExitCode(err, 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
@@ -174,7 +195,7 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	// the settings the managed gateway gave it, and sandboxcli talks only to
 	// that daemon: no per-user config.yaml is read. A runtime descriptor that
 	// cannot be trusted, or root, refuses (never the per-user gateway).
-	switch _, err := sandboxHostClient(runtime.GOOS); {
+	switch _, err := sandboxHostClient(goos); {
 	case err == nil:
 		cfg = managedSandboxCommandConfig()
 		return nil
@@ -182,9 +203,9 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 		if cmd.Parent() != nil && cmd.Parent().Name() == "pack" && os.Geteuid() == 0 {
 			// Root has no sandbox daemon here; name its offline digest
 			// command, which `required_pack_digest` needs (GAP-0224).
-			platform := map[string]string{"darwin": "macos"}[runtime.GOOS]
+			platform := map[string]string{"darwin": "macos"}[goos]
 			if platform == "" {
-				platform = runtime.GOOS
+				platform = goos
 			}
 			err = fmt.Errorf("%w; an administrator reads a pack's digest with `%s enterprise %s sandbox pack-digest <pack>`",
 				err, managedHostGatewayCommand(), platform)
@@ -203,6 +224,36 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		return err
+	}
+	return nil
+}
+
+// sandboxRunPlatformCheck resolves an implicit Windows runtime before applying
+// OpenShell's platform restriction. Configuration loading starts no sandbox,
+// gateway connection or audit store. Explicit refusals require no configuration;
+// explicit OpenShell preserves its platform-first answer even on a broken file.
+func sandboxRunPlatformCheck(goos, goarch, requested string, load func() (*config.Config, error)) error {
+	runtimeError := func(err error) error {
+		var exit *sandboxcli.ExitError
+		if errors.As(err, &exit) {
+			return withExitCode(err, exit.Code)
+		}
+		return withExitCode(err, 3)
+	}
+	if _, err := sandboxcli.CheckRunRuntime(requested, ""); err != nil {
+		return runtimeError(err)
+	}
+	if goos == "windows" && (requested == "" || requested == "auto") {
+		loaded, err := load()
+		if err != nil {
+			return err
+		}
+		if _, err := sandboxcli.CheckRunRuntime(requested, loaded.SandboxDefaultRuntime()); err != nil {
+			return runtimeError(err)
+		}
+	}
+	if err := sandboxHostRefusal(goos, goarch, false); err != nil {
+		return withExitCode(err, 3)
 	}
 	return nil
 }
@@ -514,6 +565,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 		}),
 	}
 	f := cmd.Flags()
+	f.Var(&onceString{p: &o.Runtime, more: "choose one runtime for the new session"}, "runtime", "sandbox runtime: auto, openshell or axis (default: configured runtime; AXIS qualification pending)")
 	f.StringVar(&o.Name, "name", "", "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)")
 	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull")
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")

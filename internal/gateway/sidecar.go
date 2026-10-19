@@ -101,21 +101,24 @@ type Sidecar struct {
 	cfgCurrent atomic.Pointer[config.Config]
 	// generation is the configuration generation this sidecar last
 	// published (also the process-wide liveGeneration).
-	generation    atomic.Pointer[Generation]
-	client        *Client
-	router        *EventRouter
-	store         *audit.Store
-	logger        *audit.Logger
-	health        *SidecarHealth
-	notify        *NotificationQueue
-	hilt          *HILTApprovalManager
-	webhooks      *WebhookDispatcher
-	aiDiscovery   *inventory.ContinuousDiscoveryService
-	aiRuntime     *sensor.Service
-	appProtection *applicationProtectionController
-	osNotifier    *notifier.Dispatcher
-	configMgr     *ConfigManager
-	modelRouter   ModelRouter
+	generation atomic.Pointer[Generation]
+	// Native launch authority is installed only by a qualified controller during
+	// serial startup. A nil owner preserves the existing OpenShell path.
+	sandboxLaunchOwner atomic.Pointer[sidecarSandboxLaunchOwner]
+	client             *Client
+	router             *EventRouter
+	store              *audit.Store
+	logger             *audit.Logger
+	health             *SidecarHealth
+	notify             *NotificationQueue
+	hilt               *HILTApprovalManager
+	webhooks           *WebhookDispatcher
+	aiDiscovery        *inventory.ContinuousDiscoveryService
+	aiRuntime          *sensor.Service
+	appProtection      *applicationProtectionController
+	osNotifier         *notifier.Dispatcher
+	configMgr          *ConfigManager
+	modelRouter        ModelRouter
 
 	// inventoryPublish is the managed_enterprise inventory change gate. It is nil
 	// in every other deployment mode. It lives here, not inside the emitter
@@ -2123,282 +2126,285 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		nextGen.judge = s.sharedJudge()
 	}
 
-	// Application-protection observer attachment must be infallible after the
-	// commit point below. Resolve the only fallible dependency (the gateway
-	// token) while all old resources and the published config are still live.
-	if aiRestart && nextAIDiscovery != nil && strings.TrimSpace(next.Gateway.Token) == "" {
-		apiToken, err := s.ensureGatewayTokenSynthesis()
-		if err != nil {
-			return fmt.Errorf("config reload application protection gateway token: %w", err)
+	commit := func(ctx context.Context) error {
+		// Application-protection observer attachment must be infallible after the
+		// commit point below. Resolve the only fallible dependency (the gateway
+		// token) while all old resources and the published config are still live.
+		if aiRestart && nextAIDiscovery != nil && strings.TrimSpace(next.Gateway.Token) == "" {
+			apiToken, err := s.ensureGatewayTokenSynthesis()
+			if err != nil {
+				return fmt.Errorf("config reload application protection gateway token: %w", err)
+			}
+			next.Gateway.Token = apiToken
 		}
-		next.Gateway.Token = apiToken
-	}
 
-	// Resolve the managed posture before the v8 commit boundary without
-	// mutating process-global state. The actual toggles are applied only after
-	// the candidate runtime graph has passed its canaries and committed.
-	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
-	// Only the Secure Client profile runs the AID-only posture; a
-	// standalone deployment keeps the local engine and ordinary redaction.
-	nextManagedAIDOnly := next.ManagedAIDOnly()
-	// The v8 runtime graph is the first mutation and the commit boundary. Its
-	// reload builds and canary-validates the complete candidate off-path, then
-	// atomically publishes it. Everything below is deliberately infallible, so
-	// a rejected graph leaves both the prior graph and Config authoritative.
-	if v8PlanChanged {
-		s.observabilityV8Mu.Lock()
-		owner, ok := s.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
-		s.observabilityV8Mu.Unlock()
-		if !ok || owner == nil {
-			return fmt.Errorf("config reload observability v8: active runtime is unavailable")
-		}
-		if _, err := owner.reload(ctx, candidatePlan, owner.retainJudgeBodies); err != nil {
-			return newSidecarObservabilityV8BootstrapError(
-				sidecarObservabilityV8BootstrapReload,
-				err,
-			)
-		}
-		s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
-	}
-
-	// Canonical v8 redaction is selected per destination, so there is no
-	// process-wide privacy kill switch to mutate on reload. Keep only the
-	// managed-enterprise local-agent carve-out and cloud-controlled
-	// per-inspection redaction gate in sync with the committed deployment mode.
-	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
-	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
-	setManagedServiceHosted(nextManagedEnterprise)
-	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
-	setAgentIdentityConfig(&next)
-	applyIdentityPosture(&next)
-
-	// The judge is wired before the generation is published: a request
-	// that pins the next generation runs its judge, already bound to the
-	// trace runtime (GAP-0455). The router reads it from the generation.
-	if judgeChanged {
-		if nextJudge != nil {
+		// Resolve the managed posture before the v8 commit boundary without
+		// mutating process-global state. The actual toggles are applied only after
+		// the candidate runtime graph has passed its canaries and committed.
+		nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
+		// Only the Secure Client profile runs the AID-only posture; a
+		// standalone deployment keeps the local engine and ordinary redaction.
+		nextManagedAIDOnly := next.ManagedAIDOnly()
+		// The v8 runtime graph is the first mutation and the commit boundary. Its
+		// reload builds and canary-validates the complete candidate off-path, then
+		// atomically publishes it. Everything below is deliberately infallible, so
+		// a rejected graph leaves both the prior graph and Config authoritative.
+		if v8PlanChanged {
 			s.observabilityV8Mu.Lock()
-			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
-			if s.observabilityV8ConsumersDetached {
-				judgeRuntime = nil
-			}
-			nextJudge.bindJudgeTraceV8(judgeRuntime)
+			owner, ok := s.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 			s.observabilityV8Mu.Unlock()
-		}
-		s.setSharedJudge(nextJudge)
-		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
-		if api := s.apiSnapshot(); api != nil {
-			api.SetHookJudge(nextJudge)
-		}
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetJudge(nextJudge)
-		}
-		nextGen.judge = nextJudge
-	} else if previousGen != nil {
-		nextGen.judge = previousGen.judge
-	} else {
-		nextGen.judge = s.sharedJudge()
-	}
-	if !rulePackChanged && previousGen != nil {
-		// The same pack stays: keep its compiled rules and patterns, which
-		// the process-wide scanners keep too.
-		nextGen.activeRules, nextGen.activePatterns = previousGen.activeRules, previousGen.activePatterns
-	}
-
-	appliedCfg := current
-	if !onlyReloadModeChange {
-		appliedCfg = s.publishConfig(&next)
-	}
-	nextGen.Config = appliedCfg
-	// The connector rule sets are replaced before the generation is
-	// published, which binds them; a request pinned to the previous
-	// generation keeps that generation's sets (GAP-1466).
-	publishConnectorRulePackGeneration(
-		ruleManagedConnectors(current),
-		rulePackCandidate.connectorRules,
-	)
-	s.publishGeneration(nextGen)
-	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
-	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
-		// Installed skills, plugins and MCP servers affected by a list
-		// change are readmitted now, without waiting for content drift
-		// (GAP-0627, GAP-0993, GAP-1211), and an MCP server a new allow pin or scan_on_install
-		// false admits without a scan is admitted now, not at the next
-		// interval (GAP-0910).
-		if w := s.installWatcher.Load(); w != nil {
-			w.RequestRescan()
-		}
-	}
-	if privateUpstreamsReload {
-		// Replace, rather than merge, so removing the last entry takes effect.
-		// Drop pooled transports as well: an already-idle connection otherwise
-		// bypasses DialContext and could survive an allowlist revocation.
-		netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(appliedCfg.Guardrail.AllowPrivateUpstreams))
-		providerHTTPClient.CloseIdleConnections()
-	}
-
-	if rulePackChanged {
-		publishRulePackOverrides(rulePackCandidate.activeRules)
-		publishLocalPatternsOverride(rulePackCandidate.activePatterns)
-		// Judge verdicts were rendered under the previous pack.
-		InvalidateJudgeVerdictCache()
-	}
-	if api := s.apiSnapshot(); api != nil {
-		previousProfiles := api.guardrailProfileSet()
-		api.setGuardrailProfiles(profileCandidate)
-		refreshDirectoryFactsOnProfileChange(oldCfg, newCfg)
-		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
-		if profileCandidate != nil {
-			profileCandidate.logProfileWarnings()
-		}
-	}
-	if s.router != nil {
-		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
-		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
-		s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
-	}
-
-	if notifierChanged(oldCfg, newCfg) {
-		s.osNotifier = notifier.NewWithSender(appliedCfg.Notifications, osToastSenderFor(appliedCfg))
-		if s.hilt != nil {
-			s.hilt.SetNotifier(s.osNotifier)
-		}
-		if api := s.apiSnapshot(); api != nil {
-			api.SetNotifier(s.osNotifier)
-		}
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetNotifier(s.osNotifier)
-		}
-	}
-
-	if webhooksChanged(oldCfg, newCfg) {
-		nextWebhooks := NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
-		if nextWebhooks != nil {
-			metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
-			nextWebhooks.BindObservabilityV8(metricRuntime)
-		}
-		oldWebhooks := s.swapWebhooks(nextWebhooks)
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetWebhookDispatcher(nextWebhooks)
-		}
-		if oldWebhooks != nil {
-			oldWebhooks.Close()
-		}
-	}
-
-	if proxy := s.proxySnapshot(); proxy != nil {
-		proxy.ApplyGuardrailConfig(&appliedCfg.Guardrail)
-		proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
-		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
-	}
-
-	if aiRestart {
-		if nextAIDiscovery != nil {
-			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish))
-			// Before the swap, so the restart worker never runs the
-			// replacement with a stale scan-history window.
-			s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)
-		}
-		oldDiscovery := s.swapAIDiscovery(nextAIDiscovery)
-		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
-			oldDiscovery.BindObservabilityV8(nil)
-		}
-		if api := s.apiSnapshot(); api != nil {
-			api.SetAIDiscoveryService(nextAIDiscovery)
-			api.SetAIRuntimeService(s.aiRuntimeSnapshot())
-		}
-		// The API setter waits for leases using the old service before it
-		// publishes the replacement. A coalesced intermediate that the restart
-		// worker never claimed can now be retired without racing a query;
-		// claimed/running services close from their Run defer.
-		if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
-			if _, err := oldDiscovery.CloseIfNeverStarted(); err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] close superseded ai discovery service: %v\n", err)
+			if !ok || owner == nil {
+				return fmt.Errorf("config reload observability v8: active runtime is unavailable")
 			}
+			if _, err := owner.reload(ctx, candidatePlan, owner.retainJudgeBodies); err != nil {
+				return newSidecarObservabilityV8BootstrapError(
+					sidecarObservabilityV8BootstrapReload,
+					err,
+				)
+			}
+			s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
 		}
-		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
-	}
 
-	// AI Defense inspector hot-rebuild. Fires when any field on
-	// CiscoAIDefense changes — most commonly a fresh
-	// cisco_ai_defense_endpoint from AVC's env_config.json arriving
-	// after DefenseClaw was installed. pickInspector reads
-	// s.currentConfig() (already swapped to the applied snapshot
-	// above via s.publishConfig), so it will construct against the
-	// new endpoint. Same fail-closed contract as boot: a nil
-	// inspector disables the hook-lane AID call entirely; the proxy
-	// lane's SetManagedInspection is called only in managed_enterprise
-	// mode.
-	if inspectorNeedsRebuild(oldCfg, newCfg) {
-		if inspector := s.pickInspector(ctx); inspector != nil {
+		// Canonical v8 redaction is selected per destination, so there is no
+		// process-wide privacy kill switch to mutate on reload. Keep only the
+		// managed-enterprise local-agent carve-out and cloud-controlled
+		// per-inspection redaction gate in sync with the committed deployment mode.
+		setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
+		setStandaloneEnterpriseActive(next.StandaloneEnterprise())
+		setManagedServiceHosted(nextManagedEnterprise)
+		SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+		setAgentIdentityConfig(&next)
+		applyIdentityPosture(&next)
+
+		// The judge is wired before the generation is published: a request
+		// that pins the next generation runs its judge, already bound to the
+		// trace runtime (GAP-0455). The router reads it from the generation.
+		if judgeChanged {
+			if nextJudge != nil {
+				s.observabilityV8Mu.Lock()
+				judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
+				if s.observabilityV8ConsumersDetached {
+					judgeRuntime = nil
+				}
+				nextJudge.bindJudgeTraceV8(judgeRuntime)
+				s.observabilityV8Mu.Unlock()
+			}
+			s.setSharedJudge(nextJudge)
+			judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
 			if api := s.apiSnapshot(); api != nil {
-				api.SetCiscoInspector(inspector)
+				api.SetHookJudge(nextJudge)
 			}
-		} else if api := s.apiSnapshot(); api != nil {
-			// Reload rejected the inspector (managed provider now
-			// unavailable, or endpoint now empty). Clear the API
-			// binding so the hook lane fails open cleanly instead of
-			// keeping stale state that points at the old endpoint.
-			api.SetCiscoInspector(nil)
-		}
-		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
-				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+				proxy.SetJudge(nextJudge)
 			}
-		} else if !managed.IsManagedEnterprise(newCfg.DeploymentMode) {
-			// The open-source proxy's AI Defense client is built from
-			// cisco_ai_defense too; rebuild it so an edit applies hot.
-			if proxy := s.proxySnapshot(); proxy != nil {
-				proxy.ReloadCiscoClient(&newCfg.CiscoAIDefense, newCfg.DataDir)
-			}
+			nextGen.judge = nextJudge
+		} else if previousGen != nil {
+			nextGen.judge = previousGen.judge
+		} else {
+			nextGen.judge = s.sharedJudge()
 		}
-	}
+		if !rulePackChanged && previousGen != nil {
+			// The same pack stays: keep its compiled rules and patterns, which
+			// the process-wide scanners keep too.
+			nextGen.activeRules, nextGen.activePatterns = previousGen.activeRules, previousGen.activePatterns
+		}
 
-	// managed_enterprise: refresh the connector / MCP endpoint inventory
-	// on every reload — MCP servers and connectors can change via config
-	// without restarting the discovery scanner. Rebuild the emitter from
-	// the just-published config, re-arm the scan-cadence hook (the
-	// discovery service may have been recreated above), and emit an
-	// immediate snapshot so AI Defense sees the change without waiting
-	// for the next scan tick.
-	if nextManagedEnterprise {
-		var snapshotFn func() inventory.AIDiscoveryReport
-		svc := s.aiDiscoverySnapshot()
-		if svc != nil {
-			snapshotFn = svc.Snapshot
+		appliedCfg := current
+		if !onlyReloadModeChange {
+			appliedCfg = s.publishConfig(&next)
 		}
-		inventoryEmit := makeEndpointInventoryEmitter(
-			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+		nextGen.Config = appliedCfg
+		// The connector rule sets are replaced before the generation is
+		// published, which binds them; a request pinned to the previous
+		// generation keeps that generation's sets (GAP-1466).
+		publishConnectorRulePackGeneration(
+			ruleManagedConnectors(current),
+			rulePackCandidate.connectorRules,
 		)
-		if svc != nil {
-			svc.SetManagedInventoryEmitHook(inventoryEmit)
+		s.publishGeneration(nextGen)
+		s.refreshHookGuardPolicies(oldCfg, appliedCfg)
+		if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
+			// Installed skills, plugins and MCP servers affected by a list
+			// change are readmitted now, without waiting for content drift
+			// (GAP-0627, GAP-0993, GAP-1211), and an MCP server a new allow pin or scan_on_install
+			// false admits without a scan is admitted now, not at the next
+			// interval (GAP-0910).
+			if w := s.installWatcher.Load(); w != nil {
+				w.RequestRescan()
+			}
 		}
-		inventoryEmit(ctx)
-	} else if svc := s.aiDiscoverySnapshot(); svc != nil {
-		// The discovery service can survive a deployment-mode-only reload.
-		// Clear the generation-owned callback so later scan cadences cannot
-		// retain managed endpoint inventory behavior.
-		svc.SetManagedInventoryEmitHook(nil)
-	}
+		if privateUpstreamsReload {
+			// Replace, rather than merge, so removing the last entry takes effect.
+			// Drop pooled transports as well: an already-idle connection otherwise
+			// bypasses DialContext and could survive an allowlist revocation.
+			netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(appliedCfg.Guardrail.AllowPrivateUpstreams))
+			providerHTTPClient.CloseIdleConnections()
+		}
 
-	if watcherRestart {
-		signalRestart(s.watcherRestartCh)
+		if rulePackChanged {
+			publishRulePackOverrides(rulePackCandidate.activeRules)
+			publishLocalPatternsOverride(rulePackCandidate.activePatterns)
+			// Judge verdicts were rendered under the previous pack.
+			InvalidateJudgeVerdictCache()
+		}
+		if api := s.apiSnapshot(); api != nil {
+			previousProfiles := api.guardrailProfileSet()
+			api.setGuardrailProfiles(profileCandidate)
+			refreshDirectoryFactsOnProfileChange(oldCfg, newCfg)
+			auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+			if profileCandidate != nil {
+				profileCandidate.logProfileWarnings()
+			}
+		}
+		if s.router != nil {
+			s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
+			s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
+			s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
+		}
+
+		if notifierChanged(oldCfg, newCfg) {
+			s.osNotifier = notifier.NewWithSender(appliedCfg.Notifications, osToastSenderFor(appliedCfg))
+			if s.hilt != nil {
+				s.hilt.SetNotifier(s.osNotifier)
+			}
+			if api := s.apiSnapshot(); api != nil {
+				api.SetNotifier(s.osNotifier)
+			}
+			if proxy := s.proxySnapshot(); proxy != nil {
+				proxy.SetNotifier(s.osNotifier)
+			}
+		}
+
+		if webhooksChanged(oldCfg, newCfg) {
+			nextWebhooks := NewWebhookDispatcher(appliedCfg.Webhooks, appliedCfg.Observability)
+			if nextWebhooks != nil {
+				metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+				nextWebhooks.BindObservabilityV8(metricRuntime)
+			}
+			oldWebhooks := s.swapWebhooks(nextWebhooks)
+			if proxy := s.proxySnapshot(); proxy != nil {
+				proxy.SetWebhookDispatcher(nextWebhooks)
+			}
+			if oldWebhooks != nil {
+				oldWebhooks.Close()
+			}
+		}
+
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.ApplyGuardrailConfig(&appliedCfg.Guardrail)
+			proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
+			proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
+		}
+
+		if aiRestart {
+			if nextAIDiscovery != nil {
+				nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish))
+				// Before the swap, so the restart worker never runs the
+				// replacement with a stale scan-history window.
+				s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)
+			}
+			oldDiscovery := s.swapAIDiscovery(nextAIDiscovery)
+			if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
+				oldDiscovery.BindObservabilityV8(nil)
+			}
+			if api := s.apiSnapshot(); api != nil {
+				api.SetAIDiscoveryService(nextAIDiscovery)
+				api.SetAIRuntimeService(s.aiRuntimeSnapshot())
+			}
+			// The API setter waits for leases using the old service before it
+			// publishes the replacement. A coalesced intermediate that the restart
+			// worker never claimed can now be retired without racing a query;
+			// claimed/running services close from their Run defer.
+			if oldDiscovery != nil && oldDiscovery != nextAIDiscovery {
+				if _, err := oldDiscovery.CloseIfNeverStarted(); err != nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] close superseded ai discovery service: %v\n", err)
+				}
+			}
+			s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
+		}
+
+		// AI Defense inspector hot-rebuild. Fires when any field on
+		// CiscoAIDefense changes — most commonly a fresh
+		// cisco_ai_defense_endpoint from AVC's env_config.json arriving
+		// after DefenseClaw was installed. pickInspector reads
+		// s.currentConfig() (already swapped to the applied snapshot
+		// above via s.publishConfig), so it will construct against the
+		// new endpoint. Same fail-closed contract as boot: a nil
+		// inspector disables the hook-lane AID call entirely; the proxy
+		// lane's SetManagedInspection is called only in managed_enterprise
+		// mode.
+		if inspectorNeedsRebuild(oldCfg, newCfg) {
+			if inspector := s.pickInspector(ctx); inspector != nil {
+				if api := s.apiSnapshot(); api != nil {
+					api.SetCiscoInspector(inspector)
+				}
+			} else if api := s.apiSnapshot(); api != nil {
+				// Reload rejected the inspector (managed provider now
+				// unavailable, or endpoint now empty). Clear the API
+				// binding so the hook lane fails open cleanly instead of
+				// keeping stale state that points at the old endpoint.
+				api.SetCiscoInspector(nil)
+			}
+			if nextManagedAIDOnly {
+				if proxy := s.proxySnapshot(); proxy != nil {
+					proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+				}
+			} else if !managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+				// The open-source proxy's AI Defense client is built from
+				// cisco_ai_defense too; rebuild it so an edit applies hot.
+				if proxy := s.proxySnapshot(); proxy != nil {
+					proxy.ReloadCiscoClient(&newCfg.CiscoAIDefense, newCfg.DataDir)
+				}
+			}
+		}
+
+		// managed_enterprise: refresh the connector / MCP endpoint inventory
+		// on every reload — MCP servers and connectors can change via config
+		// without restarting the discovery scanner. Rebuild the emitter from
+		// the just-published config, re-arm the scan-cadence hook (the
+		// discovery service may have been recreated above), and emit an
+		// immediate snapshot so AI Defense sees the change without waiting
+		// for the next scan tick.
+		if nextManagedEnterprise {
+			var snapshotFn func() inventory.AIDiscoveryReport
+			svc := s.aiDiscoverySnapshot()
+			if svc != nil {
+				snapshotFn = svc.Snapshot
+			}
+			inventoryEmit := makeEndpointInventoryEmitter(
+				s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+			)
+			if svc != nil {
+				svc.SetManagedInventoryEmitHook(inventoryEmit)
+			}
+			inventoryEmit(ctx)
+		} else if svc := s.aiDiscoverySnapshot(); svc != nil {
+			// The discovery service can survive a deployment-mode-only reload.
+			// Clear the generation-owned callback so later scan cadences cannot
+			// retain managed endpoint inventory behavior.
+			svc.SetManagedInventoryEmitHook(nil)
+		}
+
+		if watcherRestart {
+			signalRestart(s.watcherRestartCh)
+		}
+		if guardrailRestart {
+			signalRestart(s.guardrailRestartCh)
+		}
+		if apiRestart {
+			signalRestart(s.apiRestartCh)
+		}
+		if fleetAccessChanged {
+			signalRestart(s.fleetReloadCh)
+		}
+		if aiRestart {
+			signalRestart(s.aiRestartCh)
+			signalRestart(s.aiRuntimeRestartCh)
+		}
+		preparedCommitted = true
+		return nil
 	}
-	if guardrailRestart {
-		signalRestart(s.guardrailRestartCh)
-	}
-	if apiRestart {
-		signalRestart(s.apiRestartCh)
-	}
-	if fleetAccessChanged {
-		signalRestart(s.fleetReloadCh)
-	}
-	if aiRestart {
-		signalRestart(s.aiRestartCh)
-		signalRestart(s.aiRuntimeRestartCh)
-	}
-	preparedCommitted = true
-	return nil
+	return s.publishSandboxAuthority(ctx, commit)
 }
 
 // assetAdmissionListsChanged reports a reload that changes skill or plugin
@@ -2557,8 +2563,9 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	// Every openshell key but the listeners' is read per sandbox launch, so
-	// none may bounce the API listener.
+	// The candidate loader projects common sandbox policy into OpenShell.
+	// Only its listener settings may bounce the API listener; other sandbox
+	// settings are read from the published generation per launch.
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
@@ -5138,19 +5145,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Synthesize a first-boot gateway token once for all connectors — the
 	// token is baked into every connector's hook scripts and is the shared
 	// secret the API server authenticates inbound hooks against.
-	dotenvPath := filepath.Join(s.currentConfig().DataDir, ".env")
-	apiToken := s.currentConfig().Gateway.ResolvedToken()
-	if apiToken == "" {
-		tok, err := EnsureGatewayToken(dotenvPath)
-		if err != nil {
-			s.health.SetGuardrail(StateError, err.Error(), nil)
-			return fmt.Errorf("first-boot gateway token: %w", err)
-		}
-		next := cloneConfig(s.currentConfig())
-		next.Gateway.Token = tok
-		s.publishConfig(next)
-		apiToken = tok
-		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	apiToken, err := s.ensureGatewayTokenSynthesis()
+	if err != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return fmt.Errorf("first-boot gateway token: %w", err)
 	}
 	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 
@@ -8235,6 +8233,12 @@ func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
 	cfg := s.currentConfig()
 	if tok := cfg.Gateway.ResolvedToken(); tok != "" {
 		return tok, nil
+	}
+	// Native authority is installed after startup token synthesis. A later
+	// first-token write would publish config outside its generation transaction.
+	// Refuse before touching .env, cfgCurrent or the process environment.
+	if s.sandboxLaunchOwner.Load() != nil {
+		return "", errSandboxPublication
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	tok, err := EnsureGatewayToken(dotenvPath)

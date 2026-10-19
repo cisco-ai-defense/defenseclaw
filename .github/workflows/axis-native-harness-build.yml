@@ -1,0 +1,358 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS reviewed fixed Linux harness source build
+
+# Compile only. Never run this wrapper, a peer, clone, prctl or a sandbox.
+on:
+  push:
+    branches: [codex/axis-native-build, codex/axis-peer-experiments]
+    paths:
+      - .github/workflows/axis-native-harness-build.yml
+      - internal/axis/bridgeproto/**
+      - internal/axis/bridgeowner/**
+      - internal/axis/bridgeprocess/**
+      - internal/axis/namespaceinit/**
+      - test/e2e/axis/native-peer/harness/**
+      - go.mod
+      - go.sum
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_LICENSES.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: amd64
+      GOAMD64: v1
+      GOWORK: 'off'
+      GOENV: 'off'
+      GOFLAGS: ''
+      GOEXPERIMENT: ''
+      GODEBUG: ''
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
+      GOPRIVATE: ''
+      GONOPROXY: ''
+      GONOSUMDB: ''
+      GOMODCACHE: ${{ github.workspace }}/.axis-harness-modules
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+            go.sum
+            LICENSE
+            NOTICE
+            THIRD_PARTY_LICENSES.txt
+            .github/workflows/axis-native-harness-build.yml
+            internal/axis/bridgeproto
+            internal/axis/bridgeowner
+            internal/axis/bridgeprocess
+            internal/axis/namespaceinit
+            test/e2e/axis/native-peer/harness
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Refuse unreviewed compiler inputs before dependency or build commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import subprocess
+
+          roots = {
+              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
+              'internal/axis/bridgeproto': ['README.md', 'codec.go', 'fuzz_test.go', 'message.go', 'protocol_test.go', 'state.go'],
+              'internal/axis/bridgeowner': ['README.md', 'owner.go', 'owner_test.go', 'pipe.go', 'pipe_child_overlapped_windows.go', 'pipe_child_overlapped_windows_test.go', 'pipe_other.go', 'pipe_test.go', 'pipe_windows.go', 'pipe_windows_test.go'],
+              'internal/axis/bridgeprocess': ['README.md', 'bootstrap_windows.go', 'image_linux.go', 'image_windows.go', 'image_windows_test.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go', 'start_windows.go', 'start_windows_test.go'],
+              'test/e2e/axis/native-peer/harness': ['README.md', 'artifact.go', 'cleanup.go', 'cleanup_test.go', 'harness_test.go', 'lifecycle.go', 'lifecycle_linux.go', 'lifecycle_linux_test.go', 'lifecycle_test.go', 'main.go', 'outer_linux.go', 'outer_linux_test.go', 'platform_linux.go', 'platform_linux_test.go', 'platform_other.go', 'protocol.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
+          }
+          sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-harness-build.yml']
+          for root, names in roots.items():
+              tracked = subprocess.run(['git', 'ls-tree', '-r', '--name-only', '-z', os.environ['GITHUB_SHA'], '--', root], check=True, capture_output=True, timeout=20).stdout
+              expected = b''.join((root + '/' + name).encode() + b'\0' for name in sorted(names))
+              if tracked != expected or sorted(path.name for path in Path(root).iterdir()) != sorted(names):
+                  raise SystemExit('complete source directory inventory differs')
+              sources.extend(root + '/' + name for name in names)
+          artifact = Path('harness-artifact')
+          artifact.mkdir()
+          source_hashes = {}
+          for name in sorted(sources):
+              path = Path(name)
+              metadata = path.lstat()
+              if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or not 0 < metadata.st_size < 1024 * 1024:
+                  raise SystemExit('source type or size refused')
+              raw = path.read_bytes()
+              committed = subprocess.run(['git', 'cat-file', 'blob', os.environ['GITHUB_SHA'] + ':' + name], check=True, capture_output=True, timeout=20).stdout
+              if raw != committed:
+                  raise SystemExit('source Git identity differs')
+              if name.endswith('.go') and (re.search(rb'(?m)^\s*//go:embed\b', raw) or b'"C"' in raw or b'#cgo' in raw):
+                  raise SystemExit('embedded or native compiler source refused')
+              target = artifact / 'source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(raw)
+              source_hashes[name] = hashlib.sha256(raw).hexdigest()
+          registry = Path('test/e2e/axis/native-peer/harness/artifact.go').read_bytes()
+          receipt_sha = '6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668'
+          registry_sha = hashlib.sha256(registry).hexdigest()
+          if registry_sha != '4e84953fcafb47c5edfb5f5c3084c91a99d1ab33897bc8fdf0c281114ffecc6d' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
+              raise SystemExit('exact reviewed fixed-contributor registry source required')
+          version_registry_sha = hashlib.sha256(Path('test/e2e/axis/native-peer/harness/version.go').read_bytes()).hexdigest()
+          if version_registry_sha != '3c78c4e996928044af9e0d92636d98dc9164fbd4a32198268e0ef1e27a53b81d':
+              raise SystemExit('exact reviewed Claude version registry required')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'version_registry_source_sha256': version_registry_sha, 'reviewed_version_receipt_sha256': 'e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7', 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'fixed_suites': {'baseline': ['argv', 'stdio', 'exit23', 'boundaries'], 'lifecycle': ['wait-timeout', 'wait-cancel', 'tree-cancel'], 'claude-version': ['claude-version']}, 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          PY
+      - name: Verify exact dependency closure without running the wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOVERSION)" = "go1.26.5"
+          go mod download -json golang.org/x/sys@v0.47.0 > harness-artifact/GO-MODULE-DOWNLOAD.json
+          go list -mod=readonly -deps -json ./test/e2e/axis/native-peer/harness > harness-artifact/GO-DEPS.json
+          python3 - <<'PY'
+          from pathlib import Path
+          # Root go.mod has unrelated replacements outside this sparse source
+          # closure. Verify the same cache through an exact metadata-only module.
+          verification = Path('harness-artifact/dependency-verifier')
+          verification.mkdir()
+          (verification / 'go.mod').write_text('module example.invalid/axis-harness-cache-verifier\n\ngo 1.26.5\n\nrequire golang.org/x/sys v0.47.0\n')
+          sums = 'golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=\ngolang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=\n'
+          if not set(sums.splitlines()).issubset(set(Path('go.sum').read_text(encoding='utf-8').splitlines())):
+              raise SystemExit('root dependency checksums differ')
+          (verification / 'go.sum').write_text(sums)
+          PY
+          go -C harness-artifact/dependency-verifier mod verify > harness-artifact/GO-MOD-VERIFY.txt
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import shutil
+
+          artifact = Path('harness-artifact')
+          module = json.loads((artifact / 'GO-MODULE-DOWNLOAD.json').read_text(encoding='utf-8'))
+          expected = {'Path': 'golang.org/x/sys', 'Version': 'v0.47.0', 'Sum': 'h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=', 'GoModSum': 'h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw='}
+          if any(module.get(key) != value for key, value in expected.items()) or module.get('Replace') or module.get('Error'):
+              raise SystemExit('dependency module identity refused')
+          if (artifact / 'GO-MOD-VERIFY.txt').read_text(encoding='utf-8') != 'all modules verified\n':
+              raise SystemExit('dependency verification refused')
+          verification_inputs = {
+              'go.mod': 'module example.invalid/axis-harness-cache-verifier\n\ngo 1.26.5\n\nrequire golang.org/x/sys v0.47.0\n',
+              'go.sum': 'golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=\ngolang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=\n',
+          }
+          if any((artifact / 'dependency-verifier' / name).read_text(encoding='utf-8') != value for name, value in verification_inputs.items()):
+              raise SystemExit('metadata-only verification inputs changed')
+          raw = (artifact / 'GO-DEPS.json').read_text(encoding='utf-8')
+          if len(raw) > 16 * 1024 * 1024:
+              raise SystemExit('dependency metadata exceeds bound')
+          decoder, index, local = json.JSONDecoder(), 0, set()
+          root = Path.cwd()
+          wanted = {'internal/axis/namespaceinit', 'internal/axis/bridgeproto', 'internal/axis/bridgeowner', 'internal/axis/bridgeprocess', 'test/e2e/axis/native-peer/harness'}
+          count = 0
+          while index < len(raw):
+              if raw[index].isspace():
+                  index += 1
+                  continue
+              package, index = decoder.raw_decode(raw, index)
+              count += 1
+              if count > 512 or package.get('Error') or package.get('CgoFiles'):
+                  raise SystemExit('dependency compiler-input scope refused')
+              if package.get('Standard'):
+                  continue
+              if package.get('EmbedFiles'):
+                  raise SystemExit('nonstandard embedded compiler inputs refused')
+              identity = package.get('Module', {})
+              if identity.get('Replace'):
+                  raise SystemExit('replacement build dependency refused')
+              if identity.get('Path') == 'github.com/defenseclaw/defenseclaw' and identity.get('Main') is True:
+                  relative = Path(package['Dir']).relative_to(root).as_posix()
+                  if relative not in wanted or package['ImportPath'] != identity['Path'] + '/' + relative:
+                      raise SystemExit('undisclosed local compiler package refused')
+                  if any(package.get(field) for field in ('CFiles', 'CXXFiles', 'MFiles', 'HFiles', 'FFiles', 'SFiles', 'SwigFiles', 'SwigCXXFiles', 'SysoFiles')):
+                      raise SystemExit('local assembly or native inputs refused')
+                  local.add(relative)
+              elif identity.get('Path') != expected['Path'] or identity.get('Version') != expected['Version'] or identity.get('Sum') != expected['Sum']:
+                  raise SystemExit('additional external module refused')
+          if local != wanted:
+              raise SystemExit('incomplete local dependency closure')
+          destination = artifact / 'dependencies'
+          destination.mkdir()
+          retained = {}
+          for key, source, name, bound in [
+              ('module_zip', Path(module['Zip']), 'golang.org-x-sys-v0.47.0.zip', 16 * 1024 * 1024),
+              ('module_go_mod', Path(module['GoMod']), 'golang.org-x-sys-go.mod', 1024 * 1024),
+              ('module_license', Path(module['Dir']) / 'LICENSE', 'golang.org-x-sys-LICENSE', 1024 * 1024),
+          ]:
+              if not source.is_file() or source.is_symlink() or not 0 < source.stat().st_size <= bound:
+                  raise SystemExit('module retained input refused')
+              target = destination / name
+              shutil.copyfile(source, target)
+              retained[key] = {'path': target.relative_to(artifact).as_posix(), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'size': target.stat().st_size}
+          (artifact / 'DEPENDENCY-CLOSURE.json').write_text(json.dumps({'module': expected, 'local_packages': sorted(local), 'package_count': count, 'retained': retained, 'module_verification': True, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          PY
+      - name: Run only source-reviewed inert lifecycle, registry and version unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/harness -run '^Test(Lifecycle|ClaudeVersion|ReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls$)' -count=1 -timeout=20s > harness-artifact/INERT-LIFECYCLE-TESTS.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          expected = {
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/empty-baseline',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/single-loader',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/missing-loader',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/loader-in-baseline',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/wrong-leaf',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/extra-entry',
+              'TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd/many-entries',
+              'TestClaudeVersionSourcesRemainHeldUntilNativeWaitAndClose',
+              'TestClaudeVersionWorkerFileTableIsAnExactTail',
+              'TestClaudeVersionRegistryIsSeparateAndClosedOverReviewedInputs',
+              'TestClaudeVersionPlanIsLiteralOfflineAndHasOnlyTwoLibraryFiles',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes',
+              'TestClaudeVersionELFRefusesChangedLoaderClosureWithoutExecution',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/none',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/bytes',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/stderr',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/exit',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/timeout',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/truncated',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/binding',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/request',
+              'TestReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls',
+              'TestLifecycleSuiteAndPlansAreClosedAndBaselineUnchanged',
+              'TestLifecycleMarkersRequireExactUniqueSetDespiteChunkOrder',
+              'TestLifecycleProtocolCorrelatesTimeoutCancelAndSeparateCleanup',
+              'TestLifecycleProtocolRefusesUnreadyWrongExitAndMissingTreeObserver',
+              'TestLifecycleTreeRequiresProgressThenFiniteStability',
+              'TestLifecycleTreeRejectsNoProgressLinksAndOversizedFiles',
+              'TestLifecycleTreeRejectsNoProgressLinksAndOversizedFiles/no-progress',
+              'TestLifecycleTreeRejectsNoProgressLinksAndOversizedFiles/linked-ready',
+              'TestLifecycleTreeRejectsNoProgressLinksAndOversizedFiles/oversized-heartbeat',
+          }
+          raw = Path('harness-artifact/INERT-LIFECYCLE-TESTS.jsonl').read_bytes()
+          if len(raw) > 1024 * 1024:
+              raise SystemExit('inert lifecycle test output exceeds bound')
+          rows = [json.loads(line) for line in raw.splitlines()]
+          passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
+          if set(passed) != expected or len(passed) != len(expected) or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
+              raise SystemExit('exact inert lifecycle test inventory refused')
+          Path('harness-artifact/INERT-LIFECYCLE-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 14, 'inert_filesystem_and_go_writer_only': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
+          PY
+      - name: Build two deterministic static wrapper images and retain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir harness-build-one harness-build-two harness-artifact/bin
+          GOCACHE="$RUNNER_TEMP/axis-harness-cache-one" go build -mod=readonly -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o harness-build-one/reviewed-harness ./test/e2e/axis/native-peer/harness
+          GOCACHE="$RUNNER_TEMP/axis-harness-cache-two" go build -mod=readonly -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o harness-build-two/reviewed-harness ./test/e2e/axis/native-peer/harness
+          cmp harness-build-one/reviewed-harness harness-build-two/reviewed-harness
+          cp harness-build-one/reviewed-harness harness-artifact/bin/reviewed-harness
+          go version -m harness-artifact/bin/reviewed-harness > harness-artifact/GO-BUILDINFO.txt
+          go env -json GOVERSION GOOS GOARCH GOAMD64 CGO_ENABLED GOTOOLCHAIN GOROOT GOTOOLDIR GOWORK GOENV GOFLAGS GOEXPERIMENT > harness-artifact/TOOLCHAIN.json
+          test -z "$(git status --porcelain --untracked-files=no)"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import struct
+
+          artifact = Path('harness-artifact')
+          image = (artifact / 'bin/reviewed-harness').read_bytes()
+          if not 64 <= len(image) <= 32 * 1024 * 1024:
+              raise SystemExit('wrapper byte bound refused')
+          header = struct.unpack_from('<16sHHIQQQIHHHHHH', image)
+          if header[0][:7] != b'\x7fELF\x02\x01\x01' or header[1:4] != (2, 62, 1) or header[8] != 64:
+              raise SystemExit('static Linux x86_64 ELF required')
+          entry, offset, width, count = header[4], header[5], header[9], header[10]
+          if width != 56 or not 1 <= count <= 128 or offset < 64 or offset + width * count > len(image):
+              raise SystemExit('ELF program-header bound refused')
+          executable_entry = False
+          for index in range(count):
+              kind, flags, start, address, _, size, memory, _ = struct.unpack_from('<IIQQQQQQ', image, offset + index * width)
+              if kind in (2, 3) or start + size > len(image) or size > memory or address + memory > 1 << 64:
+                  raise SystemExit('dynamic or malformed ELF refused')
+              executable_entry |= kind == 1 and flags & 1 != 0 and address <= entry < address + size
+          if not executable_entry:
+              raise SystemExit('ELF entry outside executable file-backed load segment')
+          toolchain = json.loads((artifact / 'TOOLCHAIN.json').read_text(encoding='utf-8'))
+          expected = {'GOVERSION': 'go1.26.5', 'GOOS': 'linux', 'GOARCH': 'amd64', 'GOAMD64': 'v1', 'CGO_ENABLED': '0', 'GOTOOLCHAIN': 'local', 'GOWORK': 'off', 'GOENV': '', 'GOFLAGS': '', 'GOEXPERIMENT': ''}
+          if any(toolchain.get(key) != value for key, value in expected.items()):
+              raise SystemExit('toolchain settings refused')
+          lines = (artifact / 'GO-BUILDINFO.txt').read_text(encoding='utf-8').splitlines()
+          dependencies = [line.strip().split() for line in lines if line.startswith('\tdep\t')]
+          if dependencies != [['dep', 'golang.org/x/sys', 'v0.47.0', 'h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=']] or any(line.startswith('\t=>') for line in lines):
+              raise SystemExit('binary module buildinfo differs')
+          tools = {'go': Path(toolchain['GOROOT']) / 'bin/go'}
+          tools.update({name: Path(toolchain['GOTOOLDIR']) / name for name in ('compile', 'link', 'asm')})
+          tool_hashes = {}
+          for name, path in tools.items():
+              if not stat.S_ISREG(path.lstat().st_mode) or not 0 < path.stat().st_size < 128 * 1024 * 1024:
+                  raise SystemExit('toolchain input refused')
+              tool_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          workflow_identity = {'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'wrapper_peer_payload_or_sandbox_execution': False}
+          (artifact / 'WORKFLOW.json').write_text(json.dumps(workflow_identity, indent=2) + '\n')
+          files = {}
+          for path in sorted(artifact.rglob('*')):
+              if path.is_dir():
+                  continue
+              if not stat.S_ISREG(path.lstat().st_mode) or path.is_symlink() or path.stat().st_size > 32 * 1024 * 1024:
+                  raise SystemExit('artifact input refused')
+              raw = path.read_bytes()
+              files[path.relative_to(artifact).as_posix()] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+          prebuild = json.loads((artifact / 'PREBUILD.json').read_text(encoding='utf-8'))
+          provenance = {'scope': 'reviewed_fixed_linux_native_peer_harness_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'artifact_registry_closed': False, 'registry_source_sha256': prebuild['registry_source_sha256'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'version_registry_source_sha256': prebuild['version_registry_source_sha256'], 'reviewed_version_receipt_sha256': prebuild['reviewed_version_receipt_sha256'], 'fixed_case_selectors': prebuild['fixed_case_selectors'], 'fixed_suites': prebuild['fixed_suites'], 'inert_lifecycle_tests': json.loads((artifact / 'INERT-LIFECYCLE-TESTS.json').read_text(encoding='utf-8')), 'wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
+          (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+      - name: Retain run identity even when the build refuses
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p harness-artifact
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          value = {'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'wrapper_peer_payload_or_sandbox_execution': False}
+          Path('harness-artifact/WORKFLOW.json').write_text(json.dumps(value, indent=2) + '\n')
+          PY
+      - name: Retain reviewed fixed-contributor unexecuted wrapper and source evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-reviewed-native-harness-linux-${{ github.sha }}
+          path: harness-artifact/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

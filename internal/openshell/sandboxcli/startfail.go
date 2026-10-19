@@ -84,12 +84,12 @@ const localhostCheckScript = `if /usr/bin/getent hosts localhost >/dev/null 2>&1
 // and whether its /etc/hosts names it; known is false when it could not
 // tell.
 func (s *session) localhostState(ctx context.Context) (resolves, listed, known bool) {
-	inv, err := s.cli.Exec(s.sb.Name, []string{"/bin/sh", "-c", localhostCheckScript}, openshell.CLIExecOptions{Timeout: probeTimeout})
+	execution, err := s.prepareOpenShellRecipe(SessionExecRequest{Argv: []string{"/bin/sh", "-c", localhostCheckScript}, Timeout: probeTimeout})
 	if err != nil {
 		return false, false, false
 	}
 	var out bytes.Buffer
-	if code, err := s.app.Streamer.Stream(ctx, inv, &out, &out); err != nil || code != 0 {
+	if code, err := execution.Run(ctx, SessionStreams{Stdout: &out, Stderr: &out}); err != nil || code != 0 {
 		return false, false, false
 	}
 	for _, line := range strings.Split(out.String(), "\n") {

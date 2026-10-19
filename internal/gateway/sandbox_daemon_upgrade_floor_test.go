@@ -119,7 +119,7 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 	if !ok || reg.ID != id || reg.Confirmed || reg.Revoked || reg.Floor.MinProfile != "balanced" {
 		t.Fatalf("loaded registration = %+v, present %v", reg, ok)
 	}
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	return f, ctl, gate, func(up bool) { answer = up }
 }
 

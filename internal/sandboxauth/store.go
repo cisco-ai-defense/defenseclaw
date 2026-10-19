@@ -261,6 +261,9 @@ func (s *FileStore) Update(id string, fn func(*Spec) error) (Binding, error) {
 		if spec.Connector != current.Connector || spec.SandboxName != current.SandboxName {
 			return invalid("connector and sandbox name cannot change; mint a new binding")
 		}
+		if spec.ExecutionOS != current.ExecutionOS {
+			return invalid("execution OS cannot change on a live credential; mint a new binding")
+		}
 		if !slices.Equal(spec.Routes, current.Routes) {
 			return invalid("routes cannot change on a live credential; mint a new binding")
 		}
@@ -566,6 +569,7 @@ func bindingFromSpec(id string, spec Spec) Binding {
 		SandboxName:    spec.SandboxName,
 		Connector:      spec.Connector,
 		AgentVersion:   spec.AgentVersion,
+		ExecutionOS:    spec.ExecutionOS,
 		HookContractID: spec.HookContractID,
 		PolicyProfile:  spec.PolicyProfile,
 		Routes:         slices.Clone(spec.Routes),

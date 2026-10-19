@@ -93,6 +93,33 @@ def test_secure_client_refusals_match_go_golden():
         cfgmod.validate_sandbox_floors({**sc, "guardrail": {"profiles": {"p": {"sandbox": {"process_tree": True}}}}})
 
 
+@pytest.mark.parametrize("source", ["sandbox", "openshell"])
+def test_admin_floor_refusal_names_declaring_source(source, tmp_path, monkeypatch):
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        f"config_version: 9\n{source}:\n  admin:\n    when_unavailable: block\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=rf"^{source}: admin.when_unavailable"):
+        cfgmod.load()
+
+
+def test_admin_floor_cross_source_contradiction_names_both_sources():
+    with pytest.raises(ValueError, match=r"^sandbox: combined with openshell.admin, "):
+        cfgmod.validate_sandbox_floors({
+            "openshell": {"admin": {"allowed": False}},
+            "sandbox": {"admin": {"required_for": ["codex"]}},
+        })
+
+
+def test_secure_client_common_floor_refusal_names_common_source():
+    with pytest.raises(ValueError, match=r"^sandbox: admin.allowed: managed sandbox keys"):
+        cfgmod.validate_sandbox_floors({
+            "deployment_mode": "managed_enterprise", "enterprise": {"profile": "secure_client"},
+            "sandbox": {"admin": {"allowed": True}},
+        })
+
+
 def test_profile_sandbox_parses_and_saves_only_set_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(

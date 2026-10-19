@@ -44,11 +44,31 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
-	"gopkg.in/yaml.v3"
 )
 
-// The sandbox manager is the SandboxController the REST API drives.
-var _ SandboxController = (*manager.Manager)(nil)
+// sandboxRuntimeController is the execution owner's control-plane surface.
+// Policy refresh, managed views and supervision stay with that owner even when
+// its contained-process provider changes. Vendor gateway maintenance is a
+// separate optional dependency; a native provider need not invent a gateway.
+type sandboxRuntimeController interface {
+	SandboxController
+	Run(context.Context) error
+	RefreshPolicies()
+	ConfirmingView(*sandboxapi.Sandbox, string)
+	ExplainUnder(context.Context, *config.Config, sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+}
+
+type openShellGatewayMaintenance interface {
+	ForgetGatewayError()
+	GatewayStopped()
+	Reconcile(context.Context) error
+	ForeignSandboxesRunning() bool
+}
+
+var (
+	_ sandboxRuntimeController    = (*manager.Manager)(nil)
+	_ openShellGatewayMaintenance = (*manager.Manager)(nil)
+)
 
 // sandboxListenerHost is where the sandbox ingress and egress proxy
 // listen: OpenShell relays host.openshell.internal to host loopback.
@@ -58,8 +78,10 @@ const sandboxListenerHost = "127.0.0.1"
 // openshell.enabled: the hook ingress, the egress proxy and the manager.
 // It restarts with the API, whose restart rules cover the listener ports.
 type sandboxRuntime struct {
-	api        *APIServer
-	manager    *manager.Manager
+	api     *APIServer
+	manager sandboxRuntimeController
+	// openShell belongs only to an owner with an OpenShell vendor gateway.
+	openShell  openShellGatewayMaintenance
 	proxy      *egress.Proxy
 	egressAddr string
 	health     *SidecarHealth
@@ -198,6 +220,9 @@ func managedGatewaySandboxNote(cfg *config.Config) string {
 // the per-user gateway (newSandboxRuntime) or a managed host's per-user
 // sandbox daemon (newSandboxDaemonRuntime).
 type sandboxRuntimeDeps struct {
+	// native is installed only by this host's qualified factory/publication
+	// owner. Nil is the default; configuration or API values never populate it.
+	native *manager.NativeExecution
 	// config is the configuration the manager reads: config.yaml for the
 	// per-user gateway, the managed gateway's settings for the daemon.
 	config func() *config.Config
@@ -265,6 +290,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace})
 	}
 	mgr, err := manager.New(manager.Options{
+		Native:  deps.native,
 		DataDir: dataDir,
 		Owner:   owner,
 		Config:  deps.config,
@@ -366,7 +392,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	}
 	mgr.AttachProxy(proxy)
 	api.SetSandboxController(mgr)
-	rt.manager, rt.proxy = mgr, proxy
+	rt.manager, rt.proxy, rt.openShell = mgr, proxy, mgr
 	feed := mgr.Feed()
 	rt.fleet = mgr
 	if deps.telemetry != nil {
@@ -659,7 +685,7 @@ func (rt *sandboxRuntime) serveEgressOn(ctx context.Context, ln net.Listener, ke
 }
 
 // sandboxConfigPersister keeps "always" sandbox decisions in config.yaml
-// (openshell.egress.unblocked / block) through the same write transaction
+// (sandbox.egress.unblocked / block, or legacy openshell keys) through the same write transaction
 // the guardrail config API uses, so the ConfigManager reloads them. Always
 // approvals and unblocks never go to openshell.egress.allow: an allow entry
 // lets its name resolve to private addresses, an unblock does not.
@@ -702,40 +728,17 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 	if key != "openshell.egress.unblocked" && key != "openshell.egress.block" {
 		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
 	}
-	// The list comes from the file the write replaces, not from the applied
-	// generation, which lags it (debounce, a rejected reload, another
-	// writer): the CAS below then covers the whole read-modify-write.
+	// Resolve authority and append under the shared writer lock. The applied
+	// generation can lag another CLI or policy writer's accepted source.
 	path := configFilePathForSnapshot(current)
-	original, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	var doc struct {
-		OpenShell struct {
-			Egress struct {
-				Unblocked []string `yaml:"unblocked"`
-				Block     []string `yaml:"block"`
-			} `yaml:"egress"`
-		} `yaml:"openshell"`
-	}
-	if err := yaml.Unmarshal(original, &doc); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
-	}
-	list := doc.OpenShell.Egress.Unblocked
-	if key == "openshell.egress.block" {
-		list = doc.OpenShell.Egress.Block
-	}
-	for _, have := range list {
-		if strings.EqualFold(strings.TrimSpace(have), host) {
-			return nil
-		}
-	}
-	next := append(append([]string{}, list...), host)
+	var original []byte
 	actor := configwrite.ActorPrefixSandbox + host
-	written, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: key, Value: next}}, configwrite.Options{
-		Actor:        actor,
-		Reason:       "sandbox always decision",
-		ExpectSHA256: configwrite.SHA256Hex(original),
+	written, err := configwrite.ApplyComputed(ctx, path, func(raw []byte) ([]configwrite.Change, error) {
+		original = raw
+		return sandboxDecisionPatch(path, raw, key, host)
+	}, configwrite.Options{
+		Actor:  actor,
+		Reason: "sandbox always decision",
 	})
 	if errors.Is(err, configwrite.ErrManaged) {
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
@@ -743,6 +746,9 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 	}
 	if err != nil {
 		return fmt.Errorf("save %s: %w", key, err)
+	}
+	if len(written.Changed) == 0 {
+		return nil
 	}
 	if err := a.configReloader(ctx, "sandbox_always_decision"); err != nil {
 		_, rollbackErr := configwrite.ReplaceDocument(ctx, path, original, configwrite.Options{

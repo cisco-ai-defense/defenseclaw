@@ -1,0 +1,30 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "defenseclaw-axis-mxc-probe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+resolver = "3"
+# Each source checkout keeps its own workspace inheritance. Do not promote its
+# path dependencies into this contributor workspace as implicit members.
+exclude = ["axis-source", "mxc-source"]
+
+# These directories are fresh, exact-commit build inputs, not vendored sources.
+# prepare_build.py checks both identities before applying the reviewed patch.
+[dependencies]
+axis-core = { version = "=0.3.5", path = "axis-source/crates/axis-core" }
+axis-sandbox = { version = "=0.3.5", path = "axis-source/crates/axis-sandbox" }
+mxc-sdk = { version = "=1.0.1", path = "mxc-source/src/mxc-sdk", default-features = false }
+anyhow = "=1.0.104"
+libc = "=0.2.189"
+serde_json = "=1.0.151"
+tempfile = "=3.27.0"
+
+[profile.release]
+debug = false
+strip = "debuginfo"

@@ -1,0 +1,255 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC V1 contributor build
+
+# Build evidence only. Generating a combined lock does not authorize executing
+# the probe; its lock must be reviewed, committed and rebuilt with --locked.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-mxc-v1-feasibility.yml
+      - test/e2e/axis/mxc-runner/**
+      - test/e2e/axis/mxc-macos/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-mxc-v1-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  linux-build:
+    name: Build Linux AXIS MXC V1 contributor probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out the contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            test/e2e/axis/mxc-runner
+            test/e2e/axis/patches
+
+      - name: Stage the exact contributor source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C defenseclaw-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -C defenseclaw-source status --porcelain)"
+          mkdir probe
+          cp -a defenseclaw-source/test/e2e/axis/mxc-runner/. probe/
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch probe/mxc-literal-argv.patch
+
+      - name: Check out the reviewed AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: probe/axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the independently reviewed MXC V1 source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: probe/mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Provision build prerequisites on the disposable runner
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential pkg-config ca-certificates
+
+      - name: Build without executing the contributor probe
+        timeout-minutes: 35
+        working-directory: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" fmt -- --check
+          if test -f Cargo.lock; then
+            python3 prepare_build.py build-locked
+          else
+            python3 prepare_build.py generate-lock
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          pathlib.Path("build-artifact/WORKFLOW.json").write_text(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow_commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "execution_performed": False,
+          }, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Test fixed Linux policy and fixture helpers without launching a sandbox
+        working-directory: probe
+        shell: bash
+        run: cargo +"$RUST_TOOLCHAIN" test --locked --release probe::tests -- --test-threads=1
+
+      - name: Upload build evidence and the combined lock for review
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-linux-contributor-${{ github.sha }}
+          path: |
+            probe/build-artifact/**
+            probe/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6
+
+  macos-build:
+    name: Build macOS AXIS MXC V1 contributor probe
+    runs-on: macos-14
+    timeout-minutes: 50
+    steps:
+      - name: Check out the contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            test/e2e/axis/mxc-macos
+            test/e2e/axis/patches
+
+      - name: Stage the exact contributor source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C defenseclaw-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -C defenseclaw-source status --porcelain)"
+          mkdir probe
+          cp -a defenseclaw-source/test/e2e/axis/mxc-macos/. probe/
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch probe/mxc-literal-argv.patch
+
+      - name: Check out the reviewed AXIS policy source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: probe/axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the reviewed MXC V1 source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: probe/mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify native build tools and provision the pinned Rust toolchain
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          xcode-select --print-path
+          clang --version
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+
+      - name: Inventory the exact macOS shell selector and fixed target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import stat
+
+          selector = "/private/var/select/sh"
+          for path in ("/", "/private", "/private/var", "/private/var/select", selector, "/bin", "/bin/bash"):
+              try:
+                  metadata = os.lstat(path)
+              except FileNotFoundError:
+                  print(json.dumps({"path": path, "type": "missing"}, sort_keys=True))
+                  continue
+              kind = "symlink" if stat.S_ISLNK(metadata.st_mode) else (
+                  "directory" if stat.S_ISDIR(metadata.st_mode) else (
+                      "regular" if stat.S_ISREG(metadata.st_mode) else "other"
+                  )
+              )
+              print(json.dumps({
+                  "path": path, "type": kind, "uid": metadata.st_uid,
+                  "mode": oct(stat.S_IMODE(metadata.st_mode)),
+                  "link_target": os.readlink(path) if path == selector and kind == "symlink" else None,
+              }, sort_keys=True))
+          print(json.dumps({"selector_canonical": os.path.realpath(selector)}, sort_keys=True))
+          PY
+
+      - name: Build without executing the contributor probe
+        timeout-minutes: 35
+        working-directory: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" fmt -- --check
+          if test -f Cargo.lock; then
+            python3 prepare_build.py build-locked
+          else
+            python3 prepare_build.py generate-lock
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          pathlib.Path("build-artifact/WORKFLOW.json").write_text(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow_commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "execution_performed": False,
+          }, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Test the fixed Seatbelt profile generator without launching a sandbox
+        working-directory: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" test --locked --release strict_profile::tests -- --test-threads=1
+          cargo +"$RUST_TOOLCHAIN" test --locked --release probe::tests -- --test-threads=1
+
+      - name: Upload build evidence and the combined lock for review
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-macos-contributor-${{ github.sha }}
+          path: |
+            probe/build-artifact/**
+            probe/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6

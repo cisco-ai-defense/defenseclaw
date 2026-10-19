@@ -104,11 +104,15 @@ func (phase SandboxPhase) Active() bool {
 // Registered values of the enumerated correlation.sandbox attributes.
 const (
 	SandboxRuntimeOpenShell = "openshell"
+	SandboxRuntimeAxis      = "axis"
 
-	SandboxDriverDocker = "docker"
-	SandboxDriverPodman = "podman"
-	SandboxDriverVM     = "vm"
-	SandboxDriverK8s    = "k8s"
+	SandboxDriverDocker           = "docker"
+	SandboxDriverPodman           = "podman"
+	SandboxDriverVM               = "vm"
+	SandboxDriverK8s              = "k8s"
+	SandboxDriverProcessContainer = "process_container"
+	SandboxDriverBubblewrap       = "bubblewrap"
+	SandboxDriverSeatbelt         = "seatbelt"
 
 	SandboxProfileOpen     = "open"
 	SandboxProfileBalanced = "balanced"
@@ -128,7 +132,7 @@ var SandboxDriverReasons = []string{
 // sandbox record. Empty fields are omitted, never inferred. Identity values
 // are log attributes only; the registry forbids them as metric labels.
 type SandboxIdentity struct {
-	// ID is the OpenShell sandbox ID; empty until the gateway accepted it.
+	// ID is the provider's immutable sandbox/session ID; empty before admission.
 	ID string
 	// Name is the DefenseClaw sandbox name (by default <folder>-<rand4>).
 	// Every record except gateway-wide health requires it.
@@ -137,9 +141,9 @@ type SandboxIdentity struct {
 	// the record connector and is the only identity-like label on sandbox
 	// metrics (defenseclaw.connector.source).
 	Connector string
-	// Runtime is SandboxRuntimeOpenShell.
+	// Runtime is the owning execution runtime (SandboxRuntime*).
 	Runtime string
-	// Driver is the OpenShell compute driver (SandboxDriver*).
+	// Driver is the provider's native or compute driver (SandboxDriver*).
 	Driver string
 	// DriverReason is why a managed sandbox runs on Driver
 	// (SandboxDriverReasons: configured, kvm_available, or the KVM probe's
@@ -2075,8 +2079,8 @@ func (identity SandboxIdentity) validate(requireName bool) error {
 		field, value string
 		allowed      []string
 	}{
-		{"runtime", identity.Runtime, []string{SandboxRuntimeOpenShell}},
-		{"driver", identity.Driver, []string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s}},
+		{"runtime", identity.Runtime, []string{SandboxRuntimeOpenShell, SandboxRuntimeAxis}},
+		{"driver", identity.Driver, []string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s, SandboxDriverProcessContainer, SandboxDriverBubblewrap, SandboxDriverSeatbelt}},
 		{"driver reason", identity.DriverReason, SandboxDriverReasons},
 		{"profile", identity.Profile, []string{SandboxProfileOpen, SandboxProfileBalanced, SandboxProfileStrict}},
 		{"workdir mode", identity.WorkdirMode, []string{SandboxWorkdirMount, SandboxWorkdirCopy}},

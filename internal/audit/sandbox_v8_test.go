@@ -47,6 +47,21 @@ func testSandboxIdentity() SandboxIdentity {
 	}
 }
 
+func TestNativeSandboxIdentityVocabulary(t *testing.T) {
+	for _, driver := range []string{SandboxDriverProcessContainer, SandboxDriverBubblewrap, SandboxDriverSeatbelt} {
+		identity := testSandboxIdentity()
+		identity.Runtime, identity.Driver = SandboxRuntimeAxis, driver
+		if err := identity.validate(true); err != nil {
+			t.Fatalf("owned native runtime/driver rejected: %v", err)
+		}
+	}
+	identity := testSandboxIdentity()
+	identity.Runtime = "unregistered-provider"
+	if err := identity.validate(true); err == nil {
+		t.Fatal("unregistered runtime accepted")
+	}
+}
+
 // sandboxHarness shares one audit store across a test's cases. Opening a
 // store runs every audit migration, which dominates this suite under -race;
 // each case still binds a fresh capturing runtime and recorder, so records and

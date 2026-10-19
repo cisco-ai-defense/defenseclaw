@@ -4815,7 +4815,7 @@ attributes:
 - id: defenseclaw.sandbox.runtime
   type: string
   brief: Isolation runtime hosting the sandbox
-  examples: [openshell]
+  examples: [openshell, axis]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -4823,12 +4823,12 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [openshell]}
-    notes: NVIDIA OpenShell 0.1.x is the only supported runtime
+    overrides: {enum: [openshell, axis]}
+    notes: The runtime owning this exact sandbox or native session; a value does not advertise runtime qualification
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.driver
   type: string
-  brief: OpenShell compute driver running the sandbox
+  brief: Compute or native enforcement driver running the sandbox
   examples: [docker]
   stability: stable
   owner: defenseclaw
@@ -4837,8 +4837,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [docker, podman, vm, k8s]}
-    notes: The OpenShell gateway compute driver; DefenseClaw supports only docker today
+    overrides: {enum: [docker, podman, vm, k8s, process_container, bubblewrap, seatbelt]}
+    notes: The exact owning provider driver; a value does not advertise driver or capability qualification
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.driver_reason
   type: string

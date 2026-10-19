@@ -102,6 +102,10 @@ type ProxyControl interface {
 
 // Options configure a Manager.
 type Options struct {
+	// Native is a trusted host-owned execution dependency beneath this same
+	// manager/API. Nil preserves refusal before any native preparation. Runtime
+	// enablement alone never creates a qualified catalog or factory.
+	Native *NativeExecution
 	// DataDir is the DefenseClaw data directory. Required.
 	DataDir string
 	// Owner labels the sandboxes this data dir owns (image.Store.Owner), so
@@ -282,6 +286,9 @@ type Manager struct {
 
 	mu    sync.Mutex
 	boxes map[string]*box
+	// Native admission cannot reopen after this manager's shutdown. A fresh
+	// service lifetime requires a fresh manager/host publication dependency.
+	nativeClosed bool
 	// undone are the names of creates this daemon rolled back (a Ctrl-C, a
 	// failure), with when: the OpenShell sandbox of such a create may outlive
 	// its rollback (a MicroVM still provisioning), and is this daemon's own
@@ -506,6 +513,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.runCtx = ctx
 	m.runMu.Unlock()
 	defer func() {
+		m.closeNativeSessions()
 		m.stopWatchers()
 		m.closeGateway()
 		m.feed.closeSubscribers()
@@ -894,7 +902,11 @@ func (m *Manager) config() *config.Config {
 // (openshell.workdir.undo_ignored): the directory names and the cap on the
 // copies, or nothing while the key is off.
 func (m *Manager) keepIgnored() ([]string, int64) {
-	u := m.config().OpenShell.Workdir.UndoIgnored
+	return keepIgnoredConfig(m.config())
+}
+
+func keepIgnoredConfig(cfg *config.Config) ([]string, int64) {
+	u := cfg.OpenShell.Workdir.UndoIgnored
 	if !u.Enabled {
 		return nil, 0
 	}

@@ -2,7 +2,67 @@
 
 Open this when: your change adds or depends on something outside the Python wheel and Go binaries (Docker, a VM or microVM, KVM, a GPU, a local model server, a node or python extra, a system package, an OS version, network egress), or you touch OpenShell, sandboxes, judges or scanners.
 
-Heavy requirements stay optional, off by default and never installed silently. Sandboxes are off until `openshell.enabled` is set by `defenseclaw sandbox setup`.
+Heavy requirements stay optional, off by default and never installed silently. With no common `sandbox` namespace, sandboxes remain off until `openshell.enabled` is set by `defenseclaw sandbox setup`. An explicitly present common namespace owns the master switch and runtime-lane enablement; preserve legacy restrictions for missing common policy leaves. Active AXIS configuration is refused until its execution and containment gates are qualified; configuration enablement alone is never availability evidence.
+
+`internal/sandboxruntime/policy.go` (`@sym:ResolveExecutionPolicy`) freezes the projected common
+policy through the existing pack resolver. Keep its private host evaluator as
+the broker authority; inspection JSON and a flattened provider allowlist cannot
+replace it. Rotate the host authority snapshot identity or generation when
+broker routing or host facts change. Adapter admission needs exact runtime,
+harness, policy and complete component receipts plus independently qualified
+capabilities. A structural receipt grants no launch, credential or session
+ownership authority. The contract starts nothing and does not enable AXIS.
+At dispatch, compare the fresh trusted host authority binding and serialize
+authority rotation with admission and launch, or condition launch on that
+generation. Never accept an API client's binding as current host state.
+
+`internal/sandboxruntime/launch.go` (`@sym:LaunchGate`) serializes that boundary.
+Its callback reads the actual owner authority source; its last published binding
+detects out-of-transaction changes and rollback. Every authority writer must
+enter the rotation transaction before publishing new facts.
+`RotatePublished` accepts the exact binding returned by a host publisher that
+assigns its generation inside that transaction; never guess its next counter.
+Skip no-op changes before entering a transition. Once entered, cancellation or
+non-advancing/mismatched publication closes admission.
+Prepared handles copy complete launch inputs and receipts, consume once and
+refuse serialization.
+On partial launch, cancellation or an identity mismatch, clean up the exact
+owned resource handle; failed cleanup closes admission. The host controller
+still reserves unique session identities, aborts abandoned preparations and
+owns successful workloads. A gate is not adapter qualification or a session store.
+
+`internal/axis/bridgeproto` defines private bounded helper frames and conversation
+admission only. Digests correlate host-owned records; they grant no authority.
+Keep the resolver snapshot and provider credentials out of helper/child plans.
+Enforce native path custody, elapsed deadlines and owned teardown in the actual
+supervisor. A clean codec/state test is not a contained-process qualification.
+
+`internal/axis/bridgeowner` owns private parent pipe endpoints and protocol
+ordering under absolute deadlines. Require already-established native custody,
+distinct pipe objects, bounded writes/output queues, and cancellation checks
+before queued events are delivered. Windows parent endpoints must support
+overlapped deadlines; anonymous pipes refuse. Closing pipes or receiving
+Destroyed is never process-tree cleanup proof: independently terminate/wait the
+owned native resources, retain failed cleanup responsibility and keep admission
+closed. This package starts no helper or runtime; fake-custody tests qualify only
+the actual pipe/state behavior they exercise.
+
+Private Windows host staging lives in `internal/openshell/workspace/host_stage.go`
+and `internal/openshell/workspace/HOST_STAGE.md`. Preserve held original source
+identity, policy and unmask paths while sanitizing captured bytes through held
+roots. Never rebind policy to a temporary capture or start stock Git from a
+drive-letter fallback. Unsupported Git formats and incomplete reads refuse.
+Frozen operator fallback facts plus the same captured local config select
+line-ending behavior. The pinned go-git plumbing dependency and exact license
+texts are recorded in `go.mod`, `NOTICE` and `THIRD_PARTY_LICENSES.txt`.
+Host staging alone grants no guest, runtime, credential or provider capability.
+
+`internal/openshell/sandboxcli/session_transport.go` (`@sym:SessionTransport`)
+separates command execution from session orchestration. Bind the transport
+explicitly to the recorded target; pass literal argv without shell rendering.
+Missing or unsupported transports refuse. The existing fixed Unix image recipes
+remain explicitly OpenShell-only. Preserve terminal diagnostic custody, output
+filtering, interrupts, session notices and workspace review when adding adapters.
 
 ## Requirements: disclosure
 
@@ -36,6 +96,15 @@ IDs live only in `reference/checklist.md`. These rows add detail and carry no ID
 | Keep the Python `defenseclaw sandbox` surface in lockstep with the Go command tree. Update the golden, the TUI panel and the reference docs together. | The two CLIs drift otherwise. | `go test ./internal/cli ./internal/openshell/sandboxcli`; `pytest cli/tests/test_cmd_sandbox.py` | `internal/cli/testdata/sandbox_commands.json`, `cli/defenseclaw/commands/cmd_sandbox.py`, `docs-site/content/docs/reference/sandbox-cli.mdx` |
 | Recognise an OpenShell installed outside the supported route and say DefenseClaw cannot manage its gateway; do not edit it. | A service the user owns must not be restarted or rewritten. | `go test ./internal/openshell -run DoctorOnReleaseBinaries` | `internal/openshell/doctor.go` (`@sym:OpenShellOutsideFormula`, `@sym:OpenShellOutsideUnit`) |
 | Probes read world-readable information only. Mark a fix that restarts the gateway (it stops running sandboxes). | Probes must not touch other users' state. | review the probe | `internal/openshell/doctor.go` (`Fix.RestartsGateway`), `cli/defenseclaw/commands/cmd_doctor.py` (`@sym:_check_kernel_sensor`) |
+
+The private AXIS source is not customer runtime availability. The bounded wire
+contract (`internal/axis/bridgeproto`), pipe owner (`internal/axis/bridgeowner`),
+and Linux factory (`internal/axis/bridgeprocess`) carry no resolver or credential
+authority. Keep the factory's `Session` after cleanup failure: it retains native
+custody independently of the protocol owner's single shutdown attempt. Its
+inert image/fake-custody tests do not qualify an executable bundle, namespace
+tree or a real agent. Runtime activation still needs the full common-policy,
+artifact, native boundary, broker, hook and application gates.
 
 ## Requirements: judges, local models, scanners
 

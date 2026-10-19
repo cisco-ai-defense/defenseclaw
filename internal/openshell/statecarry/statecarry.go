@@ -28,7 +28,7 @@
 // the rollback restored.
 //
 // Carry copies that setup from the install the installer leaves into the
-// one it makes live: the openshell: section of config.yaml and the sandbox
+// one it makes live: the openshell: and optional sandbox: sections of config.yaml and the sandbox
 // state directories (StateDirs). The install left keeps its own copy, so a
 // second rollback (a roll forward, which the restored install's installer
 // runs without this package) finds it as it was.
@@ -67,6 +67,10 @@ const configKey = "openshell"
 // (<data_dir>/sandboxes/manager/<name>.json, manager.recordDirName).
 var recordDir = filepath.Join("sandboxes", "manager")
 
+const liveSetupSkipped = "the live install has a sandbox setup of its own"
+
+var errLiveSetupAppeared = errors.New("statecarry: the live install gained a sandbox setup while carrying state")
+
 // Options names the two installs.
 type Options struct {
 	// FromDataDir and FromConfig are the install the installer leaves.
@@ -78,6 +82,9 @@ type Options struct {
 	// after a rollback by an earlier release uses it: the older install may
 	// have set up sandboxes since, and then its setup is the one in use.
 	OnlyIfUnset bool
+	// afterInstall lets package tests make a config change at the exact
+	// boundary between state installation and the locked config write.
+	afterInstall func() error
 }
 
 // Result says what Carry did.
@@ -131,7 +138,7 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 	}
-	section, on, err := openShellSection(o.FromConfig)
+	sections, on, err := sandboxSections(o.FromConfig)
 	if err != nil {
 		return Result{}, err
 	}
@@ -144,22 +151,30 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 		return Result{}, err
 	}
 	if o.OnlyIfUnset {
-		_, liveOn, err := openShellSection(o.Config)
+		_, liveOn, err := sandboxSections(o.Config)
 		if err != nil {
 			return Result{}, err
 		}
 		if liveOn || len(sandboxRecords(o.DataDir)) > 0 {
-			return Result{Skipped: "the live install has a sandbox setup of its own"}, nil
+			return Result{Skipped: liveSetupSkipped}, nil
 		}
 	}
-	// An alias would point into the other document: write its value.
-	var value any = section
-	if hasAlias(section) {
-		var plain any
-		if err := section.Decode(&plain); err != nil {
-			return Result{}, fmt.Errorf("statecarry: %s: openshell: %w", o.FromConfig, err)
+	changes := make([]configwrite.Change, 0, len(sections))
+	for _, key := range []string{configKey, "sandbox"} {
+		section := sections[key]
+		if section == nil {
+			continue
 		}
-		value = plain
+		// An alias would point into the other document: write its value.
+		var value any = section
+		if hasAlias(section) {
+			var plain any
+			if err := section.Decode(&plain); err != nil {
+				return Result{}, fmt.Errorf("statecarry: %s: %s: %w", o.FromConfig, key, err)
+			}
+			value = plain
+		}
+		changes = append(changes, configwrite.Change{Path: key, Value: value})
 	}
 	names := sandboxRecords(o.FromDataDir)
 	moves, err := stage(o.FromDataDir, o.DataDir)
@@ -169,20 +184,46 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 	if err := install(moves); err != nil {
 		return Result{}, errors.Join(err, undo(moves))
 	}
-	if _, err := configwrite.Apply(ctx, o.Config, []configwrite.Change{{Path: configKey, Value: value}}, configwrite.Options{
+	if o.afterInstall != nil {
+		if err := o.afterInstall(); err != nil {
+			return Result{}, errors.Join(err, undo(moves))
+		}
+	}
+	if _, err := configwrite.ApplyComputed(ctx, o.Config, func(current []byte) ([]configwrite.Change, error) {
+		live, liveOn, err := parseSandboxSections(current)
+		if err != nil {
+			return nil, err
+		}
+		if o.OnlyIfUnset && liveOn {
+			return nil, errLiveSetupAppeared
+		}
+		if sections["sandbox"] == nil && live["sandbox"] != nil {
+			return nil, errors.New("statecarry: the live install has sandbox policy but the source uses legacy openshell policy; explicitly reconcile the sandbox policy before carrying its setup")
+		}
+		if sections["sandbox"] != nil && sections[configKey] == nil && live[configKey] != nil {
+			return nil, errors.New("statecarry: the live install has openshell settings but the source only has common sandbox policy; explicitly reconcile the sandbox policy before carrying its setup")
+		}
+		return changes, nil
+	}, configwrite.Options{
 		Actor:  configwrite.ActorMigration,
 		Reason: "installer: keep the sandbox setup of the install it replaced",
 	}); err != nil {
-		err = fmt.Errorf("write the openshell settings into %s: %w", o.Config, err)
+		if errors.Is(err, errLiveSetupAppeared) {
+			if undoErr := undo(moves); undoErr != nil {
+				return Result{}, undoErr
+			}
+			return Result{Skipped: liveSetupSkipped}, nil
+		}
+		err = fmt.Errorf("write the sandbox settings into %s: %w", o.Config, err)
 		return Result{}, errors.Join(err, undo(moves))
 	}
 	done(moves)
 	return Result{Carried: true, Sandboxes: names}, nil
 }
 
-// openShellSection returns the openshell: mapping of the config.yaml at
-// path and whether it turns sandboxes on.
-func openShellSection(path string) (*yaml.Node, bool, error) {
+// sandboxSections returns the explicit policy and vendor sections and the
+// authoritative master switch, preserving legacy enablement without sandbox:.
+func sandboxSections(path string) (map[string]*yaml.Node, bool, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
@@ -190,22 +231,42 @@ func openShellSection(path string) (*yaml.Node, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	sections, on, err := parseSandboxSections(raw)
+	if err != nil {
+		return nil, false, fmt.Errorf("statecarry: %s: %w", path, err)
+	}
+	return sections, on, nil
+}
+
+func parseSandboxSections(raw []byte) (map[string]*yaml.Node, bool, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, false, fmt.Errorf("statecarry: %s: %w", path, err)
+		return nil, false, err
 	}
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
 		return nil, false, nil
 	}
-	section := mapValue(doc.Content[0], configKey)
-	if section == nil || section.Kind != yaml.MappingNode {
-		return nil, false, nil
+	sections := make(map[string]*yaml.Node)
+	for _, key := range []string{configKey, "sandbox"} {
+		if node := mapValue(doc.Content[0], key); node != nil {
+			if node.Kind != yaml.MappingNode {
+				return nil, false, fmt.Errorf("%s: expected a configuration mapping", key)
+			}
+			sections[key] = node
+		}
+	}
+	section := sections["sandbox"]
+	if section == nil {
+		section = sections[configKey]
+	}
+	if section == nil {
+		return sections, false, nil
 	}
 	var enabled bool
 	if node := mapValue(section, "enabled"); node == nil || node.Decode(&enabled) != nil {
 		enabled = false
 	}
-	return section, enabled, nil
+	return sections, enabled, nil
 }
 
 func hasAlias(n *yaml.Node) bool {

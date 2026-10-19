@@ -90,7 +90,7 @@ func TestSandboxDaemonStopAndDeleteCountAsInFlight(t *testing.T) {
 		during = append(during, f.d.stops.Load())
 		return false, nil
 	}
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	_, _ = ctl.Stop(ctx, "kept1")
 	_, _ = ctl.Delete(ctx, "kept1", sandboxapi.DeleteRequest{})
 	if len(during) != 2 || during[0] != 1 || during[1] != 1 {
@@ -119,7 +119,7 @@ func TestSandboxDaemonCheckWaitsForAStopBegunDuringTheList(t *testing.T) {
 	if err := os.WriteFile(f.exe, []byte("v2-upgraded"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	var once sync.Once
 	stopped := make(chan struct{})
 	during = func() {
@@ -225,7 +225,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	if !slices.ContainsFunc(raw.Violations, closedFloorDeny) || raw.NetworkMode != "deny" || raw.Profile != "strict" {
 		t.Fatalf("the closed floor's view is not the deny of the evidence: %+v %s/%s", raw.Violations, raw.Profile, raw.NetworkMode)
 	}
-	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctl := &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 
 	// Still no answer: the closed floor stays, and the views say the policy
 	// is being confirmed instead of the deny.
@@ -288,7 +288,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	g.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: "profile removed"}, nil
 	}
-	gctl := &managedSandboxController{Manager: g.d.rt.manager, d: g.d}
+	gctl := &managedSandboxController{sandboxRuntimeController: g.d.rt.manager, d: g.d}
 	_, _ = gctl.List(ctx)
 	if r, _ := g.d.regs.get("dc-b"); !r.Revoked {
 		t.Fatalf("the revoked registration was not marked: %+v", r)
@@ -389,7 +389,7 @@ func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
 	}
 	c.sandboxDaemonFixture = f
 	runPastRevalidate(t, f)
-	c.ctl = &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	c.ctl = &managedSandboxController{sandboxRuntimeController: f.d.rt.manager, d: f.d}
 	if !f.d.floorClosed() {
 		t.Fatal("the fixture's start-up confirmation adopted a floor")
 	}

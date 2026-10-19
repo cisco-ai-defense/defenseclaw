@@ -44,8 +44,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
-// box returns the named sandbox, or a not-found error.
+// box is the legacy operation lookup. Unsupported operations must never select
+// an OpenShell sandbox using a native session's display name.
 func (m *Manager) box(name string) (*box, error) {
+	b, err := m.ownedBox(name)
+	if err != nil {
+		return nil, err
+	}
+	if b.native != nil {
+		return nil, nativeUnsupported()
+	}
+	return b, nil
+}
+
+// ownedBox is reserved for operations with an explicit native implementation.
+func (m *Manager) ownedBox(name string) (*box, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.boxes[name]
@@ -59,12 +72,19 @@ func (m *Manager) box(name string) (*box, error) {
 // sandbox being created is refused at once: its create holds the lock for
 // as long as it runs, an image build included (defaultCreateTimeout).
 func (m *Manager) lockBox(name string) (*box, func(), error) {
-	b, err := m.box(name)
+	return m.lockSelectedBox(m.box(name))
+}
+
+func (m *Manager) lockOwnedBox(name string) (*box, func(), error) {
+	return m.lockSelectedBox(m.ownedBox(name))
+}
+
+func (m *Manager) lockSelectedBox(b *box, err error) (*box, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
 	m.mu.Lock()
-	creating := b.creating
+	creating, name := b.creating, b.rec.Name
 	m.mu.Unlock()
 	if creating {
 		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is being created", name)
@@ -141,7 +161,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 			live = true
 			m.mu.Lock()
 			for _, sb := range sbs {
-				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
+				if b := m.boxes[sb.Name]; b != nil && b.native == nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
 					b.sb, b.missing = sb, false
 				}
 			}
@@ -155,22 +175,26 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	bindings := make([]string, 0, len(m.boxes))
 	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
 	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
+	native := make([]bool, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
 			v := m.view(b)
-			if !live {
+			if !live && b.native == nil {
 				unconfirmedPhase(&v)
 			}
 			out = append(out, v)
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
 			accepted = append(accepted, b.rec.Accepted)
+			native = append(native, b.native != nil)
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i], accepted[i])
+		if !native[i] {
+			m.decorate(&out[i], proxy, bindings[i], accepted[i])
+		}
 	}
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -179,11 +203,15 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 
 // Get returns one sandbox.
 func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
-	b, err := m.box(name)
+	b, err := m.ownedBox(name)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
+	if b.native != nil {
+		m.mu.Unlock()
+		return m.getNative(ctx, b)
+	}
 	retained := b.retained
 	m.mu.Unlock()
 	live := retained
@@ -225,11 +253,14 @@ func unconfirmedPhase(v *sandboxapi.Sandbox) {
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
 // later start.
 func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
-	b, unlock, err := m.lockBox(name)
+	b, unlock, err := m.lockOwnedBox(name)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	if b.native != nil {
+		return m.stopNative(ctx, b)
+	}
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
@@ -317,6 +348,9 @@ func credentialDigest(creds map[string]string) string {
 // refuseRetained refuses what needs a live sandbox on a retained box (a
 // deleted sandbox whose snapshot is kept).
 func (m *Manager) refuseRetained(b *box) error {
+	if b.native != nil {
+		return nativeUnsupported()
+	}
 	m.mu.Lock()
 	retained, name := b.retained, b.rec.Name
 	m.mu.Unlock()
@@ -328,6 +362,10 @@ func (m *Manager) refuseRetained(b *box) error {
 }
 
 func (m *Manager) stop(ctx context.Context, b *box) error {
+	if b.native != nil {
+		_, err := m.stopNative(ctx, b)
+		return err
+	}
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -459,6 +497,9 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 // checkSandbox refuses an operation on b when the OpenShell sandbox under
 // its name is not b's (sameSandbox), marking b missing.
 func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
+	if b.native != nil {
+		return nativeUnsupported()
+	}
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
@@ -482,11 +523,14 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 // a fresh snapshot for the new session unless the folder still holds an
 // earlier session's changes that nobody accepted (keepSnapshot, Accept).
 func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
-	b, unlock, err := m.lockBox(name)
+	b, unlock, err := m.lockOwnedBox(name)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	if b.native != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "native session restart is not qualified; create a new session")
+	}
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
@@ -988,7 +1032,7 @@ func maskedRels(binding sandboxauth.Binding, workdir string) []string {
 // a new image ID and a new prepared disk from the driver (image prune
 // removes it with its overlay image; see image.Builder.pruneRunImages).
 func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
-	b, unlock, err := m.lockBox(name)
+	b, unlock, err := m.lockOwnedBox(name)
 	if err != nil {
 		return nil, err
 	}
@@ -998,6 +1042,9 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 
 // deleteLocked deletes b, whose operation lock the caller holds.
 func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
+	if b.native != nil {
+		return m.deleteNative(ctx, b, req)
+	}
 	m.mu.Lock()
 	retained, name := b.retained, b.rec.Name
 	m.mu.Unlock()

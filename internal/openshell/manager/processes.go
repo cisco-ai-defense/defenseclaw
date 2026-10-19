@@ -166,7 +166,7 @@ func newProcTree() *procTree {
 // processTreeOn reports whether the box's policy has the process tree on.
 // Callers hold Manager.mu.
 func (b *box) processTreeOn() bool {
-	return b.eff != nil && b.eff.ProcessTree
+	return b.native == nil && b.eff != nil && b.eff.ProcessTree
 }
 
 // tree returns the box's process tree, making it on first use. Callers hold

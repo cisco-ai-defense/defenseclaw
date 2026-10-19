@@ -151,7 +151,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 
 ## SBX: sandbox
 
-- [ ] **M-SBX-1** Sandboxes stay off until `openshell.enabled` is set; the doctor section skips when off. Why: no cost or requirement for users who never asked.
+- [ ] **M-SBX-1** Sandboxes stay off until legacy `openshell.enabled` is set, or an explicitly present `sandbox` namespace enables both its master switch and its selected runtime lane; the doctor section skips when off. Adding runtime selection preserves inherited policy, and an unavailable runtime refuses without fallback. Why: no cost or requirement for users who never asked.
   Check: `pytest cli/tests/test_cmd_doctor_sandbox.py`. Evidence: `cli/defenseclaw/commands/cmd_doctor.py`.
 - [ ] **M-SBX-2** Driver choice (docker, vm, auto, fallback) is an explicit setting with a typed refusal; a required MicroVM never falls back to Docker; macOS never uses Docker. Why: a silent downgrade weakens required isolation.
   Check: `go test ./internal/openshell -run SelectDriver`. Evidence: `internal/openshell/driver_select.go`.

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,8 +36,30 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
+
+func TestSandboxRuntimeFlagRefusesBeforeConfigOrHostRoute(t *testing.T) {
+	for _, selected := range []string{"axis", "unknown"} {
+		cmd := newSandboxRunCmd()
+		if err := cmd.Flags().Parse([]string{"--runtime", selected}); err != nil {
+			t.Fatal(err)
+		}
+		err := sandboxPreRun(cmd, nil)
+		if err == nil || strings.Contains(err.Error(), "OpenShell sandboxes run") {
+			t.Fatalf("runtime %q reached legacy host path: %v", selected, err)
+		}
+		var refused *sandboxapi.Error
+		if !errors.As(err, &refused) {
+			t.Fatalf("runtime %q lost typed refusal: %v", selected, err)
+		}
+	}
+	cmd := newSandboxRunCmd()
+	if err := cmd.Flags().Parse([]string{"--runtime", "axis", "--runtime", "openshell"}); err == nil {
+		t.Fatal("two runtime selections accepted")
+	}
+}
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
 // stub parity check (track G2) and for this golden test. Long and Example

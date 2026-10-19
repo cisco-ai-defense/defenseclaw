@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"slices"
@@ -542,84 +543,67 @@ func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) err
 	if len(hosts) == 0 {
 		return errors.New("name at least one host")
 	}
-	key := "openshell.egress." + list
-	var current []string
-	if a.Cfg != nil {
-		switch list {
-		case "allow":
-			current = a.Cfg.OpenShell.Egress.Allow
-		case "block":
-			current = a.Cfg.OpenShell.Egress.Block
-		default:
-			return fmt.Errorf("unknown egress list %q", list)
-		}
+	if list != "allow" && list != "block" {
+		return fmt.Errorf("unknown egress list %q", list)
 	}
-	var next, removed, missing []string
-	for _, have := range current {
-		if slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(config.NormalizeOpenShellEgressPattern(h), have) }) {
-			removed = append(removed, have)
-		} else {
-			next = append(next, have)
+	key := "openshell.egress." + list
+	displayKey := key
+	var removed, missing []string
+	err := a.patchConfigComputed("", func(raw []byte) (map[string]any, error) {
+		root, err := sandboxSource(raw)
+		if err != nil {
+			return nil, err
 		}
+		// The common block owns shared writes even when this list still
+		// inherits its current entries from the legacy source.
+		if sandboxSourceAt(root, "sandbox") != nil {
+			displayKey = "sandbox.egress." + list
+		}
+		current, err := sourceEgressListAt(root, list)
+		if err != nil {
+			return nil, err
+		}
+		next := make([]string, 0, len(current))
+		for _, have := range current {
+			if slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(config.NormalizeOpenShellEgressPattern(h), have) }) {
+				removed = append(removed, have)
+			} else {
+				next = append(next, have)
+			}
+		}
+		if len(removed) == 0 {
+			return nil, fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), displayKey, CommandName)
+		}
+		return map[string]any{key: next}, nil
+	})
+	if err != nil {
+		return err
 	}
 	for _, h := range hosts {
 		if !slices.ContainsFunc(removed, func(r string) bool { return strings.EqualFold(r, config.NormalizeOpenShellEgressPattern(h)) }) {
 			missing = append(missing, h)
 		}
 	}
-	if len(removed) == 0 {
-		return fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), key, CommandName)
-	}
-	if next == nil {
-		next = []string{}
-	}
-	if err := a.patchConfig(map[string]any{key: next}); err != nil {
-		return err
-	}
-	a.ok("removed " + strings.Join(removed, ", ") + " from " + key)
+	a.ok("removed " + strings.Join(removed, ", ") + " from " + displayKey)
 	if len(missing) > 0 {
-		a.warn(strings.Join(missing, ", ") + " is not in " + key)
+		a.warn(strings.Join(missing, ", ") + " is not in " + displayKey)
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
 	return nil
 }
 
-// egressEditAttempts bounds how often addEgressHosts redoes an edit that
-// another writer overtook.
-const egressEditAttempts = 5
-
 // addEgressHosts appends the hosts it does not already have to
-// openshell.egress.<list> and returns the ones it added. The list is read
-// from the config.yaml the write replaces, not from a.Cfg, which was loaded
-// when the command started, and the write is checked against those bytes:
-// the daemon saves its "always" decisions to the same lists while this runs,
-// so a write from a stale list would drop them. A change made in between
-// fails the write with configwrite.ErrConflict and the edit is redone on the
-// new file.
+// the effective egress list and returns the ones it added. Reading and
+// changing the list share the config writer lock, retaining concurrent
+// decisions and honoring the current policy source rather than a.Cfg.
 func (a *App) addEgressHosts(list string, hosts []string) ([]string, error) {
-	a.defaults()
-	for range egressEditAttempts {
-		raw, err := os.ReadFile(a.ConfigPath)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read %s: %w", a.ConfigPath, err)
-		}
-		var doc struct {
-			OpenShell struct {
-				Egress struct {
-					Allow []string `yaml:"allow"`
-					Block []string `yaml:"block"`
-				} `yaml:"egress"`
-			} `yaml:"openshell"`
-		}
-		if err := yaml.Unmarshal(raw, &doc); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", a.ConfigPath, err)
-		}
-		current := doc.OpenShell.Egress.Allow
-		if list == "block" {
-			current = doc.OpenShell.Egress.Block
+	var added []string
+	err := a.patchConfigComputed("", func(raw []byte) (map[string]any, error) {
+		current, err := sourceEgressList(raw, list)
+		if err != nil {
+			return nil, err
 		}
 		next := slices.Clone(current)
-		var added []string
 		for _, h := range hosts {
 			if !slices.ContainsFunc(next, func(have string) bool { return strings.EqualFold(strings.TrimSpace(have), h) }) {
 				next = append(next, h)
@@ -629,16 +613,30 @@ func (a *App) addEgressHosts(list string, hosts []string) ([]string, error) {
 		if len(added) == 0 {
 			return nil, nil
 		}
-		err = a.patchConfigIf(map[string]any{"openshell.egress." + list: next}, configwrite.SHA256Hex(raw))
-		if errors.Is(err, configwrite.ErrConflict) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		return added, nil
+		return map[string]any{"openshell.egress." + list: next}, nil
+	})
+	return added, err
+}
+
+func sourceEgressList(raw []byte, list string) ([]string, error) {
+	root, err := sandboxSource(raw)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("%s keeps changing; run the command again", a.ConfigPath)
+	return sourceEgressListAt(root, list)
+}
+
+func sourceEgressListAt(root *yaml.Node, list string) ([]string, error) {
+	node := sandboxSourceAt(root, "sandbox.egress."+list)
+	if node == nil {
+		node = sandboxSourceAt(root, "openshell.egress."+list)
+	}
+	var current []string
+	var err error
+	if node != nil {
+		err = node.Decode(&current)
+	}
+	return current, err
 }
 
 // adminAllows refuses an allow entry the organization's policy would make
@@ -690,22 +688,33 @@ func (a *App) patchConfig(updates map[string]any) error {
 // (configwrite.ErrManaged, below), and a managed host's sandboxes keep
 // their "always" decisions in the managed gateway's decisions store
 // through the daemon, not here. A Secure Client document is not refused by
-// the writer, so it is refused before it.
+// the writer, so the callback refuses its current source under the same lock.
 func (a *App) patchConfigIf(updates map[string]any, expectSHA256 string) error {
+	return a.patchConfigComputed(expectSHA256, func([]byte) (map[string]any, error) { return updates, nil })
+}
+
+func (a *App) patchConfigComputed(expectSHA256 string, compute func([]byte) (map[string]any, error)) error {
 	a.defaults()
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) && !a.Cfg.StandaloneEnterprise() {
 		return managedConfigRefusal()
 	}
-	keys := make([]string, 0, len(updates))
-	for key := range updates {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	changes := make([]configwrite.Change, 0, len(keys))
-	for _, key := range keys {
-		changes = append(changes, configwrite.Change{Path: key, Value: updates[key]})
-	}
-	_, err := configwrite.Apply(context.Background(), a.ConfigPath, changes, configwrite.Options{
+	_, err := configwrite.ApplyComputed(context.Background(), a.ConfigPath, func(raw []byte) ([]configwrite.Change, error) {
+		root, err := sandboxSource(raw)
+		if err != nil {
+			return nil, err
+		}
+		// The generic writer permits Secure Client config edits. Sandbox
+		// policy is administrator-owned under either managed profile.
+		mode := sandboxSourceAt(root, "deployment_mode")
+		if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || mode != nil && managed.IsManagedEnterprise(mode.Value) {
+			return nil, configwrite.ErrManaged
+		}
+		updates, err := compute(raw)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxPolicyChanges(root, updates)
+	}, configwrite.Options{
 		Actor:        configwrite.CurrentActor(configwrite.ActorPrefixCLI),
 		Reason:       "defenseclaw-gateway sandbox",
 		ExpectSHA256: expectSHA256,
@@ -717,6 +726,133 @@ func (a *App) patchConfigIf(updates map[string]any, expectSHA256 string) error {
 		return fmt.Errorf("%s was not changed: %w", a.ConfigPath, err)
 	}
 	return nil
+}
+
+// sandboxSource keeps authority decisions tied to explicit source keys, not
+// loader defaults or the common policy projected into a.Cfg.OpenShell.
+func sandboxSource(raw []byte) (*yaml.Node, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	doc, err := config.ParseV8YAML("", raw)
+	if err != nil {
+		return nil, err
+	}
+	return doc.Document.Content[0], nil
+}
+
+func sandboxSourceAt(root *yaml.Node, path string) *yaml.Node {
+	node := root
+	for _, key := range strings.Split(path, ".") {
+		if node == nil || node.Kind != yaml.MappingNode {
+			return nil
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		node = next
+	}
+	return node
+}
+
+func refuseAXISSetup(root *yaml.Node) error {
+	if runtime := sandboxSourceAt(root, "sandbox.runtime"); runtime != nil && runtime.Value == "axis" {
+		return axisSetupRefusal()
+	}
+	return nil
+}
+
+func axisSetupRefusal() error {
+	return errors.New("sandbox.runtime is axis; AXIS is not available in this build, so OpenShell setup cannot enable it; explicitly select sandbox.runtime openshell before running setup")
+}
+
+func (a *App) checkSetupRuntime() error {
+	file, err := os.Open(a.ConfigPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		if a.Cfg != nil && a.Cfg.SandboxDefaultRuntime() == "axis" {
+			return axisSetupRefusal()
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s before setup: %w", a.ConfigPath, err)
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, int64(config.V8YAMLMaxSourceBytes)+1))
+	if err != nil {
+		return fmt.Errorf("read %s before setup: %w", a.ConfigPath, err)
+	}
+	root, err := sandboxSource(raw)
+	if err != nil {
+		return err
+	}
+	return refuseAXISSetup(root)
+}
+
+func sandboxPolicyChanges(root *yaml.Node, updates map[string]any) ([]configwrite.Change, error) {
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var changes []configwrite.Change
+	common := sandboxSourceAt(root, "sandbox") != nil
+	for _, key := range keys {
+		value := updates[key]
+		suffix, legacy := strings.CutPrefix(key, "openshell.")
+		if !common || !legacy {
+			changes = append(changes, configwrite.Change{Path: key, Value: value})
+			continue
+		}
+		if suffix == "enabled" {
+			on, ok := value.(bool)
+			if !ok {
+				return nil, errors.New("openshell.enabled requires a boolean")
+			}
+			if on {
+				if err := refuseAXISSetup(root); err != nil {
+					return nil, err
+				}
+				changes = append(changes, configwrite.Change{Path: "sandbox.runtimes.openshell.enabled", Value: true})
+			}
+			changes = append(changes, configwrite.Change{Path: "sandbox.enabled", Value: on})
+		} else if commonSandboxPolicySuffix(suffix) {
+			// These callers write individual leaves. Refuse a whole policy
+			// mapping rather than replace unrelated explicit legacy leaves.
+			var encoded yaml.Node
+			if err := encoded.Encode(value); err != nil {
+				return nil, err
+			}
+			if encoded.Kind == yaml.MappingNode {
+				return nil, fmt.Errorf("%s: write individual sandbox policy fields", key)
+			}
+			changes = append(changes, configwrite.Change{Path: "sandbox." + suffix, Value: value})
+		} else {
+			changes = append(changes, configwrite.Change{Path: key, Value: value})
+			continue
+		}
+		// Keep an explicit duplicate synchronized only for the intended
+		// leaf. Every other source conflict is still rejected by validation.
+		if sandboxSourceAt(root, key) != nil {
+			changes = append(changes, configwrite.Change{Path: key, Value: value})
+		}
+	}
+	return changes, nil
+}
+
+func commonSandboxPolicySuffix(suffix string) bool {
+	key, _, _ := strings.Cut(suffix, ".")
+	// Shared fields of config.SandboxConfig; vendor fields stay openshell.*.
+	switch key {
+	case "ingress_port", "egress_port", "pack", "pack_dir", "profile", "yolo", "llm", "keep_headless",
+		"workdir", "egress", "approvals", "resources", "harnesses", "wrappers", "mcp", "admin":
+		return true
+	}
+	return false
 }
 
 // PackOptions are the `pack` flags.

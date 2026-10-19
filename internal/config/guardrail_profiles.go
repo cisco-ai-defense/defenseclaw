@@ -734,6 +734,11 @@ func (c *Config) DeepCopy() (*Config, error) {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
 	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
+	if c.Sandbox != nil && out.Sandbox != nil {
+		// JSON cannot retain source-leaf presence. It must survive snapshots:
+		// implicit defaults must not become explicit policy after a clone.
+		out.Sandbox.declared = maps.Clone(c.Sandbox.declared)
+	}
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

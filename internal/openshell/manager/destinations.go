@@ -1022,7 +1022,7 @@ func (m *Manager) flushDestinations(only string) {
 	}
 	var targets []target
 	for name, b := range m.boxes {
-		if (only == "" || name == only) && !b.deleted && !b.retained && !b.creating {
+		if b.native == nil && (only == "" || name == only) && !b.deleted && !b.retained && !b.creating {
 			targets = append(targets, target{name, b.rec.Harness, b.rec.BindingID, slices.Clone(b.proxyOpens)})
 		}
 	}

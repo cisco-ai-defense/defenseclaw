@@ -721,7 +721,7 @@ wait:
 func (d *SandboxDaemon) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ctl := &managedSandboxController{Manager: d.rt.manager, d: d}
+	ctl := &managedSandboxController{sandboxRuntimeController: d.rt.manager, d: d}
 	d.api.SetSandboxController(ctl)
 	d.listenMu.Lock()
 	d.runCtx = ctx
@@ -1665,7 +1665,7 @@ func managedExplainFloor(me sandboxapi.ManagedExplain) config.OpenShellAdminConf
 // with create and start resolved and registered at the managed gateway
 // first and delete reported to it.
 type managedSandboxController struct {
-	*manager.Manager
+	sandboxRuntimeController
 	d *SandboxDaemon
 }
 
@@ -1674,7 +1674,7 @@ var _ SandboxController = (*managedSandboxController)(nil)
 // Status adds the managed part, with settings no older than
 // sandboxDaemonSettingsTTL (managedStatus reads stale ones again).
 func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Status, error) {
-	st, err := c.Manager.Status(ctx)
+	st, err := c.sandboxRuntimeController.Status(ctx)
 	if st != nil {
 		st.Managed = c.d.managedStatus(ctx)
 		if st.Gateway != nil {
@@ -1752,13 +1752,13 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 	c.d.stops.Add(1)
 	defer c.d.stops.Add(-1)
 	if _, held := c.d.openShell.PortHolder(c.d.currentSettings()); !held {
-		if sb, err := c.Manager.Get(ctx, name); err == nil && sb != nil && audit.SandboxPhase(sb.Phase) == audit.SandboxPhaseStopped {
+		if sb, err := c.sandboxRuntimeController.Get(ctx, name); err == nil && sb != nil && audit.SandboxPhase(sb.Phase) == audit.SandboxPhaseStopped {
 			c.d.reportStopped(context.WithoutCancel(ctx), name)
 			return sb, nil
 		}
 	}
 	ready := c.d.openShellForKept(ctx, true)
-	sb, err := c.Manager.Stop(ctx, name)
+	sb, err := c.sandboxRuntimeController.Stop(ctx, name)
 	if err != nil {
 		// The wait for the stop may have lost the gateway (a deferred
 		// restart, the caller gone) after OpenShell stopped the sandbox:
@@ -1766,7 +1766,7 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 		// for a sandbox that stopped (GAP-0462). Its state decides; a
 		// sandbox DefenseClaw does not know has none to read.
 		if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-			if stopped := c.d.stoppedAfterFailedStop(ctx, name, c.Manager.Get); stopped != nil {
+			if stopped := c.d.stoppedAfterFailedStop(ctx, name, c.sandboxRuntimeController.Get); stopped != nil {
 				c.d.logf("stop %s: the wait failed (%v), and the sandbox is stopped", name, err)
 				c.d.reportStopped(context.WithoutCancel(ctx), name)
 				return stopped, nil
@@ -1805,9 +1805,9 @@ func (d *SandboxDaemon) stoppedAfterFailedStop(ctx context.Context, name string,
 // gateway started, when no other account holds its port (GAP-0492).
 func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
-	list, err := c.Manager.List(ctx)
+	list, err := c.sandboxRuntimeController.List(ctx)
 	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.d.openShellForKept(ctx, false) == nil {
-		list, err = c.Manager.List(ctx)
+		list, err = c.sandboxRuntimeController.List(ctx)
 	}
 	for i := range list {
 		c.confirmingView(&list[i])
@@ -1818,9 +1818,9 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 // Get is List for one sandbox.
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
-	sb, err := c.Manager.Get(ctx, name)
+	sb, err := c.sandboxRuntimeController.Get(ctx, name)
 	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.d.openShellForKept(ctx, false) == nil {
-		sb, err = c.Manager.Get(ctx, name)
+		sb, err = c.sandboxRuntimeController.Get(ctx, name)
 	}
 	if err == nil {
 		c.confirmingView(sb)
@@ -1972,7 +1972,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	// refuses the create otherwise); the record keeps the reason.
 	createCtx := withManagedMCPJudge(manager.WithDriverChoice(ctx, choice),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
-	sb, err := c.Manager.Create(createCtx, req)
+	sb, err := c.sandboxRuntimeController.Create(createCtx, req)
 	if err != nil {
 		undo()
 		return nil, err
@@ -1990,7 +1990,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		})
 	}
 	if err != nil {
-		if _, delErr := c.Manager.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); delErr != nil {
+		if _, delErr := c.sandboxRuntimeController.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); delErr != nil {
 			d.logf("delete %s after its registration failed: %v", sb.Name, delErr)
 		}
 		undo()
@@ -2063,7 +2063,7 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, err
 	}
 	d.adoptFloor(name)
-	return c.Manager.Start(withManagedMCPJudge(ctx, d.startMCPJudge(r.ID)), name, req)
+	return c.sandboxRuntimeController.Start(withManagedMCPJudge(ctx, d.startMCPJudge(r.ID)), name, req)
 }
 
 // userMCPServers are the caller's own MCP servers of harnessName (user
@@ -2110,7 +2110,7 @@ func (c *managedSandboxController) Delete(ctx context.Context, name string, req 
 	c.d.stops.Add(1)
 	defer c.d.stops.Add(-1)
 	ready := c.d.openShellForKept(ctx, true)
-	resp, err := c.Manager.Delete(ctx, name, req)
+	resp, err := c.sandboxRuntimeController.Delete(ctx, name, req)
 	if err != nil && ready != nil {
 		return resp, ready
 	}
@@ -2194,7 +2194,7 @@ func applyManagedPosture(out *sandboxapi.Explain, p *sandboxapi.ManagedPosture) 
 // (GAP-0228).
 func (c *managedSandboxController) PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
 	if req.Sandbox != "" {
-		return c.Manager.PolicyTest(ctx, req)
+		return c.sandboxRuntimeController.PolicyTest(ctx, req)
 	}
 	// The managed gateway judges them under the caller's floor, its
 	// required pack and profile minimum included, which the daemon's own

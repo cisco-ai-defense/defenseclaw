@@ -258,7 +258,7 @@ func (m *Manager) triageSweep() {
 	m.mu.Lock()
 	var ready []*box
 	for _, b := range m.boxes {
-		if !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
+		if b.native == nil && !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
 			ready = append(ready, b)
 		}
 	}
@@ -923,8 +923,14 @@ func originFor(actor string) string {
 func (m *Manager) Approvals(_ context.Context, sandbox string) ([]sandboxapi.Approval, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if b := m.boxes[sandbox]; b != nil && b.native != nil {
+		return nil, nativeUnsupported()
+	}
 	var out []sandboxapi.Approval
 	for _, a := range m.approvals {
+		if b := m.boxes[a.sandbox]; b != nil && b.native != nil {
+			continue
+		}
 		if a.status != sandboxapi.ApprovalPending || (sandbox != "" && a.sandbox != sandbox) {
 			continue
 		}
@@ -947,6 +953,9 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	m.mu.Unlock()
 	if a == nil || b == nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "no pending approval %s", id)
+	}
+	if b.native != nil {
+		return nil, nativeUnsupported()
 	}
 	m.mu.Lock()
 	status := a.status
@@ -1303,7 +1312,7 @@ func (m *Manager) liveBoxes() []*box {
 	defer m.mu.Unlock()
 	out := make([]*box, 0, len(m.boxes))
 	for _, b := range m.boxes {
-		if !b.deleted && !b.retained {
+		if b.native == nil && !b.deleted && !b.retained {
 			out = append(out, b)
 		}
 	}

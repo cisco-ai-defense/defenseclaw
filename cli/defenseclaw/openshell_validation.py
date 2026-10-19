@@ -327,3 +327,65 @@ def _listeners_error(document: Mapping[str, Any], ingress: int, egress: int) -> 
     if ports["ingress_port"] == ports["egress_port"]:
         return "openshell.egress_port", "use different effective ingress and egress ports"
     return None
+
+
+_SANDBOX_POLICY_KEYS = (
+    "ingress_port", "egress_port", "pack", "pack_dir", "profile", "yolo", "llm", "keep_headless",
+    "workdir", "egress", "approvals", "resources", "harnesses", "wrappers", "mcp", "admin",
+)
+
+
+def _sandbox_overlap(old: Any, new: Any, path: str) -> tuple[str, str] | None:
+    if isinstance(old, Mapping) and isinstance(new, Mapping):
+        for key in new:
+            if key in old:
+                error = _sandbox_overlap(old[key], new[key], f"{path}.{key}")
+                if error is not None:
+                    return error
+        return None
+    if type(old) is not type(new) or old != new:
+        return f"sandbox.{path}", f"conflicts with explicitly configured openshell.{path}; use one common policy source"
+    return None
+
+
+def sandbox_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Compare explicit source values before defaults, then check common policy."""
+    if "sandbox" not in document:
+        return None
+    from defenseclaw import config_writer
+
+    if config_writer.secure_client_document(dict(document)):
+        return "sandbox", "common runtime configuration is not supported with the Secure Client integration"
+    section = document["sandbox"]
+    if not isinstance(section, Mapping):
+        return "sandbox", "expected a configuration mapping"
+    runtime = section.get("runtime", "auto")
+    if not isinstance(runtime, str) or runtime not in {"auto", "openshell", "axis"}:
+        return "sandbox.runtime", "select auto, openshell or axis"
+    legacy = _mapping(document.get("openshell"))
+    for key in _SANDBOX_POLICY_KEYS:
+        if key in legacy and key in section:
+            error = _sandbox_overlap(legacy[key], section[key], key)
+            if error is not None:
+                return error
+    if section.get("enabled") is True and section.get("runtime", "auto") == "axis":
+        return "sandbox.runtime", (
+            "AXIS runtime is not available in this build; keep sandbox.enabled false "
+            "until its containment and execution gates are qualified"
+        )
+    from defenseclaw.config import _sandbox_merge_admin_sources, validate_sandbox_floors
+
+    effective = _sandbox_merge_admin_sources(legacy, section)
+    effective["enabled"] = (section.get("enabled") is True and section.get("runtime", "auto") != "axis"
+                            and _mapping(_mapping(section.get("runtimes")).get("openshell")).get("enabled") is True)
+    adapted = {**document, "openshell": effective}
+    error = openshell_error(adapted)
+    if error is not None:
+        return error[0].replace("openshell.", "sandbox.", 1), error[1].replace("openshell.", "sandbox.")
+    # The same floor checker used by config.load also checks profile overlays
+    # against common admin policy while retaining the legacy floor.
+    try:
+        validate_sandbox_floors(document)
+    except ValueError as exc:
+        return "sandbox.admin", str(exc)
+    return None

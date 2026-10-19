@@ -1,0 +1,98 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS official Linux Claude inert inspection
+
+# Manual, metadata-only acquisition. No installer, vendor image or sandbox runs.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-native-claude-inspect.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-claude-inspect-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inspect-only:
+    # Registration pushes cannot fetch data or execute any inspection step.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows/axis-native-claude-inspect.yml
+            test/e2e/axis/native-peer/claude
+          sparse-checkout-cone-mode: false
+      - name: Verify complete inspection source bytes before use
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import subprocess
+
+          paths = [
+              '.github/workflows/axis-native-claude-inspect.yml',
+              'test/e2e/axis/native-peer/claude/README.md',
+              'test/e2e/axis/native-peer/claude/inspect_artifact.py',
+              'test/e2e/axis/native-peer/claude/test_inspect_artifact.py',
+          ]
+          commit = os.environ['GITHUB_SHA']
+          assert re.fullmatch('[0-9a-f]{40}', commit)
+          package = Path('test/e2e/axis/native-peer/claude')
+          assert sorted(p.name for p in package.iterdir()) == ['README.md', 'inspect_artifact.py', 'test_inspect_artifact.py']
+          tracked = subprocess.run(['git', 'ls-tree', '-r', '--name-only', '-z', commit, '--', str(package)], check=True, capture_output=True, timeout=20).stdout
+          assert tracked == b''.join(p.encode() + b'\0' for p in paths[1:])
+          report = Path('claude-inspect-report')
+          report.mkdir(mode=0o700)
+          source = {}
+          for name in paths:
+              path = Path(name)
+              info = path.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 256 * 1024
+              raw = path.read_bytes()
+              committed = subprocess.run(['git', 'show', commit + ':' + name], check=True, capture_output=True, timeout=20).stdout
+              assert raw == committed
+              target = report / 'source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(raw)
+              source[name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+          (report / 'PREBUILD.json').write_text(json.dumps({'repository': os.environ['GITHUB_REPOSITORY'], 'commit': commit, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'source': source}, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+          PY
+      - name: Run synthetic inspector tests without external tools or network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -E -s -m unittest discover -s test/e2e/axis/native-peer/claude -p test_inspect_artifact.py -v
+      - name: Verify signed fixed release and inspect ELF data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -x /usr/bin/gpg
+          test -x /usr/bin/readelf
+          python3 -I test/e2e/axis/native-peer/claude/inspect_artifact.py
+      - name: Retain bounded metadata only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-official-linux-claude-inert-inspection
+          path: claude-inspect-report/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

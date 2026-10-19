@@ -35,12 +35,12 @@ import (
 // daemon restart, for a sandbox the organization allows (GAP-0462). A view
 // of a sandbox the manager does not hold is left as it is.
 func (m *Manager) ConfirmingView(v *sandboxapi.Sandbox, note string) {
-	if v == nil {
+	if v == nil || v.Runtime == audit.SandboxRuntimeAxis {
 		return
 	}
 	m.mu.Lock()
 	b := m.boxes[v.Name]
-	if b == nil || b.deleted {
+	if b == nil || b.deleted || b.native != nil {
 		m.mu.Unlock()
 		return
 	}

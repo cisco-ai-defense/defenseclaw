@@ -1,0 +1,189 @@
+--- a/src/core/wxc/src/main.rs
++++ b/src/core/wxc/src/main.rs
+@@ -66,6 +66,10 @@
+     /// Parse and validate config then exit without executing
+     #[arg(long = "dry-run")]
+     dry_run: bool,
++
++    /// Contributor-only process-local Ctrl-C relay for paired AXIS console I/O.
++    #[arg(long = "axis-inherited-console-relay", requires = "config", conflicts_with_all = ["config_path", "config_base64", "delete", "probe", "dry_run", "setup_hyperlight", "setup_wslc", "command"])]
++    axis_inherited_console_relay: bool,
+ 
+     /// Path to diagnostic log file (appends, creates if missing)
+     #[arg(long = "log-file")]
+@@ -434,6 +438,57 @@
+     let _ = unsafe { SetConsoleCtrlHandler(Some(dacl_ctrl_handler), true) };
+ }
+ 
++struct AxisConsoleRelayGuard;
++
++unsafe extern "system" fn axis_console_relay_handler(event: u32) -> windows::core::BOOL {
++    use windows::Win32::System::Console::CTRL_C_EVENT;
++    // This process-local callback is not inherited. Windows independently
++    // delivers the same event to the contained workload. Never set NULL/TRUE.
++    windows::core::BOOL((event == CTRL_C_EVENT) as i32)
++}
++
++impl AxisConsoleRelayGuard {
++    fn install() -> Result<Self, String> {
++        use windows::Win32::System::Console::{
++            GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler, CONSOLE_MODE,
++            STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
++        };
++        for kind in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
++            let mut mode = CONSOLE_MODE::default();
++            // SAFETY: the OS supplies the current process's standard handle;
++            // the mode output is a live local allocation.
++            unsafe { GetStdHandle(kind).and_then(|handle| GetConsoleMode(handle, &mut mode)) }
++                .map_err(|error| format!("AXIS console relay requires three console handles: {error}"))?;
++        }
++        // Register the Base cleanup handler first. Its OnceLock makes the
++        // later runner registration a no-op, leaving this relay LAST in the
++        // handler chain. CTRL_C cannot consume the Base tracking slot.
++        appcontainer_common::sandbox_tracking::install_ctrl_handler();
++        // SAFETY: this callback has the required ABI and consumes only CTRL_C.
++        unsafe { SetConsoleCtrlHandler(Some(axis_console_relay_handler), true) }
++            .map_err(|error| format!("AXIS console relay registration failed: {error}"))?;
++        Ok(Self)
++    }
++}
++
++impl Drop for AxisConsoleRelayGuard {
++    fn drop(&mut self) {
++        use windows::Win32::System::Console::SetConsoleCtrlHandler;
++        // SAFETY: remove only this callback from this executor's handler list.
++        let _ = unsafe { SetConsoleCtrlHandler(Some(axis_console_relay_handler), false) };
++    }
++}
++
++fn validate_axis_console_relay_request(request: &ExecutionRequest) -> Result<(), &'static str> {
++    if !matches!(request.containment, ContainmentBackend::ProcessContainer)
++        || !is_base_container_version(&request.schema_version)
++        || request.policy.fallback.allow_dacl_mutation
++    {
++        return Err("AXIS console relay requires one-shot BaseContainer with DACL fallback disabled");
++    }
++    Ok(())
++}
++
+ fn main() {
+     let cli = Cli::parse().normalize_named_config_command();
+ 
+@@ -654,6 +709,10 @@
+     let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
+         Ok(MxcRequest::OneShot(req)) => req,
+         Ok(MxcRequest::StateAware(mut parsed)) => {
++            if cli.axis_inherited_console_relay {
++                eprintln!("AXIS console relay supports only a one-shot BaseContainer request");
++                process::exit(1);
++            }
+             let context =
+                 match command_override_context_for_state_aware(&parsed, has_command_override) {
+                     Ok(context) => context,
+@@ -698,6 +757,16 @@
+     request.experimental_enabled = cli.experimental;
+     request.dry_run = cli.dry_run;
+ 
++    if cli.axis_inherited_console_relay {
++        if let Err(error) = validate_axis_console_relay_request(&request) {
++            eprintln!("{error}");
++            process::exit(1);
++        }
++    }
++    // One registration per single-shot executor; declared before the runner
++    // so panic unwinding drops the runner before unregistering the callback.
++    let mut axis_console_relay = None;
++
+     // Apply the CLI command-line override to one-shot requests. State-aware
+     // exec is handled above before dispatch.
+     let command_override = match command_override_from_cli(
+@@ -822,6 +891,19 @@
+ 
+                 match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
+                     Ok(dispatched) => {
++                        if cli.axis_inherited_console_relay {
++                            if !matches!(dispatched.tier, appcontainer_common::fallback_detector::IsolationTier::BaseContainer) {
++                                eprintln!("AXIS console relay refuses any BaseContainer fallback tier");
++                                process::exit(1);
++                            }
++                            axis_console_relay = Some(match AxisConsoleRelayGuard::install() {
++                                Ok(guard) => guard,
++                                Err(error) => {
++                                    eprintln!("{error}");
++                                    process::exit(1);
++                                }
++                            });
++                        }
+                         for w in &dispatched.warnings {
+                             let _ = writeln!(logger, "warning: {w}");
+                         }
+@@ -982,6 +1064,10 @@
+     drop(runner);
+     drop(take_parked_dacl());
+ 
++    // process::exit below skips destructors; unregister explicitly after the
++    // contained process and runner have stopped. Panic uses the RAII path.
++    drop(axis_console_relay);
++
+     if cli.dry_run {
+         handle_dry_run_exit(&response, &mut logger);
+     }
+@@ -1045,6 +1131,47 @@
+ 
+     fn test_logger() -> Logger {
+         Logger::new(Mode::Buffer)
++    }
++
++    #[test]
++    fn axis_console_relay_flag_is_explicit_and_single_shot() {
++        let cli = parse_cli(&["wxc-exec", "--config", "policy.json", "--axis-inherited-console-relay"]);
++        assert!(cli.axis_inherited_console_relay);
++        assert!(!parse_cli(&["wxc-exec", "--config", "policy.json"]).axis_inherited_console_relay);
++        assert!(Cli::try_parse_from(["wxc-exec", "--axis-inherited-console-relay"]).is_err());
++        for flag in ["--dry-run", "--probe", "--delete", "--setup-hyperlight", "--setup-wslc"] {
++            assert!(Cli::try_parse_from([
++                "wxc-exec", "--config", "policy.json", "--axis-inherited-console-relay", flag,
++            ]).is_err());
++        }
++    }
++
++    #[test]
++    fn axis_console_relay_requires_strict_basecontainer() {
++        let mut request = ExecutionRequest::default();
++        request.schema_version = "0.5.0".to_owned();
++        request.policy.fallback.allow_dacl_mutation = false;
++        assert!(validate_axis_console_relay_request(&request).is_ok());
++        request.policy.fallback.allow_dacl_mutation = true;
++        assert!(validate_axis_console_relay_request(&request).is_err());
++        request.policy.fallback.allow_dacl_mutation = false;
++        request.schema_version = "0.4.0".to_owned();
++        assert!(validate_axis_console_relay_request(&request).is_err());
++        request.schema_version = "0.5.0".to_owned();
++        request.containment = ContainmentBackend::WindowsSandbox;
++        assert!(validate_axis_console_relay_request(&request).is_err());
++    }
++
++    #[test]
++    fn axis_console_relay_does_not_consume_close_or_break() {
++        use windows::Win32::System::Console::{
++            CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
++            CTRL_SHUTDOWN_EVENT,
++        };
++        assert!(unsafe { axis_console_relay_handler(CTRL_C_EVENT) }.as_bool());
++        for event in [CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT] {
++            assert!(!unsafe { axis_console_relay_handler(event) }.as_bool());
++        }
+     }
+ 
+     #[test]
+--- a/src/backends/appcontainer/common/src/sandbox_tracking.rs
++++ b/src/backends/appcontainer/common/src/sandbox_tracking.rs
+@@ -274,7 +274,7 @@
+ 
+ static HANDLER_INSTALLED: OnceLock<()> = OnceLock::new();
+ 
+-fn install_ctrl_handler() {
++pub fn install_ctrl_handler() {
+     HANDLER_INSTALLED.get_or_init(|| {
+         use windows::Win32::System::Console::SetConsoleCtrlHandler;
+         // SAFETY: `ctrl_handler` has the correct `unsafe extern "system"` signature.

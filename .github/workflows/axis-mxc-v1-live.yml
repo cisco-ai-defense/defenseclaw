@@ -1,0 +1,145 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC V1 native Linux experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: axis-mxc-v1-linux-live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-live:
+    name: Run the reviewed fixed MXC Bubblewrap experiment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out the live harness
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: live-source
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/mxc-runner
+
+      - name: Check out the independently reviewed build source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: b2e1461dc9f35ed0cad9a2cae718ff28f99335c5
+          path: build-source
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/mxc-runner
+
+      # Reviewed build artifacts expire after seven days. Expiry is an expected
+      # fail-closed refusal, not a harness regression; do not select "latest".
+      # Re-pin only after rebuilding the exact reviewed sources with the committed
+      # combined lock, independently checking every source/artifact hash, and
+      # reviewing any changed lock. Update the build checkout SHA, artifact ID,
+      # archive digest, run ID, build SHA/name and external provenance digest
+      # together below. Then manually dispatch this fixed experiment. Helper or
+      # source edits alone never authorize running an older pinned artifact.
+      - name: Fetch only the reviewed locked artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          gh api repos/cisco-ai-defense/defenseclaw/actions/artifacts/12130812117 >evidence/artifact-api.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          item = json.loads(Path('evidence/artifact-api.json').read_text())
+          assert item['id'] == 12130812117 and item['expired'] is False
+          assert item['name'] == 'axis-mxc-v1-linux-contributor-b2e1461dc9f35ed0cad9a2cae718ff28f99335c5'
+          assert item['digest'] == 'sha256:cfa51244cb0ceb3dfb5c6dd9dcafc7be394fa8cffd7bde2768075de0e340b3f1'
+          assert item['workflow_run']['id'] == 39111547034
+          assert item['workflow_run']['head_sha'] == 'b2e1461dc9f35ed0cad9a2cae718ff28f99335c5'
+          PY
+          gh run download 39111547034 --repo cisco-ai-defense/defenseclaw \
+            --name axis-mxc-v1-linux-contributor-b2e1461dc9f35ed0cad9a2cae718ff28f99335c5 --dir locked-artifact
+
+      - name: Verify every file before making the probe executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 live-source/test/e2e/axis/mxc-runner/verify_live_artifact.py \
+            --artifact locked-artifact/build-artifact --source-checkout build-source \
+            --provenance-sha256 f3cbace34fea2038915b08bced6935b48b47f477fb48d996605edcd882a534c9 \
+            --build-commit b2e1461dc9f35ed0cad9a2cae718ff28f99335c5 --build-run 39111547034 \
+            --receipt evidence/artifact-verified.json
+          python3 -m unittest discover -s live-source/test/e2e/axis/mxc-runner -p 'test_*.py'
+
+      - name: Install the native substrate on the disposable runner
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update
+          sudo apt-get -o Dpkg::Use-Pty=0 install -y --no-install-recommends bubblewrap
+          /usr/bin/bwrap --version >evidence/bubblewrap-version.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          version = re.fullmatch(r'bubblewrap (\d+)\.(\d+)(?:\.(\d+))?\s*', Path('evidence/bubblewrap-version.txt').read_text())
+          assert version is not None and tuple(int(value or 0) for value in version.groups()) >= (0, 5, 0)
+          PY
+          uname -a >evidence/kernel.txt
+
+      - name: Check namespaces and run the fixed private offline experiment
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          original=absent
+          if test -r "$knob"; then original="$(cat "$knob")"; fi
+          changed=0
+          restore_userns() {
+            result=$?
+            trap - EXIT
+            if test "$changed" = 1; then
+              if ! sudo -n /usr/sbin/sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" >evidence/userns-restore.log 2>&1; then result=1; fi
+              if test "$(cat "$knob")" != "$original"; then result=1; fi
+            fi
+            printf 'original=%s changed=%s current=%s\n' "$original" "$changed" "$(cat "$knob" 2>/dev/null || printf absent)" >evidence/userns-preparation.txt
+            exit "$result"
+          }
+          trap restore_userns EXIT
+          readiness() {
+            env -i PATH=/usr/bin:/bin LANG=C /usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+              /usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-net \
+              --die-with-parent --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /lib /lib \
+              --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --chdir / --clearenv \
+              --setenv PATH /usr/bin:/bin --setenv LANG C -- /usr/bin/true
+          }
+          if ! readiness >evidence/namespace-first.txt 2>&1; then
+            # Explicit preparation of this disposable CI VM only. Production
+            # readiness must report the host requirement instead of changing it.
+            test "$GITHUB_ACTIONS" = true
+            test "$RUNNER_ENVIRONMENT" = github-hosted
+            test "$original" = 1
+            changed=1
+            sudo -n /usr/sbin/sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >evidence/userns-prepare.log 2>&1
+            readiness >evidence/namespace-prepared.txt 2>&1
+          fi
+          python3 live-source/test/e2e/axis/mxc-runner/run_live.py \
+            --artifact locked-artifact/build-artifact --receipt evidence/artifact-verified.json --evidence evidence
+
+      - name: Retain bounded results including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-linux-live-${{ github.sha }}
+          path: |
+            evidence/*.json
+            evidence/*.txt
+            evidence/*.log
+          if-no-files-found: warn
+          retention-days: 7

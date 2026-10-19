@@ -384,14 +384,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	}
 	rec.Stage = filepath.Join(stageRoot, repo)
 
-	scanOpts := secretScanOptions{
-		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
-		detector: opts.Detector, contentScan: !opts.DisableContentScan,
-		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
-	}
-	if scanOpts.detector == nil {
-		scanOpts.detector = DefaultSecretDetector()
-	}
+	scanOpts := stageSecretOptions(opts, real)
 	if isGitTopLevel(ctx, real) {
 		rec.Kind = CopyGit
 		rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
@@ -409,6 +402,20 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	}
 	ok = true
 	return rec, dir, nil
+}
+
+// stageSecretOptions resolves policy against the original project, before a
+// private host capture changes the paths used for reading its frozen bytes.
+func stageSecretOptions(opts StageOptions, project string) secretScanOptions {
+	resolved := secretScanOptions{
+		patterns: slices.Clone(opts.Masks), unmask: normalizeUnmask(opts.Unmask, project), maskTracked: true,
+		detector: opts.Detector, contentScan: !opts.DisableContentScan,
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, project),
+	}
+	if resolved.detector == nil {
+		resolved.detector = DefaultSecretDetector()
+	}
+	return resolved
 }
 
 // isGitTopLevel reports whether dir is the top of a git work tree. A folder
@@ -832,8 +839,28 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 // which the record lists once (CopyRecord.HeldBack), not among its
 // warnings.
 func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
+	return selectFilesFrom(selectionIOForPath(root), candidates, scanOpts, maxBytes, rec)
+}
+
+// selectionIO keeps the sanitizer's decisions shared while host-only staging
+// can read a captured tree through held roots instead of reopening host paths.
+type selectionIO struct {
+	stat func(string) (fs.FileInfo, error)
+	read func(string, int64) ([]byte, error)
+}
+
+func selectionIOForPath(root string) selectionIO {
+	return selectionIO{
+		stat: func(rel string) (fs.FileInfo, error) { return os.Lstat(filepath.Join(root, filepath.FromSlash(rel))) },
+		read: func(rel string, limit int64) ([]byte, error) {
+			return readSmallRegular(filepath.Join(root, filepath.FromSlash(rel)), limit)
+		},
+	}
+}
+
+func selectFilesFrom(source selectionIO, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
-	held, err := detectSecretsIn(root, candidates, scanOpts)
+	held, err := detectSecretsFrom(source, candidates, scanOpts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -856,7 +883,7 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 		if unmaskedBy(scanOpts.unmaskAsked, rel) {
 			check = unmaskOnly
 		}
-		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+		if would, err := detectSecretsFrom(source, []string{rel}, check); err == nil && len(would) > 0 {
 			rec.Unmasked = append(rec.Unmasked, rel)
 		}
 	}
@@ -873,7 +900,7 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 		if skipped(heldSet, rel) {
 			continue
 		}
-		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
+		info, err := source.stat(rel)
 		if err != nil {
 			continue // deleted from the working tree
 		}
@@ -894,6 +921,10 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 // mode ships exactly git's view of the working tree, not a directory walk)
 // and returns the ones it holds back.
 func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]string, error) {
+	return detectSecretsFrom(selectionIOForPath(root), rels, opts)
+}
+
+func detectSecretsFrom(source selectionIO, rels []string, opts secretScanOptions) ([]string, error) {
 	var held []string
 	budget := defaultMaxContentScanFiles
 	for _, rel := range rels {
@@ -907,13 +938,12 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]stri
 		if !opts.contentScan || opts.detector == nil || budget <= 0 {
 			continue
 		}
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		info, err := os.Lstat(p)
+		info, err := source.stat(rel)
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxContentScanBytes {
 			continue
 		}
 		budget--
-		content, err := readSmallRegular(p, maxContentScanBytes)
+		content, err := source.read(rel, maxContentScanBytes)
 		if err != nil || looksBinary(content) {
 			continue
 		}

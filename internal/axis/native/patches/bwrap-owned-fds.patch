@@ -1,0 +1,846 @@
+diff --git a/bubblewrap.c b/bubblewrap.c
+index 9b78a9a..2d9e1a1 100644
+--- a/bubblewrap.c
++++ b/bubblewrap.c
+@@ -32,6 +32,14 @@
+ #include <sys/signalfd.h>
+ #include <sys/capability.h>
+ #include <sys/prctl.h>
++#include <sys/syscall.h>
++#include <sys/vfs.h>
++#include <linux/mount.h>
++#include <linux/magic.h>
++#include <limits.h>
++#include <linux/openat2.h>
++#include <sys/stat.h>
++#include <sys/statvfs.h>
+ #include <linux/sched.h>
+ #include <linux/seccomp.h>
+ #include <linux/filter.h>
+@@ -68,6 +76,12 @@ static bool is_privileged; /* See acquire_privs() */
+ static const char *argv0;
+ static const char *host_tty_dev;
+ static int proc_fd = -1;
++/* Private contributor FD route. Never used by the legacy pathname options. */
++static bool opt_owned_fd_mounts;
++static int original_mount_ns_fd = -1;
++static int owned_original_root_fd = -1;
++static int owned_local_root_fd = -1;
++static int owned_destination_root_fd = -1;
+ static const char *opt_exec_label = NULL;
+ static const char *opt_file_label = NULL;
+ static bool opt_as_pid_1;
+@@ -130,6 +144,9 @@ static NsInfo ns_infos[] = {
+ typedef enum {
+   SETUP_BIND_MOUNT,
+   SETUP_RO_BIND_MOUNT,
++  SETUP_OWNED_FD_MOUNT,
++  SETUP_OWNED_RO_FD_MOUNT,
++  SETUP_OWNED_RO_IMAGE,
+   SETUP_DEV_BIND_MOUNT,
+   SETUP_MOUNT_PROC,
+   SETUP_MOUNT_DEV,
+@@ -158,6 +175,10 @@ struct _SetupOp
+   const char *source;
+   const char *dest;
+   int         fd;
++  int         owned_local_fd;
++  struct stat owned_original_stat;
++  struct statfs owned_original_fs;
++  unsigned long owned_original_flags;
+   SetupOpFlag flags;
+   int         perms;
+   size_t      size;  /* number of bytes, zero means unset/default */
+@@ -233,6 +254,7 @@ setup_op_new (SetupOpType type)
+ 
+   op->type = type;
+   op->fd = -1;
++  op->owned_local_fd = -1;
+   op->flags = 0;
+   return op;
+ }
+@@ -341,6 +363,9 @@ usage (int ecode, FILE *out)
+            "    --dev-bind-try SRC DEST      Equal to --dev-bind but ignores non-existent SRC\n"
+            "    --ro-bind SRC DEST           Bind mount the host path SRC readonly on DEST\n"
+            "    --ro-bind-try SRC DEST       Equal to --ro-bind but ignores non-existent SRC\n"
++           "    --dc-bind-fd FD DEST         Contributor only: mount a held object on DEST\n"
++           "    --dc-ro-bind-fd FD DEST      Contributor only: readonly held object without submounts\n"
++           "    --dc-ro-image-fd FD DEST     Contributor only: verified sealed private image copy\n"
+            "    --remount-ro DEST            Remount DEST as readonly; does not recursively remount\n"
+            "    --exec-label LABEL           Exec label for the sandbox\n"
+            "    --file-label LABEL           File label for temporary sandbox content\n"
+@@ -1165,6 +1190,558 @@ privileged_op (int         privileged_op_socket,
+  * some privileged operations (also in the child namespace) via the
+  * privileged_op_socket.
+  */
++#define OWNED_MOUNTINFO_LIMIT (4 * 1024 * 1024)
++#define OWNED_MOUNTINFO_ENTRIES 4096
++#define OWNED_IMAGE_LIMIT ((off_t) 512 * 1024 * 1024)
++
++static bool
++owned_path_valid (const char *path, bool locator)
++{
++  const char *part;
++  const char *end;
++  if (path == NULL || path[0] != '/' || strlen (path) >= PATH_MAX)
++    return FALSE;
++  if (locator && (strstr (path, " (deleted)") != NULL || strstr (path, "(unreachable)") != NULL))
++    return FALSE;
++  if (strcmp (path, "/") == 0)
++    return TRUE;
++  for (part = path + 1; *part != 0; part = end + 1)
++    {
++      size_t size;
++      end = strchr (part, '/');
++      if (end == NULL)
++        end = part + strlen (part);
++      size = end - part;
++      if (size == 0 || (size == 1 && part[0] == '.') ||
++          (size == 2 && part[0] == '.' && part[1] == '.'))
++        return FALSE;
++      if (locator)
++        for (const unsigned char *p = (const unsigned char *) part;
++             p < (const unsigned char *) end; p++)
++          if (*p < 32 || *p == 127)
++            return FALSE;
++      if (*end == 0)
++        return TRUE;
++      if (end[1] == 0)
++        return FALSE;
++    }
++  return FALSE;
++}
++
++static bool
++owned_device_number (const char *text)
++{
++  const char *colon = strchr (text, ':');
++  char *end;
++  unsigned long long major, minor;
++  if (colon == NULL || colon == text || colon[1] == 0 || strchr (colon + 1, ':') != NULL)
++    return FALSE;
++  for (const char *p = text; *p != 0; p++)
++    if (p != colon && (*p < '0' || *p > '9'))
++      return FALSE;
++  errno = 0;
++  major = strtoull (text, &end, 10);
++  if (errno != 0 || end != colon || major > UINT_MAX)
++    return FALSE;
++  errno = 0;
++  minor = strtoull (colon + 1, &end, 10);
++  return errno == 0 && *end == 0 && minor <= UINT_MAX;
++}
++
++static bool
++owned_number (const char *text, uint64_t *number)
++{
++  char *end;
++  unsigned long long value;
++  if (text[0] < '0' || text[0] > '9')
++    return FALSE;
++  errno = 0;
++  value = strtoull (text, &end, 10);
++  if (errno != 0 || *end != 0 || value == 0)
++    return FALSE;
++  *number = value;
++  return TRUE;
++}
++
++/* mountinfo escapes exactly these four bytes. Unknown/truncated escapes fail,
++ * rather than changing where a mountpoint appears relative to the grant. */
++static bool
++owned_decode_mount_path (char *text, bool require_path)
++{
++  char *output = text;
++  for (char *input = text; *input != 0; input++)
++    {
++      if (*input != '\\')
++        *output++ = *input;
++      else
++        {
++          if (strncmp (input, "\\040", 4) == 0)
++            *output++ = ' ';
++          else if (strncmp (input, "\\011", 4) == 0)
++            *output++ = '\t';
++          else if (strncmp (input, "\\012", 4) == 0)
++            *output++ = '\n';
++          else if (strncmp (input, "\\134", 4) == 0)
++            *output++ = '\\';
++          else
++            return FALSE;
++          input += 3;
++        }
++    }
++  *output = 0;
++  return *text != 0 && (!require_path || owned_path_valid (text, FALSE));
++}
++
++/* No st_dev-only topology test: bind mounts can share device and inode. Parse
++ * the complete bounded namespace inventory, require a reachable source mount
++ * ID and refuse every nested mountpoint, including same-filesystem aliases. */
++static bool
++owned_mountinfo_admits (const char *inventory, const char *locator, uint64_t source_mount_id)
++{
++  cleanup_free char *copy = NULL;
++  uint64_t seen[OWNED_MOUNTINFO_ENTRIES];
++  size_t count = 0;
++  bool found = FALSE;
++  char *line;
++  char *next_line;
++  size_t length = strlen (inventory);
++  if (length == 0 || length > OWNED_MOUNTINFO_LIMIT || inventory[length - 1] != '\n' ||
++      !owned_path_valid (locator, TRUE))
++    return FALSE;
++  copy = xstrdup (inventory);
++  line = copy;
++  while ((next_line = strchr (line, '\n')) != NULL)
++    {
++      char *fields[64];
++      size_t fields_count = 0;
++      size_t separator = 0;
++      char *cursor = line;
++      char *field;
++      uint64_t mount_id, parent_id;
++      *next_line = 0;
++      if (next_line - line > 65536 || count == OWNED_MOUNTINFO_ENTRIES)
++        return FALSE;
++      for (const unsigned char *p = (const unsigned char *) line; *p != 0; p++)
++        if (*p < 32 || *p == 127)
++          return FALSE;
++      while ((field = strsep (&cursor, " ")) != NULL)
++        {
++          if (*field == 0 || fields_count == 64)
++            return FALSE;
++          if (strcmp (field, "-") == 0)
++            {
++              if (separator != 0)
++                return FALSE;
++              separator = fields_count;
++            }
++          fields[fields_count++] = field;
++        }
++      if (fields_count < 10 || separator < 6 || separator + 4 != fields_count ||
++          !owned_number (fields[0], &mount_id) || !owned_number (fields[1], &parent_id) ||
++          !owned_device_number (fields[2]) ||
++          !owned_decode_mount_path (fields[3], FALSE) || !owned_decode_mount_path (fields[4], TRUE))
++        return FALSE;
++      for (size_t i = 0; i < count; i++)
++        if (seen[i] == mount_id)
++          return FALSE;
++      seen[count++] = mount_id;
++      if (mount_id == source_mount_id)
++        {
++          if (!has_path_prefix (locator, fields[4]))
++            return FALSE;
++          found = TRUE;
++        }
++      if (strcmp (locator, fields[4]) != 0 && has_path_prefix (fields[4], locator))
++        return FALSE;
++      line = next_line + 1;
++    }
++  return found && *line == 0;
++}
++
++static char *
++owned_mountinfo_snapshot (void)
++{
++  cleanup_fd int fd = openat (proc_fd, "self/mountinfo", O_RDONLY | O_CLOEXEC);
++  char *data = xmalloc (OWNED_MOUNTINFO_LIMIT + 1);
++  size_t used = 0;
++  if (fd < 0)
++    die_with_error ("Can't inspect owned source mount topology");
++  for (;;)
++    {
++      ssize_t got = TEMP_FAILURE_RETRY (read (fd, data + used, OWNED_MOUNTINFO_LIMIT + 1 - used));
++      if (got < 0)
++        die_with_error ("Can't read owned source mount topology");
++      if (got == 0)
++        break;
++      used += got;
++      if (used > OWNED_MOUNTINFO_LIMIT)
++        die ("Owned source mount topology exceeds its bound");
++    }
++  if (used == 0 || memchr (data, 0, used) != NULL || data[used - 1] != '\n')
++    die ("Owned source mount topology is truncated or invalid");
++  data[used] = 0;
++  return data;
++}
++
++static uint64_t
++owned_mount_id (int fd)
++{
++  struct statx identity = { 0 };
++  if (syscall (SYS_statx, fd, "", AT_EMPTY_PATH | AT_NO_AUTOMOUNT, STATX_MNT_ID, &identity) != 0 ||
++      !(identity.stx_mask & STATX_MNT_ID) || identity.stx_mnt_id == 0)
++    die ("Owned source requires a supported exact mount identity");
++  return identity.stx_mnt_id;
++}
++
++static uint64_t
++owned_reopen_resolve (void)
++{
++  /* No lookup may trigger I/O/revalidation or an intermediate automount,
++   * especially while examining the original namespace. EAGAIN is refusal;
++   * never retry with a weaker resolution policy. */
++  return RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_CACHED;
++}
++
++static int
++owned_reopen (int root_fd, const char *locator)
++{
++  struct open_how how = {
++    .flags = O_PATH | O_CLOEXEC | O_NOFOLLOW,
++    .resolve = owned_reopen_resolve (),
++  };
++  if (!owned_path_valid (locator, TRUE))
++    die ("Owned source locator is not representable");
++  if (strcmp (locator, "/") == 0)
++    return fcntl (root_fd, F_DUPFD_CLOEXEC, 3);
++  return syscall (SYS_openat2, root_fd, locator + 1, &how, sizeof (how));
++}
++
++static bool
++owned_preserves_flags (unsigned long original, unsigned long local)
++{
++  /* Include unknown restrictive flags too, rather than keeping a partial
++   * hand-maintained subset that might accidentally omit NOEXEC. */
++  return (original & ~local) == 0;
++}
++
++static uint64_t
++owned_source_attribute_set (bool readonly, unsigned long original)
++{
++  /* Clone preserves mount attributes; reinforce these restrictions explicitly
++   * as well, including a source whose filesystem was initially readonly. */
++  return MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV |
++         ((readonly || (original & ST_RDONLY)) ? MOUNT_ATTR_RDONLY : 0) |
++         ((original & ST_NOEXEC) ? MOUNT_ATTR_NOEXEC : 0);
++}
++
++static bool
++owned_source_matches (SetupOp *op, int fd)
++{
++  struct stat value;
++  struct statfs filesystem;
++  struct statvfs flags;
++  return fstat (fd, &value) == 0 && fstatfs (fd, &filesystem) == 0 && fstatvfs (fd, &flags) == 0 &&
++         value.st_dev == op->owned_original_stat.st_dev && value.st_ino == op->owned_original_stat.st_ino &&
++         (value.st_mode & S_IFMT) == (op->owned_original_stat.st_mode & S_IFMT) &&
++         filesystem.f_type == op->owned_original_fs.f_type &&
++         memcmp (&filesystem.f_fsid, &op->owned_original_fs.f_fsid, sizeof (filesystem.f_fsid)) == 0 &&
++         owned_preserves_flags (op->owned_original_flags, flags.f_flag);
++}
++
++static void
++owned_capture_original_sources (void)
++{
++  cleanup_free char *before = owned_mountinfo_snapshot ();
++  cleanup_free char *after = NULL;
++  owned_original_root_fd = open ("/", O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++  if (owned_original_root_fd < 0)
++    die_with_error ("Can't retain original source root");
++  for (SetupOp *op = ops; op != NULL; op = op->next)
++    if (op->type == SETUP_OWNED_FD_MOUNT || op->type == SETUP_OWNED_RO_FD_MOUNT)
++      {
++        cleanup_fd int reachable = -1;
++        struct statvfs flags;
++        char descriptor[64];
++        char locator[PATH_MAX + 1];
++        ssize_t length;
++        uint64_t mount_id;
++        if (fstat (op->fd, &op->owned_original_stat) != 0 ||
++            fstatfs (op->fd, &op->owned_original_fs) != 0 || fstatvfs (op->fd, &flags) != 0)
++          die_with_error ("Can't inspect original owned source");
++        op->owned_original_flags = flags.f_flag;
++        snprintf (descriptor, sizeof (descriptor), "self/fd/%d", op->fd);
++        length = readlinkat (proc_fd, descriptor, locator, PATH_MAX);
++        if (length <= 0 || length >= PATH_MAX)
++          die ("Owned source locator is unavailable or truncated");
++        locator[length] = 0;
++        /* bwrap stages a fresh tmpfs at /tmp. A covering source would gain
++         * a nested setup mount after the no-submount check. Descendant source
++         * descriptors do not copy a mount attached above their own root. */
++        if (has_path_prefix ("/tmp", locator))
++          die ("Owned source must not cover the private staging mountpoint");
++        reachable = owned_reopen (owned_original_root_fd, locator);
++        if (reachable < 0)
++          die_with_error ("Owned source namespace-local reopen failed");
++        if (!owned_source_matches (op, reachable))
++          die ("Owned source namespace-local object or restrictions differ");
++        /* The trusted private factory may have cloned its mount namespace
++         * before this executable. An imported FD still holds the old mount;
++         * copy_mnt_ns does not translate its file path to the cloned mount ID.
++         * Keep that FD as object/flag authority, but inspect the actual view
++         * reopened in our current namespace, which is the only view cloned.
++         * This requires the factory's clone-only origin/idmap provenance;
++         * matching an arbitrary foreign FD's inode is not that provenance. */
++        mount_id = owned_mount_id (reachable);
++        if (!owned_mountinfo_admits (before, locator, mount_id))
++          die ("Owned source namespace-local topology is unsupported");
++        op->source = xstrdup (locator);
++      }
++  after = owned_mountinfo_snapshot ();
++  if (strcmp (before, after) != 0)
++    die ("Original owned source mount topology changed during admission");
++}
++
++static void
++owned_require_new_namespace (void)
++{
++  cleanup_fd int active = openat (proc_fd, "self/ns/mnt", O_RDONLY | O_CLOEXEC);
++  struct stat original, current;
++  if (original_mount_ns_fd < 0 || active < 0 || fstat (original_mount_ns_fd, &original) != 0 ||
++      fstat (active, &current) != 0 ||
++      (original.st_dev == current.st_dev && original.st_ino == current.st_ino))
++    die ("Owned setup requires a held distinct private mount namespace");
++}
++
++static void
++owned_prepare_local_sources (void)
++{
++  cleanup_free char *before = owned_mountinfo_snapshot ();
++  cleanup_free char *after = NULL;
++  owned_local_root_fd = open ("/", O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++  if (owned_local_root_fd < 0)
++    die_with_error ("Can't retain namespace-local source root");
++  for (SetupOp *op = ops; op != NULL; op = op->next)
++    if (op->type == SETUP_OWNED_FD_MOUNT || op->type == SETUP_OWNED_RO_FD_MOUNT)
++      {
++        op->owned_local_fd = owned_reopen (owned_local_root_fd, op->source);
++        if (op->owned_local_fd < 0 || !owned_source_matches (op, op->owned_local_fd) ||
++            !owned_mountinfo_admits (before, op->source, owned_mount_id (op->owned_local_fd)))
++          die ("Namespace-local owned source identity or topology differs");
++      }
++  after = owned_mountinfo_snapshot ();
++  if (strcmp (before, after) != 0)
++    die ("Private owned source mount topology changed during admission");
++}
++
++static bool
++owned_image_sealed (int fd, const struct stat *expected)
++{
++  struct stat value;
++  int seals = fcntl (fd, F_GET_SEALS);
++  int required = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
++  return fstat (fd, &value) == 0 && S_ISREG (value.st_mode) && value.st_size >= 20 &&
++         value.st_size <= OWNED_IMAGE_LIMIT && (value.st_mode & 06000) == 0 &&
++         value.st_dev == expected->st_dev && value.st_ino == expected->st_ino &&
++         value.st_size == expected->st_size && seals >= 0 && (seals & required) == required;
++}
++
++static void
++owned_copy_image (int source, int target, const struct stat *expected)
++{
++  unsigned char input[16384], output[16384];
++  off_t offset = 0;
++  struct stat value;
++  if (!owned_image_sealed (source, expected))
++    die ("Owned image requires an immutable bounded sealed source");
++  /* The caller holds a newly O_EXCL-created file in the private tmpfs. No
++   * untrusted process exists in this namespace during setup. Source identity,
++   * size and seals remain held through a full second byte comparison. Go keeps
++   * the admission digest of this same immutable source; equality proves that
++   * the copied image has that digest without another crypto implementation. */
++  while (offset < expected->st_size)
++    {
++      size_t size = expected->st_size - offset > (off_t) sizeof (input) ?
++                    sizeof (input) : (size_t) (expected->st_size - offset);
++      if (TEMP_FAILURE_RETRY (pread (source, input, size, offset)) != (ssize_t) size)
++        die ("Owned image source read was incomplete");
++      if (TEMP_FAILURE_RETRY (pwrite (target, input, size, offset)) != (ssize_t) size)
++        die ("Owned image private copy was incomplete");
++      offset += size;
++    }
++  if (fstat (target, &value) != 0 || !S_ISREG (value.st_mode) || value.st_nlink != 1 ||
++      value.st_size != expected->st_size || !owned_image_sealed (source, expected))
++    die ("Owned image private copy identity or size differs");
++  for (offset = 0; offset < expected->st_size;)
++    {
++      size_t size = expected->st_size - offset > (off_t) sizeof (input) ?
++                    sizeof (input) : (size_t) (expected->st_size - offset);
++      if (TEMP_FAILURE_RETRY (pread (source, input, size, offset)) != (ssize_t) size ||
++          TEMP_FAILURE_RETRY (pread (target, output, size, offset)) != (ssize_t) size ||
++          memcmp (input, output, size) != 0)
++        die ("Owned image private copy byte comparison failed");
++      offset += size;
++    }
++  if (!owned_image_sealed (source, expected) || fchmod (target, 0555) != 0)
++    die ("Owned image source changed or copy permissions failed");
++}
++
++static void
++owned_fd_mount (SetupOp *op)
++{
++  int source_fd = op->owned_local_fd;
++  const char *destination = op->dest;
++  bool image = op->type == SETUP_OWNED_RO_IMAGE;
++  bool readonly = op->type != SETUP_OWNED_FD_MOUNT;
++  cleanup_fd int current_ns = -1;
++  cleanup_fd int root_fd = -1;
++  cleanup_fd int parent_fd = -1;
++  cleanup_fd int target_fd = -1;
++  cleanup_fd int tree_fd = -1;
++  cleanup_fd int image_fd = -1;
++  cleanup_free char *relative = NULL;
++  struct stat original_ns, active_ns, source_st, target_st, root_st, parent_st;
++  struct statfs root_fs;
++  struct mount_attr attr = { 0 };
++  char *component, *next;
++  unsigned tree_flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_NO_AUTOMOUNT;
++  unsigned attr_flags = AT_EMPTY_PATH;
++
++  /* All mutation below must be in bwrap's newly created mount namespace.
++   * Keep the original namespace alive: an inode must not be compared after
++   * releasing the object whose identity it represents. */
++  current_ns = openat (proc_fd, "self/ns/mnt", O_RDONLY | O_CLOEXEC);
++  if (original_mount_ns_fd < 0 || current_ns < 0 ||
++      fstat (original_mount_ns_fd, &original_ns) != 0 ||
++      fstat (current_ns, &active_ns) != 0 ||
++      (original_ns.st_dev == active_ns.st_dev && original_ns.st_ino == active_ns.st_ino))
++    die ("Owned FD mounts require a new private mount namespace");
++
++  if (image)
++    source_fd = op->fd;
++  if (fstat (source_fd, &source_st) != 0 ||
++      (!S_ISDIR (source_st.st_mode) && !S_ISREG (source_st.st_mode)))
++    die ("Owned FD mount source must be an open directory or regular file");
++  if (!owned_path_valid (destination, TRUE) || destination[1] == 0 ||
++      destination[strlen (destination) - 1] == '/' ||
++      has_path_prefix (destination, "/dev") || has_path_prefix (destination, "/proc") ||
++      (image ? strcmp (destination, "/.defenseclaw/payload") != 0 :
++       has_path_prefix (destination, "/.defenseclaw")))
++    die ("Owned FD mount destination must be a normalized non-root absolute path");
++
++  root_fd = fcntl (owned_destination_root_fd, F_DUPFD_CLOEXEC, 3);
++  if (root_fd < 0 || fstat (root_fd, &root_st) != 0 ||
++      fstatfs (root_fd, &root_fs) != 0 || root_fs.f_type != TMPFS_MAGIC)
++    die ("Owned FD mount destination root is not bwrap's private tmpfs");
++  parent_fd = fcntl (root_fd, F_DUPFD_CLOEXEC, 3);
++  if (parent_fd < 0)
++    die_with_error ("Can't retain owned destination root");
++
++  relative = xstrdup (destination + 1);
++  component = relative;
++  for (;;)
++    {
++      bool is_directory;
++      next = strchr (component, '/');
++      if (next != NULL)
++        *next = 0;
++      if (component[0] == 0 || strcmp (component, ".") == 0 || strcmp (component, "..") == 0)
++        die ("Owned FD mount destination has an invalid component");
++      if (fstat (parent_fd, &parent_st) != 0)
++        die_with_error ("Can't inspect owned destination parent");
++      is_directory = next != NULL || S_ISDIR (source_st.st_mode);
++      /* An earlier mount may cover a destination ancestor. Never create a
++       * placeholder in that source filesystem: only this new private tmpfs
++       * may be changed. Existing targets remain usable through held FDs. */
++      if (parent_st.st_dev == root_st.st_dev && is_directory)
++        {
++          if (mkdirat (parent_fd, component, 0755) != 0 && errno != EEXIST)
++            die_with_error ("Can't create owned destination directory");
++        }
++      else if (image)
++        {
++          if (parent_st.st_dev != root_st.st_dev)
++            die ("Owned image destination is not private tmpfs");
++          image_fd = openat (parent_fd, component, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0500);
++          if (image_fd < 0)
++            die_with_error ("Can't exclusively create private owned image");
++          owned_copy_image (source_fd, image_fd, &source_st);
++          source_fd = image_fd;
++        }
++      else if (parent_st.st_dev == root_st.st_dev)
++        {
++          cleanup_fd int created = openat (parent_fd, component,
++                                          O_CREAT | O_EXCL | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0444);
++          if (created < 0 && errno != EEXIST)
++            die_with_error ("Can't create owned destination file");
++        }
++      target_fd = openat (parent_fd, component, O_PATH | O_NOFOLLOW | O_CLOEXEC |
++                          (is_directory ? O_DIRECTORY : 0));
++      if (target_fd < 0 || fstat (target_fd, &target_st) != 0 ||
++          (is_directory ? !S_ISDIR (target_st.st_mode) : !S_ISREG (target_st.st_mode)))
++        die ("Owned FD mount destination is not an admitted object");
++      if (image && next == NULL)
++        {
++          struct stat copied;
++          if (image_fd < 0 || fstat (image_fd, &copied) != 0 ||
++              copied.st_dev != target_st.st_dev || copied.st_ino != target_st.st_ino)
++            die ("Private owned image destination identity differs");
++        }
++      if (next == NULL)
++        break;
++      close (parent_fd);
++      parent_fd = target_fd;
++      target_fd = -1;
++      component = next + 1;
++    }
++
++  /* The source is now a held namespace-local, identity-checked object, or the
++   * verified immutable private image copy. No source lookup happens here.
++   * Nested source mounts have already been refused, not silently copied. */
++  if (S_ISDIR (source_st.st_mode))
++    {
++      tree_flags |= AT_RECURSIVE;
++      attr_flags |= AT_RECURSIVE;
++    }
++  tree_fd = syscall (SYS_open_tree, source_fd, "", tree_flags);
++  if (tree_fd < 0)
++    die_with_error ("Owned source mount cloning failed");
++  attr.attr_set = owned_source_attribute_set (readonly, image ? 0 : op->owned_original_flags);
++  if (syscall (SYS_mount_setattr, tree_fd, "", attr_flags, &attr, sizeof (attr)) != 0)
++    die_with_error ("Owned detached mount attributes failed");
++  if (syscall (SYS_move_mount, tree_fd, "", target_fd, "",
++               MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) != 0)
++    die_with_error ("Owned mount attachment failed");
++}
++
++static unsigned
++owned_root_attribute_flags (void)
++{
++  /* Deliberately not AT_RECURSIVE: explicit RW submounts stay writable. */
++  return AT_EMPTY_PATH;
++}
++
++static uint64_t
++owned_root_attribute_set (void)
++{
++  return MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV;
++}
++
++static void
++owned_readonly_root (void)
++{
++  cleanup_fd int root = fcntl (owned_destination_root_fd, F_DUPFD_CLOEXEC, 3);
++  cleanup_fd int active = openat (proc_fd, "self/ns/mnt", O_RDONLY | O_CLOEXEC);
++  struct stat original, current;
++  struct statfs filesystem;
++  struct mount_attr attr = { .attr_set = owned_root_attribute_set () };
++  if (root < 0 || active < 0 || fstatfs (root, &filesystem) != 0 || filesystem.f_type != TMPFS_MAGIC ||
++      fstat (original_mount_ns_fd, &original) != 0 || fstat (active, &current) != 0 ||
++      (original.st_dev == current.st_dev && original.st_ino == current.st_ino))
++    die ("Owned readonly root requires verified private tmpfs and namespace");
++  if (syscall (SYS_mount_setattr, root, "", owned_root_attribute_flags (), &attr, sizeof (attr)) != 0)
++    die_with_error ("Can't make private owned root readonly");
++}
++
+ static void
+ setup_newroot (bool unshare_pid,
+                int  privileged_op_socket)
+@@ -1178,8 +1755,8 @@ setup_newroot (bool unshare_pid,
+       int source_mode = 0;
+       unsigned int i;
+ 
+-      if (op->source &&
+-          op->type != SETUP_MAKE_SYMLINK)
++      if (op->source && op->type != SETUP_OWNED_FD_MOUNT && op->type != SETUP_OWNED_RO_FD_MOUNT &&
++          op->type != SETUP_OWNED_RO_IMAGE && op->type != SETUP_MAKE_SYMLINK)
+         {
+           source = get_oldroot_path (op->source);
+           source_mode = get_file_mode (source);
+@@ -1215,6 +1792,13 @@ setup_newroot (bool unshare_pid,
+ 
+       switch (op->type)
+         {
++        case SETUP_OWNED_FD_MOUNT:
++        case SETUP_OWNED_RO_FD_MOUNT:
++        case SETUP_OWNED_RO_IMAGE:
++          if (privileged_op_socket != -1 || is_privileged)
++            die ("Owned FD mounts do not support privileged or setuid helpers");
++          owned_fd_mount (op);
++          break;
+         case SETUP_RO_BIND_MOUNT:
+         case SETUP_DEV_BIND_MOUNT:
+         case SETUP_BIND_MOUNT:
+@@ -1517,6 +2101,31 @@ close_ops_fd (void)
+           (void) close (op->fd);
+           op->fd = -1;
+         }
++      if (op->owned_local_fd != -1)
++        {
++          close (op->owned_local_fd);
++          op->owned_local_fd = -1;
++        }
++    }
++  if (original_mount_ns_fd != -1)
++    {
++      close (original_mount_ns_fd);
++      original_mount_ns_fd = -1;
++    }
++  if (owned_original_root_fd != -1)
++    {
++      close (owned_original_root_fd);
++      owned_original_root_fd = -1;
++    }
++  if (owned_local_root_fd != -1)
++    {
++      close (owned_local_root_fd);
++      owned_local_root_fd = -1;
++    }
++  if (owned_destination_root_fd != -1)
++    {
++      close (owned_destination_root_fd);
++      owned_destination_root_fd = -1;
+     }
+ }
+ 
+@@ -1549,6 +2158,9 @@ resolve_symlinks_in_ops (void)
+             }
+           break;
+ 
++        case SETUP_OWNED_FD_MOUNT:
++        case SETUP_OWNED_RO_FD_MOUNT:
++        case SETUP_OWNED_RO_IMAGE:
+         case SETUP_MOUNT_PROC:
+         case SETUP_MOUNT_DEV:
+         case SETUP_MOUNT_TMPFS:
+@@ -1847,6 +2459,35 @@ parse_args_recurse (int          *argcp,
+           argv += 2;
+           argc -= 2;
+         }
++      else if (strcmp (arg, "--dc-bind-fd") == 0 || strcmp (arg, "--dc-ro-bind-fd") == 0 ||
++               strcmp (arg, "--dc-ro-image-fd") == 0)
++        {
++          char *end;
++          long source_fd;
++          int descriptor_flags;
++          struct stat source_st;
++          if (argc < 3)
++            die ("Owned FD mounts take a descriptor and destination");
++          errno = 0;
++          source_fd = strtol (argv[1], &end, 10);
++          if (argv[1][0] == 0 || *end != 0 || errno != 0 || source_fd <= 2 || source_fd > INT_MAX ||
++              fstat ((int) source_fd, &source_st) != 0 ||
++              (!S_ISDIR (source_st.st_mode) && !S_ISREG (source_st.st_mode)))
++            die ("Invalid owned source descriptor");
++          descriptor_flags = fcntl ((int) source_fd, F_GETFD);
++          if (descriptor_flags < 0 || fcntl ((int) source_fd, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0)
++            die_with_error ("Can't close source capability on exec");
++          op = setup_op_new (strcmp (arg, "--dc-ro-image-fd") == 0 ? SETUP_OWNED_RO_IMAGE :
++                             strcmp (arg, "--dc-bind-fd") == 0 ? SETUP_OWNED_FD_MOUNT : SETUP_OWNED_RO_FD_MOUNT);
++          op->fd = fcntl ((int) source_fd, F_DUPFD_CLOEXEC, 3);
++          if (op->fd < 0)
++            die_with_error ("Can't retain owned source descriptor");
++          op->dest = argv[2];
++          op->flags = NO_CREATE_DEST;
++          opt_owned_fd_mounts = TRUE;
++          argv += 2;
++          argc -= 2;
++        }
+       else if (strcmp(arg, "--ro-bind") == 0 ||
+                strcmp(arg, "--ro-bind-try") == 0)
+         {
+@@ -2751,6 +3392,45 @@ main (int    argc,
+   if (!is_privileged && getuid () != 0 && opt_userns_fd == -1)
+     opt_unshare_user = TRUE;
+ 
++  if (opt_owned_fd_mounts)
++    {
++      SetupOp *owned_op;
++      bool attached_source = FALSE;
++      unsigned images = 0;
++#if !defined(__x86_64__)
++      die ("Owned FD mounts currently require Linux x86_64");
++#endif
++      if (is_privileged || real_uid == 0 || !opt_unshare_user ||
++          !opt_unshare_pid || !opt_unshare_net || !opt_unshare_ipc || !opt_unshare_uts ||
++          opt_userns_fd != -1 || opt_userns2_fd != -1 || opt_pidns_fd != -1 || opt_as_pid_1 ||
++          argc < 1 || strcmp (argv[0], "/.defenseclaw/payload") != 0)
++        die ("Owned FD mounts require an unprivileged fresh namespace set");
++      /* Legacy setup options can create or chmod entries through a preceding
++       * source grant. This route is deliberately narrower than the ordinary
++       * CLI: synthesize only fixed private device/proc roots before mounting
++       * any source, then accept held-object mount operations exclusively. */
++      for (owned_op = ops; owned_op != NULL; owned_op = owned_op->next)
++        {
++          if (owned_op->type == SETUP_OWNED_FD_MOUNT ||
++              owned_op->type == SETUP_OWNED_RO_FD_MOUNT || owned_op->type == SETUP_OWNED_RO_IMAGE)
++            {
++              attached_source = TRUE;
++              if (owned_op->type == SETUP_OWNED_RO_IMAGE)
++                {
++                  if (strcmp (owned_op->dest, "/.defenseclaw/payload") != 0)
++                    die ("Owned image requires its fixed guest destination");
++                  images++;
++                }
++            }
++          else if (attached_source ||
++                   !((owned_op->type == SETUP_MOUNT_PROC && strcmp (owned_op->dest, "/proc") == 0) ||
++                     (owned_op->type == SETUP_MOUNT_DEV && strcmp (owned_op->dest, "/dev") == 0)))
++            die ("Owned FD mounts refuse legacy setup operations");
++        }
++      if (images != 1)
++        die ("Owned FD mounts require exactly one immutable private image");
++    }
++
+ #ifdef ENABLE_REQUIRE_USERNS
+   /* In this build option, we require userns. */
+   if (is_privileged && getuid () != 0 && opt_userns_fd == -1)
+@@ -2818,6 +3498,13 @@ main (int    argc,
+   proc_fd = open ("/proc", O_PATH);
+   if (proc_fd == -1)
+     die_with_error ("Can't open /proc");
++  if (opt_owned_fd_mounts)
++    {
++      original_mount_ns_fd = openat (proc_fd, "self/ns/mnt", O_RDONLY | O_CLOEXEC);
++      if (original_mount_ns_fd < 0)
++        die_with_error ("Can't retain original mount namespace identity");
++      owned_capture_original_sources ();
++    }
+ 
+   /* We need *some* mountpoint where we can mount the root tmpfs.
+    * Because we use pivot_root, it won't appear to be mounted from
+@@ -3077,7 +3764,15 @@ main (int    argc,
+   /* Mark everything as slave, so that we still
+    * receive mounts from the real root, but don't
+    * propagate mounts to the real root. */
+-  if (mount (NULL, "/", NULL, MS_SILENT | MS_SLAVE | MS_REC, NULL) < 0)
++  if (opt_owned_fd_mounts)
++    {
++      /* No incoming host propagation may change the admitted source view. */
++      owned_require_new_namespace ();
++      if (mount (NULL, "/", NULL, MS_SILENT | MS_PRIVATE | MS_REC, NULL) < 0)
++        die_with_mount_error ("Failed to make owned namespace private");
++      owned_prepare_local_sources ();
++    }
++  else if (mount (NULL, "/", NULL, MS_SILENT | MS_SLAVE | MS_REC, NULL) < 0)
+     die_with_mount_error ("Failed to make / slave");
+ 
+   /* Create a tmpfs which we will use as / in the namespace */
+@@ -3112,6 +3807,15 @@ main (int    argc,
+   if (chdir ("/") != 0)
+     die_with_error ("chdir / (base path)");
+ 
++  if (opt_owned_fd_mounts)
++    {
++      struct statfs filesystem;
++      owned_destination_root_fd = open ("/newroot", O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++      if (owned_destination_root_fd < 0 || fstatfs (owned_destination_root_fd, &filesystem) != 0 ||
++          filesystem.f_type != TMPFS_MAGIC)
++        die ("Can't retain new private owned destination root");
++    }
++
+   if (is_privileged)
+     {
+       pid_t child;
+@@ -3163,6 +3867,8 @@ main (int    argc,
+       setup_newroot (opt_unshare_pid, -1);
+     }
+ 
++  if (opt_owned_fd_mounts)
++    owned_readonly_root ();
+   close_ops_fd ();
+ 
+   /* The old root better be rprivate or we will send unmount events to the parent namespace */
+@@ -3380,7 +4086,9 @@ main (int    argc,
+   if (opt_argv0 != NULL)
+     argv[0] = (char *) opt_argv0;
+ 
+-  if (execvp (exec_path, argv) == -1)
++  /* The private route takes one explicit guest executable. execv does not
++   * search PATH or fall back to a shell for an unrecognized image. */
++  if ((opt_owned_fd_mounts ? execv (exec_path, argv) : execvp (exec_path, argv)) == -1)
+     {
+       if (setup_finished_pipe[1] != -1)
+         {

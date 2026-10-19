@@ -44,6 +44,9 @@ type box struct {
 	// op serializes lifecycle operations (create, start, stop, delete,
 	// undo) on this sandbox. It is taken before Manager.mu, never under it.
 	op sync.Mutex
+	// native retains this manager's exact native session/partial cleanup.
+	// Never adopt it by OpenShell name or serialize a prepared launch handle.
+	native *nativeSession
 
 	// The fields below are guarded by Manager.mu.
 	rec record
@@ -180,7 +183,7 @@ func (m *Manager) saveRecord(b *box) error {
 		return nil
 	}
 	m.mu.Lock()
-	rec, unrecorded := b.rec, b.unrecorded
+	rec, unrecorded := b.rec, b.unrecorded || b.native != nil
 	m.mu.Unlock()
 	if unrecorded {
 		// Its labels are all there is: writing them as its record would
@@ -359,6 +362,11 @@ func (b *box) identity() audit.SandboxIdentity {
 		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness, Runtime: audit.SandboxRuntimeOpenShell,
 		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
 		BindingID: b.rec.BindingID,
+	}
+	if b.native != nil {
+		id.ID, id.Name = b.native.identity.ID, b.native.identity.Name
+		id.Runtime, id.Driver = string(b.native.identity.Runtime.Runtime), b.native.identity.Runtime.Driver
+		return id
 	}
 	// Telemetry names the driver as OpenShell does (audit.SandboxDriverVM is
 	// "vm"); one this build does not know is left out, not guessed.
@@ -740,8 +748,11 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
 	accepted := b.rec.Accepted
+	native := b.native != nil
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, accepted)
+	if !native {
+		m.decorate(&v, proxy, bindingID, accepted)
+	}
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -751,6 +762,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 // every sandbox of it gets (a driver without per-sandbox limits); ""
 // for the others and for a deleted one. Callers hold Manager.mu.
 func sharedLimitsOf(b *box) openshell.ComputeDriver {
+	if b.native != nil {
+		return ""
+	}
 	if d, _ := openshell.LookupDriver(b.rec.Driver); !d.SandboxLimits && !b.retained {
 		return d.Name
 	}
@@ -852,7 +866,7 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	r := b.rec
 	v := sandboxapi.Sandbox{
-		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
+		Name: r.Name, ID: r.ID, Runtime: string(audit.SandboxRuntimeOpenShell), Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
 		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
 		RunImage: r.RunImage, RunImageID: r.RunImageID, Driver: r.Driver, DriverReason: r.DriverReason,
@@ -867,6 +881,10 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.HarnessName = spec.DisplayName
 	}
 	switch {
+	case b.native != nil:
+		native := nativeSessionView(b)
+		v.ID, v.Runtime, v.Phase, v.Driver = native.ID, native.Runtime, native.Phase, native.Driver
+		v.ExitCode = b.native.instance.ExitCode
 	case b.retained:
 		v.Phase = string(audit.SandboxPhaseDeleted)
 	case b.missing:
@@ -915,7 +933,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	}
 	v.UnflushedAt = r.UnflushedAt
 	for _, a := range m.approvals {
-		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
+		if b.native == nil && a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
 			v.PendingApprovals++
 		}
 	}

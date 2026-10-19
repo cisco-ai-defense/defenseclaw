@@ -166,7 +166,7 @@ func (p *teardownPlan) empty() bool {
 // sandboxesOn reports whether config.yaml turns sandboxes on, which the
 // teardown's last step turns off.
 func (a *App) sandboxesOn() bool {
-	if a.Cfg == nil || !a.Cfg.OpenShell.Enabled {
+	if a.Cfg == nil || !a.Cfg.SandboxEnabled() {
 		return false
 	}
 	_, err := os.Stat(a.ConfigPath)
@@ -678,7 +678,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 	a.pruneWrapperFiles()
 	if p.disable {
 		if err := a.patchConfig(map[string]any{"openshell.enabled": false, "openshell.wrappers": []string{}}); err != nil {
-			a.warn("could not turn openshell.enabled off: " + err.Error())
+			fail("turn sandbox enablement off", err)
 		} else {
 			a.ok("openshell.enabled is off")
 		}

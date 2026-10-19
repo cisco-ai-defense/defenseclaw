@@ -1,0 +1,1303 @@
+diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+index e52aa2dfb69324da0d7432a494cc0b31bfd92439..a00506f98ac88de22639a3e7090431bbe33d786d 100644
+--- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+@@ -144,8 +144,7 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
+ 
+ const CAPTURE_API_AVAILABLE_LOG: &str =
+     "captureDenials: learning-mode trace API available (processmodel.dll)";
+-const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
+-    "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
++const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str = "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
+      and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
+      build does not support that policy, and enumeration-only access cannot fall back to \
+      AppContainer enforcement";
+@@ -280,6 +279,676 @@ impl Default for BaseContainerRunner {
+     }
+ }
+ 
++// Raw return-value calls are deliberately confined to the contributor literal
++// launch path. windows::Result conversion can format an error before the native
++// status is sampled, so capture both thread-local status values first.
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    #[link_name = "CreateProcessW"]
++    fn literal_create_process_w(
++        application: *const u16,
++        command: *mut u16,
++        process_attributes: *const c_void,
++        thread_attributes: *const c_void,
++        inherit_handles: i32,
++        creation_flags: u32,
++        environment: *const c_void,
++        current_directory: *const u16,
++        startup: *const STARTUPINFOW,
++        process: *mut PROCESS_INFORMATION,
++    ) -> i32;
++    #[link_name = "GetLastError"]
++    fn literal_get_last_error() -> u32;
++}
++
++#[link(name = "ntdll")]
++unsafe extern "system" {
++    #[link_name = "RtlGetLastNtStatus"]
++    fn literal_get_last_nt_status() -> i32;
++    #[link_name = "NtQueryInformationProcess"]
++    fn literal_query_process_information(
++        process: HANDLE,
++        information_class: u32,
++        information: *mut c_void,
++        information_length: u32,
++        return_length: *mut u32,
++    ) -> i32;
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct NativeLaunchFailure {
++    win32: u32,
++    nt_status: i32,
++}
++
++fn capture_native_launch_failure(
++    win32: impl FnOnce() -> u32,
++    nt_status: impl FnOnce() -> i32,
++) -> NativeLaunchFailure {
++    let win32 = win32();
++    let nt_status = nt_status();
++    NativeLaunchFailure { win32, nt_status }
++}
++
++#[derive(Clone, Copy)]
++struct NativeLaunchShape {
++    lengths: [usize; 6],
++    capped: bool,
++}
++
++impl NativeLaunchShape {
++    fn bounded(lengths: [usize; 6]) -> Self {
++        // Diagnostic counts only: never allocate from a reported length or
++        // retain any argument, environment value or filesystem spelling.
++        const LIMIT: usize = 65_536;
++        Self {
++            capped: lengths.iter().any(|length| *length > LIMIT),
++            lengths: lengths.map(|length| length.min(LIMIT)),
++        }
++    }
++
++    fn describe(self, failure: NativeLaunchFailure) -> String {
++        let [
++            application,
++            command,
++            environment,
++            cwd,
++            argv_entries,
++            env_entries,
++        ] = self.lengths;
++        format!(
++            "native_launch_failure win32={} ntstatus=0x{:08x} application_utf16_units={} command_utf16_units={} environment_utf16_units={} cwd_utf16_units={} argv_entries={} environment_entries={} counts_capped={}",
++            failure.win32,
++            failure.nt_status as u32,
++            application,
++            command,
++            environment,
++            cwd,
++            argv_entries,
++            env_entries,
++            self.capped
++        )
++    }
++}
++
++/// Encode the documented Windows C/Rust argv rules without invoking a shell.
++/// Keep the absolute application separate so CreateProcessW never searches or
++/// guesses which executable a command-line prefix names.
++fn windows_literal_argv_buffers(
++    argv: &crate::mxc_common::literal_argv::LiteralArgv,
++) -> Result<(Vec<u16>, Vec<u16>), ScriptResponse> {
++    use std::os::windows::ffi::OsStrExt;
++    const MAX_COMMAND_UNITS: usize = 32_766; // excludes the terminating NUL
++    fn append(output: &mut Vec<u16>, unit: u16, count: usize) -> Result<(), ScriptResponse> {
++        if output
++            .len()
++            .checked_add(count)
++            .is_none_or(|size| size > MAX_COMMAND_UNITS)
++        {
++            return Err(ScriptResponse::rejected(
++                "literal Windows command exceeds 32767 UTF-16 units",
++            ));
++        }
++        output.extend(std::iter::repeat_n(unit, count));
++        Ok(())
++    }
++    let mut application: Vec<u16> = argv.program().encode_wide().collect();
++    if application.contains(&0) || application.contains(&u16::from(b'"')) {
++        return Err(ScriptResponse::rejected(
++            "literal Windows executable contains NUL or a quote",
++        ));
++    }
++    let mut command = Vec::new();
++    for (index, value) in argv.values().iter().enumerate() {
++        if index != 0 {
++            append(&mut command, u16::from(b' '), 1)?;
++        }
++        append(&mut command, u16::from(b'"'), 1)?;
++        let mut slashes = 0;
++        for unit in value.encode_wide() {
++            if unit == 0 {
++                return Err(ScriptResponse::rejected(
++                    "literal Windows argument contains NUL",
++                ));
++            }
++            if unit == u16::from(b'\\') {
++                slashes += 1;
++                continue;
++            }
++            if unit == u16::from(b'"') {
++                append(&mut command, u16::from(b'\\'), slashes * 2 + 1)?;
++            } else {
++                append(&mut command, u16::from(b'\\'), slashes)?;
++            }
++            append(&mut command, unit, 1)?;
++            slashes = 0;
++        }
++        append(&mut command, u16::from(b'\\'), slashes * 2)?;
++        append(&mut command, u16::from(b'"'), 1)?;
++    }
++    application.push(0);
++    command.push(0);
++    Ok((application, command))
++}
++
++/// Pure admission: local drive or verbatim-drive syntax only. Do not normalize
++/// a caller path first: that could traverse a remote junction on the host.
++fn local_executable_parts(
++    program: &std::ffi::OsStr,
++) -> Result<(u16, Vec<std::ffi::OsString>), ScriptResponse> {
++    use std::os::windows::ffi::{OsStrExt, OsStringExt};
++    let units: Vec<u16> = program.encode_wide().collect();
++    let prefix = if units.starts_with(&[92, 92, 63, 92]) {
++        4
++    } else {
++        0
++    };
++    let drive = units.get(prefix).copied().unwrap_or_default();
++    if !((65..=90).contains(&drive) || (97..=122).contains(&drive))
++        || units.get(prefix + 1) != Some(&58)
++        || units.get(prefix + 2) != Some(&92)
++        || units.len() > 32_766
++    {
++        return Err(ScriptResponse::rejected(
++            "literal executable requires an absolute local drive path",
++        ));
++    }
++    let mut parts = Vec::new();
++    for part in units[prefix + 3..].split(|unit| *unit == 92) {
++        let name = String::from_utf16_lossy(part);
++        let stem = name
++            .split('.')
++            .next()
++            .unwrap_or("")
++            .trim_end_matches(' ')
++            .to_ascii_uppercase();
++        let dos_device = ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"]
++            .contains(&stem.as_str())
++            || ["COM", "LPT"].iter().any(|prefix| {
++                stem.strip_prefix(*prefix).is_some_and(|suffix| {
++                    matches!(
++                        suffix,
++                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
++                    )
++                })
++            });
++        if part.is_empty()
++            || part == [46]
++            || part == [46, 46]
++            || dos_device
++            || part.last().is_some_and(|unit| *unit == 46 || *unit == 32)
++            || part
++                .iter()
++                .any(|unit| *unit < 32 || [34, 42, 47, 58, 60, 62, 63, 124].contains(unit))
++        {
++            return Err(ScriptResponse::rejected(
++                "literal executable refuses UNC/device/ADS/dot or ambiguous path components",
++            ));
++        }
++        parts.push(std::ffi::OsString::from_wide(part));
++    }
++    Ok((
++        if (97..=122).contains(&drive) {
++            drive - 32
++        } else {
++            drive
++        },
++        parts,
++    ))
++}
++
++struct LocalExecutableCustody {
++    // DOS spelling is only a CreateProcess compatibility input, not authority.
++    application: Vec<u16>,
++    // Hold directory names against rename; hold the image against writes/rename.
++    // Directory metadata and contents remain mutable under the caller's rights.
++    // This is not a digest-based executable authorization for a production host.
++    _handles: Vec<OwnedHandle>,
++}
++
++// Native PROCESSINFOCLASS ProcessImageFileMapping (44) reads an input HANDLE
++// and compares the process image's SectionObjectPointer with that held file.
++// It requires PROCESS_QUERY_INFORMATION and FILE_EXECUTE | SYNCHRONIZE on the
++// file. Unlike a queried pathname followed by a reopen, no mutable name selects
++// the comparison object. Unsupported, warning and failed statuses all refuse.
++// Primary definitions: m417z/ntdoc descriptions/processinfoclass.md and
++// winsiderss/systeminformer phnt/include/ntpsapi.h (q: HANDLE input).
++fn literal_image_mapping_status(process: HANDLE, custody: &LocalExecutableCustody) -> i32 {
++    let Some(image) = custody._handles.last() else {
++        return 0xc000_0008_u32 as i32; // STATUS_INVALID_HANDLE, fail closed
++    };
++    let mut image_handle = image.get();
++    // SAFETY: both handles remain owned, the input buffer is exactly one native
++    // HANDLE, class 44 reads it without writing output, and ReturnLength is optional.
++    unsafe {
++        literal_query_process_information(
++            process,
++            44,
++            (&mut image_handle as *mut HANDLE).cast(),
++            std::mem::size_of::<HANDLE>() as u32,
++            ptr::null_mut(),
++        )
++    }
++}
++
++fn resume_after_literal_image_match<E>(
++    query: impl FnOnce() -> i32,
++    resume: impl FnOnce() -> u32,
++    refuse: impl FnOnce(i32) -> E,
++) -> Result<u32, E> {
++    let status = query();
++    if status != 0 {
++        return Err(refuse(status));
++    }
++    Ok(resume())
++}
++
++fn pin_local_executable(
++    program: &std::ffi::OsStr,
++) -> Result<LocalExecutableCustody, ScriptResponse> {
++    use std::os::windows::ffi::{OsStrExt, OsStringExt};
++    use windows::Win32::Storage::FileSystem::{
++        CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
++        QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
++        FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS,
++        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
++        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
++        OPEN_EXISTING, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
++    };
++    let (drive, parts) = local_executable_parts(program)?;
++    let alias = [drive, 58, 0];
++    let mut target = vec![0u16; 1024];
++    let count = unsafe { QueryDosDeviceW(PCWSTR(alias.as_ptr()), Some(&mut target)) };
++    if count == 0 || count as usize >= target.len() {
++        return Err(ScriptResponse::rejected(
++            "cannot resolve the local executable drive",
++        ));
++    }
++    let end = target
++        .iter()
++        .position(|unit| *unit == 0)
++        .unwrap_or(target.len());
++    let target = String::from_utf16(&target[..end])
++        .map_err(|_| ScriptResponse::rejected("invalid local drive mapping"))?;
++    let volume = target
++        .strip_prefix(r"\Device\HarddiskVolume")
++        .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
++        .ok_or_else(|| {
++            ScriptResponse::rejected(
++                "literal executable refuses mapped, SUBST and redirected drives",
++            )
++        })?;
++    // Resolve the trusted kernel volume directly, rather than re-reading a
++    // caller's mutable DOS drive alias during path traversal.
++    let native_root = PathBuf::from(format!(r"\\?\GLOBALROOT\Device\HarddiskVolume{volume}\"));
++    let open = |path: &Path, directory: bool| -> Result<OwnedHandle, ScriptResponse> {
++        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
++        wide.push(0);
++        // Attribute-only directory opens do not participate in rename-sharing
++        // enforcement. List access makes no-delete sharing an effective pin.
++        // Share directory writes so holding ordinary ancestors does not deny
++        // unrelated content operations; the image still denies write sharing.
++        let (access, share) = if directory {
++            (
++                FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0,
++                FILE_SHARE_READ | FILE_SHARE_WRITE,
++            )
++        } else {
++            (FILE_GENERIC_READ.0 | FILE_EXECUTE.0, FILE_SHARE_READ)
++        };
++        let handle = unsafe {
++            CreateFileW(
++                PCWSTR(wide.as_ptr()),
++                access,
++                share,
++                None,
++                OPEN_EXISTING,
++                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
++                None,
++            )
++        }
++        .map_err(|_| {
++            ScriptResponse::rejected(
++                "cannot hold local executable directory names or read-only image",
++            )
++        })?;
++        let handle = OwnedHandle::new(handle);
++        let mut information = BY_HANDLE_FILE_INFORMATION::default();
++        unsafe { GetFileInformationByHandle(handle.get(), &mut information) }
++            .map_err(|_| ScriptResponse::rejected("cannot inspect an executable path handle"))?;
++        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
++            || (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0) != directory
++        {
++            return Err(ScriptResponse::rejected(
++                "literal executable refuses reparse points or unexpected path object types",
++            ));
++        }
++        Ok(handle)
++    };
++    let final_path = |handle: HANDLE, volume: u32| -> Result<Vec<u16>, ScriptResponse> {
++        let mut result = vec![0u16; 32_768];
++        let count = unsafe {
++            GetFinalPathNameByHandleW(
++                handle,
++                &mut result,
++                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | volume),
++            )
++        };
++        if count == 0 || count as usize >= result.len() {
++            return Err(ScriptResponse::rejected(
++                "cannot bind executable custody to a local volume GUID",
++            ));
++        }
++        result.truncate(count as usize);
++        let value = String::from_utf16_lossy(&result);
++        if volume == VOLUME_NAME_GUID.0
++            && (!value.starts_with(r"\\?\Volume{") || !value.contains(r"}\"))
++        {
++            return Err(ScriptResponse::rejected(
++                "executable handle is not on a local GUID volume",
++            ));
++        }
++        result.push(0);
++        Ok(result)
++    };
++    let root = open(&native_root, true)?;
++    let volume_root = final_path(root.get(), VOLUME_NAME_GUID.0)?;
++    // DRIVE_FIXED == 3. Query by the held volume's GUID, before traversing any
++    // caller path component; do not query a potentially redirected drive alias.
++    if unsafe { GetDriveTypeW(PCWSTR(volume_root.as_ptr())) } != 3 {
++        return Err(ScriptResponse::rejected(
++            "literal executable requires a local fixed volume",
++        ));
++    }
++    let mut path = PathBuf::from(std::ffi::OsString::from_wide(
++        &volume_root[..volume_root.len() - 1],
++    ));
++    let mut handles = vec![root];
++    for (index, part) in parts.iter().enumerate() {
++        path.push(part);
++        handles.push(open(&path, index + 1 != parts.len())?);
++    }
++    let dos_application = final_path(
++        handles
++            .last()
++            .expect("root and nonempty lexical path")
++            .get(),
++        VOLUME_NAME_DOS.0,
++    )?;
++    let dos_name = std::ffi::OsString::from_wide(&dos_application[..dos_application.len() - 1]);
++    local_executable_parts(&dos_name)?;
++    // Match the measured compatible ordinary-DOS form. Retained file/ancestor
++    // handles remain the authority; the kernel image check below must succeed
++    // before any primary thread is resumed, even if a DOS alias changes.
++    let prefix = [92_u16, 92, 63, 92];
++    let application = if dos_application.starts_with(&prefix) {
++        dos_application[4..].to_vec()
++    } else {
++        dos_application
++    };
++    Ok(LocalExecutableCustody {
++        application,
++        _handles: handles,
++    })
++}
++
++#[cfg(test)]
++mod strict_windows_path_tests {
++    use super::*;
++
++    #[test]
++    fn local_lexical_admission_accepts_only_unambiguous_drive_paths() {
++        for path in [r"C:\fixed path\child.exe", r"\\?\C:\fixed\child.exe"] {
++            let (drive, parts) = local_executable_parts(std::ffi::OsStr::new(path)).unwrap();
++            assert_eq!(drive, u16::from(b'C'));
++            assert!(!parts.is_empty());
++        }
++        for path in [
++            r"\\server\share\child.exe",
++            r"\\?\UNC\server\share\child.exe",
++            r"\\.\pipe\child",
++            r"\\?\GLOBALROOT\Device\HarddiskVolume3\child.exe",
++            r"C:\fixed\child.exe:stream",
++            r"C:\fixed\..\child.exe",
++            r"C:\fixed.\child.exe",
++            r"C:\fixed \child.exe",
++            r"C:/fixed/child.exe",
++            r"C:child.exe",
++            r"C:\fixed\NUL.exe",
++            r"C:\fixed\COM¹.exe",
++            r"C:\",
++        ] {
++            assert!(
++                local_executable_parts(std::ffi::OsStr::new(path)).is_err(),
++                "{path}"
++            );
++        }
++    }
++
++    #[test]
++    fn native_local_file_custody_holds_image_against_write_without_spawning() {
++        let directory = tempfile::tempdir().unwrap();
++        let parent = directory.path().join("fixed-parent");
++        let moved = directory.path().join("fixed-renamed-parent");
++        std::fs::create_dir(&parent).unwrap();
++        let image = parent.join("fixed-not-executed.exe");
++        std::fs::write(&image, b"fixed public file; never executed").unwrap();
++        drop(
++            std::fs::OpenOptions::new()
++                .write(true)
++                .open(&image)
++                .unwrap(),
++        );
++        // Positive control: this exact ancestor can be renamed before pinning.
++        std::fs::rename(&parent, &moved).unwrap();
++        std::fs::rename(&moved, &parent).unwrap();
++        let mut custody = pin_local_executable(image.as_os_str()).unwrap();
++        let error = std::fs::OpenOptions::new()
++            .write(true)
++            .open(&image)
++            .unwrap_err();
++        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
++        let application =
++            String::from_utf16(&custody.application[..custody.application.len() - 1]).unwrap();
++        assert!(!application.starts_with(r"\\"));
++        local_executable_parts(std::ffi::OsStr::new(&application)).unwrap();
++        // A held image can independently prevent parent rename. Release only
++        // that final image handle so it cannot mask weak directory custody.
++        drop(custody._handles.pop().unwrap());
++        let rename = std::fs::rename(&parent, &moved).unwrap_err();
++        assert_eq!(rename.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
++        let sibling = parent.join("fixed-public-sibling.txt");
++        std::fs::write(&sibling, b"fixed public sibling").unwrap();
++        std::fs::remove_file(sibling).unwrap();
++        drop(custody);
++        drop(
++            std::fs::OpenOptions::new()
++                .write(true)
++                .open(&image)
++                .unwrap(),
++        );
++        std::fs::rename(&parent, &moved).unwrap();
++        std::fs::rename(&moved, &parent).unwrap();
++    }
++
++    #[test]
++    fn literal_image_mapping_requires_exact_success_before_resume() {
++        use std::cell::RefCell;
++        for status in [0_i32, 1, 0x8000_0005_u32 as i32, 0xc000_0001_u32 as i32] {
++            let events = RefCell::new(Vec::new());
++            let result = resume_after_literal_image_match(
++                || {
++                    events.borrow_mut().push("query");
++                    status
++                },
++                || {
++                    events.borrow_mut().push("resume");
++                    1
++                },
++                |refused| {
++                    events.borrow_mut().push("cleanup");
++                    refused
++                },
++            );
++            if status == 0 {
++                assert_eq!(result, Ok(1));
++                assert_eq!(*events.borrow(), vec!["query", "resume"]);
++            } else {
++                assert_eq!(result, Err(status));
++                assert_eq!(*events.borrow(), vec!["query", "cleanup"]);
++            }
++        }
++    }
++
++    #[test]
++    fn native_process_image_mapping_matches_current_image_and_refuses_wrong_file() {
++        use std::io::{Read, Seek, SeekFrom, Write};
++        use std::os::windows::io::BorrowedHandle;
++        use windows::Win32::Storage::FileSystem::{
++            FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
++        };
++        use windows::Win32::System::Threading::GetCurrentProcess;
++        fn held_file(custody: &LocalExecutableCustody) -> std::fs::File {
++            // Clone ownership without reopening a name or taking the custody handle.
++            let borrowed =
++                unsafe { BorrowedHandle::borrow_raw(custody._handles.last().unwrap().get().0) };
++            std::fs::File::from(borrowed.try_clone_to_owned().unwrap())
++        }
++        fn identity(custody: &LocalExecutableCustody) -> (u64, [u8; 16]) {
++            let mut information = FILE_ID_INFO::default();
++            unsafe {
++                GetFileInformationByHandleEx(
++                    custody._handles.last().unwrap().get(),
++                    FileIdInfo,
++                    (&mut information as *mut FILE_ID_INFO).cast(),
++                    std::mem::size_of::<FILE_ID_INFO>() as u32,
++                )
++            }
++            .unwrap();
++            (
++                information.VolumeSerialNumber,
++                information.FileId.Identifier,
++            )
++        }
++        // Read-only current-process API qualification; never create a child.
++        let current = pin_local_executable(std::env::current_exe().unwrap().as_os_str()).unwrap();
++        let process = unsafe { GetCurrentProcess() };
++        assert_eq!(literal_image_mapping_status(process, &current), 0);
++        let directory = tempfile::tempdir().unwrap();
++        let copied_path = directory
++            .path()
++            .join("fixed-public-unexecuted-identical-image.exe");
++        let mut original = held_file(&current);
++        let size = original.metadata().unwrap().len();
++        assert!(size > 0 && size <= 256 * 1024 * 1024);
++        let mut output = std::fs::OpenOptions::new()
++            .create_new(true)
++            .write(true)
++            .open(&copied_path)
++            .unwrap();
++        original.seek(SeekFrom::Start(0)).unwrap();
++        assert_eq!(
++            std::io::copy(&mut (&mut original).take(size + 1), &mut output).unwrap(),
++            size
++        );
++        output.flush().unwrap();
++        drop(output);
++        let copied = pin_local_executable(copied_path.as_os_str()).unwrap();
++        // A valid PE with identical bytes must still be a different kernel file.
++        assert!(identity(&current) != identity(&copied));
++        let mut copy_reader = held_file(&copied);
++        original.seek(SeekFrom::Start(0)).unwrap();
++        copy_reader.seek(SeekFrom::Start(0)).unwrap();
++        let mut left = [0_u8; 8192];
++        let mut right = [0_u8; 8192];
++        let mut remaining = size;
++        while remaining != 0 {
++            let count = remaining.min(left.len() as u64) as usize;
++            original.read_exact(&mut left[..count]).unwrap();
++            copy_reader.read_exact(&mut right[..count]).unwrap();
++            assert!(left[..count] == right[..count]);
++            remaining -= count as u64;
++        }
++        assert_eq!(original.read(&mut left[..1]).unwrap(), 0);
++        assert_eq!(copy_reader.read(&mut right[..1]).unwrap(), 0);
++        assert_ne!(literal_image_mapping_status(process, &copied), 0);
++        let wrong = directory.path().join("fixed-public-wrong-image.bin");
++        std::fs::write(&wrong, b"fixed public synthetic unrelated file").unwrap();
++        let wrong = pin_local_executable(wrong.as_os_str()).unwrap();
++        assert_ne!(literal_image_mapping_status(process, &wrong), 0);
++    }
++}
++
++#[cfg(test)]
++mod strict_windows_argv_tests {
++    use super::*;
++    use crate::mxc_common::literal_argv::LiteralArgv;
++
++    #[test]
++    fn explicit_application_and_native_quoting_preserve_literal_values() {
++        let argv = LiteralArgv::new(vec![
++            r"C:\fixed path\child.exe".into(),
++            "".into(),
++            "a b".into(),
++            "a\"b".into(),
++            "tail\\".into(),
++            "λ-雪;$()`&|<>*?".into(),
++        ])
++        .unwrap();
++        let (application, command) = windows_literal_argv_buffers(&argv).unwrap();
++        assert_eq!(
++            String::from_utf16(&application[..application.len() - 1]).unwrap(),
++            r"C:\fixed path\child.exe"
++        );
++        assert_eq!(
++            String::from_utf16(&command[..command.len() - 1]).unwrap(),
++            r#""C:\fixed path\child.exe" "" "a b" "a\"b" "tail\\" "λ-雪;$()`&|<>*?""#
++        );
++        assert_eq!(application.last(), Some(&0));
++        assert_eq!(command.last(), Some(&0));
++    }
++
++    #[test]
++    fn native_failure_diagnostics_are_numeric_bounded_and_ordered() {
++        let calls = std::cell::RefCell::new(Vec::new());
++        let failure = capture_native_launch_failure(
++            || {
++                calls.borrow_mut().push("win32");
++                87
++            },
++            || {
++                calls.borrow_mut().push("ntstatus");
++                0xc000000du32 as i32
++            },
++        );
++        assert_eq!(calls.into_inner(), ["win32", "ntstatus"]);
++        assert_eq!(failure.win32, 87);
++        assert_eq!(failure.nt_status as u32, 0xc000000d);
++        let text = NativeLaunchShape::bounded([44, 55, 66, 77, 2, 8]).describe(failure);
++        assert_eq!(
++            text,
++            "native_launch_failure win32=87 ntstatus=0xc000000d application_utf16_units=44 command_utf16_units=55 environment_utf16_units=66 cwd_utf16_units=77 argv_entries=2 environment_entries=8 counts_capped=false"
++        );
++        let maximum = NativeLaunchShape::bounded([usize::MAX; 6]).describe(failure);
++        assert!(maximum.ends_with("counts_capped=true"));
++        assert_eq!(maximum.matches("=65536").count(), 6);
++        assert!(maximum.len() < 320);
++        assert!(!maximum.contains('\\'));
++    }
++
++    #[test]
++    fn native_limit_and_invalid_application_fail_before_resource_creation() {
++        let argv = LiteralArgv::new(vec![
++            r"C:\fixed\child.exe".into(),
++            "a".repeat(32_767).into(),
++        ])
++        .unwrap();
++        assert!(windows_literal_argv_buffers(&argv).is_err());
++        let argv = LiteralArgv::new(vec!["C:\\fixed\\bad\"name.exe".into()]).unwrap();
++        assert!(windows_literal_argv_buffers(&argv).is_err());
++    }
++}
++
+ impl BaseContainerRunner {
+     pub fn new() -> Self {
+         Self::default()
+@@ -466,7 +1135,14 @@ impl BaseContainerRunner {
+         request: &ExecutionRequest,
+         logger: &mut Logger,
+         capture: bool,
++        literal_argv: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++        literal_custody: Option<&LocalExecutableCustody>,
+     ) -> Result<BaseChild, ScriptResponse> {
++        if literal_argv.is_some() != literal_custody.is_some() {
++            return Err(ScriptResponse::rejected(
++                "literal argv and held executable custody must be bound together",
++            ));
++        }
+         let _ = writeln!(
+             logger,
+             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
+@@ -548,8 +1224,17 @@ impl BaseContainerRunner {
+ 
+         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
+ 
+-        // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
+-        let mut cmd_wide = string_util::to_wide(&request.script_code);
++        // Literal execution carries an explicit application name and native
++        // argument boundaries. Legacy command-string callers remain unchanged.
++        let (application_wide, mut cmd_wide) = if let Some(argv) = literal_argv {
++            let (_, command) = windows_literal_argv_buffers(argv)?;
++            let custody = literal_custody.ok_or_else(|| {
++                ScriptResponse::rejected("literal execution requires held local image custody")
++            })?;
++            (Some(custody.application.clone()), command)
++        } else {
++            (None, string_util::to_wide(&request.script_code))
++        };
+ 
+         // Resolved via the shared helper so both Windows launch paths agree and
+         // neither can pass a NULL cwd (see `working_directory`).
+@@ -631,19 +1316,19 @@ impl BaseContainerRunner {
+                 h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+                     Ok(h) => h,
+                     Err(e) => {
+-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")))
++                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")));
+                     }
+                 };
+                 h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
+                     Ok(h) => h,
+                     Err(e) => {
+-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")))
++                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")));
+                     }
+                 };
+                 h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
+                     Ok(h) => h,
+                     Err(e) => {
+-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")))
++                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")));
+                     }
+                 };
+ 
+@@ -736,7 +1421,15 @@ impl BaseContainerRunner {
+                 0
+             };
+ 
+-        let _ = writeln!(logger, "launching: {}", request.script_code);
++        if let Some(argv) = literal_argv {
++            let _ = writeln!(
++                logger,
++                "launching literal argv ({} entries)",
++                argv.values().len()
++            );
++        } else {
++            let _ = writeln!(logger, "launching: {}", request.script_code);
++        }
+         let _ = writeln!(logger, "identity: {identity}");
+ 
+         let current_env_ptr = env_ptr;
+@@ -880,24 +1573,78 @@ impl BaseContainerRunner {
+                 }
+             };
+         let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
+-        let result = unsafe {
+-            CreateProcessW(
+-                PCWSTR::null(),
+-                Some(PWSTR(cmd_wide.as_mut_ptr())),
+-                None,
+-                None,
+-                !inherited_handles.is_empty(),
+-                PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
+-                environment,
+-                PCWSTR(cwd_ptr),
+-                &extended_startup.startup_info().StartupInfo,
+-                &mut pi,
+-            )
+-        };
+-        let (success, last_error) = if result.is_ok() {
+-            (1, None)
++        // Freeze numeric shape before the native call. UTF-16 block lengths
++        // include their NUL terminators; counts never carry source values.
++        let launch_shape = literal_argv.map(|argv| {
++            NativeLaunchShape::bounded([
++                application_wide.as_ref().map_or(0, Vec::len),
++                cmd_wide.len(),
++                env_block.as_ref().map_or(0, Vec::len),
++                cwd_wide.len(),
++                argv.values().len(),
++                env_block.as_ref().map_or(0, |block| {
++                    block
++                        .split(|unit| *unit == 0)
++                        .filter(|entry| !entry.is_empty())
++                        .count()
++                }),
++            ])
++        });
++        let (success, last_error, native_failure) = if literal_argv.is_some() {
++            let created = unsafe {
++                literal_create_process_w(
++                    application_wide
++                        .as_ref()
++                        .map_or(ptr::null(), |value| value.as_ptr()),
++                    cmd_wide.as_mut_ptr(),
++                    ptr::null(),
++                    ptr::null(),
++                    i32::from(!inherited_handles.is_empty()),
++                    current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
++                    current_env_ptr,
++                    cwd_ptr,
++                    &extended_startup.startup_info().StartupInfo,
++                    &mut pi,
++                )
++            };
++            if created != 0 {
++                (1, None, None)
++            } else {
++                // These are the first API calls after the raw BOOL refusal.
++                // No windows::Result conversion, allocation or formatting runs
++                // before the two thread-local values have been copied.
++                let failure = capture_native_launch_failure(
++                    || unsafe { literal_get_last_error() },
++                    || unsafe { literal_get_last_nt_status() },
++                );
++                (
++                    0,
++                    Some(windows::Win32::Foundation::WIN32_ERROR(failure.win32)),
++                    Some(failure),
++                )
++            }
+         } else {
+-            (0, Some(unsafe { GetLastError() }))
++            let result = unsafe {
++                CreateProcessW(
++                    application_wide
++                        .as_ref()
++                        .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
++                    Some(PWSTR(cmd_wide.as_mut_ptr())),
++                    None,
++                    None,
++                    !inherited_handles.is_empty(),
++                    PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
++                    environment,
++                    PCWSTR(cwd_ptr),
++                    &extended_startup.startup_info().StartupInfo,
++                    &mut pi,
++                )
++            };
++            if result.is_ok() {
++                (1, None, None)
++            } else {
++                (0, Some(unsafe { GetLastError() }), None)
++            }
+         };
+ 
+         if success == 0 {
+@@ -934,10 +1681,16 @@ impl BaseContainerRunner {
+                 )
+             });
+ 
+-            let mut extended_error = format!(
+-                "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {err:?} (working directory: {})",
+-                working_directory.describe()
+-            );
++            let mut extended_error = match native_failure.zip(launch_shape) {
++                Some((failure, shape)) => format!(
++                    "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {}",
++                    shape.describe(failure)
++                ),
++                None => format!(
++                    "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {err:?} (working directory: {})",
++                    working_directory.describe()
++                ),
++            };
+             if let Some(cleanup_error) = capture_cleanup_error {
+                 let _ = write!(
+                     extended_error,
+@@ -1056,7 +1809,55 @@ impl BaseContainerRunner {
+         // every descendant it spawns is captured), resume its main thread.
+         // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+         // handle; `ResumeThread` only adjusts its suspend count.
+-        let previous_suspend_count = unsafe { ResumeThread(pi.hThread) };
++        let previous_suspend_count = if let Some(custody) = literal_custody {
++            resume_after_literal_image_match(
++                || literal_image_mapping_status(pi.hProcess, custody),
++                || unsafe { ResumeThread(pi.hThread) },
++                |status| {
++                    let mut message = format!(
++                        "held image mapping refused before resume: NTSTATUS=0x{:08x}",
++                        status as u32,
++                    );
++                    if let Err(error) = job.terminate_and_wait(u32::MAX) {
++                        let _ = write!(message, "; owned Job cleanup failed: {error}");
++                    }
++                    // The primary thread has never resumed. Terminate and wait the
++                    // exact retained root as well, even if Job cleanup failed.
++                    unsafe {
++                        if WaitForSingleObject(pi.hProcess, 0) != WAIT_OBJECT_0
++                            && TerminateProcess(pi.hProcess, u32::MAX).is_err()
++                        {
++                            let _ = write!(message, "; retained root termination failed");
++                        }
++                        if WaitForSingleObject(pi.hProcess, 5_000) != WAIT_OBJECT_0 {
++                            let _ = write!(
++                                message,
++                                "; retained root did not stop within cleanup bound"
++                            );
++                        }
++                        if CloseHandle(pi.hProcess).is_err() {
++                            let _ = write!(message, "; retained process handle close failed");
++                        }
++                        if CloseHandle(pi.hThread).is_err() {
++                            let _ = write!(message, "; retained thread handle close failed");
++                        }
++                    }
++                    if let Some(error) = capture_session
++                        .take()
++                        .and_then(|session| session.finish(None).err())
++                    {
++                        let _ = write!(message, "; capture teardown failed: {error}");
++                    }
++                    self.proxy_coordinator.stop(logger);
++                    ScriptResponse {
++                        failure_phase: FailurePhase::LaunchFailed,
++                        ..ScriptResponse::error(&message)
++                    }
++                },
++            )?
++        } else {
++            unsafe { ResumeThread(pi.hThread) }
++        };
+         if previous_suspend_count == u32::MAX {
+             let mut message = format!(
+                 "ResumeThread failed for the BaseContainer child: {:?}",
+@@ -1223,7 +2024,34 @@ impl SandboxBackend for BaseContainerRunner {
+         // Pipes → capture pipes the caller drives; Inherit → the child inherits
+         // the binary's own std handles / console (a TTY when the binary has one).
+         let capture = stdio == StdioMode::Pipes;
+-        let child = self.spawn_base(request, logger, capture)?;
++        let child = self.spawn_base(request, logger, capture, None, None)?;
++        Ok(Box::new(BaseContainerSandboxProcess::from_child(
++            child, logger,
++        )))
++    }
++
++    fn spawn_argv(
++        &mut self,
++        request: &ExecutionRequest,
++        argv: &crate::mxc_common::literal_argv::LiteralArgv,
++        logger: &mut Logger,
++        stdio: StdioMode,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        crate::process_container_common::validate_process_container_stdio(stdio)?;
++        crate::mxc_common::validator::validate_argv_common(request, argv)?;
++        self.validate(request)?;
++        // Validate native encoding and its Windows size bound before creating
++        // PSEC state, pipes, Jobs or a child. No legacy command is constructed.
++        windows_literal_argv_buffers(argv)?;
++        let custody = pin_local_executable(argv.program())?;
++        let child = self.spawn_base(
++            request,
++            logger,
++            stdio == StdioMode::Pipes,
++            Some(argv),
++            Some(&custody),
++        )?;
++        drop(custody);
+         Ok(Box::new(BaseContainerSandboxProcess::from_child(
+             child, logger,
+         )))
+diff --git a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+index ad519ce38dd45a0bab013fbd8a3fd423fe61e269..5cf0d40e68c3e6f4330bddbbcf5142d197d85ec3 100644
+--- a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+@@ -147,9 +147,13 @@ pub(super) fn spawn_argv_runner(
+                 .spawn_argv(request, argv, logger, stdio)
+                 .map_err(map_spawn_error)
+         }
+-        _ => Err(MxcError::unsupported_containment(
+-            "literal argv requires an explicitly supported native backend; no fallback is available",
+-        )),
++        _ => {
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++            let _ = (argv, logger);
++            Err(MxcError::unsupported_containment(
++                "literal argv requires an explicitly supported native backend; no fallback is available",
++            ))
++        }
+     }
+ }
+ 
+diff --git a/src/mxc-sdk/src/core/mxc_engine/mod.rs b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+index f99706d1a02b26cfd6d50f15a4f503a6bde2c0f5..d57e56da37e54f3cf66018561092fdcd395c5932 100644
+--- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+@@ -114,23 +114,54 @@ pub fn spawn_execution_request(
+ /// Contributor-only native Windows PSEC path. Validation and spawn happen on
+ /// the same direct backend; the fallback dispatcher is never called.
+ #[cfg(target_os = "windows")]
+-pub fn spawn_windows_psec(
++pub fn spawn_windows_psec(request: &ExecutionRequest) -> Result<Box<dyn SandboxProcess>, Error> {
++    validate_contributor_psec_request(request)?;
++    spawn_execution_request_with_logger_and(
++        request,
++        Logger::new(Mode::Buffer),
++        |request, logger| {
++            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            let mut native =
++                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
++            // new() leaves request serviceability unconfirmed. SandboxBackend's
++            // spawn() invokes native validation for this exact request before
++            // entering spawn_validated(); construction itself is not validation.
++            native
++                .spawn(request, logger, StdioMode::Pipes)
++                .map_err(dispatch::map_spawn_error)
++        },
++    )
++}
++
++/// Explicit literal argv through the same strict native PSEC admission.
++#[cfg(target_os = "windows")]
++pub fn spawn_windows_psec_argv(
+     request: &ExecutionRequest,
++    argv: &crate::mxc_common::literal_argv::LiteralArgv,
+ ) -> Result<Box<dyn SandboxProcess>, Error> {
+     validate_contributor_psec_request(request)?;
+-    spawn_execution_request_with_logger_and(request, Logger::new(Mode::Buffer), |request, logger| {
+-        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+-        crate::mxc_engine::run::log_policy_hash(request, logger);
+-        let mut native = crate::process_container_common::base_container_runner::BaseContainerRunner::new();
+-        // new() leaves request serviceability unconfirmed. SandboxBackend's
+-        // spawn() invokes native validation for this exact request before
+-        // entering spawn_validated(); construction itself is not validation.
+-        native.spawn(request, logger, StdioMode::Pipes).map_err(dispatch::map_spawn_error)
+-    })
++    crate::mxc_common::validator::validate_argv_common(request, argv)
++        .map_err(dispatch::map_spawn_error)?;
++    spawn_execution_request_with_logger_and(
++        request,
++        Logger::new(Mode::Buffer),
++        |request, logger| {
++            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            let mut native =
++                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
++            native
++                .spawn_argv(request, argv, logger, StdioMode::Pipes)
++                .map_err(dispatch::map_spawn_error)
++        },
++    )
+ }
+ 
+ #[cfg(target_os = "windows")]
+-fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), MxcError> {
++pub(crate) fn validate_contributor_psec_request(
++    request: &ExecutionRequest,
++) -> Result<(), MxcError> {
+     use crate::mxc_common::models::NetworkAction;
+     if !matches!(request.containment, ContainmentBackend::ProcessContainer)
+         || request.policy.fallback.allow_dacl_mutation
+@@ -140,13 +171,24 @@ fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), M
+             "strict PSEC requires explicit ProcessContainer, no DACL fallback and a live request",
+         ));
+     }
+-    let offline_egress = request.policy.network_egress.as_ref().is_some_and(|policy| {
+-        policy.default == NetworkAction::Deny && policy.allow.is_empty() && policy.deny.is_empty()
+-    });
+-    let offline_ingress = request.policy.network_ingress.as_ref().is_some_and(|policy| {
+-        policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
+-    });
+-    if !offline_egress || !offline_ingress
++    let offline_egress = request
++        .policy
++        .network_egress
++        .as_ref()
++        .is_some_and(|policy| {
++            policy.default == NetworkAction::Deny
++                && policy.allow.is_empty()
++                && policy.deny.is_empty()
++        });
++    let offline_ingress = request
++        .policy
++        .network_ingress
++        .as_ref()
++        .is_some_and(|policy| {
++            policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
++        });
++    if !offline_egress
++        || !offline_ingress
+         || request.policy.network_proxy.is_enabled()
+         || request.policy.runtime_network_proxy_specified
+         || request.policy.allowed_proxy_peer.is_some()
+@@ -199,9 +241,19 @@ mod strict_psec_tests {
+         request.policy.network_egress = Some(NetworkEgressPolicy::default());
+         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+         assert!(validate_contributor_psec_request(&request).is_ok());
+-        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Allow;
++        request
++            .policy
++            .network_ingress
++            .as_mut()
++            .unwrap()
++            .host_loopback = NetworkAction::Allow;
+         assert!(validate_contributor_psec_request(&request).is_err());
+-        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Deny;
++        request
++            .policy
++            .network_ingress
++            .as_mut()
++            .unwrap()
++            .host_loopback = NetworkAction::Deny;
+         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Allow;
+         assert!(validate_contributor_psec_request(&request).is_err());
+         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Deny;
+diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+index 8082b6720d8f357c452a2e45d8abc02c364c1c74..9ddb78a4546736b56da3318e26fba42356d9859e 100644
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -347,26 +347,169 @@ pub mod v1 {
+         options: SpawnOptions,
+     ) -> Result<MxcProcess, Error> {
+         if !matches!(request.containment, Containment::ProcessContainer(_)) {
+-            return Err(crate::mxc_common::mxc_error::MxcError::unsupported_containment(
+-                "strict Windows PSEC requires explicit ProcessContainer containment",
+-            ).into());
++            return Err(
++                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
++                    "strict Windows PSEC requires explicit ProcessContainer containment",
++                )
++                .into(),
++            );
+         }
+         let mut prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
++        validate_windows_psec_filesystem(&request, &prepared)?;
++        prepared.inner.policy.fallback.allow_dacl_mutation = false;
++        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
++    }
++
++    /// Contributor-only literal arguments in native PSEC. The command field
++    /// must be empty; unsupported OS policy and every fallback remain refused.
++    #[cfg(target_os = "windows")]
++    pub fn spawn_windows_psec_argv(
++        request: ContainerRequest,
++        values: Vec<std::ffi::OsString>,
++        options: SpawnOptions,
++    ) -> Result<MxcProcess, Error> {
++        let (prepared, argv) = prepare_windows_psec_argv(&request, values, options.telemetry)?;
++        crate::mxc_engine::spawn_windows_psec_argv(&prepared.inner, &argv).map(MxcProcess::new)
++    }
++
++    #[cfg(target_os = "windows")]
++    fn prepare_windows_psec_argv(
++        request: &ContainerRequest,
++        values: Vec<std::ffi::OsString>,
++        telemetry: Option<TelemetryConfig>,
++    ) -> Result<
++        (
++            crate::policy::PreparedContainerRequest,
++            crate::mxc_common::literal_argv::LiteralArgv,
++        ),
++        Error,
++    > {
++        if !matches!(request.containment, Containment::ProcessContainer(_)) {
++            return Err(
++                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
++                    "strict Windows literal argv requires explicit ProcessContainer containment",
++                )
++                .into(),
++            );
++        }
++        let argv = crate::mxc_common::literal_argv::LiteralArgv::new(values)?;
++        let mut prepared =
++            crate::policy::prepare_literal_creation_request(request, &argv, telemetry)?;
++        validate_windows_psec_filesystem(request, &prepared)?;
++        prepared.inner.policy.fallback.allow_dacl_mutation = false;
++        crate::mxc_engine::validate_contributor_psec_request(&prepared.inner)?;
++        Ok((prepared, argv))
++    }
++
++    #[cfg(target_os = "windows")]
++    fn validate_windows_psec_filesystem(
++        request: &ContainerRequest,
++        prepared: &crate::policy::PreparedContainerRequest,
++    ) -> Result<(), Error> {
+         let filesystem = request.filesystem.as_ref().ok_or_else(|| {
+             crate::mxc_common::mxc_error::MxcError::malformed_request(
+                 "contributor PSEC requires an explicit filesystem policy",
+             )
+         })?;
+-        if filesystem.readwrite_paths.iter().any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
+-            || filesystem.readonly_paths.iter().any(|path| !prepared.inner.policy.readonly_paths.contains(path))
+-            || filesystem.denied_paths.iter().any(|path| !prepared.inner.policy.denied_paths.contains(path))
++        if filesystem
++            .readwrite_paths
++            .iter()
++            .any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
++            || filesystem
++                .readonly_paths
++                .iter()
++                .any(|path| !prepared.inner.policy.readonly_paths.contains(path))
++            || filesystem
++                .denied_paths
++                .iter()
++                .any(|path| !prepared.inner.policy.denied_paths.contains(path))
+         {
+             return Err(crate::mxc_common::mxc_error::MxcError::malformed_request(
+                 "contributor PSEC refuses normalization that drops explicit filesystem grants or denies",
+             ).into());
+         }
+-        prepared.inner.policy.fallback.allow_dacl_mutation = false;
+-        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
++        Ok(())
++    }
++
++    #[cfg(all(test, target_os = "windows"))]
++    mod strict_windows_psec_argv_tests {
++        use super::*;
++        fn baseline() -> ContainerRequest {
++            let mut request = ContainerRequest::new("");
++            request.containment =
++                Containment::ProcessContainer(configs::ProcessContainerConfig::default());
++            request.filesystem = Some(FilesystemPolicy {
++                readwrite_paths: vec![r"C:\fixed\workspace".into()],
++                readonly_paths: vec![r"C:\fixed\child.exe".into()],
++                denied_paths: vec![r"C:\fixed\workspace\outside.txt".into()],
++                clear_policy_on_exit: Some(true),
++            });
++            request.network = Some(NetworkPolicy {
++                egress: Some(NetworkEgressPolicy {
++                    default: Some(NetworkAction::Deny),
++                    ..Default::default()
++                }),
++                ingress: Some(NetworkIngressPolicy {
++                    default: Some(NetworkAction::Deny),
++                    host_loopback: Some(NetworkAction::Deny),
++                }),
++                runtime_config: None,
++            });
++            request.working_directory = Some(r"C:\fixed\workspace".into());
++            request.environment = Some(Vec::new());
++            request.inherit_default_environment = Some(false);
++            request
++        }
++        fn values() -> Vec<std::ffi::OsString> {
++            vec![r"C:\fixed\child.exe".into(), "".into(), "a b".into()]
++        }
++        #[test]
++        fn preparation_preserves_literal_arguments_and_closed_native_options() {
++            let (prepared, argv) = prepare_windows_psec_argv(&baseline(), values(), None).unwrap();
++            assert!(prepared.inner.script_code.is_empty());
++            assert!(!prepared.inner.policy.fallback.allow_dacl_mutation);
++            assert!(!prepared.inner.inherit_default_env);
++            assert_eq!(prepared.inner.env, Some(Vec::new()));
++            assert_eq!(argv.values(), values());
++            assert_eq!(
++                prepared.inner.policy.denied_paths,
++                [r"C:\fixed\workspace\outside.txt"]
++            );
++        }
++        #[test]
++        fn preparation_rejects_legacy_ambiguity_other_backend_and_missing_filesystem() {
++            let mut request = baseline();
++            request.command = "legacy command".into();
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++            let mut request = baseline();
++            request.containment = Containment::Bubblewrap;
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++            let mut request = baseline();
++            request.filesystem = None;
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
++        #[test]
++        fn preparation_refuses_network_allow_before_any_native_creation() {
++            let mut request = baseline();
++            request
++                .network
++                .as_mut()
++                .unwrap()
++                .egress
++                .as_mut()
++                .unwrap()
++                .default = Some(NetworkAction::Allow);
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
++        #[test]
++        fn preparation_refuses_normalization_that_drops_a_covering_grant() {
++            let mut request = baseline();
++            let filesystem = request.filesystem.as_mut().unwrap();
++            filesystem
++                .readwrite_paths
++                .push(r"C:\fixed\workspace\outside.txt".into());
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
+     }
+ 
+     /// Spawn a [`ContainerRequest`] attached to a caller-controlled PTY.

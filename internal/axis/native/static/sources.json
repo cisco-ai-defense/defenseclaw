@@ -1,0 +1,46 @@
+{
+  "format": 1,
+  "scope": "static_bubblewrap_source_build_no_runtime_admission",
+  "musl": {
+    "version": "1.2.6",
+    "git": "https://git.musl-libc.org/git/musl",
+    "commit": "9fa28ece75d8a2191de7c5bb53bed224c5947417",
+    "archive": "https://musl.libc.org/releases/musl-1.2.6.tar.gz",
+    "archive_sha256": "d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a",
+    "archive_size": 1082499,
+    "archive_git_blob_matches": 2660,
+    "license": "MIT",
+    "license_file": "COPYRIGHT",
+    "license_sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+  },
+  "libcap": {
+    "version": "2.78",
+    "git": "https://git.kernel.org/pub/scm/libs/libcap/libcap.git",
+    "commit": "a1fef85d27d0ee12729a64d1c9b2183c6007e56a",
+    "tag_object": "7a89aa42efc57e18f8c42de700f6367bd7531a1a",
+    "archive": "https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.78.tar.xz",
+    "archive_sha256": "0d621e562fd932ccf67b9660fb018e468a683d7b827541df27813228c996bb11",
+    "archive_size": 201040,
+    "archive_git_blob_matches": 312,
+    "omitted_git_files": [".gitignore"],
+    "selected_license": "BSD-3-Clause",
+    "upstream_license": "BSD-3-Clause OR GPL-2.0-only",
+    "license_file": "License",
+    "license_sha256": "68467e731f4744bd6e0bb69e8df9c3a994e09cd6b203d0c41327ac6d079c581d"
+  },
+  "bubblewrap": {
+    "version": "0.9.0",
+    "commit": "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
+    "overlay_sha256": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
+    "license": "LGPL-2.0-or-later",
+    "license_sha256": "b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c"
+  },
+  "compiler": {
+    "target": "x86_64-linux-gnu",
+    "driver": "/usr/bin/x86_64-linux-gnu-gcc-13",
+    "require_binary_package_and_startup_object_inventory": true,
+    "require_full_link_map_and_trace": true,
+    "independent_artifact_review_required": true
+  },
+  "runtime_admission": false
+}

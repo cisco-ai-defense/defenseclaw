@@ -1498,6 +1498,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
 	add("openshell", oldCfg.OpenShell, newCfg.OpenShell)
+	// Common policy is projected into OpenShell by the candidate loader. Keep
+	// selection and switch metadata in the published generation even when its
+	// effective OpenShell policy is unchanged (for example a disabled runtime).
+	add("sandbox", oldCfg.Sandbox, newCfg.Sandbox)
 	// The v8 action keys of a Secure Client source, which main compared here;
 	// no Secure Client hot set lists them, so an edit is restart-required.
 	for _, key := range []string{"skill_actions", "mcp_actions", "plugin_actions"} {
@@ -1587,6 +1591,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// Sandbox settings are read per launch, and the sandbox listeners
 		// rebind in-process (apiNeedsRestart).
 		"openshell": {},
+		"sandbox":   {},
 		// applyConfigReload rebuilds the discovery service and restarts the
 		// discovery and runtime-plane workers in-process (aiRestart). Keeping
 		// it restart-required failed the whole reload, so a profile edit saved

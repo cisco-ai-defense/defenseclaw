@@ -1,0 +1,33 @@
+diff --git a/crates/axis-sandbox/src/linux/seccomp.rs b/crates/axis-sandbox/src/linux/seccomp.rs
+--- a/crates/axis-sandbox/src/linux/seccomp.rs
++++ b/crates/axis-sandbox/src/linux/seccomp.rs
+@@ -706,6 +706,29 @@ pub fn apply_seccomp(policy: &ProcessPolicy) -> Result<(), String> {
+     Ok(())
+ }
+ 
++/// Contributor experiment: apply AXIS's existing offline socket restrictions
++/// inside an MXC-owned PID namespace. The caller must set no_new_privs first.
++/// This does not choose a backend, create a process or weaken blocked_syscalls.
++pub fn apply_offline_mxc_child_seccomp(
++    policy: &ProcessPolicy,
++    interactive_terminal: bool,
++) -> Result<(), String> {
++    let mut options = SeccompOptions::deny_network_socket_domains();
++    if interactive_terminal {
++        options = options
++            .allow_process_group_syscalls()
++            .allow_thread_signal_syscalls();
++    }
++    let filter = prepare_seccomp_with_options(policy, options)?;
++    filter.apply_current_process().map_err(|errno| {
++        format!(
++            "offline MXC child seccomp(SET_MODE_FILTER) failed: {}",
++            std::io::Error::from_raw_os_error(errno)
++        )
++    })?;
++    Ok(())
++}
++
+ pub fn launcher_main_from_env() -> i32 {
+     match run_launcher_from_args(std::env::args_os().skip(1)) {
+         Ok(code) => code,

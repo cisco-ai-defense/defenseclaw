@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "scope": "fixed_linux_native_claude_2_1_292_version_only_v1",
+  "verified": true,
+  "execution_performed": false,
+  "production_certification": false,
+  "axis_commit": "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c",
+  "mxc_commit": "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
+  "bubblewrap_commit": "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
+  "static_closure_sha256": "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
+  "payload_source_sha256": "",
+  "builds": [
+    {
+      "role": "peer_and_static_bwrap",
+      "commit": "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139",
+      "run": 39158759518,
+      "artifact": 12148605722,
+      "archive_sha256": "68e5d232ed286cfbbbbcb212170cc6bf0aff4536cfbc98fb7129da1315a99085",
+      "provenance_sha256": "7d6fd05f40006e334921fa4efec58a033b3c2bbaf707d7be03b6322bc81ac59c"
+    },
+    {
+      "role": "shared_musl_loader",
+      "commit": "0ad2618803ecd69a7a1df782c70f38b699d74d13",
+      "run": 39193900521,
+      "artifact": 12161286875,
+      "archive_sha256": "4001eaf9cf2321ba9d695fe49d53168192f9d6b4649d715c1f88c12242da8060",
+      "provenance_sha256": "f533f74bfff81d5cf36b7f6975a7a41d06ccbcc97be114ba09c2835b821bcf41"
+    }
+  ],
+  "images": [
+    {
+      "role": "peer",
+      "path": "images/peer",
+      "sha256": "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665",
+      "size": 2722752
+    },
+    {
+      "role": "static_musl_bwrap",
+      "path": "images/bwrap-static-musl",
+      "sha256": "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee37d",
+      "size": 198584
+    },
+    {
+      "role": "claude_musl",
+      "path": "images/claude-musl",
+      "sha256": "d23f28ef84f5459a25d2d4cf999a7debd41df83507160446983d4ca65554e50f",
+      "size": 245203032
+    }
+  ],
+  "claude_version": {
+    "version": "2.1.292",
+    "platform": "linux-x64-musl",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.292/linux-x64-musl/claude",
+    "manifest_sha256": "64f5abe05a43151810acf8c25169872e41293c96d3ae73d6508733a8b336e2b1",
+    "signature_sha256": "537e1a8bcca1646fd5e52d3dc8d16509395a88f6f18b13765b2c085d057567ea",
+    "key_sha256": "bd70a5e4a268002704024ceba7f8446024114e94f3f0bdd11c23a9e592be81c6",
+    "signer_fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+    "inspection_archive_sha256": "d150b40d90cc201eb45223d73221c4d626598e269d003974f45aa4beb5ba28c2"
+  },
+  "loader": {
+    "role": "shared_musl_loader",
+    "path": "images/musl-loader",
+    "sha256": "76b812138a1d4be51ae095e94920e1fd1c5d25f793651baf834d05a2c455c040",
+    "size": 853616
+  },
+  "loader_closure_sha256": "ff3aaad09bd59f623fac2fdffccd7ddfaef44bf2b5ba42508e9b20bf37280e92"
+}

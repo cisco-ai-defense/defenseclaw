@@ -1,0 +1,134 @@
+--- a/crates/axis-sandbox/src/windows/mxc.rs
++++ b/crates/axis-sandbox/src/windows/mxc.rs
+@@ -28,6 +28,52 @@
+ const MXC_DRY_RUN_SUCCESS: &str = "Dry run completed. Result: validation passed";
+ const MAX_DRY_RUN_OUTPUT_BYTES: u64 = 64 * 1024;
+ const EXECUTOR_NAMES: &[&str] = &["wxc-exec.exe", "wxc.exe", "mxc-exec.exe"];
++
++// Process-local handler registrations are not inherited by the child. Windows
++// still delivers CTRL_C_EVENT to the contained workload sharing this console.
++// A NULL/TRUE ignore handler must not be used: that ignore state is inherited.
++static CONSOLE_RELAY_USERS: std::sync::atomic::AtomicUsize =
++    std::sync::atomic::AtomicUsize::new(0);
++static CONSOLE_RELAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
++struct ConsoleRelayGuard;
++
++unsafe extern "system" fn console_relay_handler(event: u32) -> windows::core::BOOL {
++    use std::sync::atomic::Ordering;
++    windows::core::BOOL(relay_console_event(event, CONSOLE_RELAY_USERS.load(Ordering::SeqCst)) as i32)
++}
++
++fn relay_console_event(event: u32, active_users: usize) -> bool {
++    event == windows::Win32::System::Console::CTRL_C_EVENT && active_users > 0
++}
++
++impl ConsoleRelayGuard {
++    fn install() -> Result<Self, MxcWindowsError> {
++        use std::sync::atomic::Ordering;
++        use windows::Win32::System::Console::SetConsoleCtrlHandler;
++        let _lock = CONSOLE_RELAY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
++        if CONSOLE_RELAY_USERS.load(Ordering::SeqCst) == 0 {
++            // SAFETY: the callback has the Windows ABI and performs only an
++            // atomic load. It consumes CTRL_C_EVENT in this supervisor only.
++            unsafe { SetConsoleCtrlHandler(Some(console_relay_handler), true) }
++                .map_err(|error| MxcWindowsError::Executor(format!("console relay: {error}")))?;
++        }
++        CONSOLE_RELAY_USERS.fetch_add(1, Ordering::SeqCst);
++        Ok(Self)
++    }
++}
++
++impl Drop for ConsoleRelayGuard {
++    fn drop(&mut self) {
++        use std::sync::atomic::Ordering;
++        use windows::Win32::System::Console::SetConsoleCtrlHandler;
++        let _lock = CONSOLE_RELAY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
++        if CONSOLE_RELAY_USERS.fetch_sub(1, Ordering::SeqCst) == 1 {
++            // SAFETY: remove only this registered process-local callback.
++            let _ = unsafe { SetConsoleCtrlHandler(Some(console_relay_handler), false) };
++        }
++    }
++}
+ 
+ #[derive(Debug, Error, PartialEq, Eq)]
+ enum MxcWindowsError {
+@@ -165,10 +211,12 @@
+     executor: MxcWindowsExecutor,
+     child: Option<MxcExecutorChild>,
+     job: Option<super::job_object::JobHandle>,
++    console_relay: Option<ConsoleRelayGuard>,
+     config_file: Option<tempfile::NamedTempFile>,
+     exit_code: Option<i32>,
+     workspace_dir: PathBuf,
+     capture_output: bool,
++    interactive_terminal: bool,
+     timeout_sec: Option<u64>,
+ }
+ 
+@@ -229,10 +277,12 @@
+             executor,
+             child: None,
+             job: None,
++            console_relay: None,
+             config_file: None,
+             exit_code: None,
+             workspace_dir: config.workspace_dir.clone(),
+             capture_output: config.capture_output,
++            interactive_terminal: config.interactive_terminal,
+             timeout_sec: config.timeout_sec.or(config.policy.process.timeout_sec),
+         }
+     }
+@@ -251,6 +301,7 @@
+         // Closing the Job Object is the final process-tree kill boundary.
+         self.job.take();
+         self.config_file.take();
++        self.console_relay.take();
+     }
+ 
+     fn terminate_tree(&mut self) -> Result<(), SandboxError> {
+@@ -261,6 +312,7 @@
+             let _ = child.wait()?;
+         }
+         self.config_file.take();
++        self.console_relay.take();
+         Ok(())
+     }
+ }
+@@ -280,6 +332,15 @@
+             .map_err(|err| SandboxError::IsolationFailed(format!("MXC Job Object: {err}")))?;
+         let mut command = Command::new(&self.executor.path);
+         configure_executor_invocation(&mut command, config.path(), false);
++        if self.interactive_terminal {
++            // Admission already requires all three console handles. The
++            // paired executor must explicitly accept the same relay contract.
++            self.console_relay = Some(
++                ConsoleRelayGuard::install()
++                    .map_err(|error| SandboxError::IsolationFailed(error.to_string()))?,
++            );
++            command.arg("--axis-inherited-console-relay");
++        }
+         command.current_dir(&self.workspace_dir);
+         configure_executor_environment(&mut command, &self.executor.path);
+         if self.capture_output {
+@@ -1199,6 +1260,20 @@
+     }
+ 
+     #[test]
++    fn axis_console_relay_consumes_only_active_ctrl_c() {
++        use windows::Win32::System::Console::{
++            CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT,
++            CTRL_SHUTDOWN_EVENT,
++        };
++        assert!(!relay_console_event(CTRL_C_EVENT, 0));
++        assert!(relay_console_event(CTRL_C_EVENT, 1));
++        assert!(relay_console_event(CTRL_C_EVENT, 2));
++        for event in [CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT] {
++            assert!(!relay_console_event(event, 1));
++        }
++    }
++
++    #[test]
+     fn managed_inference_requires_strict_proxy_but_is_not_windows_rejected() {
+         let root = tempfile::tempdir().unwrap();
+         let mut config = sandbox_config(root.path());

@@ -143,7 +143,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	m.mu.Lock()
 	var gone []*box
 	for name, b := range m.boxes {
-		if _, ok := live[name]; !ok && !b.creating && !b.deleted && !b.retained {
+		if _, ok := live[name]; !ok && b.native == nil && !b.creating && !b.deleted && !b.retained {
 			gone = append(gone, b)
 		}
 	}
@@ -610,9 +610,20 @@ func (m *Manager) goneNow(ctx context.Context, gw *Gateway, b *box) bool {
 // orphaned when no binding exists either. A sandbox adopted without a
 // record is taken to run on the gateway's driver: it is live there.
 func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
+	m.mu.Lock()
+	native := m.boxes[sb.Name] != nil && m.boxes[sb.Name].native != nil
+	m.mu.Unlock()
+	if native {
+		return nil
+	}
 	binding, berr := m.opts.Bindings.Lookup(sb.Name)
 	m.mu.Lock()
 	b := m.boxes[sb.Name]
+	// A native reservation may have appeared while the binding store was read.
+	if b != nil && b.native != nil {
+		m.mu.Unlock()
+		return nil
+	}
 	if b == nil {
 		// No readable record: the labels name the harness, profile and
 		// pack, but not the run flags or the project, so the sandbox's

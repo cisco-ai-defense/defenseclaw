@@ -43,6 +43,8 @@ import (
 
 // RunOptions are the `sandbox run` flags.
 type RunOptions struct {
+	// Runtime selects a new session's provider; empty/auto uses configuration.
+	Runtime string
 	Harness string
 	Name    string
 	Copy    bool
@@ -96,6 +98,11 @@ const (
 
 // Run is `sandbox run <harness>`.
 func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
+	selected, err := CheckRunRuntime(o.Runtime, a.Cfg.SandboxDefaultRuntime())
+	if err != nil {
+		return err
+	}
+	o.Runtime = selected
 	a.defaults()
 	spec, err := ResolveHarness(o.Harness)
 	if err != nil {
@@ -393,7 +400,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	a.warnUnkeptOptionValue(spec, o.Args)
 	autoRm := a.headlessRm(o, headless)
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
+	s := &session{app: a, api: api, cli: cli, transport: a.openShellSessionTransport(cli, sb.Name), workspaceTransport: a.openShellWorkspaceTransport(cli, sb.Name), spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
 		passArgs: len(o.Args) > 0}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
@@ -1518,7 +1525,8 @@ func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, b
 // again and the run stays refused with the preflight's words (fail closed).
 func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, project string, o RunOptions, fatal []string) error {
 	req := sandboxapi.CreateRequest{
-		Name: o.Name, Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile, Copy: true, Safe: o.Safe,
+		Runtime: o.Runtime,
+		Name:    o.Name, Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile, Copy: true, Safe: o.Safe,
 		Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP, CPU: o.CPU, Memory: o.Memory, ProcessTree: o.ProcessTree,
 	}
 	sb, err := api.Create(ctx, req)
@@ -1533,7 +1541,8 @@ func (a *App) managedRefusal(ctx context.Context, api API, spec *harness.Spec, p
 
 func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, copyMode bool, env map[string]string) (sandboxapi.CreateRequest, llmChoice, error) {
 	req := sandboxapi.CreateRequest{
-		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
+		Runtime: o.Runtime,
+		Name:    strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env, ProcessTree: o.ProcessTree,
 		// The sandbox's clock reads like this machine's.

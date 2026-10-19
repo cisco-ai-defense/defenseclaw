@@ -314,6 +314,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"cisco_ai_defense",
 		"scanners",
 		"openshell",
+		"sandbox",
 		"watch",
 		"firewall",
 		"guardrail",

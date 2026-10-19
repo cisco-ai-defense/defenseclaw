@@ -1,0 +1,268 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC V1 native Windows contributor build
+
+# Build-only: the hosted image is not a PSEC qualification host.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-mxc-v1-windows-build.yml
+      - test/e2e/axis/windows/mxc-v1/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
+  workflow_dispatch:
+    inputs:
+      fixed_probe_slice:
+        description: Fixed contributor probe slice; no sandbox runs in this workflow
+        type: choice
+        required: true
+        default: dll-startup-only
+        options:
+          - standalone-boundary
+          - dll-startup-only
+          - claude-version-only
+          - claude-create-control-only
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-mxc-v1-windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  windows-build:
+    name: Build the strict native PSEC contributor probe without executing it
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          persist-credentials: false
+          sparse-checkout: |
+            test/e2e/axis/windows/mxc-v1
+            test/e2e/axis/patches
+
+      - name: Stage exact Git bytes independently of Windows checkout line endings
+        env:
+          AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+          import subprocess
+          head = os.environ['GITHUB_SHA']
+          fixed_slice = os.environ['AXIS_WINDOWS_FIXED_PROBE_SLICE']
+          assert fixed_slice in ('standalone-boundary', 'dll-startup-only', 'claude-version-only', 'claude-create-control-only')
+          checkout = Path('defenseclaw-source')
+          assert subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip() == head
+          assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
+          prefix = 'test/e2e/axis/windows/mxc-v1/'
+          files = ['Cargo.toml', 'README.md', 'prepare_build.py', 'test_prepare_build.py',
+                   'src/main.rs', 'src/probe.rs', 'src/loader_child.rs', 'src/boundary_child.rs',
+                   'src/native_environment.rs', 'src/native_identity.rs', 'src/private_native_record.rs',
+                   'src/dll_startup_child.rs', 'src/dll_startup_protocol.rs',
+                   'patches/mxc-strict-windows-psec.patch', 'patches/mxc-windows-literal-argv.patch',
+                   'patches/mxc-windows-process-identity.patch',
+                   'patches/mxc-fixed-claude-create-control.patch']
+          # Inert source-hash tests inspect every registered overlay. The build
+          # helper still applies the control overlay only for its selected slice.
+          if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')
+          root = Path('probe')
+          root.mkdir()
+          for relative in files:
+              target = root / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(subprocess.check_output(['git', '-C', str(checkout), 'show', head + ':' + prefix + relative]))
+          (root / 'patches/mxc-literal-argv.patch').write_bytes(subprocess.check_output([
+              'git', '-C', str(checkout), 'show', head + ':test/e2e/axis/patches/mxc-literal-argv.patch',
+          ]))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor source staging failed' }
+
+      - name: Check out reviewed AXIS policy source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: probe/axis-source
+          persist-credentials: false
+
+      - name: Check out reviewed MXC V1 source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: probe/mxc-source
+          persist-credentials: false
+
+      - name: Provision the pinned build toolchain and check formatting
+        timeout-minutes: 10
+        working-directory: probe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned build toolchain provisioning failed' }
+          python -m unittest discover -s . -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Build-helper inert tests failed' }
+          cargo "+$env:RUST_TOOLCHAIN" fmt -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor Rust formatting check failed' }
+
+      - name: Build without executing PSEC or the contributor probe
+        timeout-minutes: 30
+        working-directory: probe
+        env:
+          AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('standalone-boundary', 'dll-startup-only', 'claude-version-only', 'claude-create-control-only')) {
+            throw 'Unknown fixed contributor probe slice'
+          }
+          # Initialize installed native tools in this same process. Otherwise
+          # Rust can find Git's unrelated link.exe before the MSVC linker.
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            throw 'The installed Visual Studio discovery tool is missing'
+          }
+          $installations = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $installations.Count -ne 1) {
+            throw 'Exactly one installed native Visual Studio toolchain is required'
+          }
+          $visualStudioRoot = (Resolve-Path -LiteralPath $installations[0]).Path
+          $developerShell = Join-Path $visualStudioRoot 'Common7\Tools\Launch-VsDevShell.ps1'
+          if (-not (Test-Path -LiteralPath $developerShell -PathType Leaf)) {
+            throw 'The installed Visual Studio developer shell is missing'
+          }
+          & $developerShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $nativeLinker = (Get-Command link.exe -CommandType Application -ErrorAction Stop).Source
+          $nativeLinker = (Resolve-Path -LiteralPath $nativeLinker).Path
+          if (-not $nativeLinker.StartsWith($visualStudioRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'link.exe does not resolve beneath the selected Visual Studio installation'
+          }
+          if (-not $env:LIB -or -not $env:INCLUDE) {
+            throw 'The native MSVC and Windows SDK include/library environment is missing'
+          }
+          Write-Host "Using native MSVC linker: $nativeLinker"
+          if (Test-Path -LiteralPath Cargo.lock -PathType Leaf) {
+            python prepare_build.py build-locked --probe-slice $env:AXIS_WINDOWS_FIXED_PROBE_SLICE
+          } else {
+            python prepare_build.py generate-lock --probe-slice $env:AXIS_WINDOWS_FIXED_PROBE_SLICE
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
+          # Exact SDK tests cover pure pre-creation validators/quoting, synthetic
+          # file custody and a read-only current-process image query. They never
+          # create a child process. The
+          # hosted image never executes PSEC or any contributor payload.
+          # Cargo requires the SDK's own workspace for its dev-dependencies.
+          # Keep its reviewed upstream lock separate from the contributor lock.
+          @'
+          import json
+          import os
+          import re
+          import prepare_build as build
+          sdk_workspace = build.ROOT / 'mxc-source' / 'src'
+          sdk_lock = sdk_workspace / 'Cargo.lock'
+          expected_sdk_lock = '2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0'
+          if build.digest(sdk_lock) != expected_sdk_lock:
+              raise RuntimeError('SDK regression tests require the unchanged upstream lock')
+          # Fully qualified exact names prevent a renamed or filtered-out
+          # test from turning this admission gate into a zero-test pass.
+          groups = {
+              'core_modules::mxc_common::sandbox_process::runner_tests': [
+                  'native_query_process_handle_defaults_to_unsupported_without_os_calls',
+              ],
+              'core_modules::mxc_engine::strict_psec_tests': [
+                  'strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn',
+                  'contributor_psec_admission_only_accepts_fixed_offline_posture',
+              ],
+              'v1::strict_windows_psec_argv_tests': [
+                  'preparation_preserves_literal_arguments_and_closed_native_options',
+                  'preparation_rejects_legacy_ambiguity_other_backend_and_missing_filesystem',
+                  'preparation_refuses_network_allow_before_any_native_creation',
+                  'preparation_refuses_normalization_that_drops_a_covering_grant',
+              ],
+              'backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests': [
+                  'explicit_application_and_native_quoting_preserve_literal_values',
+                  'native_limit_and_invalid_application_fail_before_resource_creation',
+                  'native_failure_diagnostics_are_numeric_bounded_and_ordered',
+              ],
+              'backend_modules::process_container::common::base_container_runner::strict_windows_path_tests': [
+                  'local_lexical_admission_accepts_only_unambiguous_drive_paths',
+                  'native_local_file_custody_holds_image_against_write_without_spawning',
+                  'literal_image_mapping_requires_exact_success_before_resume',
+                  'native_process_image_mapping_matches_current_image_and_refuses_wrong_file',
+              ],
+          }
+          selected = [group + '::' + name for group, names in groups.items() for name in names]
+          control = os.environ['AXIS_WINDOWS_FIXED_PROBE_SLICE'] == 'claude-create-control-only'
+          if control:
+              selected.append(
+                  'backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests::'
+                  'fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads'
+              )
+          cargo = [
+              'cargo', '+' + build.TOOLCHAIN, 'test', '--locked', '--release',
+              '--target-dir', str(build.ROOT / 'target'),
+              '-p', 'mxc-sdk', '--lib', '--no-default-features',
+          ]
+          listing = build.command(cargo + ['--', '--list', '--format', 'terse'], cwd=sdk_workspace, capture=True)
+          listed = re.findall(r'^(.+): test$', listing, re.MULTILINE)
+          if len(set(selected)) != (15 if control else 14) or any(listed.count(name) != 1 for name in selected):
+              raise RuntimeError('The exact reviewed SDK regression tests are missing or duplicated')
+          for name in selected:
+              output = build.command(cargo + [name, '--', '--exact', '--test-threads=1'], cwd=sdk_workspace, capture=True)
+              print(output)
+              if (len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.MULTILINE)) != 1
+                      or not re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', output, re.MULTILINE)):
+                  raise RuntimeError('An exact SDK regression test did not report one non-ignored pass')
+          if build.digest(sdk_lock) != expected_sdk_lock:
+              raise RuntimeError('SDK regression tests changed the upstream lock')
+          build.verify_build_sources(build.ROOT / 'axis-source', build.ROOT / 'mxc-source', control=control)
+          (build.ROOT / 'build-artifact' / 'SDK-ADMISSION-TESTS.json').write_text(json.dumps({
+              'tests': selected,
+              'passed': len(selected),
+              'sandbox_or_payload_execution': False,
+              'native_file_fixture_tests': 2,
+              'native_image_mapping_query_tests': 1,
+              'upstream_lock_sha256': expected_sdk_lock,
+          }, indent=2) + '\n', encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'SDK no-child native-admission regression tests failed' }
+          @'
+          import json
+          import os
+          from pathlib import Path
+          Path('build-artifact/WORKFLOW.json').write_text(json.dumps({
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'execution_performed': False,
+          }, indent=2) + '\n', encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record workflow attribution' }
+
+      - name: Retain the combined lock and source-bound build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-windows-contributor-${{ github.sha }}
+          path: |
+            probe/build-artifact/**
+            probe/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7

@@ -848,6 +848,35 @@ every later one, until it restarts. `/health` shows `last_reload_error`, and an
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 
+## Common sandbox settings
+
+The optional `sandbox:` block adds common policy and explicit runtime selection.
+When absent, existing `openshell:` configuration keeps its behavior. With the
+common block present, its `enabled` switch controls sandbox activation and each
+adapter also needs explicit enablement under `runtimes`. Adding a runtime choice
+does not install, start, or qualify that runtime.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `sandbox.enabled` | `false` | Master switch for common sandbox configuration. Off disables every adapter, including legacy OpenShell activation. |
+| `sandbox.runtime` | `auto` | Default for new sessions: `auto`, `openshell`, or `axis`. Auto retains OpenShell selection; unavailable selections never fall back. |
+| `sandbox.runtimes.openshell.enabled` | `false` | Explicitly enables the OpenShell adapter when the master switch is on. |
+| `sandbox.runtimes.axis.enabled` | `false` | Records AXIS enablement intent. Active AXIS selection is currently refused as unavailable while its containment and execution qualification is pending. |
+
+Shared policy uses the same keys described below: pack, profile, permissions,
+workspace masks, egress, resources, harnesses, wrappers, MCP, approvals, and
+administrator restrictions. A missing common policy leaf retains its existing
+OpenShell value; defaults apply when neither source declares it. Explicitly
+different values for the same shared leaf in both blocks are rejected with the
+field name. Existing administrator restrictions remain in force.
+
+Keep OpenShell binary, gateway, image, telemetry and credential-delivery settings
+under `openshell:`. Common sandbox configuration is unavailable with the frozen
+Secure Client integration. Common enablement, adapter enablement, listener ports,
+new-session defaults and policy changes apply through the normal policy-generation
+path. Listener changes rebind in process without restarting the gateway process,
+as equivalent OpenShell listener changes do.
+
 ## OpenShell sandbox settings
 
 The `openshell:` block configures NVIDIA OpenShell 0.1 sandboxes, the

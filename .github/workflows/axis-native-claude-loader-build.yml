@@ -1,0 +1,167 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS fixed shared musl loader build
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-native-claude-loader-build.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-claude-loader-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-only:
+    # Push only registers this workflow. No build or acquisition runs on push.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows/axis-native-claude-loader-build.yml
+            test/e2e/axis/native-peer/claude-loader
+            internal/axis/native/static/build_static.py
+            internal/axis/native/static/sources.json
+            internal/axis/native/static/musl-LICENSE
+          sparse-checkout-cone-mode: false
+      - name: Verify exact complete build source before use
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import subprocess
+
+          package = 'test/e2e/axis/native-peer/claude-loader'
+          members = ['README.md', 'build_loader.py', 'compiler-inputs.json', 'test_build_loader.py']
+          paths = ['.github/workflows/axis-native-claude-loader-build.yml'] + [package + '/' + n for n in members] + [
+              'internal/axis/native/static/build_static.py',
+              'internal/axis/native/static/sources.json',
+              'internal/axis/native/static/musl-LICENSE',
+          ]
+          commit = os.environ['GITHUB_SHA']
+          assert re.fullmatch('[0-9a-f]{40}', commit)
+          assert sorted(p.name for p in Path(package).iterdir()) == members
+          tracked = subprocess.run(['git', 'ls-tree', '-r', '--name-only', '-z', commit, '--', package], check=True, capture_output=True, timeout=20).stdout
+          assert tracked == b''.join((package + '/' + n).encode() + b'\0' for n in members)
+          report = Path('claude-loader-artifact')
+          report.mkdir(mode=0o700)
+          sources = {}
+          for name in paths:
+              path = Path(name)
+              info = path.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 256 * 1024
+              raw = path.read_bytes()
+              committed = subprocess.run(['git', 'show', commit + ':' + name], check=True, capture_output=True, timeout=20).stdout
+              assert raw == committed
+              target = report / 'source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(raw)
+              sources[name] = {'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+          (report / 'PREBUILD.json').write_text(json.dumps({'repository': os.environ['GITHUB_REPOSITORY'], 'commit': commit, 'source': sources}, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+      - name: Run seven inert loader admission tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -E -s - <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          import unittest
+          sys.path.insert(0, 'test/e2e/axis/native-peer/claude-loader')
+          import test_build_loader
+          expected = {
+              'test_compiler_drift_or_omitted_input_refused_before_build',
+              'test_exact_reviewed_compiler_inventory_is_finite',
+              'test_external_runtime_dependency_or_search_path_refused',
+              'test_inert_shared_loader_shape',
+              'test_interpreter_writable_code_and_nonfile_entry_refused',
+              'test_link_map_rejects_external_libc_and_escaping_input',
+              'test_truncated_and_oversized_loader_refused',
+          }
+          names = set(unittest.defaultTestLoader.getTestCaseNames(test_build_loader.LoaderTests))
+          assert names == expected
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(test_build_loader.LoaderTests)
+          assert suite.countTestCases() == 7
+          with Path('claude-loader-artifact/UNIT-TESTS.txt').open('w', encoding='utf-8') as stream:
+              result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+          passed = result.wasSuccessful() and result.testsRun == 7
+          Path('claude-loader-artifact/UNIT-RESULT.json').write_text(json.dumps({'tests': sorted(names), 'passed': passed, 'tests_run': result.testsRun, 'compiler_or_target_execution': False}, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          assert passed
+          PY
+      - name: Compile only the fixed shared loader twice
+        id: compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/axis-loader-home"
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/axis-loader-home" LC_ALL=C TZ=UTC \
+            /usr/bin/python3 -B -E -s test/e2e/axis/native-peer/claude-loader/build_loader.py
+      - name: Retain exact build manifest and diagnostics
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.compile.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          root = Path('claude-loader-artifact')
+          assert root.is_dir() and not root.is_symlink()
+          files = {}
+          total = 0
+          for path in sorted(root.rglob('*')):
+              info = path.lstat()
+              assert not stat.S_ISLNK(info.st_mode)
+              if stat.S_ISDIR(info.st_mode):
+                  continue
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 <= info.st_size <= 64 << 20
+              total += info.st_size
+              assert len(files) < 16384 and total <= 128 << 20
+              raw = path.read_bytes()
+              files[path.relative_to(root).as_posix()] = {'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+          provenance = {
+              'scope': 'fixed_shared_musl_1_2_6_loader_build_only',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow': '.github/workflows/axis-native-claude-loader-build.yml',
+              'build_commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'build_succeeded': os.environ['BUILD_OUTCOME'] == 'success',
+              'loader_or_vendor_execution': False,
+              'runtime_admission': False,
+              'production_certification': False,
+              'files': files,
+          }
+          (root / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: axis-fixed-shared-musl-loader-${{ github.sha }}
+          path: claude-loader-artifact/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,133 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS private native peer source build
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility, codex/axis-native-build]
+    paths:
+      - .github/workflows/axis-native-peer-build.yml
+      - internal/axis/native/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
+      - test/e2e/axis/mxc-runner/Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-peer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            internal/axis/native
+            test/e2e/axis/mxc-runner/Cargo.lock
+            test/e2e/axis/patches/mxc-literal-argv.patch
+          sparse-checkout-cone-mode: false
+
+      - name: Stage private build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C defenseclaw-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -C defenseclaw-source status --porcelain)"
+          mkdir peer
+          cp -a defenseclaw-source/internal/axis/native/. peer/
+          cp defenseclaw-source/test/e2e/axis/mxc-runner/Cargo.lock peer/reviewed-linux-seed.lock
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch peer/mxc-literal-argv.patch
+
+      - name: Check out exact AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: peer/axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out exact MXC SDK source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: peer/mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out exact Bubblewrap source for unexecuted C builds
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: containers/bubblewrap
+          ref: 8e51677abd7e3338e4952370bf7d902e37d8cbb6
+          path: peer/bwrap-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Provision disposable build tooling
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --no-self-update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential gcc-13 pkg-config ca-certificates meson ninja-build libcap-dev linux-libc-dev
+
+      - name: Validate and build without launching the peer or a sandbox
+        timeout-minutes: 35
+        working-directory: peer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt +1.95.0 --edition 2024 --check src/main.rs src/lib.rs
+          python3 -m unittest -v test_prepare_build static.test_build_static
+          if test -f Cargo.lock; then
+            python3 prepare_build.py locked --dependency-unit-gates --static-musl
+          else
+            python3 prepare_build.py discover --dependency-unit-gates --static-musl
+          fi
+
+      - name: Retain workflow identity even when a build refuses
+        if: ${{ always() }}
+        working-directory: peer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path("build-artifact").mkdir(exist_ok=True)
+          Path("build-artifact/WORKFLOW.json").write_text(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow_commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "peer_or_sandbox_execution": False,
+          }, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload source evidence and discovery lock
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-private-native-peer-linux-${{ github.sha }}
+          path: |
+            peer/build-artifact/**
+            peer/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6

@@ -1007,10 +1007,10 @@ func (d *SandboxDaemon) readyOpenShell(ctx context.Context, s sandboxrelay.Daemo
 // holds the lifecycle.
 func (d *SandboxDaemon) prepareOpenShell(ctx context.Context, s sandboxrelay.DaemonSettings) error {
 	started, err := d.openShell.Prepare(ctx, s)
-	if (started || err == nil) && d.rt != nil && d.rt.manager != nil {
+	if (started || err == nil) && d.rt != nil && d.rt.openShell != nil {
 		// The manager may have just failed to reach the gateway that was
 		// not running or not registered yet: dial it again now.
-		d.rt.manager.ForgetGatewayError()
+		d.rt.openShell.ForgetGatewayError()
 	}
 	if err == nil {
 		d.openShellUsed.Store(time.Now().UnixNano())
@@ -1076,7 +1076,7 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 	if uid, held := d.openShell.PortHolder(s); !held || uid != d.uid {
 		return
 	}
-	if d.rt != nil && d.rt.manager != nil {
+	if d.rt != nil && d.rt.openShell != nil {
 		// No sandbox of the account runs, but one made with OpenShell's own
 		// CLI may: sweep the gateway for foreign sandboxes first, so they
 		// are stopped and recorded for the managed gateway under the
@@ -1085,17 +1085,17 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 		// record reached the administrator (GAP-0263). One the policy leaves
 		// running (alert) keeps its gateway.
 		sweep, cancel := context.WithTimeout(ctx, foreignSweepTimeout)
-		err := d.rt.manager.Reconcile(sweep)
+		err := d.rt.openShell.Reconcile(sweep)
 		cancel()
 		switch {
 		case err != nil:
 			d.logf("check the OpenShell gateway for foreign sandboxes before stopping it: %v", err)
-		case d.rt.manager.ForeignSandboxesRunning():
+		case d.rt.openShell.ForeignSandboxesRunning():
 			return
 		}
 	}
-	if d.openShell.Stop(ctx, s) && d.rt != nil && d.rt.manager != nil {
-		d.rt.manager.GatewayStopped()
+	if d.openShell.Stop(ctx, s) && d.rt != nil && d.rt.openShell != nil {
+		d.rt.openShell.GatewayStopped()
 	}
 }
 

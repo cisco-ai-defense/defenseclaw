@@ -1,0 +1,102 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC literal argv compile and pure units
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-mxc-argv-build.yml
+      - test/e2e/axis/mxc-argv-build/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-mxc-argv-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-pure-units:
+    name: Literal argv SDK compile and pure units (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 55
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/mxc-argv-rustup
+    steps:
+      - name: Check out the exact contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            test/e2e/axis/mxc-argv-build
+            test/e2e/axis/patches
+
+      - name: Stage the reviewed helper and argv patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C defenseclaw-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -C defenseclaw-source status --porcelain)"
+          mkdir argv-build
+          cp -a defenseclaw-source/test/e2e/axis/mxc-argv-build/. argv-build/
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch argv-build/
+          git -C defenseclaw-source show HEAD:.github/workflows/axis-mxc-argv-build.yml > argv-build/workflow.yml
+
+      - name: Check out the reviewed clean MXC SDK source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: argv-build/mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Provision the pinned toolchain on the disposable runner
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --no-self-update
+          if test "${{ runner.os }}" = Linux; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+            sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential pkg-config ca-certificates
+          else
+            xcode-select --print-path
+            clang --version
+          fi
+
+      - name: Test source and unit-selection admission without executing Rust
+        working-directory: argv-build
+        shell: bash
+        run: python3 -m unittest discover -s . -p test_build_sdk.py -v
+
+      - name: Compile SDK and run only reviewed pure units
+        timeout-minutes: 43
+        working-directory: argv-build
+        shell: bash
+        run: python3 build_sdk.py
+
+      - name: Upload source and compile-unit evidence without executables
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-argv-${{ matrix.platform }}-${{ github.sha }}
+          path: argv-build/build-artifact/**
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6

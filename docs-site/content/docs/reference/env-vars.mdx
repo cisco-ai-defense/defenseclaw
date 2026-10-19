@@ -372,7 +372,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 132 test-only variables">
+<Accordion title="Show the 135 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -407,6 +407,9 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_PATH`<br/>Default: `unset`<br/>Values: `absolute test lock path`, `unset`<br/>Managed host: `ignore` | Lock path passed to the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_READY`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Ready-signal path shared with the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_RELEASE`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Release-signal path shared with the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
+| `DEFENSECLAW_HOST_STAGE_GIT_TREE_HELPER`<br/>Default: `unset`<br/>Values: `parent`, `child`, `unset`<br/>Managed host: `ignore` | Selects a parent or child of the native Windows host-staging command cleanup fixture.<br/>**Read by:** `internal/openshell/workspace/git_windows_test.go` |
+| `DEFENSECLAW_HOST_STAGE_GIT_TREE_PID`<br/>Default: `unset`<br/>Values: `absolute private test-file path`, `unset`<br/>Managed host: `ignore` | Passes the private PID publication file to the native Windows host-staging cleanup fixture.<br/>**Read by:** `internal/openshell/workspace/git_windows_test.go` |
+| `DEFENSECLAW_HOST_STAGE_GIT_TREE_RELEASE`<br/>Default: `unset`<br/>Values: `private test release-event token`, `unset`<br/>Managed host: `ignore` | Passes the temporary release event token to the native Windows host-staging cleanup fixture.<br/>**Read by:** `internal/openshell/workspace/git_windows_test.go` |
 | `DEFENSECLAW_HTTP_COMMAND_INJECTION_BENIGN_CORPORA`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `platform path-list of JSONL corpus files`, `unset`<br/>Managed host: `ignore` | Supplies path-separated external benign corpus files to the optional ActionFacts HTTP command-injection false-positive regression.<br/>**Read by:** `internal/actionfacts/http_command_injection_test.go` |
 | `DEFENSECLAW_HTTP_COMMAND_INJECTION_CORPUS`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `path to a JSONL corpus file`, `unset`<br/>Managed host: `ignore` | Supplies an external public JSONL corpus to the optional ActionFacts HTTP command-injection closed-proof regression.<br/>**Read by:** `internal/actionfacts/http_command_injection_test.go` |
 | `DEFENSECLAW_HTTP_SQLI_CORPUS`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `path to a JSONL corpus file`, `unset`<br/>Managed host: `ignore` | Supplies an external public JSONL corpus to the optional ActionFacts HTTP SQL-injection closed-proof regression.<br/>**Read by:** `internal/actionfacts/http_sql_injection_test.go` |

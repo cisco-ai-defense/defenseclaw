@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -138,13 +139,23 @@ func Command(ctx context.Context, dir string, args ...string) (cmd *exec.Cmd, cl
 // scrubbedEnv returns the env slice for the safe child, with home as
 // its HOME and XDG_CONFIG_HOME.
 func scrubbedEnv(tmpHome string) []string {
+	return scrubbedEnvEntries(os.Environ(), tmpHome, runtime.GOOS == "windows")
+}
+
+// Windows environment names are case-insensitive, including names read by
+// native Git. Fold only comparison keys; preserve retained names and values.
+// Unix keeps its existing case-sensitive environment semantics.
+func scrubbedEnvEntries(entries []string, tmpHome string, caseInsensitive bool) []string {
 	out := make([]string, 0, 32)
-	for _, e := range os.Environ() {
+	for _, e := range entries {
 		eq := strings.IndexByte(e, '=')
 		if eq <= 0 {
 			continue
 		}
 		k := e[:eq]
+		if caseInsensitive {
+			k = strings.ToUpper(k)
+		}
 		if _, drop := safeEnvKeysExact[k]; drop {
 			continue
 		}

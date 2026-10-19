@@ -214,6 +214,9 @@
     },
     "fleet": {
       "$ref": "#/$defs/fleet"
+    },
+    "sandbox": {
+      "$ref": "#/$defs/sandbox"
     }
   },
   "$defs": {
@@ -5899,6 +5902,113 @@
         "policy_compiler_path": {
           "type": "string",
           "maxLength": 4096
+        }
+      }
+    },
+    "sandboxRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "sandbox": {
+      "description": "Optional common sandbox policy and explicit runtime enablement. When absent, supported openshell configuration remains authoritative. Vendor installation settings stay in openshell.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "ingress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "egress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "pack": {
+          "$ref": "#/$defs/openShellPackRef"
+        },
+        "pack_dir": {
+          "$ref": "#/$defs/openShellPackDir"
+        },
+        "profile": {
+          "$ref": "#/$defs/openShellProfileOrInherit"
+        },
+        "yolo": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "llm": {
+          "description": "The model credential a sandbox run shares: the default of `sandbox run --llm`, which the shell wrappers, the TUI and the macOS app take too.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "anthropic",
+            "claude-oauth",
+            "openai",
+            "bedrock",
+            "gemini"
+          ],
+          "default": "auto"
+        },
+        "keep_headless": {
+          "description": "Keep the sandbox a foreground one-prompt `sandbox run --prompt` (or a harness print mode) creates; by default it is deleted at the run's end when nothing is left in it to bring back or undo.",
+          "type": "boolean",
+          "default": false
+        },
+        "workdir": {
+          "$ref": "#/$defs/openShellWorkdir"
+        },
+        "egress": {
+          "$ref": "#/$defs/openShellEgress"
+        },
+        "approvals": {
+          "$ref": "#/$defs/openShellApprovals"
+        },
+        "resources": {
+          "$ref": "#/$defs/openShellResources"
+        },
+        "harnesses": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "wrappers": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "mcp": {
+          "$ref": "#/$defs/openShellMCP"
+        },
+        "admin": {
+          "$ref": "#/$defs/openShellAdmin"
+        },
+        "runtime": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "openshell",
+            "axis"
+          ],
+          "default": "auto",
+          "description": "Default runtime selection for new sessions. Selection does not establish runtime availability or capabilities."
+        },
+        "runtimes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "openshell": {
+              "$ref": "#/$defs/sandboxRuntime"
+            },
+            "axis": {
+              "$ref": "#/$defs/sandboxRuntime"
+            }
+          }
         }
       }
     }

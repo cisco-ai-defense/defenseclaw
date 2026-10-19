@@ -35,9 +35,9 @@ import stat
 import subprocess
 import sys
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1763,6 +1763,42 @@ class OpenShellConfig:
         return (api_port if api_port > 0 else 18970) + 2
 
 
+@dataclass
+class SandboxRuntimeConfig:
+    enabled: bool = False
+
+
+@dataclass
+class SandboxRuntimesConfig:
+    openshell: SandboxRuntimeConfig = field(default_factory=SandboxRuntimeConfig)
+    axis: SandboxRuntimeConfig = field(default_factory=SandboxRuntimeConfig)
+
+
+@dataclass
+class SandboxConfig:
+    """Common policy; an absent namespace preserves legacy OpenShell settings."""
+
+    enabled: bool = False
+    runtime: str = "auto"
+    runtimes: SandboxRuntimesConfig = field(default_factory=SandboxRuntimesConfig)
+    ingress_port: int = 0
+    egress_port: int = 0
+    pack: str = ""
+    pack_dir: str = ""
+    profile: str = ""
+    yolo: bool | None = None
+    llm: str = "auto"
+    keep_headless: bool = False
+    workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
+    egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
+    approvals: OpenShellApprovalsConfig = field(default_factory=OpenShellApprovalsConfig)
+    resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
+    harnesses: list[str] = field(default_factory=list)
+    wrappers: list[str] = field(default_factory=list)
+    mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
+    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+
+
 def api_bind_host(cfg: Any) -> str:
     """Return the address the gateway REST API listens on.
 
@@ -3101,6 +3137,17 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
         return
     openshell = raw.get("openshell") if isinstance(raw.get("openshell"), Mapping) else {}
     admin = openshell.get("admin") if isinstance(openshell.get("admin"), Mapping) else {}
+    legacy_admin = admin
+    common = raw.get("sandbox") if isinstance(raw.get("sandbox"), Mapping) else {}
+    common_admin = common.get("admin") if isinstance(common.get("admin"), Mapping) else {}
+    if common_admin:
+        for source, section in (("sandbox", common_admin), ("openshell", admin)):
+            error = _sandbox_section_error(section, "admin")
+            if error:
+                raise ValueError(source + ": " + error)
+        # Source overlap is validated separately; retain every legacy-only
+        # restriction when the new common namespace is present.
+        admin = _sandbox_merge_admin_sources(admin, common_admin)
     guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), Mapping) else {}
     profiles = guardrail.get("profiles") if isinstance(guardrail.get("profiles"), Mapping) else {}
     sections = {
@@ -3112,9 +3159,14 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
     if (sections or floor_keys) and config_writer.secure_client_document(dict(raw)):
         if sections:
             raise ValueError(f"guardrail: {_SANDBOX_SECURE_CLIENT_PROFILES}")
+        common_floor_keys = [key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if common_admin.get(key) not in (None, "")]
+        source = "sandbox" if common_floor_keys else "openshell"
+        source_keys = common_floor_keys or [
+            key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if legacy_admin.get(key) not in (None, "")
+        ]
         raise ValueError(
-            "openshell: admin."
-            + ", admin.".join(floor_keys)
+            source + ": admin."
+            + ", admin.".join(source_keys)
             + ": managed sandbox keys are not supported with the Secure Client integration"
         )
     for name in sorted(sections):
@@ -3124,7 +3176,8 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
             raise ValueError(where + error)
     error = _sandbox_section_error(admin, "admin")
     if error:
-        raise ValueError("openshell: " + error)
+        source = "sandbox: combined with openshell.admin, " if common_admin else "openshell: "
+        raise ValueError(source + error)
 
 
 def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
@@ -3775,6 +3828,7 @@ class Config:
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
     scanners: ScannersConfig = field(default_factory=ScannersConfig)
     openshell: OpenShellConfig = field(default_factory=OpenShellConfig)
+    sandbox: SandboxConfig | None = None
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
@@ -3930,10 +3984,10 @@ class Config:
         surfaces keep using :meth:`active_connectors`.
         """
         names = set(self.active_connectors())
-        openshell = getattr(self, "openshell", None)
-        for harness in getattr(openshell, "harnesses", None) or []:
-            if str(harness).strip():
-                names.add(connector_paths.normalize(str(harness)))
+        for policy in (self.openshell, self.sandbox):
+            for harness in getattr(policy, "harnesses", None) or []:
+                if str(harness).strip():
+                    names.add(connector_paths.normalize(str(harness)))
         return sorted(names)
 
     def skill_dirs(self, connector: str | None = None) -> list[str]:
@@ -4276,6 +4330,7 @@ class Config:
                 " — run 'defenseclaw migrate' first."
             )
         existing = _existing_document_for_save(path, current)
+        _assert_sandbox_save_authority(existing, dataclass_data, baseline)
         # Lists are replaced as a unit by the modeled delta. If another
         # process changed registry sources after this Config was loaded, a
         # whole-list save would silently discard that process's source.
@@ -4633,6 +4688,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     _serialize_openshell(d)
+    if d.get("sandbox") is None:
+        d.pop("sandbox", None)
+    else:
+        _serialize_openshell({"openshell": d["sandbox"]})
     _serialize_routing(d)
     return d
 
@@ -5053,6 +5112,86 @@ def _baseline_keeping_migrated_llm_slots(current: dict[str, Any], baseline: dict
             if isinstance(parent, dict):
                 parent.pop(unified[-1], None)
     return baseline if adjusted is None else adjusted
+
+
+def _assert_sandbox_save_authority(
+    existing: dict[str, Any],
+    current: dict[str, Any],
+    baseline: dict[str, Any],
+) -> None:
+    """Refuse stale or legacy policy edits under the config writer's lock."""
+    from defenseclaw.config_writer import ConfigConflictError
+
+    if ("sandbox" in existing) != ("sandbox" in baseline) and (
+        current.get("sandbox", _V8_MISSING) != baseline.get("sandbox", _V8_MISSING)
+    ):
+        raise ConfigConflictError(
+            "sandbox authority changed since load; reload config.yaml and retry the sandbox change"
+        )
+    if not any("sandbox" in document for document in (existing, current, baseline)):
+        return
+
+    def changed_path(before: Any, after: Any, path: str) -> str | None:
+        if before == after:
+            return None
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(set(before) | set(after)):
+                changed = changed_path(before.get(key, _V8_MISSING), after.get(key, _V8_MISSING), f"{path}.{key}")
+                if changed:
+                    return changed
+        return path
+
+    before = baseline.get("openshell", {})
+    after = current.get("openshell", {})
+    for item in fields(SandboxConfig):
+        if item.name in {"runtime", "runtimes"}:
+            continue
+        suffix = changed_path(before.get(item.name, _V8_MISSING), after.get(item.name, _V8_MISSING), item.name)
+        if suffix:
+            raise ConfigConflictError(
+                f"sandbox.{suffix} owns this setting; change sandbox.{suffix} instead of openshell.{suffix}, "
+                "then reload config.yaml and retry"
+            )
+
+    # A modeled save merges into the latest document. That is safe for
+    # independent leaves, but a list or scalar edited by two loaded Configs
+    # must not silently replace the first writer's policy. Compare effective
+    # modeled values so an inherited openshell leaf is checked too.
+    old_common = baseline.get("sandbox", _V8_MISSING)
+    new_common = current.get("sandbox", _V8_MISSING)
+    if old_common == new_common:
+        return
+
+    def changed_leaves(before: Any, after: Any, prefix: tuple[str, ...] = ()) -> Iterator[tuple[str, ...]]:
+        if before == after:
+            return
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(set(before) | set(after)):
+                yield from changed_leaves(before.get(key, _V8_MISSING), after.get(key, _V8_MISSING), (*prefix, key))
+        else:
+            yield prefix
+
+    def at_path(value: Any, path: tuple[str, ...]) -> Any:
+        for key in path:
+            if not isinstance(value, dict):
+                return _V8_MISSING
+            value = value.get(key, _V8_MISSING)
+        return value
+
+    disk_common: Any = _V8_MISSING
+    if "sandbox" in existing:
+        from dataclasses import asdict
+
+        data_dir = str(existing.get("data_dir") or current.get("data_dir") or "")
+        disk_model = _merge_sandbox(existing["sandbox"], data_dir, existing.get("openshell"))
+        modeled = {"openshell": asdict(disk_model)}
+        _serialize_openshell(modeled)
+        disk_common = modeled["openshell"]
+    for path in changed_leaves(old_common, new_common):
+        observed = at_path(disk_common, path)
+        if observed != at_path(old_common, path) and observed != at_path(new_common, path):
+            name = ".".join(("sandbox", *path))
+            raise ConfigConflictError(f"{name} changed since load; reload config.yaml and retry")
 
 
 def _merge_v8_modeled_changes(
@@ -6615,6 +6754,39 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     )
 
 
+def _merge_sandbox(
+    raw: dict[str, Any] | None, data_dir: str = "", legacy: dict[str, Any] | None = None,
+) -> SandboxConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("sandbox: expected a configuration mapping")
+    shared = {item.name for item in fields(SandboxConfig)} - {"runtime", "runtimes", "enabled"}
+    previous = {key: value for key, value in _openshell_mapping(legacy).items() if key in shared}
+    policy = _merge_openshell(_sandbox_merge_admin_sources(previous, raw), data_dir)
+    runtimes = _openshell_mapping(raw.get("runtimes"))
+    return SandboxConfig(
+        **{item.name: getattr(policy, item.name) for item in fields(SandboxConfig)
+           if item.name not in {"runtime", "runtimes"}},
+        runtime=_openshell_str(raw.get("runtime")) or "auto",
+        runtimes=SandboxRuntimesConfig(**{
+            name: SandboxRuntimeConfig(
+                enabled=_coerce_bool(_openshell_mapping(runtimes.get(name)).get("enabled", False)),
+            )
+            for name in ("openshell", "axis")
+        }),
+    )
+
+
+def _sandbox_merge_admin_sources(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(old)
+    for key, value in new.items():
+        previous = merged.get(key)
+        merged[key] = (_sandbox_merge_admin_sources(previous, value)
+                       if isinstance(previous, Mapping) and isinstance(value, Mapping) else value)
+    return merged
+
+
 def _openshell_optional_str_list(value: Any) -> list[str] | None:
     """A list whose absence means "no constraint": None when unset, the
     entries (possibly none) otherwise."""
@@ -7056,6 +7228,7 @@ def load(
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
         openshell=_merge_openshell(raw.get("openshell"), data_dir),
+        sandbox=_merge_sandbox(raw.get("sandbox"), data_dir, raw.get("openshell")),
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
@@ -7117,6 +7290,17 @@ def load(
     cfg.guardrail.validate()
     validate_guardrail_profiles(cfg.guardrail)
     validate_sandbox_floors(raw)
+    from defenseclaw.openshell_validation import sandbox_error
+
+    sandbox_problem = sandbox_error(raw)
+    if sandbox_problem is not None:
+        raise ValueError(f"{sandbox_problem[0]}: {sandbox_problem[1]}")
+    if cfg.sandbox is not None:
+        for item in fields(SandboxConfig):
+            if item.name not in {"enabled", "runtime", "runtimes"}:
+                setattr(cfg.openshell, item.name, copy.deepcopy(getattr(cfg.sandbox, item.name)))
+        cfg.openshell.enabled = (cfg.sandbox.enabled and cfg.sandbox.runtime != "axis"
+                                 and cfg.sandbox.runtimes.openshell.enabled)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.

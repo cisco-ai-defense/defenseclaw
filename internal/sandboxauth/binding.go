@@ -156,6 +156,9 @@ type Spec struct {
 	Connector string
 	// AgentVersion is the harness version installed in the sandbox image.
 	AgentVersion string
+	// ExecutionOS is the trusted runtime's guest OS, not the gateway host OS
+	// or a request header. Empty preserves legacy OpenShell Linux bindings.
+	ExecutionOS string
 	// HookContractID is the reviewed hook contract the image was built for.
 	// Hook handlers resolve the connector profile from it instead of the
 	// host's contract lock or agent-version cache.
@@ -181,6 +184,7 @@ type Binding struct {
 	SandboxName    string    `json:"sandbox_name"`
 	Connector      string    `json:"connector"`
 	AgentVersion   string    `json:"agent_version,omitempty"`
+	ExecutionOS    string    `json:"execution_os,omitempty"`
 	HookContractID string    `json:"hook_contract_id,omitempty"`
 	PolicyProfile  string    `json:"policy_profile,omitempty"`
 	Routes         []Route   `json:"routes"`
@@ -208,6 +212,7 @@ func (b Binding) Spec() Spec {
 		SandboxName:    b.SandboxName,
 		Connector:      b.Connector,
 		AgentVersion:   b.AgentVersion,
+		ExecutionOS:    b.ExecutionOS,
 		HookContractID: b.HookContractID,
 		PolicyProfile:  b.PolicyProfile,
 		Routes:         slices.Clone(b.Routes),
@@ -216,6 +221,15 @@ func (b Binding) Spec() Spec {
 		RateLimit:      b.RateLimit,
 		TTL:            time.Duration(b.TTLSeconds) * time.Second,
 	}
+}
+
+// GuestOS resolves a legacy binding's implicit Linux platform. New native
+// bindings record their actual execution OS; store validation rejects unknowns.
+func (b Binding) GuestOS() string {
+	if b.ExecutionOS == "" {
+		return SandboxGOOS
+	}
+	return b.ExecutionOS
 }
 
 // Allows reports whether the binding lists route.
@@ -306,6 +320,14 @@ func (s Spec) normalize() (Spec, error) {
 	s.AgentVersion = strings.TrimSpace(s.AgentVersion)
 	if len(s.AgentVersion) > 128 || !printableASCII(s.AgentVersion) {
 		return Spec{}, invalid("agent version is malformed")
+	}
+	switch s.ExecutionOS {
+	case "", "linux", "darwin", "windows":
+	default:
+		return Spec{}, invalid("execution OS is not linux, darwin or windows")
+	}
+	if s.ExecutionOS == "windows" && (s.Workdir.Mode != WorkdirCopy || len(s.Workdir.Mounts) != 0) {
+		return Spec{}, invalid("native Windows bindings require a copied workspace without host mappings")
 	}
 	s.HookContractID = strings.TrimSpace(s.HookContractID)
 	if s.HookContractID != "" && !contractIDPattern.MatchString(s.HookContractID) {
@@ -439,7 +461,8 @@ func sortedRoutes(routes []Route) []Route {
 }
 
 // cleanSandboxPath accepts only absolute, already-clean POSIX paths. The
-// sandbox is always Linux, so host path rules never apply here.
+// host view mappings use POSIX guest paths. Native Windows copy-mode bindings
+// have no host mappings; their hook payload paths grant no host filesystem view.
 func cleanSandboxPath(p string) (string, bool) {
 	if p == "" || len(p) > maxPathLength || strings.ContainsRune(p, 0) || !strings.HasPrefix(p, "/") {
 		return "", false

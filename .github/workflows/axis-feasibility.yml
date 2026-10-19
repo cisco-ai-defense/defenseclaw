@@ -1,0 +1,431 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS feasibility source build
+
+# Contributor artifacts only. This does not install AXIS, publish a release,
+# qualify a platform, or certify the upstream runtime's isolation boundary.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-feasibility.yml
+      - test/e2e/axis/runner/**
+      - test/e2e/axis/windows/patches/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-feasibility-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AXIS_SOURCE_COMMIT: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+  RUST_TOOLCHAIN: 1.95.0
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  linux-source-artifact:
+    name: Build pinned Linux contributor artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: axis-source
+    steps:
+      - name: Check out the contributor probe source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/runner
+
+      - name: Check out the reviewed AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify source identity and install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$AXIS_SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+
+      - name: Install build prerequisites on the disposable runner
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential pkg-config ca-certificates
+
+      - name: Build the pinned core and Linux helper binaries
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins
+          git diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+
+      - name: Build the direct native contributor probe with the upstream lock
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mkdir -p crates/axis-sandbox/examples
+          install -m 0644 ../defenseclaw-source/test/e2e/axis/runner/main.rs crates/axis-sandbox/examples/defenseclaw_axis_offline.rs
+          cargo +"$RUST_TOOLCHAIN" build --locked --release -p axis-sandbox --example defenseclaw_axis_offline
+          git diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+
+      - name: Assemble contributor payload and provenance
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_WORKFLOW_COMMIT: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          payload="axis-source-linux-x86_64-$AXIS_SOURCE_COMMIT"
+          mkdir -p "dist/$payload/bin"
+          # Helpers remain ordinary executable files: no installation, setuid,
+          # capabilities, firewall changes, daemon startup, or MXC download.
+          for binary in axis axisd axis-seccomp-launcher axis-netns-helper axis-ssh-proxy; do
+            test -f "target/release/$binary"
+            test ! -L "target/release/$binary"
+            install -m 0755 "target/release/$binary" "dist/$payload/bin/$binary"
+          done
+          install -m 0755 target/release/examples/defenseclaw_axis_offline "dist/$payload/bin/defenseclaw-axis-offline-probe"
+          cp ../defenseclaw-source/test/e2e/axis/runner/main.rs "dist/$payload/OFFLINE_PROBE.rs"
+          cp Cargo.lock rust-toolchain.toml Cargo.toml LICENSE "dist/$payload/"
+          rustc +"$RUST_TOOLCHAIN" -Vv > "dist/$payload/TOOLCHAIN.txt"
+          cargo +"$RUST_TOOLCHAIN" --version >> "dist/$payload/TOOLCHAIN.txt"
+          dpkg-query -W build-essential pkg-config ca-certificates libc6 > "dist/$payload/BUILD_PACKAGES.txt"
+          PAYLOAD_DIR="dist/$payload" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+
+          root = pathlib.Path(os.environ["PAYLOAD_DIR"])
+          binaries = []
+          for path in sorted((root / "bin").iterdir()):
+              binaries.append({
+                  "path": path.relative_to(root).as_posix(),
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size_bytes": path.stat().st_size,
+              })
+          manifest = {
+              "schema_version": 1,
+              "purpose": "contributor_source_build_only",
+              "support_certification": False,
+              "source": {
+                  "repository": "https://github.com/ROCm/axis",
+                  "commit": os.environ["AXIS_SOURCE_COMMIT"],
+                  "cargo_lock_sha256": hashlib.sha256((root / "Cargo.lock").read_bytes()).hexdigest(),
+                  "toolchain_file_sha256": hashlib.sha256((root / "rust-toolchain.toml").read_bytes()).hexdigest(),
+                  "example_overlay": {
+                      "source": "test/e2e/axis/runner/main.rs",
+                      "sha256": hashlib.sha256((root / "OFFLINE_PROBE.rs").read_bytes()).hexdigest(),
+                      "build_command": f"cargo +{os.environ['RUST_TOOLCHAIN']} build --locked --release -p axis-sandbox --example defenseclaw_axis_offline",
+                  },
+              },
+              "build": {
+                  "toolchain": os.environ["RUST_TOOLCHAIN"],
+                  "command": f"cargo +{os.environ['RUST_TOOLCHAIN']} build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins",
+                  "runner_os": platform.platform(),
+                  "cargo_build_jobs": os.environ["CARGO_BUILD_JOBS"],
+                  "cargo_incremental": os.environ["CARGO_INCREMENTAL"],
+                  "workflow_repository": os.environ["BUILD_REPOSITORY"],
+                  "workflow_commit": os.environ["BUILD_WORKFLOW_COMMIT"],
+                  "run_id": os.environ["BUILD_RUN_ID"],
+                  "run_attempt": os.environ["BUILD_RUN_ATTEMPT"],
+              },
+              "limitations": [
+                  "No live AXIS or Claude execution is performed by this build.",
+                  "No MXC executor is bundled; the default auto/mxc provider is not provisioned.",
+                  "The native Linux backend requires separate host and policy qualification.",
+                  "The network helper is not installed or granted privilege.",
+                  "This manifest and checksums are evidence, not signed production provenance.",
+                  "Native Windows and its patched MXC executor require separate builds and qualification.",
+              ],
+              "binaries": binaries,
+          }
+          (root / "BUILD.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          lines = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  lines.append(f"{digest}  {path.relative_to(root).as_posix()}\n")
+          (root / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+          PY
+          (cd "dist/$payload" && sha256sum --check --strict SHA256SUMS)
+          tar -czf "dist/$payload.tar.gz" -C dist "$payload"
+          (cd dist && sha256sum "$payload.tar.gz" > "$payload.tar.gz.sha256")
+          cp "dist/$payload/BUILD.json" dist/BUILD.json
+          du -h "dist/$payload.tar.gz"
+
+      - name: Upload the source-bound contributor artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-source-linux-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: |
+            axis-source/dist/*.tar.gz
+            axis-source/dist/*.tar.gz.sha256
+            axis-source/dist/BUILD.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-source-artifact:
+    name: Build native Windows inherited-console relay contributor artifacts
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      MXC_SOURCE_COMMIT: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
+      AXIS_CONSOLE_OVERLAY_SHA256: 2dae4716da9581632fe9f19929a78902df71a2d828ea726b3545c7387686b8c4
+      AXIS_RELAY_OVERLAY_SHA256: 874035bb9429abda372d8302ea8ef2adeec479020867f3ea3680c424f20a9919
+      MXC_RELAY_OVERLAY_SHA256: 8689309175f62ce2c112b1a22f7cc7b7878ac5938aa83cb94521f85c8c9508cf
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the reviewed Windows contributor overlay
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/windows
+
+      - name: Check out the reviewed AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the pinned MXC source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
+          path: mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify source identities and install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $axisCommit = git -C axis-source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $axisCommit -ne $env:AXIS_SOURCE_COMMIT) { throw 'AXIS source identity mismatch' }
+          $mxcCommit = git -C mxc-source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $mxcCommit -ne $env:MXC_SOURCE_COMMIT) { throw 'MXC source identity mismatch' }
+          foreach ($source in @('axis-source', 'mxc-source')) {
+            $status = git -C $source status --porcelain
+            if ($LASTEXITCODE -ne 0 -or $status) { throw "Unexpected initial changes in $source" }
+          }
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed' }
+
+      - name: Apply the reviewed inherited-console experiment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Read exact committed bytes, independent of Windows checkout EOLs.
+          python -c "import os,pathlib,subprocess; pathlib.Path('AXIS_INHERITED_CONSOLE.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/axis-inherited-console.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed contributor overlay' }
+          $overlay = (Resolve-Path -LiteralPath AXIS_INHERITED_CONSOLE.patch).Path
+          if ((Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:AXIS_CONSOLE_OVERLAY_SHA256) { throw 'Contributor overlay digest mismatch' }
+          git -C axis-source apply --check --whitespace=error $overlay
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay did not match pinned AXIS source' }
+          git -C axis-source apply --whitespace=error $overlay
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay application failed' }
+          python -c "import os,pathlib,subprocess; pathlib.Path('AXIS_CONSOLE_CTRL_C_RELAY.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/axis-console-ctrl-c-relay.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed AXIS relay overlay' }
+          $relayOverlay = (Resolve-Path -LiteralPath AXIS_CONSOLE_CTRL_C_RELAY.patch).Path
+          if ((Get-FileHash -LiteralPath $relayOverlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:AXIS_RELAY_OVERLAY_SHA256) { throw 'AXIS relay overlay digest mismatch' }
+          git -C axis-source apply --check --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS relay overlay did not match the console experiment' }
+          git -C axis-source apply --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS relay overlay application failed' }
+          $changed = @(git -C axis-source diff --name-only | Sort-Object)
+          if ($LASTEXITCODE -ne 0 -or ($changed -join ',') -ne 'crates/axis-sandbox/Cargo.toml,crates/axis-sandbox/src/windows/mxc.rs') { throw 'Unexpected AXIS source modifications' }
+
+      - name: Apply the reviewed AXIS compatibility patches to MXC
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patches = @(Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' | Sort-Object Name)
+          $expected = @('0001-wxc-processcontainer-resource-limits.patch', '0002-wxc-job-list-resource-assignment.patch', '0003-axis-wfp-strict-proxy.patch')
+          if (($patches.Name -join ',') -ne ($expected -join ',')) { throw 'Unexpected AXIS MXC patch set' }
+          foreach ($patch in $patches) {
+            git -C mxc-source apply --whitespace=error $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "MXC compatibility patch failed: $($patch.Name)" }
+          }
+          python -c "import os,pathlib,subprocess; pathlib.Path('MXC_CONSOLE_CTRL_C_RELAY.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/mxc-console-ctrl-c-relay.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed MXC relay overlay' }
+          $relayOverlay = (Resolve-Path -LiteralPath MXC_CONSOLE_CTRL_C_RELAY.patch).Path
+          if ((Get-FileHash -LiteralPath $relayOverlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:MXC_RELAY_OVERLAY_SHA256) { throw 'MXC relay overlay digest mismatch' }
+          git -C mxc-source apply --check --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC relay overlay did not match the pinned patched executor' }
+          git -C mxc-source apply --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC relay overlay application failed' }
+
+      - name: Build the pinned AXIS and patched native Windows MXC binaries
+        timeout-minutes: 30
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path axis-source/Cargo.toml -p axis-cli -p axis-daemon -p axis-sandbox --bins
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS Windows source build failed' }
+          git -C axis-source diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS dependency or toolchain source changed during build' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path axis-source/Cargo.toml -p axis-sandbox inherited_console_requires_every_standard_handle
+          if ($LASTEXITCODE -ne 0) { throw 'Inherited-console admission unit test failed' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path axis-source/Cargo.toml -p axis-sandbox axis_console_relay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS console relay event unit test failed' }
+          cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features
+          if ($LASTEXITCODE -ne 0) { throw 'Patched MXC Windows executor build failed' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features axis_console_relay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC console relay admission unit tests failed' }
+          git -C mxc-source diff --exit-code -- src/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'MXC dependency lock changed during build' }
+
+      - name: Assemble Windows contributor payload and provenance
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_WORKFLOW_COMMIT: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadName = "axis-source-windows-inherited-console-relay-x86_64-$env:AXIS_SOURCE_COMMIT"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'windows-dist'
+          $payload = Join-Path $dist $payloadName
+          $bin = Join-Path $payload 'bin'
+          $axisMetadata = Join-Path $payload 'axis-source'
+          $mxcMetadata = Join-Path $payload 'mxc-source'
+          $patchMetadata = Join-Path $mxcMetadata 'patches'
+          New-Item -ItemType Directory -Path $bin, $axisMetadata, $patchMetadata | Out-Null
+          foreach ($name in @('axis.exe', 'axisd.exe')) {
+            Copy-Item -LiteralPath "axis-source/target/release/$name" -Destination $bin
+          }
+          Copy-Item -LiteralPath mxc-source/src/target/release/wxc-exec.exe -Destination $bin
+          foreach ($name in @('axis-ssh-proxy.exe', 'axis-wfp-broker.exe')) {
+            $source = "axis-source/target/release/$name"
+            if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $bin }
+          }
+          foreach ($name in @('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'LICENSE')) {
+            Copy-Item -LiteralPath "axis-source/$name" -Destination $axisMetadata
+          }
+          Copy-Item -LiteralPath AXIS_INHERITED_CONSOLE.patch -Destination $payload
+          Copy-Item -LiteralPath AXIS_CONSOLE_CTRL_C_RELAY.patch -Destination $payload
+          Copy-Item -LiteralPath MXC_CONSOLE_CTRL_C_RELAY.patch -Destination $payload
+          Copy-Item -LiteralPath mxc-source/src/Cargo.lock -Destination $mxcMetadata
+          Copy-Item -LiteralPath mxc-source/LICENSE.md -Destination $mxcMetadata
+          Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' |
+            Sort-Object Name | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $patchMetadata }
+          $rustVersion = rustc "+$env:RUST_TOOLCHAIN" -Vv
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record Rust compiler identity' }
+          $cargoVersion = cargo "+$env:RUST_TOOLCHAIN" --version
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record Cargo identity' }
+          Set-Content -LiteralPath (Join-Path $payload 'TOOLCHAIN.txt') -Encoding utf8 -Value ($rustVersion + $cargoVersion)
+          function Get-PayloadFile([System.IO.FileInfo]$File) {
+            return [ordered]@{
+              path = [System.IO.Path]::GetRelativePath($payload, $File.FullName).Replace('\', '/')
+              sha256 = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              size_bytes = $File.Length
+            }
+          }
+          $manifest = [ordered]@{
+            schema_version = 1
+            purpose = 'contributor_source_build_only'
+            support_certification = $false
+            variant = 'inherited-console-relay'
+            axis_source = [ordered]@{
+              repository = 'https://github.com/ROCm/axis'
+              commit = $env:AXIS_SOURCE_COMMIT
+              cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+              toolchain_file_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'rust-toolchain.toml') -Algorithm SHA256).Hash.ToLowerInvariant()
+              contributor_overlay = [ordered]@{
+                path = 'AXIS_INHERITED_CONSOLE.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'AXIS_INHERITED_CONSOLE.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_inherited_console_experiment'
+              }
+              contributor_relay_overlay = [ordered]@{
+                path = 'AXIS_CONSOLE_CTRL_C_RELAY.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'AXIS_CONSOLE_CTRL_C_RELAY.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_console_ctrl_c_relay_experiment'
+              }
+            }
+            mxc_source = [ordered]@{
+              repository = 'https://github.com/microsoft/mxc'
+              commit = $env:MXC_SOURCE_COMMIT
+              cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $mxcMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+              patches = @(Get-ChildItem -LiteralPath $patchMetadata -File | Sort-Object Name | ForEach-Object { Get-PayloadFile $_ })
+              contributor_relay_overlay = [ordered]@{
+                path = 'MXC_CONSOLE_CTRL_C_RELAY.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'MXC_CONSOLE_CTRL_C_RELAY.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_console_ctrl_c_relay_experiment'
+              }
+            }
+            build = [ordered]@{
+              toolchain = $env:RUST_TOOLCHAIN
+              toolchain_output_sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'TOOLCHAIN.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
+              axis_command = "cargo +$env:RUST_TOOLCHAIN build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins"
+              mxc_command = "cargo +$env:RUST_TOOLCHAIN build --locked --release -p wxc --no-default-features"
+              runner_os = [System.Environment]::OSVersion.VersionString
+              cargo_build_jobs = $env:CARGO_BUILD_JOBS
+              cargo_incremental = $env:CARGO_INCREMENTAL
+              workflow_repository = $env:BUILD_REPOSITORY
+              workflow_commit = $env:BUILD_WORKFLOW_COMMIT
+              run_id = $env:BUILD_RUN_ID
+              run_attempt = $env:BUILD_RUN_ATTEMPT
+            }
+            limitations = @(
+              'Build only: no live sandbox, Claude, daemon, helper or broker execution.'
+              'No installation, administrator actions, service registration or firewall changes.'
+              'Windows BaseContainer availability and isolation require separate host qualification.'
+              'Stock AXIS refuses interactive Windows MXC; paired contributor overlays test inherited-console admission and process-local Ctrl-C relay.'
+              'Direct BaseContainer pseudoconsole startup attributes remain unsupported; real console input, resize, signals and cleanup need manual proof.'
+              'Strict proxy networking requires an explicitly installed privileged AXIS WFP broker.'
+              'This manifest and checksums are evidence, not signed production provenance.'
+            )
+            binaries = @(Get-ChildItem -LiteralPath $bin -File | Sort-Object Name | ForEach-Object { Get-PayloadFile $_ })
+          }
+          $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $payload 'BUILD.json') -Encoding utf8
+          $sums = @(Get-ChildItem -LiteralPath $payload -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $file = Get-PayloadFile $_
+            "$($file.sha256)  $($file.path)"
+          })
+          Set-Content -LiteralPath (Join-Path $payload 'SHA256SUMS') -Encoding utf8 -Value $sums
+          $archive = Join-Path $dist "$payloadName.zip"
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive -CompressionLevel Optimal
+          $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$archive.sha256" -Encoding utf8 -Value "$archiveHash  $payloadName.zip"
+          Copy-Item -LiteralPath (Join-Path $payload 'BUILD.json') -Destination (Join-Path $dist 'BUILD.json')
+          Get-Item -LiteralPath $archive | Select-Object Name, Length
+
+      - name: Upload the native Windows source-bound contributor artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-source-windows-inherited-console-relay-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: |
+            windows-dist/*.zip
+            windows-dist/*.zip.sha256
+            windows-dist/BUILD.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

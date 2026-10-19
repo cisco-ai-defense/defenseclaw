@@ -560,6 +560,11 @@ func (c *Config) PolicyConnectors() []string {
 	for _, name := range c.OpenShell.Harnesses {
 		add(name)
 	}
+	if c.Sandbox != nil {
+		for _, name := range c.Sandbox.Harnesses {
+			add(name)
+		}
+	}
 	sort.Strings(names)
 	return names
 }

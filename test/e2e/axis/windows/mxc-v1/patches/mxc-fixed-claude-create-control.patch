@@ -1,0 +1,408 @@
+diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+index b23ed52023ad209cebfbaae17c871ceabd71477c..ad3fa8019d2089f8044936523cf99ae93479375a 100644
+--- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+@@ -149,7 +149,7 @@ const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str = "processContainer.filesystem.
+      build does not support that policy, and enumeration-only access cannot fall back to \
+      AppContainer enforcement";
+ const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
+-    "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
++    "CreateProcessW(fixed uncontained Claude control)";
+ 
+ fn log_base_network_policy_audit(
+     request: &ExecutionRequest,
+@@ -371,6 +371,99 @@ impl NativeLaunchShape {
+     }
+ }
+ 
++// This entire helper exists only in the separately reviewed fifth overlay.
++// Store exact bounded call buffers, not hashes that expose private path facts.
++#[derive(Clone, PartialEq, Eq)]
++struct FixedClaudeControlInputs {
++    buffers: [Vec<u16>; 4],
++    flags: u32,
++    inherit: bool,
++    // Native STARTUPINFOW fields compared individually: never compare padding.
++    startup: [usize; 18],
++    handles: Vec<usize>,
++}
++
++impl FixedClaudeControlInputs {
++    fn freeze(
++        buffers: [&[u16]; 4],
++        flags: u32,
++        inherit: bool,
++        startup: &STARTUPINFOW,
++        handles: &[HANDLE],
++    ) -> Result<Self, ScriptResponse> {
++        if buffers
++            .iter()
++            .any(|value| value.is_empty() || value.len() > 65_536)
++            || handles.len() != 3
++        {
++            return Err(ScriptResponse::rejected(
++                "fixed control inputs are not bounded",
++            ));
++        }
++        Ok(Self {
++            buffers: buffers.map(<[u16]>::to_vec),
++            flags,
++            inherit,
++            startup: [
++                startup.cb as usize,
++                startup.lpReserved.0 as usize,
++                startup.lpDesktop.0 as usize,
++                startup.lpTitle.0 as usize,
++                startup.dwX as usize,
++                startup.dwY as usize,
++                startup.dwXSize as usize,
++                startup.dwYSize as usize,
++                startup.dwXCountChars as usize,
++                startup.dwYCountChars as usize,
++                startup.dwFillAttribute as usize,
++                startup.dwFlags.0 as usize,
++                startup.wShowWindow as usize,
++                startup.cbReserved2 as usize,
++                startup.lpReserved2 as usize,
++                startup.hStdInput.0 as usize,
++                startup.hStdOutput.0 as usize,
++                startup.hStdError.0 as usize,
++            ],
++            handles: handles.iter().map(|handle| handle.0 as usize).collect(),
++        })
++    }
++}
++
++fn fixed_claude_control_admitted(
++    argv: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++    capture: bool,
++    request: &ExecutionRequest,
++) -> bool {
++    let Some(argv) = argv else { return false };
++    let values = argv.values();
++    let expected = [
++        "APPDATA",
++        "HOME",
++        "LOCALAPPDATA",
++        "SYSTEMROOT",
++        "TEMP",
++        "TMP",
++        "USERPROFILE",
++        "WINDIR",
++    ];
++    let Some(environment) = request.env.as_ref() else {
++        return false;
++    };
++    let mut names: Vec<_> = environment
++        .iter()
++        .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
++        .collect();
++    names.sort_unstable();
++    capture
++        && !request.inherit_default_env
++        && values.len() == 2
++        && Path::new(&values[0]).file_name() == Some(std::ffi::OsStr::new("claude-reviewed.exe"))
++        && values[1] == std::ffi::OsStr::new("--version")
++        && environment.len() == 8
++        && names == expected
++        && request.policy.capture_denials.is_none()
++}
++
+ /// Encode the documented Windows C/Rust argv rules without invoking a shell.
+ /// Keep the absolute application separate so CreateProcessW never searches or
+ /// guesses which executable a command-line prefix names.
+@@ -908,6 +1001,88 @@ mod strict_windows_argv_tests {
+         assert_eq!(command.last(), Some(&0));
+     }
+ 
++    #[test]
++    fn fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads() {
++        let buffers = [
++            &[65u16, 0][..],
++            &[66u16, 0][..],
++            &[67u16, 0, 0][..],
++            &[68u16, 0][..],
++        ];
++        let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
++        startup.cb =
++            std::mem::size_of::<windows::Win32::System::Threading::STARTUPINFOEXW>() as u32;
++        startup.dwFlags = STARTF_USESTDHANDLES;
++        let handles = [
++            HANDLE(1usize as *mut c_void),
++            HANDLE(2usize as *mut c_void),
++            HANDLE(3usize as *mut c_void),
++        ];
++        startup.hStdInput = handles[0];
++        startup.hStdOutput = handles[1];
++        startup.hStdError = handles[2];
++        let reference =
++            FixedClaudeControlInputs::freeze(buffers, 4, true, &startup, &handles).unwrap();
++        assert!(
++            reference
++                == FixedClaudeControlInputs::freeze(buffers, 4, true, &startup, &handles).unwrap()
++        );
++        for index in 0..4 {
++            let mut changed = reference.clone();
++            changed.buffers[index][0] ^= 1;
++            assert!(reference != changed);
++        }
++        let mut changed = reference.clone();
++        changed.flags ^= 1;
++        assert!(reference != changed);
++        let mut changed = reference.clone();
++        changed.inherit = false;
++        assert!(reference != changed);
++        for index in 0..reference.startup.len() {
++            let mut changed = reference.clone();
++            changed.startup[index] ^= 1;
++            assert!(reference != changed);
++        }
++        for index in 0..reference.handles.len() {
++            let mut changed = reference.clone();
++            changed.handles[index] ^= 1;
++            assert!(reference != changed);
++        }
++        assert!(FixedClaudeControlInputs::freeze([&[]; 4], 4, true, &startup, &handles).is_err());
++        let mut request = ExecutionRequest::default();
++        request.env = Some(
++            [
++                "APPDATA",
++                "HOME",
++                "LOCALAPPDATA",
++                "SYSTEMROOT",
++                "TEMP",
++                "TMP",
++                "USERPROFILE",
++                "WINDIR",
++            ]
++            .into_iter()
++            .map(|name| format!("{name}=fixed"))
++            .collect(),
++        );
++        let argv = crate::mxc_common::literal_argv::LiteralArgv::new(vec![
++            std::ffi::OsString::from(r"C:\fixed\claude-reviewed.exe"),
++            std::ffi::OsString::from("--version"),
++        ])
++        .unwrap();
++        assert!(fixed_claude_control_admitted(Some(&argv), true, &request));
++        assert!(!fixed_claude_control_admitted(None, true, &request));
++        assert!(!fixed_claude_control_admitted(Some(&argv), false, &request));
++        let other = crate::mxc_common::literal_argv::LiteralArgv::new(vec![
++            std::ffi::OsString::from(r"C:\fixed\other.exe"),
++            std::ffi::OsString::from("--version"),
++        ])
++        .unwrap();
++        assert!(!fixed_claude_control_admitted(Some(&other), true, &request));
++        request.env.as_mut().unwrap().push("PATH=fixed".to_owned());
++        assert!(!fixed_claude_control_admitted(Some(&argv), true, &request));
++    }
++
+     #[test]
+     fn native_failure_diagnostics_are_numeric_bounded_and_ordered() {
+         let calls = std::cell::RefCell::new(Vec::new());
+@@ -1143,6 +1318,11 @@ impl BaseContainerRunner {
+                 "literal argv and held executable custody must be bound together",
+             ));
+         }
++        if !fixed_claude_control_admitted(literal_argv, capture, request) {
++            return Err(ScriptResponse::rejected(
++                "separate uncontained contributor build accepts only the fixed Claude version control",
++            ));
++        }
+         let _ = writeln!(
+             logger,
+             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
+@@ -1248,7 +1428,7 @@ impl BaseContainerRunner {
+         let cwd_wide = string_util::to_wide(&working_directory.path);
+         let cwd_ptr = cwd_wide.as_ptr();
+ 
+-        let identity = "<process-security-environment>".to_string();
++        let identity = "<uncontained-fixed-contributor-control>".to_string();
+ 
+         // --- Determine STDIO mode ---
+         // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
+@@ -1544,34 +1724,69 @@ impl BaseContainerRunner {
+                         msg,
+                         "; additionally failed to discard the learning-mode trace: {cleanup_error}"
+                     );
+-                    }
+-                    let _ = writeln!(logger, "Error: {msg}");
+-                    log_base_network_policy_audit(
+-                        request,
+-                        &identity,
+-                        OperationStatus::Failure,
+-                        logger,
+-                    );
+-                    let failure_phase = if primary.is_api_unavailable()
+-                        || cleanup_error.as_ref().is_some_and(
+-                            crate::learning_mode_windows::LearningModeError::is_api_unavailable,
+-                        ) {
+-                        FailurePhase::BackendUnavailable
+-                    } else {
+-                        FailurePhase::LaunchFailed
+-                    };
+-                    if capture_denials.is_some() {
+-                        self.cleanup_capture_begin_failure(logger);
+-                    }
+-                    return Err(ScriptResponse {
+-                        exit_code: -1,
+-                        error_message: msg.clone(),
+-                        standard_err: msg,
+-                        failure_phase,
+-                        ..Default::default()
+-                    });
+                 }
+-            };
++                let _ = writeln!(logger, "Error: {msg}");
++                log_base_network_policy_audit(request, &identity, OperationStatus::Failure, logger);
++                let failure_phase = if primary.is_api_unavailable()
++                    || cleanup_error.as_ref().is_some_and(
++                        crate::learning_mode_windows::LearningModeError::is_api_unavailable,
++                    ) {
++                    FailurePhase::BackendUnavailable
++                } else {
++                    FailurePhase::LaunchFailed
++                };
++                if capture_denials.is_some() {
++                    self.cleanup_capture_begin_failure(logger);
++                }
++                return Err(ScriptResponse {
++                    exit_code: -1,
++                    error_message: msg.clone(),
++                    standard_err: msg,
++                    failure_phase,
++                    ..Default::default()
++                });
++            }
++        };
++        // Construct the normal startup list above as an unexecuted reference.
++        // The PSEC object remains owned, but ONLY the HANDLE_LIST-only list is
++        // selected below. No PSEC launch is attempted or retried by this control.
++        let control_startup =
++            SecurityEnvironmentStartupInfo::fixed_claude_control(si, &inherited_handles).map_err(
++                |_| ScriptResponse::rejected("fixed control startup construction refused"),
++            )?;
++        let buffers = [
++            application_wide
++                .as_deref()
++                .ok_or_else(|| ScriptResponse::rejected("fixed control image missing"))?,
++            cmd_wide.as_slice(),
++            env_block
++                .as_deref()
++                .ok_or_else(|| ScriptResponse::rejected("fixed control environment missing"))?,
++            cwd_wide.as_slice(),
++        ];
++        let reference = FixedClaudeControlInputs::freeze(
++            buffers,
++            current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
++            !inherited_handles.is_empty(),
++            &extended_startup.startup_info().StartupInfo,
++            &inherited_handles,
++        )?;
++        let selected = FixedClaudeControlInputs::freeze(
++            buffers,
++            current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
++            !inherited_handles.is_empty(),
++            &control_startup.startup_info().StartupInfo,
++            &inherited_handles,
++        )?;
++        if reference != selected {
++            return Err(ScriptResponse::rejected(
++                "fixed control launch inputs differ",
++            ));
++        }
++        // Fixed public evidence only. The reference is constructed, not run.
++        println!(
++            "{{\"fixed_create_control_inputs_equal\":true,\"psec_attribute_attached\":false,\"constructed_psec_attribute_count\":2,\"selected_attribute_count\":1}}"
++        );
+         let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
+         // Freeze numeric shape before the native call. UTF-16 block lengths
+         // include their NUL terminators; counts never carry source values.
+@@ -1603,7 +1818,7 @@ impl BaseContainerRunner {
+                     current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
+                     current_env_ptr,
+                     cwd_ptr,
+-                    &extended_startup.startup_info().StartupInfo,
++                    &control_startup.startup_info().StartupInfo,
+                     &mut pi,
+                 )
+             };
+diff --git a/src/mxc-sdk/src/backends/process_container/common/secenv.rs b/src/mxc-sdk/src/backends/process_container/common/secenv.rs
+index 4d76514088e0de1c9189368c47c7308d6e500e0e..006eab2673a43238410d76acdc9062213c2075a7 100644
+--- a/src/mxc-sdk/src/backends/process_container/common/secenv.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/secenv.rs
+@@ -187,11 +187,36 @@ pub struct SecurityEnvironmentStartupInfo {
+ impl SecurityEnvironmentStartupInfo {
+     /// Add `environment` to an extended copy of `startup_info`.
+     pub fn new(
+-        mut startup_info: STARTUPINFOW,
++        startup_info: STARTUPINFOW,
+         environment: HANDLE,
+         inherited_handles: &[HANDLE],
+     ) -> Result<Self, LearningModeError> {
+-        let attribute_count = 1 + u32::from(!inherited_handles.is_empty());
++        Self::new_inner(startup_info, Some(environment), inherited_handles)
++    }
++
++    // CONTRIBUTOR CONTROL ONLY. The separately fingerprinted fifth overlay
++    // removes PSEC attachment for exactly one fixed Claude --version control.
++    // This is not a sandbox or a fallback and is absent from ordinary builds.
++    pub(crate) fn fixed_claude_control(
++        startup_info: STARTUPINFOW,
++        inherited_handles: &[HANDLE],
++    ) -> Result<Self, LearningModeError> {
++        if inherited_handles.len() != 3 {
++            return Err(LearningModeError::ApiCall {
++                function: "fixed Claude control requires exactly three pipe handles",
++                code: windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
++            });
++        }
++        Self::new_inner(startup_info, None, inherited_handles)
++    }
++
++    fn new_inner(
++        mut startup_info: STARTUPINFOW,
++        environment: Option<HANDLE>,
++        inherited_handles: &[HANDLE],
++    ) -> Result<Self, LearningModeError> {
++        let attribute_count =
++            u32::from(environment.is_some()) + u32::from(!inherited_handles.is_empty());
+         let mut byte_count = 0usize;
+         // SAFETY: the documented sizing call uses a null list and writes only
+         // the required byte count.
+@@ -225,21 +250,22 @@ impl SecurityEnvironmentStartupInfo {
+             code: last_error(),
+         })?;
+ 
+-        let environment_value = Box::new(environment);
++        let environment_value = Box::new(environment.unwrap_or_default());
+         // SAFETY: the attribute list is initialized, and the boxed HANDLE has
+         // a stable address that outlives every use of the list.
+-        if unsafe {
+-            UpdateProcThreadAttribute(
+-                attribute_list,
+-                0,
+-                PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
+-                Some((&raw const *environment_value).cast()),
+-                std::mem::size_of::<HANDLE>(),
+-                None,
+-                None,
+-            )
+-        }
+-        .is_err()
++        if environment.is_some()
++            && unsafe {
++                UpdateProcThreadAttribute(
++                    attribute_list,
++                    0,
++                    PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
++                    Some((&raw const *environment_value).cast()),
++                    std::mem::size_of::<HANDLE>(),
++                    None,
++                    None,
++                )
++            }
++            .is_err()
+         {
+             let code = last_error();
+             // SAFETY: balances the successful initialization above.

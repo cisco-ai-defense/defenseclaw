@@ -533,7 +533,7 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
 	defer cancel()
-	b, unlock, err := m.lockBox(name)
+	b, unlock, err := m.lockOwnedBox(name)
 	if err != nil {
 		m.logf("%s: stop %s: %v", what, name, err)
 		return

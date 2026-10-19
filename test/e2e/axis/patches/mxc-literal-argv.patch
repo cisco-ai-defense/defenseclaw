@@ -1,0 +1,985 @@
+--- a/src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs
++++ b/src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs
+@@ -540,8 +540,75 @@
+     args
+ }
+ 
++/// Preserve the legacy command path, or replace only its fixed command tail
++/// with explicit OS argv. No argument is rendered or parsed as shell text.
++pub(crate) fn command_with_argv(
++    args: &[String],
++    literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++) -> Result<std::process::Command, crate::mxc_common::models::ScriptResponse> {
++    let mut command = std::process::Command::new("bwrap");
++    if let Some(argv) = literal {
++        let prefix = args
++            .len()
++            .checked_sub(COMMAND_TAIL.len() + 1)
++            .ok_or_else(|| {
++                crate::mxc_common::models::ScriptResponse::rejected(
++                    "unrecognized Bubblewrap command layout",
++                )
++            })?;
++        if args[prefix..prefix + COMMAND_TAIL.len()] != COMMAND_TAIL {
++            return Err(crate::mxc_common::models::ScriptResponse::rejected(
++                "unrecognized Bubblewrap command layout",
++            ));
++        }
++        command.args(&args[..prefix]).arg("--").args(argv.values());
++    } else {
++        command.args(args);
++    }
++    Ok(command)
++}
++
+ #[cfg(test)]
+ mod tests {
++
++    #[test]
++    fn literal_argv_does_not_use_the_shell_command_tail() {
++        use crate::mxc_common::literal_argv::LiteralArgv;
++        use std::ffi::OsString;
++        let program = if cfg!(windows) {
++            r"C:\fixed\probe.exe"
++        } else {
++            "/fixed/probe"
++        };
++        let values: Vec<OsString> = vec![
++            program.into(),
++            "".into(),
++            "$(no-expansion); 'quoted' *".into(),
++        ];
++        let literal = LiteralArgv::new(values.clone()).unwrap();
++        let args: Vec<String> = ["--unshare-pid", "--", "sh", "-c", "legacy script"]
++            .into_iter()
++            .map(str::to_owned)
++            .collect();
++        let command = command_with_argv(&args, Some(&literal)).unwrap();
++        let wanted = [
++            vec![OsString::from("--unshare-pid"), OsString::from("--")],
++            values,
++        ]
++        .concat();
++        assert_eq!(
++            command.get_args().collect::<Vec<_>>(),
++            wanted.iter().map(OsString::as_os_str).collect::<Vec<_>>()
++        );
++        assert_eq!(
++            command_with_argv(&args, None)
++                .unwrap()
++                .get_args()
++                .collect::<Vec<_>>(),
++            args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
++        );
++        assert!(command_with_argv(&["unexpected".into()], Some(&literal)).is_err());
++    }
+     use super::*;
+ 
+     fn base_request() -> ExecutionRequest {
+--- a/src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs
++++ b/src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs
+@@ -18,7 +18,7 @@
+ use std::os::fd::AsFd;
+ use std::os::unix::process::CommandExt;
+ use std::path::{Path, PathBuf};
+-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
++use std::process::{Child, ChildStdin, ExitStatus, Stdio};
+ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+ use std::time::{Duration, Instant};
+ 
+@@ -91,10 +91,36 @@
+         logger: &mut Logger,
+         stdio: StdioMode,
+     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+-        validate_common(request)?;
++        self.spawn_command(request, logger, stdio, None)
++    }
++
++    fn spawn_argv(
++        &mut self,
++        request: &ExecutionRequest,
++        argv: &crate::mxc_common::literal_argv::LiteralArgv,
++        logger: &mut Logger,
++        stdio: StdioMode,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        self.spawn_command(request, logger, stdio, Some(argv))
++    }
++}
++
++impl BubblewrapScriptRunner {
++    fn spawn_command(
++        &mut self,
++        request: &ExecutionRequest,
++        logger: &mut Logger,
++        stdio: StdioMode,
++        literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        match literal {
++            Some(argv) => crate::mxc_common::validator::validate_argv_common(request, argv)?,
++            None => validate_common(request)?,
++        }
+         // Keep the plan validation derived so the firewall path installs
+         // exactly what was accepted instead of deriving it again.
+-        let egress_plan = self.validate_prepared(request)?;
++        let egress_plan =
++            self.validate_prepared_command(request, literal, bwrap_version::probe_bwrap_uncached)?;
+         if let Some(plan) = egress_plan.as_ref() {
+             warn_unreachable_v6_targets(plan, logger);
+         }
+@@ -150,7 +176,7 @@
+         }
+         warn_resolver_mount_hint(request, logger);
+         warn_cwd_mount_hint(request, logger);
+-        let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
++        let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio, literal)?;
+         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+     }
+ }
+@@ -183,12 +209,24 @@
+     where
+         F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+     {
++        self.validate_prepared_command(request, None, probe)
++    }
++
++    fn validate_prepared_command<F>(
++        &self,
++        request: &ExecutionRequest,
++        literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++        probe: F,
++    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse>
++    where
++        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
++    {
+         validate_network_policy_support(request, self.network_policy_support())?;
+ 
+         // User-input validation runs before the environmental `bwrap`
+         // probe so config errors are reported deterministically even on
+         // hosts without bwrap installed.
+-        if request.script_code.is_empty() {
++        if literal.is_none() && request.script_code.is_empty() {
+             return Err(ScriptResponse::error(
+                 "script_code is empty — nothing to execute.",
+             ));
+@@ -437,6 +475,7 @@
+         egress_plan: Option<network_rules::EgressPlan>,
+         logger: &mut Logger,
+         stdio: StdioMode,
++        literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
+     ) -> Result<BwrapChild, ScriptResponse> {
+         // The caller manages the proxy; pass its address into the sandbox
+         // environment and restrict direct egress to that endpoint.
+@@ -546,8 +585,13 @@
+         );
+ 
+         // 3. Spawn `bwrap`.
+-        let mut command = Command::new("bwrap");
+-        command.args(&args);
++        let mut command = match bwrap_command::command_with_argv(&args, literal) {
++            Ok(command) => command,
++            Err(error) => {
++                stop_proxy_network(&mut proxy_network, logger);
++                return Err(error);
++            }
++        };
+         let pty = match stdio {
+             StdioMode::Pipes => {
+                 command
+--- a/src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs
++++ b/src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs
+@@ -292,7 +292,32 @@
+         logger: &mut Logger,
+         stdio: StdioMode,
+     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+-        validate_common(request)?;
++        self.spawn_command(request, logger, stdio, None)
++    }
++
++    fn spawn_argv(
++        &mut self,
++        request: &ExecutionRequest,
++        argv: &crate::mxc_common::literal_argv::LiteralArgv,
++        logger: &mut Logger,
++        stdio: StdioMode,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        self.spawn_command(request, logger, stdio, Some(argv))
++    }
++}
++
++impl SeatbeltScriptRunner {
++    fn spawn_command(
++        &mut self,
++        request: &ExecutionRequest,
++        logger: &mut Logger,
++        stdio: StdioMode,
++        literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        match literal {
++            Some(argv) => crate::mxc_common::validator::validate_argv_common(request, argv)?,
++            None => validate_common(request)?,
++        }
+         self.validate(request)?;
+ 
+         // The caller manages the proxy. Scope the profile's reachability rule
+@@ -316,7 +341,15 @@
+         // streaming either.
+         let gui_access = crate::seatbelt_common::seatbelt_policy::gui_access_effective(request);
+ 
+-        spawn_exec(&profile, request, gui_access, stdio, logger, proxy_address)
++        spawn_exec(
++            &profile,
++            request,
++            gui_access,
++            stdio,
++            logger,
++            proxy_address,
++            literal,
++        )
+     }
+ }
+ 
+@@ -334,6 +367,7 @@
+     stdio: StdioMode,
+     logger: &mut Logger,
+     proxy_address: Option<&ProxyAddress>,
++    literal: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
+ ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+     if gui_access && stdio != StdioMode::Inherit {
+         let mode = if stdio == StdioMode::Pipes {
+@@ -357,17 +391,28 @@
+     // this is limited to timeout-bounded runs, which are inherently
+     // non-interactive.
+     let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+-    let (mut command, pty) = build_sandbox_command(
+-        profile,
+-        &request.script_code,
+-        new_session,
+-        new_group,
+-        match stdio {
+-            StdioMode::Pty(size) => Some(size),
+-            _ => None,
+-        },
+-        logger,
+-    )?;
++    let pty_size = match stdio {
++        StdioMode::Pty(size) => Some(size),
++        _ => None,
++    };
++    let (mut command, pty) = match literal {
++        Some(argv) => protect_sandbox_command(
++            profile,
++            argv.command(),
++            new_session,
++            new_group,
++            pty_size,
++            logger,
++        ),
++        None => build_sandbox_command(
++            profile,
++            &request.script_code,
++            new_session,
++            new_group,
++            pty_size,
++            logger,
++        ),
++    }?;
+ 
+     // Always start from a cleared environment so untrusted sandboxed code never
+     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
+@@ -788,13 +833,23 @@
+     pty_size: Option<PtySize>,
+     logger: &mut Logger,
+ ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
++    let mut command = Command::new(DEFAULT_SHELL);
++    command.arg("-c").arg(script_code);
++    protect_sandbox_command(profile, command, new_session, new_group, pty_size, logger)
++}
++
++fn protect_sandbox_command(
++    profile: &str,
++    mut command: Command,
++    new_session: bool,
++    new_group: bool,
++    pty_size: Option<PtySize>,
++    logger: &mut Logger,
++) -> Result<(Command, Option<LivePty>), ScriptResponse> {
+     let profile_cstr = CString::new(profile)
+         .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+ 
+     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
+-
+-    let mut command = Command::new(DEFAULT_SHELL);
+-    command.arg("-c").arg(script_code);
+ 
+     // When requested (streaming path), put the child in its own session /
+     // process group via `setsid()` so a caller can tree-kill it with a single
+@@ -1026,6 +1081,34 @@
+     }
+ 
+     #[test]
++    fn literal_command_preserves_argv_without_constructing_a_shell() {
++        use crate::mxc_common::literal_argv::LiteralArgv;
++        use std::ffi::OsString;
++        let values: Vec<OsString> =
++            vec!["/fixed/probe".into(), "".into(), "$(literal); '*?".into()];
++        let argv = LiteralArgv::new(values.clone()).unwrap();
++        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
++        let (command, pty) = protect_sandbox_command(
++            "(version 1)",
++            argv.command(),
++            false,
++            false,
++            None,
++            &mut logger,
++        )
++        .unwrap();
++        assert!(pty.is_none());
++        assert_eq!(command.get_program(), values[0]);
++        assert_eq!(
++            command.get_args().collect::<Vec<_>>(),
++            values[1..]
++                .iter()
++                .map(OsString::as_os_str)
++                .collect::<Vec<_>>()
++        );
++    }
++
++    #[test]
+     fn gui_access_rejects_caller_owned_pty() {
+         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+         let error = spawn_exec(
+@@ -1034,6 +1117,7 @@
+             true,
+             StdioMode::Pty(PtySize::default()),
+             &mut logger,
++            None,
+             None,
+         )
+         .err()
+--- /dev/null
++++ b/src/mxc-sdk/src/core/mxc_common/literal_argv.rs
+@@ -0,0 +1,166 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++//! Explicit, non-serialized literal argv. Construction does not authorize execution.
++
++use std::ffi::{OsStr, OsString};
++use std::path::Path;
++#[cfg(any(target_os = "macos", test))]
++use std::process::Command;
++
++use super::mxc_error::MxcError;
++
++#[derive(Clone)]
++pub struct LiteralArgv {
++    values: Vec<OsString>,
++}
++
++impl std::fmt::Debug for LiteralArgv {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("LiteralArgv")
++            .field("argc", &self.values.len())
++            .finish_non_exhaustive()
++    }
++}
++
++impl LiteralArgv {
++    pub fn new(values: Vec<OsString>) -> Result<Self, MxcError> {
++        if values.is_empty() || values.len() > 4096 {
++            return Err(MxcError::malformed_request(
++                "literal argv requires 1..4096 entries",
++            ));
++        }
++        if values[0].is_empty() || !Path::new(&values[0]).is_absolute() {
++            return Err(MxcError::malformed_request(
++                "literal argv requires an absolute executable path",
++            ));
++        }
++        let mut bytes = 0usize;
++        for value in &values {
++            let encoded = value.as_encoded_bytes();
++            if encoded.contains(&0) {
++                return Err(MxcError::malformed_request(
++                    "literal argv contains an embedded NUL",
++                ));
++            }
++            bytes = bytes.checked_add(encoded.len() + 1).ok_or_else(|| {
++                MxcError::malformed_request("literal argv exceeds its size bound")
++            })?;
++            if bytes > 1024 * 1024 {
++                return Err(MxcError::malformed_request(
++                    "literal argv exceeds its size bound",
++                ));
++            }
++        }
++        Ok(Self { values })
++    }
++
++    pub fn program(&self) -> &OsStr {
++        &self.values[0]
++    }
++    pub fn arguments(&self) -> &[OsString] {
++        &self.values[1..]
++    }
++    pub fn values(&self) -> &[OsString] {
++        &self.values
++    }
++
++    #[cfg(any(target_os = "macos", test))]
++    pub(crate) fn command(&self) -> Command {
++        let mut command = Command::new(self.program());
++        command.args(self.arguments());
++        command
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::mxc_common::logger::{Logger, Mode};
++    use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
++    use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
++
++    fn program() -> OsString {
++        if cfg!(windows) {
++            r"C:\fixed\probe.exe".into()
++        } else {
++            "/fixed/probe".into()
++        }
++    }
++
++    #[test]
++    fn literal_command_preserves_empty_metacharacter_and_unicode_arguments() {
++        let values = vec![
++            program(),
++            "".into(),
++            "a b".into(),
++            "'\"$()`;&|<>~*?".into(),
++            "nonascii-λ-雪".into(),
++        ];
++        let argv = LiteralArgv::new(values.clone()).unwrap();
++        let command = argv.command();
++        assert_eq!(command.get_program(), values[0]);
++        assert_eq!(
++            command.get_args().collect::<Vec<_>>(),
++            values[1..]
++                .iter()
++                .map(OsString::as_os_str)
++                .collect::<Vec<_>>()
++        );
++        assert!(!format!("{argv:?}").contains("nonascii"));
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn literal_command_preserves_non_utf8_os_arguments() {
++        use std::os::unix::ffi::OsStringExt;
++        let argument = OsString::from_vec(vec![b'a', 0xff, b'\'']);
++        let argv = LiteralArgv::new(vec![program(), argument.clone()]).unwrap();
++        assert_eq!(argv.command().get_args().next(), Some(argument.as_os_str()));
++    }
++
++    #[test]
++    fn literal_command_refuses_empty_relative_nul_and_oversize_values() {
++        assert!(LiteralArgv::new(vec![]).is_err());
++        assert!(LiteralArgv::new(vec!["".into()]).is_err());
++        assert!(LiteralArgv::new(vec!["relative".into()]).is_err());
++        assert!(LiteralArgv::new(vec![program(), "nul\0argument".into()]).is_err());
++        assert!(LiteralArgv::new(vec![program(); 4097]).is_err());
++        assert!(LiteralArgv::new(vec![program(), "x".repeat(1024 * 1024).into()]).is_err());
++    }
++
++    #[test]
++    fn typed_validation_rejects_command_ambiguity_and_retains_common_policy_checks() {
++        let argv = LiteralArgv::new(vec![program()]).unwrap();
++        let mut request = ExecutionRequest::default();
++        request.script_code = "legacy command".into();
++        assert!(crate::mxc_common::validator::validate_argv_common(&request, &argv).is_err());
++        request.script_code.clear();
++        request.containment = crate::mxc_common::models::ContainmentBackend::Bubblewrap;
++        request.policy.enumerate_paths = vec!["/fixed/enumerate".into()];
++        assert!(crate::mxc_common::validator::validate_argv_common(&request, &argv).is_err());
++    }
++
++    #[test]
++    fn an_unimplemented_backend_refuses_without_calling_legacy_spawn() {
++        struct LegacyOnly;
++        impl SandboxBackend for LegacyOnly {
++            fn spawn(
++                &mut self,
++                _: &ExecutionRequest,
++                _: &mut Logger,
++                _: StdioMode,
++            ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++                panic!("literal argv must never fall back to legacy spawn")
++            }
++        }
++        let result = LegacyOnly.spawn_argv(
++            &ExecutionRequest::default(),
++            &LiteralArgv::new(vec![program()]).unwrap(),
++            &mut Logger::new(Mode::Buffer),
++            StdioMode::Pipes,
++        );
++        assert!(result.is_err());
++    }
++}
+--- a/src/mxc-sdk/src/core/mxc_common/mod.rs
++++ b/src/mxc-sdk/src/core/mxc_common/mod.rs
+@@ -18,6 +18,7 @@
+ pub mod filesystem_resolve;
+ pub mod hashing;
+ pub mod id;
++pub mod literal_argv;
+ pub mod log_symbols;
+ pub mod logger;
+ #[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
+--- a/src/mxc-sdk/src/core/mxc_common/sandbox_process.rs
++++ b/src/mxc-sdk/src/core/mxc_common/sandbox_process.rs
+@@ -593,6 +593,20 @@
+         logger: &mut Logger,
+         stdio: StdioMode,
+     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
++
++    /// Explicit literal argv. An unsupported backend must refuse, never quote
++    /// argv into a script or call the legacy spawn method.
++    fn spawn_argv(
++        &mut self,
++        _request: &ExecutionRequest,
++        _argv: &crate::mxc_common::literal_argv::LiteralArgv,
++        _logger: &mut Logger,
++        _stdio: StdioMode,
++    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
++        Err(ScriptResponse::rejected(
++            "literal argv is unsupported by this backend",
++        ))
++    }
+ 
+     /// Optional post-exit diagnostics for the run-to-completion (binary) path:
+     /// when the child exits non-zero, return a more actionable error message
+--- a/src/mxc-sdk/src/core/mxc_common/validator.rs
++++ b/src/mxc-sdk/src/core/mxc_common/validator.rs
+@@ -150,6 +150,24 @@
+         return Err(ScriptResponse::error("Script content must not be empty."));
+     }
+ 
++    validate_common_policy(request)
++}
++
++/// Typed argv is authoritative only with an empty legacy command. This is
++/// intentionally incompatible with every legacy spawn validator.
++pub fn validate_argv_common(
++    request: &ExecutionRequest,
++    _argv: &crate::mxc_common::literal_argv::LiteralArgv,
++) -> Result<(), ScriptResponse> {
++    if !request.script_code.is_empty() {
++        return Err(ScriptResponse::rejected(
++            "literal argv requires an empty legacy command",
++        ));
++    }
++    validate_common_policy(request)
++}
++
++fn validate_common_policy(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+     if !request.policy.enumerate_paths.is_empty()
+         && request.containment != crate::mxc_common::models::ContainmentBackend::ProcessContainer
+     {
+--- a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+@@ -111,6 +111,45 @@
+             "the mxc engine does not yet support PTY spawning for the '{}' backend",
+             other.wire_name()
+         ))),
++    }
++}
++
++/// Explicit literal argv dispatch; deliberately no backend or shell fallback.
++pub(super) fn spawn_argv_runner(
++    request: &ExecutionRequest,
++    argv: &crate::mxc_common::literal_argv::LiteralArgv,
++    logger: &mut Logger,
++    stdio: StdioMode,
++) -> Result<Box<dyn SandboxProcess>, MxcError> {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    use crate::mxc_common::sandbox_process::SandboxBackend;
++    ensure_host_supported()?;
++    if request.dry_run {
++        return Err(MxcError::malformed_request(
++            "dry_run is unsupported for literal argv spawning",
++        ));
++    }
++    if let StdioMode::Pty(size) = stdio {
++        size.validate()?;
++    }
++    match &request.containment {
++        #[cfg(target_os = "linux")]
++        ContainmentBackend::Bubblewrap => {
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner::new()
++                .spawn_argv(request, argv, logger, stdio)
++                .map_err(map_spawn_error)
++        }
++        #[cfg(target_os = "macos")]
++        ContainmentBackend::Seatbelt => {
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new()
++                .spawn_argv(request, argv, logger, stdio)
++                .map_err(map_spawn_error)
++        }
++        _ => Err(MxcError::unsupported_containment(
++            "literal argv requires an explicitly supported native backend; no fallback is available",
++        )),
+     }
+ }
+ 
+--- /dev/null
++++ b/src/mxc-sdk/src/core/mxc_engine/literal_argv.rs
+@@ -0,0 +1,47 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++use crate::mxc_common::literal_argv::LiteralArgv;
++use crate::mxc_common::logger::{Logger, Mode};
++use crate::mxc_common::models::ExecutionRequest;
++use crate::mxc_common::sandbox_process::{SandboxProcess, StdioMode};
++
++pub(crate) fn spawn_literal_argv(
++    request: &ExecutionRequest,
++    argv: &LiteralArgv,
++    stdio: StdioMode,
++) -> Result<Box<dyn SandboxProcess>, super::Error> {
++    super::spawn_execution_request_with_logger_and(
++        request,
++        Logger::new(Mode::Buffer),
++        |request, logger| super::dispatch::spawn_argv_runner(request, argv, logger, stdio),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::mxc_common::models::ContainmentBackend;
++
++    #[test]
++    fn unsupported_argv_backend_refuses_before_platform_or_spawn() {
++        let request = ExecutionRequest {
++            containment: ContainmentBackend::Lxc,
++            ..Default::default()
++        };
++        let program = if cfg!(windows) {
++            r"C:\fixed\probe.exe"
++        } else {
++            "/fixed/probe"
++        };
++        let argv = LiteralArgv::new(vec![program.into()]).unwrap();
++        let error = spawn_literal_argv(&request, &argv, StdioMode::Pipes)
++            .err()
++            .expect("unsupported literal backend must refuse");
++        assert_eq!(
++            error.code,
++            crate::mxc_engine::ErrorCode::UnsupportedContainment
++        );
++        assert!(error.message.contains("no fallback"));
++    }
++}
+--- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+@@ -33,6 +33,8 @@
+ mod dispatch;
+ mod error;
+ mod experimental;
++mod literal_argv;
++pub(crate) use literal_argv::spawn_literal_argv;
+ #[cfg(target_os = "windows")]
+ mod guarded_capture;
+ mod platform;
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -202,6 +202,7 @@
+ pub use core_modules::process_security_environment_spec;
+ 
+ mod configs;
++mod literal_argv;
+ mod options;
+ mod policy;
+ mod sandbox;
+@@ -225,6 +226,11 @@
+ /// schema version.
+ ///
+ pub mod v1 {
++    /// Explicit literal OS argv; unsupported backends refuse without fallback.
++    pub mod argv {
++        pub use crate::literal_argv::{spawn, spawn_with_pty};
++    }
++
+     pub use crate::mxc_engine::{
+         available_backends, platform_support, AvailableBackend, BackendCapability,
+         BubblewrapNetworkSupport, Error, ErrorCode, PlatformSupport, ProxyEnforcement,
+--- /dev/null
++++ b/src/mxc-sdk/src/literal_argv.rs
+@@ -0,0 +1,132 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++//! Additive typed argv entry points; no JSON/schema or legacy command changes.
++
++use std::ffi::OsString;
++
++use crate::mxc_common::literal_argv::LiteralArgv;
++use crate::mxc_common::mxc_error::MxcError;
++use crate::mxc_common::sandbox_process::StdioMode;
++use crate::mxc_engine::Error;
++use crate::policy::{ContainerRequest, PreparedContainerRequest};
++use crate::sandbox::{MxcProcess, MxcPtyProcess};
++
++struct PreparedArgvRequest {
++    policy: PreparedContainerRequest,
++    argv: LiteralArgv,
++}
++
++fn prepare(
++    request: ContainerRequest,
++    values: Vec<OsString>,
++    telemetry: Option<crate::options::TelemetryConfig>,
++) -> Result<PreparedArgvRequest, Error> {
++    if !request.command.is_empty() {
++        return Err(MxcError::malformed_request(
++            "literal argv requires an empty legacy command field",
++        )
++        .into());
++    }
++    if !matches!(
++        request.containment,
++        crate::policy::Containment::Bubblewrap | crate::policy::Containment::Seatbelt(_)
++    ) {
++        return Err(MxcError::unsupported_containment(
++            "literal argv requires an explicit supported backend, not an abstract process intent",
++        )
++        .into());
++    }
++    let argv = LiteralArgv::new(values)?;
++    let policy = crate::policy::prepare_literal_creation_request(&request, &argv, telemetry)?;
++    // The opaque value cannot exist while a legacy command/token is present.
++    crate::mxc_common::validator::validate_argv_common(&policy.inner, &argv).map_err(|_| {
++        MxcError::malformed_request(
++            "literal argv preparation retained an invalid legacy command or policy",
++        )
++    })?;
++    Ok(PreparedArgvRequest { policy, argv })
++}
++
++/// Spawn literal native OS arguments in an explicitly selected supported
++/// backend. `request.command` must be empty; argv[0] must be absolute.
++/// This contributor seam supports Bubblewrap and Seatbelt only and never
++/// retries through another backend or the legacy shell-command API.
++pub fn spawn(
++    request: ContainerRequest,
++    argv: Vec<OsString>,
++    options: crate::options::SpawnOptions,
++) -> Result<MxcProcess, Error> {
++    let PreparedArgvRequest { policy, argv } = prepare(request, argv, options.telemetry)?;
++    crate::mxc_engine::spawn_literal_argv(&policy.inner, &argv, StdioMode::Pipes)
++        .map(MxcProcess::new)
++}
++
++/// Spawn literal native OS arguments attached to the selected backend's PTY.
++/// Policy, environment, timeout and handle ownership match `argv::spawn`.
++pub fn spawn_with_pty(
++    request: ContainerRequest,
++    argv: Vec<OsString>,
++    options: crate::options::SpawnWithPtyOptions,
++) -> Result<MxcPtyProcess, Error> {
++    options.size.validate()?;
++    let PreparedArgvRequest { policy, argv } = prepare(request, argv, options.telemetry)?;
++    crate::mxc_engine::spawn_literal_argv(&policy.inner, &argv, StdioMode::Pty(options.size.into()))
++        .and_then(MxcPtyProcess::new)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn program() -> OsString {
++        if cfg!(windows) {
++            r"C:\fixed\probe.exe".into()
++        } else {
++            "/fixed/probe".into()
++        }
++    }
++
++    #[test]
++    fn argv_preparation_rejects_ambiguous_legacy_command() {
++        assert!(prepare(
++            ContainerRequest::new("legacy command"),
++            vec![program()],
++            None
++        )
++        .is_err());
++    }
++
++    #[test]
++    fn argv_preparation_refuses_abstract_process_selection() {
++        assert!(prepare(ContainerRequest::new(""), vec![program()], None).is_err());
++    }
++
++    #[test]
++    fn argv_preparation_preserves_empty_environment_and_policy() {
++        let request = ContainerRequest {
++            containment: crate::policy::Containment::Bubblewrap,
++            working_directory: Some("/fixed/workspace".into()),
++            environment: Some(Vec::new()),
++            inherit_default_environment: Some(false),
++            timeout_ms: Some(1234),
++            ..ContainerRequest::new("")
++        };
++        let PreparedArgvRequest {
++            policy: prepared,
++            argv,
++        } = prepare(request, vec![program(), "".into()], None).unwrap();
++        assert_eq!(prepared.inner.env, Some(Vec::new()));
++        assert!(!prepared.inner.inherit_default_env);
++        assert_eq!(prepared.inner.working_directory, "/fixed/workspace");
++        assert_eq!(prepared.inner.script_timeout, 1234);
++        assert_eq!(argv.arguments(), &[OsString::new()]);
++        assert!(!prepared.inner.experimental_enabled);
++        assert!(prepared.inner.script_code.is_empty());
++        assert!(crate::mxc_common::validator::validate_common(&prepared.inner).is_err());
++        assert!(crate::mxc_common::validator::validate_argv_common(&prepared.inner, &argv).is_ok());
++        assert!(!serde_json::to_string(&prepared.inner)
++            .unwrap()
++            .contains("mxc-literal-policy-normalization-only"));
++    }
++}
+--- a/src/mxc-sdk/src/policy/exact/mod.rs
++++ b/src/mxc-sdk/src/policy/exact/mod.rs
+@@ -91,6 +91,27 @@
+         #[cfg(test)]
+         requested_sandbox_kind: containment.telemetry_kind(),
+     })
++}
++
++/// Pure compatibility mapping only. The exact V1 contract requires a
++/// NonEmptyString even when no shell command exists. Keep this private token
++/// inside that mapper, clear it before returning, and never send it to a
++/// backend, telemetry, or an externally visible diagnostic sink. A future
++/// policy-only exact mapper can remove this compatibility normalization step.
++pub(super) fn build_literal_request(
++    policy: &ContainerPolicy,
++    containment: &Containment,
++    _argv: &crate::mxc_common::literal_argv::LiteralArgv,
++    container_name: Option<&str>,
++) -> Result<PreparedContainerRequest, crate::Error> {
++    let mut prepared = build_request(
++        policy,
++        containment,
++        "mxc-literal-policy-normalization-only",
++        container_name,
++    )?;
++    prepared.inner.script_code.clear();
++    Ok(prepared)
+ }
+ 
+ #[cfg(test)]
+--- a/src/mxc-sdk/src/policy.rs
++++ b/src/mxc-sdk/src/policy.rs
+@@ -849,21 +849,16 @@
+     exact::build_request(policy, containment, script, container_name)
+ }
+ 
+-pub(crate) fn prepare_request(
+-    request: &ContainerRequest,
+-) -> Result<PreparedContainerRequest, crate::Error> {
+-    let policy = ContainerPolicy {
++fn request_policy(request: &ContainerRequest) -> ContainerPolicy {
++    ContainerPolicy {
+         filesystem: request.filesystem.clone(),
+         network: request.network.clone(),
+         ui: request.ui.clone(),
+         timeout_ms: request.timeout_ms,
+-    };
+-    let mut prepared = build_request_with_containment(
+-        &policy,
+-        &request.containment,
+-        &request.command,
+-        request.container_name.as_deref(),
+-    )?;
++    }
++}
++
++fn apply_process_options(request: &ContainerRequest, prepared: &mut PreparedContainerRequest) {
+     prepared.inner.working_directory = request.working_directory.clone().unwrap_or_default();
+     prepared.inner.env = request.environment.as_ref().map(|environment| {
+         environment
+@@ -872,14 +867,13 @@
+             .collect()
+     });
+     prepared.inner.inherit_default_env = request.inherit_default_environment.unwrap_or(false);
+-    Ok(prepared)
+-}
+-
+-pub(crate) fn prepare_creation_request(
++}
++
++fn apply_creation_options(
+     request: &ContainerRequest,
++    prepared: &mut PreparedContainerRequest,
+     telemetry: Option<crate::options::TelemetryConfig>,
+-) -> Result<PreparedContainerRequest, crate::Error> {
+-    let mut prepared = prepare_request(request)?;
++) {
+     prepared.inner.experimental_enabled = false;
+     if let Some(telemetry) = telemetry {
+         prepared.inner.telemetry = Some(TelemetryConfig {
+@@ -887,6 +881,51 @@
+             requested_sandbox_kind: Some(request.containment.telemetry_kind()),
+         });
+     }
++}
++
++pub(crate) fn prepare_request(
++    request: &ContainerRequest,
++) -> Result<PreparedContainerRequest, crate::Error> {
++    let policy = request_policy(request);
++    let mut prepared = build_request_with_containment(
++        &policy,
++        &request.containment,
++        &request.command,
++        request.container_name.as_deref(),
++    )?;
++    apply_process_options(request, &mut prepared);
++    Ok(prepared)
++}
++
++pub(crate) fn prepare_creation_request(
++    request: &ContainerRequest,
++    telemetry: Option<crate::options::TelemetryConfig>,
++) -> Result<PreparedContainerRequest, crate::Error> {
++    let mut prepared = prepare_request(request)?;
++    apply_creation_options(request, &mut prepared, telemetry);
++    Ok(prepared)
++}
++
++pub(crate) fn prepare_literal_creation_request(
++    request: &ContainerRequest,
++    argv: &crate::mxc_common::literal_argv::LiteralArgv,
++    telemetry: Option<crate::options::TelemetryConfig>,
++) -> Result<PreparedContainerRequest, crate::Error> {
++    if !request.command.is_empty() {
++        return Err(crate::mxc_common::mxc_error::MxcError::malformed_request(
++            "literal argv requires an empty legacy command field",
++        )
++        .into());
++    }
++    let policy = request_policy(request);
++    let mut prepared = exact::build_literal_request(
++        &policy,
++        &request.containment,
++        argv,
++        request.container_name.as_deref(),
++    )?;
++    apply_process_options(request, &mut prepared);
++    apply_creation_options(request, &mut prepared, telemetry);
+     Ok(prepared)
+ }
+ 

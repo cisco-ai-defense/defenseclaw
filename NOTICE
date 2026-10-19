@@ -84,8 +84,9 @@ inventory the gateway archives. The Windows Setup merged SPDX 2.3 SBOM also
 derives its exact linked Go module inventory from `go version -m`.
 
 THIRD_PARTY_LICENSES.txt is a scoped attribution artifact for dependencies
-added by the structured command and semantic tool-call analysis work, not an
-exhaustive dependency inventory. Its header records the exact covered module
+added by structured command and semantic tool-call analysis, OpenShell,
+vendored Tetragon API definitions, and private native Windows host staging;
+it is not an exhaustive dependency inventory. Its header records the exact covered module
 versions, upstream license sources, and license-text digests. Additional
 license details can be found in each dependency's source repository. Key
 dependencies include:
@@ -111,6 +112,25 @@ dependencies include:
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
   - Tetragon API definitions (github.com/cilium/tetragon/api, vendored) — Apache-2.0
   - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
+
+PRIVATE NATIVE WINDOWS HOST STAGING
+
+The private host-staging implementation uses unmodified go-git v5.19.3 and
+go-billy v5.9.2 plumbing packages (Apache-2.0), with sha1cd v0.7.0
+(Apache-2.0) for collision-detecting Git object hashing. It does not enable an
+AXIS runtime. Git SHA1 object IDs are compatibility identifiers, not policy or
+artifact authorization digests.
+
+THIRD_PARTY_LICENSES.txt retains exact license/patent text and Go module ZIP
+hashes for this compiled import closure, including its unmodified
+ProtonMail/go-crypto, cloudflare/circl, filepath-securejoin, gods, gcfg,
+go-context, go-diff, warnings.v0 and Go supplemental packages. The Windows
+staging import uses filepath-securejoin's BSD-3-Clause root package, not its
+MPL-2.0 pathrs-lite implementation; the upstream mixed-license explanation
+and both license texts are included. Complete covered module sources are
+available from their upstream repositories and the exact versioned Go module
+ZIP URLs described in that attribution section. Per-artifact SBOMs continue
+to identify what each distributed executable actually contains.
 
 The generated observability redaction repertoire includes data derived from the
 Unicode Character Database 13.0 `DerivedAge.txt` file.

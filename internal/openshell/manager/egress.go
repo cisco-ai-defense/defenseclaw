@@ -170,7 +170,7 @@ func (m *Manager) refreshEgress() {
 	m.cfgSeen = cfg
 	boxes := make([]*box, 0, len(m.boxes))
 	for _, b := range m.boxes {
-		if !b.creating && !b.deleted && !b.retained {
+		if b.native == nil && !b.creating && !b.deleted && !b.retained {
 			boxes = append(boxes, b)
 		}
 	}
@@ -339,7 +339,7 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 	m.mu.Lock()
 	var ready []*box
 	for _, b := range m.boxes {
-		if !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
+		if b.native == nil && !b.creating && !b.deleted && b.phase == audit.SandboxPhaseReady {
 			ready = append(ready, b)
 		}
 	}
@@ -460,6 +460,13 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 // ask a proxy refusal raised, proxyAsk), so the managed gateway's record of
 // it names the ask.
 func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, approvalID string) (*sandboxapi.UnblockResponse, error) {
+	// Refuse unsupported providers before configuration synchronization or any
+	// managed approval mutation. The normal lookup below rechecks ownership.
+	if req.Sandbox != "" {
+		if b, err := m.ownedBox(req.Sandbox); err == nil && b.native != nil {
+			return nil, nativeUnsupported()
+		}
+	}
 	host := triage.NormalizeHost(req.Host)
 	if host == "" || strings.ContainsAny(host, "/ \t") {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a destination host is required")
@@ -1095,6 +1102,10 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	}
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
+	if b != nil && b.native != nil {
+		m.mu.Unlock()
+		return // Legacy proxy events cannot select native custody by name.
+	}
 	var ident audit.SandboxIdentity
 	var harnessName string
 	var eff *packs.Effective

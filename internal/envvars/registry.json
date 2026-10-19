@@ -1922,6 +1922,67 @@
       "since": "0.1.0"
     },
     {
+      "name": "DEFENSECLAW_HOST_STAGE_GIT_TREE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects a parent or child of the native Windows host-staging command cleanup fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "parent",
+        "child",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/workspace/git_windows_test.go",
+          "description": "Native Windows test fixture only; production binaries do not read this control."
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOST_STAGE_GIT_TREE_PID",
+      "category": "test_fixture",
+      "purpose": "Passes the private PID publication file to the native Windows host-staging cleanup fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute private test-file path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/workspace/git_windows_test.go",
+          "description": "Native Windows test fixture only; production binaries do not read this control."
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOST_STAGE_GIT_TREE_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Passes the temporary release event token to the native Windows host-staging cleanup fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "private test release-event token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/workspace/git_windows_test.go",
+          "description": "Native Windows test fixture only; production binaries do not read this control."
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_HOST_TZ",
       "category": "hook_internal",
       "purpose": "IANA time zone of the machine a sandbox was created from (`America/New_York`), set inside every OpenShell sandbox by `sandbox run`. The harness launchers, the login-shell profile and the sandbox exec wrapper export TZ from it when TZ is not set and the image has /usr/share/zoneinfo/<zone>, so the sandbox's clock reads like the host's instead of UTC.",

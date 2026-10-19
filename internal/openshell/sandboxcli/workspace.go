@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -115,8 +114,13 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	if err != nil {
 		return err
 	}
-	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
-		return a.undoApply(ctx, api, sb, o)
+	if sb, err := api.Get(ctx, o.Name); err == nil {
+		if err := requireOpenShellOperation(sb, "undo"); err != nil {
+			return err
+		}
+		if sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			return a.undoApply(ctx, api, sb, o)
+		}
 	}
 	preview, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Preview: true, KeepRefs: o.KeepRefs})
 	if err != nil {
@@ -514,7 +518,13 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 	if err != nil {
 		return err
 	}
-	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+	sb, err := api.Get(ctx, o.Name)
+	if err == nil {
+		if err := requireOpenShellOperation(sb, "review"); err != nil {
+			return err
+		}
+	}
+	if err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
 		if err := a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true}); err != nil || !o.Diff || o.Output == OutputJSON {
 			return err
 		}
@@ -531,7 +541,7 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	sb, _ := api.Get(ctx, o.Name)
+	sb, _ = api.Get(ctx, o.Name)
 	if o.Output == OutputJSON {
 		out := struct {
 			*sandboxapi.ReviewResponse
@@ -614,6 +624,9 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	if err := requireOpenShellOperation(sb, "pull"); err != nil {
+		return err
+	}
 	if sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return fmt.Errorf("%s works on your folder directly; use `%s review %s` or `%s undo %s`", o.Name, CommandName, o.Name, CommandName, o.Name)
 	}
@@ -670,7 +683,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		// the sandbox it started is stopped again, and the line says what
 		// was left, where only ^C showed (GAP-0365).
 		pullCtx, done := a.interruptible(ctx)
-		res, err = a.pull(pullCtx, api, a.cli(gateway), sb, true)
+		res, err = a.pull(pullCtx, api, a.openShellWorkspaceTransport(a.cli(gateway), sb.Name), sb, true)
 		interrupted := a.intr != nil && a.intr.fired.Load()
 		done()
 		if err != nil {
@@ -907,11 +920,14 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 }
 
 // pull captures the sandbox's work, saying so when announce is set.
-func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
+func (a *App) pull(ctx context.Context, api API, ex workspace.Execer, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
+	if ex == nil {
+		return nil, errMissingWorkspaceTransport
+	}
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb),
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: ex, SensitiveGlobs: a.reviewGlobs(ctx, sb),
 		Unflushed: !sb.UnflushedAt.IsZero()})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))

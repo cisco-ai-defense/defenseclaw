@@ -1,0 +1,193 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS fixed Linux payload source build
+
+# Build-only. The produced executable is never run in this workflow.
+on:
+  push:
+    branches: [codex/axis-native-build, codex/axis-peer-experiments]
+    paths:
+      - .github/workflows/axis-native-payload-build.yml
+      - test/e2e/axis/native-peer/payload/**
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-native-payload-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+            go.sum
+            test/e2e/axis/native-peer/README.md
+            test/e2e/axis/native-peer/payload
+            .github/workflows/axis-native-payload-build.yml
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Refuse compiler inputs outside the fixed package inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          package = Path('test/e2e/axis/native-peer/payload')
+          expected = ['main_linux.go', 'main_linux_test.go', 'main_other.go']
+          if sorted(path.name for path in package.iterdir()) != expected:
+              raise SystemExit('additional compiler or embedded input refused')
+          if any(not path.is_file() or path.is_symlink() for path in package.iterdir()):
+              raise SystemExit('non-regular source input refused')
+          tracked = subprocess.run(['git', 'ls-tree', '-r', '--name-only', '-z',
+              os.environ['GITHUB_SHA'], '--', package.as_posix()],
+              check=True, capture_output=True, timeout=20).stdout
+          wanted = b''.join((package.as_posix() + '/' + name).encode() + b'\0' for name in expected)
+          if tracked != wanted:
+              raise SystemExit('committed package inventory differs')
+          PY
+      - name: Build two fixed static images and record inert evidence
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+          GOWORK: 'off'
+          GOENV: 'off'
+          GOFLAGS: ''
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(go env GOVERSION)" = "go1.26.5"
+          mkdir payload-build-one payload-build-two payload-artifact
+          mkdir payload-artifact/bin
+          # This unit test injects the raw syscall function; it never queries a
+          # real process group, executes main, spawns, or installs a filter.
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/payload -run '^TestTreeGroupUsesAllowedRawSyscallAndPreservesError$' -count=1 -timeout=15s > payload-artifact/INERT-SYSCALL-TESTS.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path('payload-artifact/INERT-SYSCALL-TESTS.jsonl').read_bytes()
+          if len(raw) > 1024 * 1024:
+              raise SystemExit('inert syscall test output exceeds bound')
+          rows = [json.loads(line) for line in raw.splitlines()]
+          passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
+          if passed != ['TestTreeGroupUsesAllowedRawSyscallAndPreservesError'] or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
+              raise SystemExit('exact inert syscall test inventory refused')
+          Path('payload-artifact/INERT-SYSCALL-TESTS.json').write_text(json.dumps({'passed': passed, 'count': 1, 'raw_syscall_function_injected': True, 'actual_group_query_or_sandbox_execution': False}, indent=2) + '\n')
+          PY
+          go build -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o payload-build-one/payload ./test/e2e/axis/native-peer/payload
+          go build -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o payload-build-two/payload ./test/e2e/axis/native-peer/payload
+          cmp payload-build-one/payload payload-build-two/payload
+          cp payload-build-one/payload payload-artifact/bin/payload
+          go version -m payload-artifact/bin/payload > payload-artifact/GO-BUILDINFO.txt
+          go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOTOOLCHAIN GOROOT GOTOOLDIR > payload-artifact/TOOLCHAIN.json
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import struct
+          import subprocess
+
+          artifact = Path('payload-artifact')
+          def sha(raw):
+              return hashlib.sha256(raw).hexdigest()
+
+          source_files = [
+              'go.mod', 'go.sum', '.github/workflows/axis-native-payload-build.yml',
+              'test/e2e/axis/native-peer/README.md',
+              'test/e2e/axis/native-peer/payload/main_linux.go',
+              'test/e2e/axis/native-peer/payload/main_linux_test.go',
+              'test/e2e/axis/native-peer/payload/main_other.go',
+          ]
+          source_hashes = {}
+          for name in source_files:
+              raw = subprocess.run(['git', 'show', os.environ['GITHUB_SHA'] + ':' + name],
+                  check=True, capture_output=True, timeout=20).stdout
+              if Path(name).read_bytes() != raw or not 0 < len(raw) < 1024 * 1024:
+                  raise SystemExit('source identity or bound refused')
+              target = artifact / 'source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(raw)
+              source_hashes[name] = sha(raw)
+
+          image = (artifact / 'bin/payload').read_bytes()
+          if not 64 <= len(image) <= 32 * 1024 * 1024:
+              raise SystemExit('payload size refused')
+          header = struct.unpack_from('<16sHHIQQQIHHHHHH', image)
+          if header[0][:7] != b'\x7fELF\x02\x01\x01' or header[1:4] != (2, 62, 1):
+              raise SystemExit('static Linux x86_64 ELF required')
+          entry, offset, size, count = header[4], header[5], header[9], header[10]
+          if header[8] != 64 or size != 56 or not 1 <= count <= 128 or offset < 64 or offset + size * count > len(image):
+              raise SystemExit('ELF program table refused')
+          executable_entry = False
+          for index in range(count):
+              kind, flags, file_offset, address, _, file_size, memory_size, _ = struct.unpack_from('<IIQQQQQQ', image, offset + index * size)
+              if kind in (2, 3) or file_offset + file_size > len(image) or file_size > memory_size:
+                  raise SystemExit('dynamic or malformed ELF refused')
+              executable_entry |= kind == 1 and flags & 1 != 0 and address <= entry < address + memory_size
+          if not executable_entry:
+              raise SystemExit('ELF entry is outside an executable load segment')
+
+          toolchain = json.loads((artifact / 'TOOLCHAIN.json').read_text())
+          if any(toolchain[key] != value for key, value in {
+              'GOVERSION': 'go1.26.5', 'GOOS': 'linux', 'GOARCH': 'amd64',
+              'CGO_ENABLED': '0', 'GOTOOLCHAIN': 'local',
+          }.items()):
+              raise SystemExit('toolchain refused')
+          tools = {'go': Path(toolchain['GOROOT']) / 'bin/go'}
+          tools.update({name: Path(toolchain['GOTOOLDIR']) / name for name in ('compile', 'link', 'asm')})
+          tool_hashes = {name: sha(path.read_bytes()) for name, path in tools.items()}
+          files = {}
+          for path in sorted(artifact.rglob('*')):
+              if path.is_dir():
+                  continue
+              if not stat.S_ISREG(path.lstat().st_mode) or path.is_symlink():
+                  raise SystemExit('artifact file type refused')
+              raw = path.read_bytes()
+              files[path.relative_to(artifact).as_posix()] = {'size': len(raw), 'sha256': sha(raw)}
+          provenance = {
+              'scope': 'fixed_linux_native_peer_payload_build_only',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow': '.github/workflows/axis-native-payload-build.yml',
+              'build_commit': os.environ['GITHUB_SHA'],
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'go_version': 'go1.26.5', 'tool_sha256': tool_hashes,
+              'source_sha256': source_hashes, 'files': files,
+              'static_elf': True, 'two_builds_byte_identical': True,
+              'inert_syscall_tests': json.loads((artifact / 'INERT-SYSCALL-TESTS.json').read_text(encoding='utf-8')),
+              'payload_or_sandbox_execution': False, 'production_certification': False,
+          }
+          (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n', encoding='utf-8')
+          PY
+      - name: Retain the fixed unexecuted payload and source evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-fixed-native-payload-linux-${{ github.sha }}
+          path: payload-artifact/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

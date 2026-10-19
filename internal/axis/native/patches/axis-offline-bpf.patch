@@ -1,0 +1,78 @@
+--- a/crates/axis-sandbox/src/linux/seccomp.rs
++++ b/crates/axis-sandbox/src/linux/seccomp.rs
+@@ -706,6 +706,23 @@
+     Ok(())
+ }
+ 
++/// Private contributor adapter: export the existing x86_64 default-deny BPF
++/// with all socket creation denied, including AF_UNIX. No filter is installed
++/// in this process and no backend, filesystem or resource limit is selected.
++/// The caller must separately enforce those policy components and arrange
++/// no_new_privs plus filter installation before any workload instruction.
++pub fn export_offline_mxc_bpf(policy: &ProcessPolicy) -> Result<Vec<u8>, String> {
++    let mut policy = policy.clone();
++    for syscall in ["socket", "socketpair"] {
++        if !policy.blocked_syscalls.iter().any(|name| name == syscall) {
++            policy.blocked_syscalls.push(syscall.to_owned());
++        }
++    }
++    let filter =
++        prepare_seccomp_with_options(&policy, SeccompOptions::deny_network_socket_domains())?;
++    Ok(filter.export_bpf_bytes())
++}
++
+ pub fn launcher_main_from_env() -> i32 {
+     match run_launcher_from_args(std::env::args_os().skip(1)) {
+         Ok(code) => code,
+@@ -1500,6 +1517,51 @@
+     }
+ 
+     #[test]
++    fn private_offline_export_denies_every_socket_without_installing_filter() {
++        let bytes = export_offline_mxc_bpf(&ProcessPolicy::default()).unwrap();
++        let filter = PreparedSeccompFilter::from_bpf_bytes(&bytes).unwrap();
++        for syscall in [SYS_SOCKET, SYS_SOCKETPAIR] {
++            for domain in [AF_UNIX, 2, 10, 9999] {
++                assert_eq!(
++                    prepared_bpf_decision_for(
++                        &filter,
++                        AUDIT_ARCH_X86_64,
++                        syscall,
++                        [domain as u64, 0, 0, 0, 0, 0]
++                    ),
++                    FilterDecision::Errno(libc::EPERM)
++                );
++            }
++        }
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, AUDIT_ARCH_X86_64, 0, [0; 6]),
++            FilterDecision::Allow
++        );
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, 0, 0, [0; 6]),
++            FilterDecision::KillProcess
++        );
++    }
++
++    #[test]
++    fn private_offline_export_keeps_explicit_blocked_syscalls_and_refuses_unknown() {
++        let mut policy = ProcessPolicy {
++            blocked_syscalls: vec!["uname".into()],
++            ..ProcessPolicy::default()
++        };
++        let bytes = export_offline_mxc_bpf(&policy).unwrap();
++        let filter = PreparedSeccompFilter::from_bpf_bytes(&bytes).unwrap();
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, AUDIT_ARCH_X86_64, 63, [0; 6]),
++            FilterDecision::Errno(libc::EPERM)
++        );
++        policy
++            .blocked_syscalls
++            .push("not_a_supported_syscall".into());
++        assert!(export_offline_mxc_bpf(&policy).is_err());
++    }
++
++    #[test]
+     fn exported_bpf_roundtrip_preserves_action_matrix() {
+         let default_filter = prepare_seccomp(&ProcessPolicy::default()).unwrap();
+         let imported_default =

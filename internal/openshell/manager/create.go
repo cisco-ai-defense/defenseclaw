@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // copyWorkRoot is where copy mode uploads the project: the upload runs as
@@ -84,8 +85,22 @@ func (r *rollback) run(m *Manager, sandbox string) {
 // Create creates a sandbox, waits until it is ready and returns it. Every
 // step it completed is rolled back when a later one fails.
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
+	// These request slices also reach workspace planning and durable run flags.
+	// Own them before a provisioning callback can mutate caller-backed storage.
+	req.Unmask = slices.Clone(req.Unmask)
+	req.HostPorts = slices.Clone(req.HostPorts)
+	req.Context = slices.Clone(req.Context)
 	cfg := m.config()
-	if !cfg.OpenShell.Enabled {
+	selected, err := sandboxruntime.Select(sandboxruntime.ID(req.Runtime), sandboxruntime.ID(cfg.SandboxDefaultRuntime()))
+	if err != nil {
+		return nil, err
+	}
+	// Native execution uses the same reservation and lifecycle owner. Its nil
+	// or unqualified dependency refuses before listeners, paths or credentials.
+	if selected == sandboxruntime.Axis {
+		return m.createNative(ctx, req)
+	}
+	if !cfg.SandboxRuntimeEnabled(string(selected)) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
 	if err := m.listenersReady(); err != nil {
@@ -123,10 +138,17 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
 		RepoPolicy: repo,
 	}
-	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
+	resolved, _, err := packs.ResolveRun(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
-		return nil, err
+		return nil, m.invalidPack(err)
 	}
+	// Planning and provisioning use one owned resolution. A config publication
+	// during a gateway/image operation must not mix new settings with old policy.
+	cfg, resolvedFlags, eff, violations, err := resolved.ExecutionInputs()
+	if err != nil {
+		return nil, m.invalidPack(err)
+	}
+	flags.Unmask, flags.HostPorts, flags.RepoPolicy = resolvedFlags.Unmask, resolvedFlags.HostPorts, resolvedFlags.RepoPolicy
 	if v := packs.FirstFatal(violations); v != nil {
 		return nil, m.violationError(ctx, v, req.Name)
 	}
@@ -212,7 +234,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	defer rb.run(m, name)
 	view, err := m.create(ctx, gw, b, createInput{
 		name: name, project: project, harness: spec, flags: flags, eff: eff, violations: violations, mode: mode, req: req,
-		resources: resources,
+		resources: resources, config: cfg,
 	}, rb)
 	if err != nil {
 		rb.run(m, name)
@@ -227,6 +249,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 }
 
 type createInput struct {
+	config     *config.Config // owned by the same host resolution as eff
 	name       string
 	project    string
 	harness    *harness.Spec
@@ -240,7 +263,7 @@ type createInput struct {
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := in.config
 	eff, spec, name := in.eff, in.harness, in.name
 	egressDec, err := m.egressDecider(cfg, eff)
 	if err != nil {
@@ -385,7 +408,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			}
 		}
 		if !in.req.NoSnapshot {
-			keep, keepBytes := m.keepIgnored()
+			keep, keepBytes := keepIgnoredConfig(cfg)
 			snap, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: in.project, Name: name, DataDir: m.opts.DataDir, Skip: plan.MaskedRels(), Replace: true,
 				Protected: eff.PolicySources(), KeepIgnored: keep, KeepIgnoredBytes: keepBytes,
@@ -1117,6 +1140,12 @@ func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider
 // reserve claims name for a create.
 // reserve claims name for a create of project in the given workdir mode.
 func (m *Manager) reserve(name, project, mode string) (*box, error) {
+	return m.reserveExecution(name, project, mode, nil)
+}
+
+// reserveExecution publishes the provider owner with the name atomically. A
+// concurrent reader/reconciler must never mistake a new native box for OpenShell.
+func (m *Manager) reserveExecution(name, project, mode string, native *nativeSession) (*box, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if old, ok := m.boxes[name]; ok {
@@ -1126,7 +1155,7 @@ func (m *Manager) reserve(name, project, mode string) (*box, error) {
 		}
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "a sandbox named %s already exists", name)
 	}
-	b := &box{rec: record{Name: name, Project: project, WorkdirMode: mode}, creating: true, seenChunks: map[string]struct{}{}}
+	b := &box{rec: record{Name: name, Project: project, WorkdirMode: mode}, native: native, creating: true, seenChunks: map[string]struct{}{}}
 	m.boxes[name] = b
 	return b, nil
 }

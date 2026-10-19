@@ -1,0 +1,117 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC V1 native macOS experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: axis-mxc-v1-macos-live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-live:
+    name: Run the reviewed fixed MXC Seatbelt experiment
+    runs-on: macos-14
+    timeout-minutes: 12
+    steps:
+      - name: Check out the live harness
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: live-source
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/mxc-macos
+
+      - name: Check out the independently reviewed build source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: f8a9055cfe599fb4905f547ffb83f496143b6dfb
+          path: build-source
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/mxc-macos
+
+      # Reviewed build artifacts expire after seven days. Expiry is an expected
+      # fail-closed refusal, not a harness regression; do not select "latest".
+      # Re-pin only after rebuilding the exact reviewed sources with the committed
+      # combined lock, independently checking every source/artifact hash, and
+      # reviewing any changed lock. Update the build checkout SHA, artifact ID,
+      # archive digest, run ID, build SHA/name and external provenance digest
+      # together below. Then manually dispatch this fixed experiment. Helper or
+      # source edits alone never authorize running an older pinned artifact.
+      - name: Fetch only the reviewed locked artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 evidence
+          gh api repos/cisco-ai-defense/defenseclaw/actions/artifacts/12129733150 >evidence/artifact-api.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          item = json.loads(Path('evidence/artifact-api.json').read_text())
+          assert item['id'] == 12129733150 and item['expired'] is False
+          assert item['name'] == 'axis-mxc-v1-macos-contributor-f8a9055cfe599fb4905f547ffb83f496143b6dfb'
+          assert item['digest'] == 'sha256:74fc6c72d75a641cfa14e912de2a50bff289f21ef03d5c2efab687a6d2b58d5c'
+          assert item['workflow_run']['id'] == 39110212879
+          assert item['workflow_run']['head_sha'] == 'f8a9055cfe599fb4905f547ffb83f496143b6dfb'
+          PY
+          gh run download 39110212879 --repo cisco-ai-defense/defenseclaw \
+            --name axis-mxc-v1-macos-contributor-f8a9055cfe599fb4905f547ffb83f496143b6dfb --dir locked-artifact
+
+      - name: Verify every file before making the probe executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 live-source/test/e2e/axis/mxc-macos/verify_live_artifact.py \
+            --artifact locked-artifact/build-artifact --source-checkout build-source \
+            --provenance-sha256 dfe9e82bb25e0a4f6f614b33a0a000c38d843ac0fe652e2506fbee905a5aa4c4 \
+            --build-commit f8a9055cfe599fb4905f547ffb83f496143b6dfb --build-run 39110212879 \
+            --receipt evidence/artifact-verified.json
+          python3 -m unittest discover -s live-source/test/e2e/axis/mxc-macos -p 'test_*.py'
+
+      - name: Provision and record the explicit contributor watchdog
+        timeout-minutes: 6
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This disposable test runner may provision its outer watchdog.
+          # No product installer, runtime fallback or host security change.
+          if ! brew list --versions coreutils >/dev/null 2>&1; then brew install coreutils; fi
+          watchdog="$(brew --prefix coreutils)/bin/gtimeout"
+          test -x "$watchdog"
+          "$watchdog" --version >evidence/watchdog-version.txt
+          sw_vers >evidence/macos-version.txt
+          uname -a >evidence/kernel.txt
+          printf 'MXC_TEST_GTIMEOUT=%s\n' "$watchdog" >>"$GITHUB_ENV"
+
+      - name: Run only the fixed strict private offline experiment
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 live-source/test/e2e/axis/mxc-macos/run_live.py \
+            --artifact locked-artifact/build-artifact --receipt evidence/artifact-verified.json --evidence evidence \
+            --gtimeout "$MXC_TEST_GTIMEOUT" \
+            --provenance-sha256 dfe9e82bb25e0a4f6f614b33a0a000c38d843ac0fe652e2506fbee905a5aa4c4 \
+            --build-commit f8a9055cfe599fb4905f547ffb83f496143b6dfb --build-run 39110212879
+
+      - name: Retain bounded results including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-macos-live-${{ github.sha }}
+          path: |
+            evidence/*.json
+            evidence/*.txt
+          if-no-files-found: warn
+          retention-days: 7

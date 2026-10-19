@@ -18,11 +18,13 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 // TestUnifiedHookDispatch_SingleEntryPoint proves every connector
@@ -39,20 +41,25 @@ import (
 //
 // The contract we assert: an empty POST body reaches the unified handler.
 // Most connectors then produce its generic "hook event name is required"
-// error. Codex and Copilot first enforce their installer-bound event
+// error. Antigravity, Codex and Copilot first enforce their installer-bound event
 // registrations inside that same unified handler, so their connector-specific
 // trust errors are pinned separately.
 func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
 	connectors := map[string]string{
-		"codex":      "installer-bound Codex hook event is required",
-		"claudecode": "hook event name is required",
-		"hermes":     "hook event name is required",
-		"cursor":     "hook event name is required",
-		"devin":      "hook event name is required",
-		"copilot":    "Copilot hook event registration is required",
-		"openhands":  "hook event name is required",
-		"made-up":    "hook event name is required",
+		"amp":         "hook event name is required",
+		"antigravity": "Antigravity hook event registration is required",
+		"codex":       "installer-bound Codex hook event is required",
+		"claudecode":  "hook event name is required",
+		"hermes":      "hook event name is required",
+		"cursor":      "hook event name is required",
+		"devin":       "hook event name is required",
+		"copilot":     "Copilot hook event registration is required",
+		"openhands":   "hook event name is required",
+		"kiro":        "hook event name is required",
+		"omnigent":    "hook event name is required",
+		"opencode":    "hook event name is required",
+		"made-up":     "hook event name is required",
 	}
 	for name, wantError := range connectors {
 		t.Run(name, func(t *testing.T) {
@@ -68,6 +75,28 @@ func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 			if !contains(body, wantError) {
 				t.Errorf("connector %s did not reach its unified pipeline precondition %q; body=%q",
 					name, wantError, body)
+			}
+		})
+	}
+}
+
+func TestSandboxHookProfileUsesGuestPlatformWithoutChangingLegacyLinux(t *testing.T) {
+	api := &APIServer{}
+	for _, platform := range []string{"", "linux", "darwin", "windows"} {
+		t.Run("guest_"+platform, func(t *testing.T) {
+			binding := sandboxauth.Binding{Connector: "openhands", AgentVersion: "1.12.0", ExecutionOS: platform, Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy}}
+			ctx := sandboxauth.WithRequest(context.Background(), binding, nil)
+			profile := api.hookProfileForRequestBase(ctx, "openhands")
+			// This is a real platform difference in the existing connector:
+			// its reviewed native OTLP lane is available only on Darwin.
+			if got, want := profile.NativeOTLP != nil, platform == "darwin"; got != want {
+				t.Fatalf("guest %q native telemetry=%t, want %t", platform, got, want)
+			}
+			if profile.Name != "openhands" || profile.ContractID == "" {
+				t.Fatalf("guest platform lost its hook contract: %+v", profile)
+			}
+			if wrong := api.hookProfileForRequestBase(ctx, "codex"); wrong.ContractID != "" {
+				t.Fatal("a different connector inherited the authenticated binding's contract")
 			}
 		})
 	}
