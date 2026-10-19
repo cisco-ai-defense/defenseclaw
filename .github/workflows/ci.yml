@@ -138,7 +138,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # Balanced on recorded test times (scripts/test-timings/go-linux.json);
+        # the slowest two tests take ~9 minutes each, so more shards would
+        # not shorten the slowest one.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -155,11 +158,12 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 8
+          GO_TEST_SHARDS: 16
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
             --package-dir internal/gateway \
+            --timings scripts/test-timings/go-linux.json \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
           # -race also turns on checkptr in every package. In the transpiled
@@ -205,7 +209,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # ~23 minutes of tests in all: four time-balanced shards finish with
+        # the gateway shards.
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -222,11 +228,12 @@ jobs:
       - name: Run audit race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 8
+          GO_TEST_SHARDS: 4
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
             --package-dir internal/audit \
+            --timings scripts/test-timings/go-linux.json \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
           # checkptr is off only in modernc.org: see Go Gateway Test.
@@ -269,23 +276,49 @@ jobs:
           GO_PACKAGE_SHARDS: 8
         run: |
           set -euo pipefail
-          mapfile -t all_packages < <(
-            go list ./... |
-              grep -Ev '^github.com/defenseclaw/defenseclaw/internal/(audit|gateway)$' |
-              sort
-          )
-          test "${#all_packages[@]}" -gt 0
+          go list ./... > "$RUNNER_TEMP/go-packages.txt"
+          # Time-balanced (scripts/test-timings/go-linux.json): a whole package
+          # per line, or "<package><TAB><-run regex>" for one part of a package
+          # too slow for one shard. The script fails unless every package, and
+          # every test of a split package, is in exactly one shard.
+          python3 scripts/go_test_shards.py \
+            --packages-file "$RUNNER_TEMP/go-packages.txt" \
+            --exclude github.com/defenseclaw/defenseclaw/internal/audit \
+            --exclude github.com/defenseclaw/defenseclaw/internal/gateway \
+            --timings scripts/test-timings/go-linux.json \
+            --shard-count "$GO_PACKAGE_SHARDS" \
+            --shard-index "$GO_PACKAGE_SHARD" > "$RUNNER_TEMP/go-shard.txt"
           packages=()
-          for index in "${!all_packages[@]}"; do
-            if (( index % GO_PACKAGE_SHARDS == GO_PACKAGE_SHARD )); then
-              packages+=("${all_packages[index]}")
-            fi
-          done
-          test "${#packages[@]}" -gt 0
+          parts=()
+          while IFS= read -r item; do
+            if [[ "$item" == *$'\t'* ]]; then parts+=("$item"); else packages+=("$item"); fi
+          done < "$RUNNER_TEMP/go-shard.txt"
+          test "$(( ${#packages[@]} + ${#parts[@]} ))" -gt 0
+          status=0
+          profiles=()
           # checkptr is off only in modernc.org: see Go Gateway Test.
-          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
-            -coverprofile="coverage-go-other-$GO_PACKAGE_SHARD.out" \
-            "${packages[@]}"
+          if (( ${#packages[@]} > 0 )); then
+            go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
+              -coverprofile="$RUNNER_TEMP/cover-packages.out" \
+              "${packages[@]}" || status=1
+            profiles+=("$RUNNER_TEMP/cover-packages.out")
+          fi
+          for index in "${!parts[@]}"; do
+            package="${parts[index]%%$'\t'*}"
+            pattern="${parts[index]#*$'\t'}"
+            echo "::group::go test $package (part $((index + 1)) of ${#parts[@]} in this shard)"
+            go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
+              -coverprofile="$RUNNER_TEMP/cover-part-$index.out" \
+              -run "$pattern" "$package" || status=1
+            echo "::endgroup::"
+            profiles+=("$RUNNER_TEMP/cover-part-$index.out")
+          done
+          existing=()
+          for profile in "${profiles[@]}"; do [ -f "$profile" ] && existing+=("$profile"); done
+          if (( ${#existing[@]} > 0 )); then
+            python3 scripts/merge_go_coverage.py --output "coverage-go-other-$GO_PACKAGE_SHARD.out" "${existing[@]}"
+          fi
+          exit "$status"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage-other-${{ matrix.shard }}
@@ -374,7 +407,8 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 24
+          # 16 gateway + 4 audit + 8 remaining-package shards.
+          test "${#coverage_parts[@]}" -eq 28
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -440,7 +474,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        # Balanced on recorded module times (scripts/test-timings/python-linux.json).
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -451,7 +486,7 @@ jobs:
       - name: Run Python coverage shard
         env:
           PYTHON_TEST_SHARD: ${{ matrix.shard }}
-          PYTHON_TEST_SHARDS: 4
+          PYTHON_TEST_SHARDS: 6
           # Empty for the full suite. Otherwise the only modules to run: the
           # TUI tests and the tests that name a changed file.
           PY_SELECT: ${{ needs.changes.outputs.py_select }}
@@ -459,6 +494,7 @@ jobs:
           set -euo pipefail
           mapfile -t test_files < <(
             python3 scripts/python_test_shards.py \
+              --timings scripts/test-timings/python-linux.json \
               --shard-count "$PYTHON_TEST_SHARDS" \
               --shard-index "$PYTHON_TEST_SHARD" \
               --exclude cli/tests/test_telemetry_registry_generator.py \
@@ -476,12 +512,16 @@ jobs:
             .venv/bin/python -m pytest "${test_files[@]}" \
               -q --tb=short \
               --durations=25 \
+              --junitxml="junit-py-shard-$PYTHON_TEST_SHARD.xml" \
               --cov=defenseclaw \
               --cov-report=
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: python-coverage-part-regular-${{ matrix.shard }}
-          path: coverage-py-shard-${{ matrix.shard }}
+          # The JUnit report feeds scripts/update_test_timings.py python.
+          path: |
+            coverage-py-shard-${{ matrix.shard }}
+            junit-py-shard-${{ matrix.shard }}.xml
           retention-days: 1
 
   python-lint:
@@ -547,7 +587,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-py-*' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 4
+          test "${#coverage_parts[@]}" -eq 6
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -760,15 +800,15 @@ jobs:
             --vulnerability-service osv \
             --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
-  install-smoke:
-    # Builds release-shaped assets from this commit and runs the real
-    # installer through a fresh install, a 0.8.10 upgrade with rollback, the
-    # 0.8.x handoff, and the failure drills, each in a throwaway HOME.
-    name: Install and Upgrade Smoke
+  install-smoke-assets:
+    # Builds the release-shaped assets from this commit once. The Linux lanes
+    # and every Windows lane start as soon as they are uploaded, instead of
+    # the Windows lanes waiting for the Linux lanes to finish.
+    name: Install and Upgrade Smoke Assets
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 30
     env:
       # "|" falls back to direct on any proxy error; the default "," only
       # falls back on 404/410, so a proxy.golang.org stream reset
@@ -809,14 +849,39 @@ jobs:
         with:
           name: install-smoke-assets
           path: ${{ runner.temp }}/assets/
+          if-no-files-found: error
           retention-days: 3
+
+  install-smoke:
+    # Runs the real installer from the assets above through a fresh install,
+    # a 0.8.10 upgrade with rollback, the 0.8.x handoff, and the failure
+    # drills, each in a throwaway HOME.
+    name: Install and Upgrade Smoke
+    needs: install-smoke-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: install-smoke-assets
+          path: ${{ runner.temp }}/assets
       - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh fleet-opt-in upgrade-0.8.10 handoff drills"
 
   install-smoke-windows:
-    name: Install and Upgrade Smoke (Windows)
-    needs: install-smoke
+    # One runner per lane: the lanes are independent (each enters its own
+    # throwaway profile) and ran back to back for ~31 minutes on one runner.
+    name: Install and Upgrade Smoke (Windows / ${{ matrix.lane }})
+    needs: install-smoke-assets
     runs-on: windows-latest
-    timeout-minutes: 70
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [fresh, fleet-opt-in, setup-import, files-in-use, failure-drill, policy]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -828,7 +893,7 @@ jobs:
           path: assets
       - shell: pwsh
         run: |
-          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes 'fresh fleet-opt-in setup-import files-in-use failure-drill policy'
+          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes '${{ matrix.lane }}'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:
@@ -908,7 +973,9 @@ jobs:
     # the linux||darwin hook-socket, peer-home and trusted-state code) runs
     # here on its own OS, and the systemd units get a static systemd-analyze
     # check on Linux.
-    name: Unix Standalone Lifecycle (${{ matrix.os }})
+    # On macOS the two Go test steps took ~7 minutes each back to back, so
+    # they run on two runners ("darwin paths" is the second one).
+    name: Unix Standalone Lifecycle (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ${{ matrix.os }}
@@ -916,7 +983,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        include:
+          - os: ubuntu-24.04
+            label: ubuntu-24.04
+            part: lifecycle
+          - os: macos-latest
+            label: macos-latest
+            part: lifecycle
+          - os: macos-latest
+            label: macos-latest darwin paths
+            part: darwin
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -925,6 +1001,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Go tests of the standalone lifecycle packages
+        if: matrix.part == 'lifecycle'
         shell: bash
         run: >-
           go test -count=1 -timeout 20m
@@ -943,7 +1020,7 @@ jobs:
         # internal/gateway and internal/cli, the tests of their darwin, unix,
         # linux||darwin and !windows test files plus the foreign-hook guard,
         # which keys sessions by the agent process.
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.part == 'darwin'
         shell: bash
         run: |
           set -euo pipefail
@@ -976,6 +1053,7 @@ jobs:
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
+        if: matrix.part == 'lifecycle'
         shell: bash
         run: make check-quiet-startup
       - name: systemd-analyze verify the packaged units
@@ -992,9 +1070,8 @@ jobs:
   # scripts/test-enterprise-windows-install.ps1).
   enterprise-install-assets:
     # The deb and rpm come from the release's own GoReleaser config (a
-    # snapshot of `make packaging-linux-enterprise`, unsigned) and the Windows
-    # Setup from the release's builder without a signing certificate, which
-    # is the hash-pinned standalone-unsigned flavor.
+    # snapshot of `make packaging-linux-enterprise`, unsigned). The Windows
+    # Setup is built in Enterprise Install Lane Assets (Windows).
     name: Enterprise Install Lane Assets
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
@@ -1009,6 +1086,12 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+          # The snapshot cross-compiles every release target (~8 minutes with
+          # a cold build cache). The shared go.sum key holds whichever job
+          # saved it first, so this job keys its own cache on its config.
+          cache-dependency-path: |
+            go.sum
+            .goreleaser.yaml
       # GoReleaser comes straight from its GitHub release, pinned by version
       # and by the sha256 of goreleaser_Linux_x86_64.tar.gz in that release's
       # checksums.txt (cosign-verified against goreleaser's release workflow).
@@ -1045,17 +1128,35 @@ jobs:
           cp "dist/defenseclaw-enterprise-${version}-linux-amd64.deb" \
             "dist/defenseclaw-enterprise-${version}-linux-amd64.rpm" "$RUNNER_TEMP/enterprise-install-linux/"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-      # build-setup.sh builds the Python scanner runtime with uv.
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Build the hash-pinned unsigned Windows standalone Setup
-        shell: bash
-        run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: enterprise-install-linux
           path: ${{ runner.temp }}/enterprise-install-linux/
           if-no-files-found: error
           retention-days: 3
+
+  enterprise-install-assets-windows:
+    # The Windows standalone Setup from the release's builder without a
+    # signing certificate (the hash-pinned standalone-unsigned flavor). It
+    # needs no GoReleaser output, so the Windows install and upgrade lanes
+    # start a few minutes in instead of after the Linux package build.
+    name: Enterprise Install Lane Assets (Windows)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      # build-setup.sh builds the Python scanner runtime with uv.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Build the hash-pinned unsigned Windows standalone Setup
+        shell: bash
+        run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: enterprise-install-windows
@@ -1199,7 +1300,7 @@ jobs:
     # Setup /ensure, /ensure (no-op), verify, status, detect.ps1, the
     # installed CLI's ensure and /uninstall with the four Windows services.
     name: Enterprise Install Lane (Windows services)
-    needs: enterprise-install-assets
+    needs: enterprise-install-assets-windows
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -1245,28 +1346,23 @@ jobs:
     # config intent, secrets and guardian ledger and reports the applied
     # policy, and on Linux and macOS a failed upgrade rolls back (the root-only
     # lifecycle test fault). release.yaml runs the same lanes before publish.
+    # The deb and rpm lanes wait for the GoReleaser packages; the pkg and
+    # Windows lanes below build or download their own package and start
+    # without waiting for them.
     name: Enterprise Upgrade Lane (${{ matrix.lane }})
     needs: [changes, enterprise-install-assets]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets.result == 'success' }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - lane: deb
-            runner: ubuntu-24.04
             asset: linux-amd64.deb
           - lane: rpm-el9
-            runner: ubuntu-24.04
             asset: linux-amd64.rpm
             image: registry.access.redhat.com/ubi9/ubi-init@sha256:762319bbd0b15a4eff9078eb373b1f426de3e8b5560cf314715c62844b7b0fc8
-          - lane: pkg
-            runner: macos-latest
-            asset: darwin-arm64.pkg
-          - lane: Windows
-            runner: windows-latest
-            asset: setup
     env:
       GH_TOKEN: ${{ github.token }}
       LANE: ${{ matrix.lane }}
@@ -1286,67 +1382,31 @@ jobs:
         shell: bash
         run: bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: steps.previous.outputs.version != '' && runner.os == 'Linux'
+        if: steps.previous.outputs.version != ''
         with:
           name: enterprise-install-linux
           path: ${{ runner.temp }}/enterprise-install
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
-        with:
-          name: enterprise-install-windows
-          path: ${{ runner.temp }}/enterprise-install
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        if: steps.previous.outputs.version != '' && runner.os == 'macOS'
-        with:
-          go-version-file: go.mod
-      - name: Build the unsigned standalone pkg
-        if: steps.previous.outputs.version != '' && runner.os == 'macOS'
-        shell: bash
-        run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
       - name: Remove group and other write access from the runner /opt
         if: steps.previous.outputs.version != '' && matrix.lane == 'deb'
         shell: bash
         run: sudo chmod go-w /opt
-      - name: Give the runner Windows log folder its usual owner and access
-        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $logs = Join-Path $env:windir 'Logs'
-          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
-          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
-          if ($account) {
-            icacls $logs /inheritance:d | Out-Null
-            icacls $logs /remove:g "*$account" | Out-Null
-          }
       - name: Upgrade, drill the rollback, converge, verify and remove
-        if: steps.previous.outputs.version != '' && runner.os != 'Windows'
+        if: steps.previous.outputs.version != ''
         shell: bash
         env:
           PREVIOUS_PACKAGE: ${{ steps.previous.outputs.package }}
           PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
         run: |
           set -euo pipefail
-          case "$LANE" in
-            pkg) version=9.9.9 ;;
-            *) version=$LINUX_VERSION ;;
-          esac
-          args=(--package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${version}-${LANE_ASSET}" --version "$version"
+          args=(--package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LINUX_VERSION}-${LANE_ASSET}" --version "$LINUX_VERSION"
             --upgrade-from "$PREVIOUS_PACKAGE" --previous-version "$PREVIOUS_VERSION" --results "$RUNNER_TEMP/lane-results")
           if [ "$LANE" = rpm-el9 ]; then
             bash scripts/test-enterprise-linux-container.sh --image "$LANE_IMAGE" "${args[@]}"
           else
             sudo bash scripts/test-enterprise-unix-install.sh "${args[@]}"
           fi
-      - name: Upgrade, converge, verify and remove the standalone services
-        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
-        shell: pwsh
-        run: >-
-          ./scripts/test-enterprise-windows-install.ps1
-          -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
-          -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
-          -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion '${{ steps.previous.outputs.version }}'
       - name: Make the lifecycle results readable
-        if: always() && runner.os != 'Windows'
+        if: always()
         shell: bash
         run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
       - name: The upgrade kept the administrator config intent
@@ -1367,6 +1427,133 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  enterprise-upgrade-pkg:
+    # The pkg lane of Enterprise Upgrade Lane: it builds its own pkg.
+    name: Enterprise Upgrade Lane (pkg)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LANE_ASSET: darwin-arm64.pkg
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+      - name: Fetch and verify the latest release's enterprise package
+        id: previous
+        shell: bash
+        run: bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: steps.previous.outputs.version != ''
+        with:
+          go-version-file: go.mod
+      - name: Build the unsigned standalone pkg
+        if: steps.previous.outputs.version != ''
+        shell: bash
+        run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
+      - name: Upgrade, drill the rollback, converge, verify and remove
+        if: steps.previous.outputs.version != ''
+        shell: bash
+        env:
+          PREVIOUS_PACKAGE: ${{ steps.previous.outputs.package }}
+          PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+        run: >-
+          sudo bash scripts/test-enterprise-unix-install.sh
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-9.9.9-${LANE_ASSET}" --version 9.9.9
+          --upgrade-from "$PREVIOUS_PACKAGE" --previous-version "$PREVIOUS_VERSION" --results "$RUNNER_TEMP/lane-results"
+      - name: Make the lifecycle results readable
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - name: The upgrade kept the administrator config intent
+        if: steps.previous.outputs.version != ''
+        shell: bash
+        run: |
+          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
+            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
+          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
+            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
+          fi
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-upgrade-results-pkg
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-upgrade-windows:
+    # The Windows lane of Enterprise Upgrade Lane: it needs only the
+    # standalone Setup, not the GoReleaser packages.
+    name: Enterprise Upgrade Lane (Windows)
+    needs: [changes, enterprise-install-assets-windows]
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets-windows.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LANE_ASSET: setup
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+      - name: Fetch and verify the latest release's enterprise package
+        id: previous
+        shell: bash
+        run: bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.previous.outputs.version != ''
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install
+      - name: Give the runner Windows log folder its usual owner and access
+        if: steps.previous.outputs.version != ''
+        shell: pwsh
+        run: |
+          $logs = Join-Path $env:windir 'Logs'
+          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
+          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
+          if ($account) {
+            icacls $logs /inheritance:d | Out-Null
+            icacls $logs /remove:g "*$account" | Out-Null
+          }
+      - name: Upgrade, converge, verify and remove the standalone services
+        if: steps.previous.outputs.version != ''
+        shell: pwsh
+        run: >-
+          ./scripts/test-enterprise-windows-install.ps1
+          -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
+          -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+          -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion '${{ steps.previous.outputs.version }}'
+      - name: The upgrade kept the administrator config intent
+        if: steps.previous.outputs.version != ''
+        shell: bash
+        run: |
+          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
+            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
+          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
+            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
+          fi
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-upgrade-results-Windows
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
   enterprise-required:
     # One required check for the standalone managed-enterprise gates, in the
     # same pattern as Go Test and Python Lint & Test: it runs even when a gate
@@ -1377,11 +1564,14 @@ jobs:
     needs:
       - changes
       - enterprise-install-assets
+      - enterprise-install-assets-windows
       - enterprise-fleet-compiler-payload
       - enterprise-linux-install
       - enterprise-macos-install
       - enterprise-windows-install
       - enterprise-upgrade
+      - enterprise-upgrade-pkg
+      - enterprise-upgrade-windows
       - unix-standalone-lifecycle
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -1390,18 +1580,21 @@ jobs:
       - name: Require every enterprise gate
         env:
           INSTALL_ASSETS: ${{ needs.enterprise-install-assets.result }}
+          INSTALL_ASSETS_WINDOWS: ${{ needs.enterprise-install-assets-windows.result }}
           FLEET_COMPILER: ${{ needs.enterprise-fleet-compiler-payload.result }}
           LINUX_INSTALL: ${{ needs.enterprise-linux-install.result }}
           MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
           WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
           UPGRADE: ${{ needs.enterprise-upgrade.result }}
+          UPGRADE_PKG: ${{ needs.enterprise-upgrade-pkg.result }}
+          UPGRADE_WINDOWS: ${{ needs.enterprise-upgrade-windows.result }}
           UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
           # false when the pull request changes nothing these gates consume.
           ENTERPRISE: ${{ needs.changes.outputs.enterprise }}
         shell: bash
         run: |
           status=0
-          for gate in INSTALL_ASSETS FLEET_COMPILER LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UNIX_LIFECYCLE; do
+          for gate in INSTALL_ASSETS INSTALL_ASSETS_WINDOWS FLEET_COMPILER LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UPGRADE_PKG UPGRADE_WINDOWS UNIX_LIFECYCLE; do
             result=${!gate}
             echo "$gate: $result"
             if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then

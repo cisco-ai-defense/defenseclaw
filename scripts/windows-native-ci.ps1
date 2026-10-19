@@ -20,6 +20,12 @@ param(
     [string]$DiagnosticsRoot = '',
     [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [switch]$AllowCurrentUserSetupAcceptance,
+    # setup-acceptance only: wizard-1 (configure later, codex), wizard-2
+    # (claudecode, amp) and wizard-3 (copilot, cursor) run the wizard
+    # connector cells; lifecycle runs the quiet install through uninstall.
+    # Each part starts from and returns to a clean profile, so CI runs them
+    # on separate runners; 'all' runs every part in order.
+    [ValidateSet('all', 'wizard-1', 'wizard-2', 'wizard-3', 'lifecycle')][string]$SetupAcceptancePart = 'all',
     [switch]$NoRun
 )
 
@@ -1171,6 +1177,7 @@ function Invoke-WindowsNativeProcess {
         [string]$LogPath = '',
         [string]$GoTestFailureSummaryPath = '',
         [string]$WorkingDirectory = '',
+        [switch]$GoTestTimingSummary,
         [switch]$SuppressOutput
     )
     if ($GoTestFailureSummaryPath -and $SuppressOutput) {
@@ -1243,6 +1250,17 @@ function Invoke-WindowsNativeProcess {
         }
         $rawStdout = Read-WindowsNativeOutputTask $stdoutTask
         $rawStderr = Read-WindowsNativeOutputTask $stderrTask
+        if ($GoTestTimingSummary -and -not $SuppressOutput) {
+            # One line per package result from the full go test -json stream
+            # (the console copy below is bounded), for the recorded package
+            # times in scripts/test-timings/go-windows.json.
+            foreach ($packageResult in [regex]::Matches([string]$rawStdout,
+                    '(?m)^\{"Time":"[^"]*","Action":"(pass|fail|skip)","Package":"([^"]+)","Elapsed":([0-9.]+)')) {
+                [Console]::Out.WriteLine(('[go-package-time] {0} {1} {2}' -f
+                    $packageResult.Groups[2].Value, $packageResult.Groups[1].Value, $packageResult.Groups[3].Value))
+            }
+            [Console]::Out.Flush()
+        }
         $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $goTestFailureSummary = ''
         if ($GoTestFailureSummaryPath -and
@@ -5686,39 +5704,38 @@ function Invoke-SetupAcceptance {
     $setupOtlpCollector = $null
     $setupHealthSampler = $null
     try {
+        $runPart = { param([string]$Part) $SetupAcceptancePart -in @('all', $Part) }
         if ($disposableGithubRunner) {
-            Invoke-WizardConfigureLaterAcceptance `
-                $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
-                $connectorConfigPaths $userPathBefore
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
+            if (& $runPart 'wizard-1') {
+                Invoke-WizardConfigureLaterAcceptance `
+                    $setup $root $logs $installRoot $dataRoot $gateway $arpKey `
+                    $connectorConfigPaths $userPathBefore
+                Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+                $env:PATH = "$fixtureSearchPath;$processPathBefore"
+            }
 
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'codex' 'observe'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'claudecode' 'action'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            Invoke-WizardConnectorAcceptance `
-                $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                $fixtureSearchPath $userPathBefore 'amp' 'action'
-            Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
-            $env:PATH = "$fixtureSearchPath;$processPathBefore"
-
-            foreach ($wizardConnector in @('copilot', 'cursor')) {
+            foreach ($wizardCell in @(
+                @{ Part = 'wizard-1'; Connector = 'codex'; Mode = 'observe' },
+                @{ Part = 'wizard-2'; Connector = 'claudecode'; Mode = 'action' },
+                @{ Part = 'wizard-2'; Connector = 'amp'; Mode = 'action' },
+                @{ Part = 'wizard-3'; Connector = 'copilot'; Mode = 'observe' },
+                @{ Part = 'wizard-3'; Connector = 'cursor'; Mode = 'observe' }
+            )) {
+                if (-not (& $runPart $wizardCell.Part)) { continue }
                 Invoke-WizardConnectorAcceptance `
                     $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
-                    $fixtureSearchPath $userPathBefore $wizardConnector 'observe'
+                    $fixtureSearchPath $userPathBefore $wizardCell.Connector $wizardCell.Mode
                 Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
                 $env:PATH = "$fixtureSearchPath;$processPathBefore"
             }
             $env:PATH = $processPathBefore
+        } elseif ($SetupAcceptancePart -notin @('all', 'lifecycle')) {
+            throw "setup acceptance part $SetupAcceptancePart runs only on a disposable GitHub-hosted runner"
+        }
+        if (-not (& $runPart 'lifecycle')) {
+            # A wizard-only part: the finally block below still uninstalls and
+            # proves the profile, registrations and user PATH are clean.
+            return
         }
 
         Invoke-WindowsSetupStandardUserProcess $setup @(

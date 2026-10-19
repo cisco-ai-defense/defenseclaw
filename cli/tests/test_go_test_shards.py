@@ -6,22 +6,23 @@ from pathlib import Path
 
 import pytest
 
-from scripts.go_test_shards import discover_test_files, partition_test_files, run_shards
+from scripts.go_test_shards import (
+    check_exact_cover,
+    discover_test_files,
+    partition_packages,
+    partition_test_files,
+    regex_names,
+    run_shards,
+)
 
 
 def test_go_test_file_shards_are_deterministic_and_exhaustive(tmp_path: Path) -> None:
     (tmp_path / "small_test.go").write_text(
-        "package sample\n"
-        "func TestSmall(t *testing.T) {}\n"
-        "func FuzzInput(f *testing.F) {}\n"
-        "func ExampleSmall() {}\n",
+        "package sample\nfunc TestSmall(t *testing.T) {}\nfunc FuzzInput(f *testing.F) {}\nfunc ExampleSmall() {}\n",
         encoding="utf-8",
     )
     (tmp_path / "large_test.go").write_text(
-        "package sample\n"
-        "func TestLargeA(t *testing.T) {}\n"
-        "func TestLargeB(t *testing.T) {}\n"
-        + ("// weight\n" * 50),
+        "package sample\nfunc TestLargeA(t *testing.T) {}\nfunc TestLargeB(t *testing.T) {}\n" + ("// weight\n" * 50),
         encoding="utf-8",
     )
 
@@ -55,8 +56,8 @@ def test_run_shards_runs_every_shard_with_its_regex_and_fails_on_any(
     # race-enabled binary outlives the 60m timeout; every shard must run with
     # its own -run regex, and one failing shard must fail the target.
     probe = (
-        "import sys; args = sys.argv[1:]; print(\"shard\", args[0], args[args.index(\"-run\") + 1]);"
-        " sys.exit(3 if args[0] == \"1\" else 0)"
+        'import sys; args = sys.argv[1:]; print("shard", args[0], args[args.index("-run") + 1]);'
+        ' sys.exit(3 if args[0] == "1" else 0)'
     )
     command = [sys.executable, "-c", probe, "{shard}"]
 
@@ -66,3 +67,63 @@ def test_run_shards_runs_every_shard_with_its_regex_and_fails_on_any(
     assert "shard 1 ^(?:TestB|TestC)$" in out
     assert "--- shard 2/2 exit 3" in out
     assert run_shards([["TestA"]], command) == 0
+
+
+def _write_package(root: Path) -> Path:
+    package = root / "pkg"
+    package.mkdir()
+    (package / "heavy_test.go").write_text(
+        "package pkg\nfunc TestHeavyA(t *testing.T) {}\nfunc TestHeavyB(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (package / "light_test.go").write_text(
+        "package pkg\nfunc TestLightA(t *testing.T) {}\nfunc TestLightB(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (package / "new_test.go").write_text("package pkg\nfunc TestUnrecorded(t *testing.T) {}\n", encoding="utf-8")
+    return package
+
+
+def test_timed_shards_split_a_heavy_file_and_still_run_unrecorded_tests(tmp_path: Path) -> None:
+    files = discover_test_files(_write_package(tmp_path))
+    seconds = {"TestHeavyA": 100.0, "TestHeavyB": 100.0, "TestLightA": 1.0, "TestLightB": 1.0, "*": 0.5}
+
+    shards = partition_test_files(files, 2, seconds)
+
+    assert partition_test_files(files, 2, seconds) == shards
+    names = [name for shard in shards for name in shard]
+    assert sorted(names) == ["TestHeavyA", "TestHeavyB", "TestLightA", "TestLightB", "TestUnrecorded"]
+    # The heavy file outweighs half a shard, so its two tests land apart.
+    assert {"TestHeavyA", "TestHeavyB"} not in (set(shards[0]), set(shards[1]))
+    assert check_exact_cover(shards, sorted(names)) == []
+
+
+def test_exact_cover_reports_missing_duplicate_and_unknown_items() -> None:
+    problems = check_exact_cover([["A", "B"], ["B", "X"]], ["A", "B", "C"])
+
+    assert "B is in 2 shards" in problems
+    assert "C is in no shard" in problems
+    assert "X was not discovered" in problems
+
+
+def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    _write_package(tmp_path)
+    packages = ["example.com/m/pkg"] + [f"example.com/m/p{index}" for index in range(5)]
+    timings = {
+        "packages": {"example.com/m/pkg": 200.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}},
+        "tests": {"pkg": {"TestHeavyA": 100.0, "TestHeavyB": 100.0, "*": 0.5}},
+    }
+
+    shards = partition_packages(packages, 3, timings, root=tmp_path)
+
+    whole = sorted(package for shard in shards for package, regex in shard if not regex)
+    parts = [regex_names(regex) for shard in shards for package, regex in shard if regex]
+    # p4 has no recorded time and still runs.
+    assert whole == [f"example.com/m/p{index}" for index in range(5)]
+    assert len(parts) >= 2
+    assert sorted(name for part in parts for name in part) == [
+        "TestHeavyA",
+        "TestHeavyB",
+        "TestLightA",
+        "TestLightB",
+        "TestUnrecorded",
+    ]

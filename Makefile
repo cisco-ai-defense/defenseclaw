@@ -38,10 +38,10 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 # Race-enabled, the gateway and audit packages each take well over an hour as
 # one test binary. gateway-test and go-test-cov run them as this many parallel
-# shards (the CI split, scripts/go_test_shards.py); each shard keeps
+# shards (scripts/go_test_shards.py, balanced on the recorded test times like CI); each shard keeps
 # GO_TEST_TIMEOUT.
 GO_TEST_SHARDS ?= 8
-GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --shard-count $(GO_TEST_SHARDS)
+GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --timings scripts/test-timings/go-linux.json --shard-count $(GO_TEST_SHARDS)
 # -race also turns on checkptr in every package. In the transpiled SQLite
 # (modernc.org) that every audit store runs, checkptr alone doubles the cost
 # of the race suites; race detection stays on everywhere. CI uses the same flags.

@@ -916,3 +916,6 @@ if ($script:Failures) {
     exit 1
 }
 Write-Host "[lifecycle] all lanes passed ($Lanes)" -ForegroundColor Green
+# The last lane can end on a native command that was expected to fail (the
+# policy lane's refused install); do not hand its exit code to the caller.
+exit 0

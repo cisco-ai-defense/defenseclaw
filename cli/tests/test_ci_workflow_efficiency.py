@@ -26,8 +26,10 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     exhaustive = (ROOT / ".github/workflows/telemetry-registry.yml").read_text(encoding="utf-8")
 
     assert "name: Python Test (shard ${{ matrix.shard }})" in workflow
-    assert "shard: [0, 1, 2, 3]" in workflow
+    assert "shard: [0, 1, 2, 3, 4, 5]" in workflow
     assert "python3 scripts/python_test_shards.py" in workflow
+    assert "--timings scripts/test-timings/python-linux.json" in workflow
+    assert (ROOT / "scripts/test-timings/python-linux.json").is_file()
     for isolated in (
         "cli/tests/test_telemetry_registry_generator.py",
         "cli/tests/test_telemetry_registry_candidate_renderer.py",
@@ -42,7 +44,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "needs: [changes, python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
-    assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
+    assert 'test "${#coverage_parts[@]}" -eq 6' in workflow
     assert ".venv/bin/coverage combine" in workflow
     assert "run: make test" not in workflow
 
@@ -122,11 +124,15 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 8" in workflow
-    assert "internal/(audit|gateway)" in workflow
-    assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
+    assert "GO_TEST_SHARDS: 16" in workflow
+    assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
+    assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
+    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
+    # 16 gateway + 4 audit + 8 remaining-package shards, one profile each.
+    assert 'test "${#coverage_parts[@]}" -eq 28' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
     race = "go test -race -gcflags=modernc.org/...=-d=checkptr=0 "
-    assert workflow.count("go test -race ") == workflow.count(race) == 3
+    assert workflow.count("go test -race ") == workflow.count(race) == 4
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow

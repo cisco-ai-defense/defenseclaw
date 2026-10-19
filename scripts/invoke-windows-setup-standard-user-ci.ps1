@@ -24,6 +24,10 @@ param(
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
+    # setup-acceptance only: the CI matrix runs the wizard connector cells and
+    # the installed lifecycle as separate parts on separate runners; 'all'
+    # runs every part in one process (release certification and local runs).
+    [ValidateSet('all', 'wizard-1', 'wizard-2', 'wizard-3', 'lifecycle')][string]$SetupAcceptancePart = 'all',
     [switch]$Child,
     [switch]$ExerciseWmiEscape,
     [string]$ExpectedSetupSha256 = '',
@@ -423,6 +427,7 @@ function Invoke-ChildMode {
             & $nativeHarness -Operation setup-acceptance `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
+                -SetupAcceptancePart $SetupAcceptancePart `
                 -AllowCurrentUserSetupAcceptance
         } elseif ($Mode -eq 'contract') {
             & $nativeHarness -Operation contract -Connector $Connector `
@@ -1157,6 +1162,9 @@ try {
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
+    }
+    if ($Mode -eq 'setup-acceptance' -and $SetupAcceptancePart -ne 'all') {
+        $arguments += @('-SetupAcceptancePart', $SetupAcceptancePart)
     }
     $arguments += @('-ExpectedSetupSha256', $expectedSetupHash)
     # Refresh immediately before the untrusted logon. Only exact PID and

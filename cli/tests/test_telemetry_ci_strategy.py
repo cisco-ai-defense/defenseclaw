@@ -79,7 +79,7 @@ def test_ordinary_ci_always_checks_real_registry_without_exhaustive_mutation_sui
         "python-lint",
     }
     rendered_aggregate = _render(aggregate)
-    assert 'test "${#coverage_parts[@]}" -eq 4' in rendered_aggregate
+    assert 'test "${#coverage_parts[@]}" -eq 6' in rendered_aggregate
     assert "PYTHON_TELEMETRY" not in rendered_aggregate
     assert "python-coverage-part-telemetry" not in CI_PATH.read_text(encoding="utf-8")
 
