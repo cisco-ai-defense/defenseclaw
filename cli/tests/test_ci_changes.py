@@ -37,7 +37,7 @@ REQUIRED_CHECKS = {
         "make test (unified)",
         "Go Test",
         "Rego Policy Tests",
-        # The managed-mode aggregates (spec 008).
+        # The managed-mode aggregates.
         "Enterprise Required",
     },
     "windows-native.yml": {"Windows Native Required"},
