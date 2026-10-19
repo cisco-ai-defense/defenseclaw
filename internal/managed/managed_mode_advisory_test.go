@@ -5,6 +5,7 @@ package managed
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -39,6 +40,9 @@ func TestManagedModeAdvisoryRelaxesOnlyInstallerOwnedPaths(t *testing.T) {
 // GAP-0026: only the Secure Client install keeps the earlier write-bit
 // advisory; the standalone install below the same roots does not.
 func TestSecureClientInstallPathCoversOnlyTheSecureClientTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("safefile mode-bit verdicts and these install paths are Unix-only")
+	}
 	if safefile.ManagedWriteModeAdvisory == nil {
 		t.Fatal("safefile.ManagedWriteModeAdvisory is nil; the managed package must install it")
 	}

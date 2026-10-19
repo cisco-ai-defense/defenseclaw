@@ -43,7 +43,9 @@ $cases = @(
     @{ name = 'absent metadata loads no pins'; profile = 'Standalone'; trust = ''; hash = ''; trusted = $true; expect = 'refuse' }
     @{ name = 'authenticode metadata loads no pins'; profile = 'Standalone'; trust = 'authenticode'; hash = $cliHash; trusted = $true; expect = 'refuse' }
     @{ name = 'a recorded pin for other bytes'; profile = 'Standalone'; trust = 'hash_pinned'; hash = $otherHash; trusted = $true; expect = 'refuse' }
-    @{ name = 'Secure Client still needs a valid signature'; profile = 'SecureClient'; trust = 'hash_pinned'; hash = $cliHash; trusted = $true; expect = 'refuse' }
+    # Secure Client admits the executable at entry, as on main (Secure Client is
+    # out of scope for GAP-0023), so the deferred admission adds nothing there.
+    @{ name = 'Secure Client is not admitted under the lock'; profile = 'SecureClient'; trust = 'hash_pinned'; hash = $cliHash; trusted = $true; expect = 'no native_cleanup source' }
     @{ name = 'entry admission by Authenticode alone refuses (why it is deferred)'; profile = 'Standalone'; trust = 'entry'; hash = ''; trusted = $true; expect = 'refuse' }
 )
 

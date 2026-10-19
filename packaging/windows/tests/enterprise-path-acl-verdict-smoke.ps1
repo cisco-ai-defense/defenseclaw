@@ -225,3 +225,6 @@ if ($failures.Count -gt 0) {
     throw ("enterprise-path-acl-verdict-smoke: FAIL`n" + ($failures -join "`n"))
 }
 Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count) cases)"
+# A case's icacls repair attempt on a missing path fails on purpose; its exit
+# code must not become this script's.
+exit 0
