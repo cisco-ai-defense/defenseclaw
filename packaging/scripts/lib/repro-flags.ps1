@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # repro-flags.ps1 — PowerShell mirror of packaging/scripts/lib/repro-flags.sh.
-# Sourced by assemble.ps1 (Workstream A2). Semantically identical to the
+# Sourced by assemble.ps1. Semantically identical to the
 # bash version; both are constrained by scripts/check-repro-flags-parity.sh
 # so a change to one MUST land in the other.
 #
-# See docs/specs/001-windows-deterministic-build/design.md § Components and
-# the bash file for the full rationale, including why GOTOOLCHAIN is pinned
-# here rather than in go.mod.
+# See the bash file for the full rationale, including why GOTOOLCHAIN is
+# pinned here rather than in go.mod.
 #
 # USAGE
 #   . packaging/scripts/lib/repro-flags.ps1

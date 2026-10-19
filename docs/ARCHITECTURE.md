@@ -61,8 +61,7 @@ Do not maintain a second endpoint table in repository Markdown.
 
 Hook delivery fails closed by default. Only under the Secure Client
 integration does an unset `hook_fail_mode` default to open, independently of
-action-mode policy enforcement ([spec 007](specs/007-hook-delivery-default/README.md),
-scoped to Secure Client). An explicit closed is always kept; OSS, standalone
+action-mode policy enforcement. An explicit closed is always kept; OSS, standalone
 and other managed installs keep the fail-closed rules, including managed Codex
 and Claude Code and standalone Devin. Managed authorization, runtime integrity
 and strict availability remain distinct controls.

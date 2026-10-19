@@ -11,7 +11,7 @@
 #
 # Used by packaging/scripts/lib/assemble.sh during the AVC-driven
 # Windows managed-enterprise Setup assembly step when the runner is
-# Linux (see docs/specs/002-windows-avc-packaging/tasks.md task 2).
+# Linux.
 #
 # Contract:
 #   - The file at $1 MUST carry a valid Authenticode signature
@@ -23,7 +23,7 @@
 #     assemble.sh — must define). Signature/verify failures pass code 4;
 #     missing tools (osslsigncode/openssl) pass code 6. The caller
 #     controls how those codes map onto its exit-code table
-#     (design.md § Interfaces: 4=signature, 6=io).
+#     (assemble.sh: 4=signature, 6=io).
 #
 # Dependencies (all installed on the ubuntu-latest CI runner via the
 # workflow's setup step): osslsigncode, openssl.
@@ -117,7 +117,7 @@ ${verify_output}"
     # commas (e.g. `Cisco Systems, Inc.`) is preserved verbatim — the
     # earlier awk-on-oneline path stripped everything after the first
     # comma and turned that CN into "Cisco Systems", failing valid
-    # Cisco signatures. See CR spec-002:PRRT_kwDORuAK-s6ahACT.
+    # Cisco signatures.
     #
     # Chain-vs-signer note: this checks that AT LEAST ONE cert in the
     # PKCS#7 chain carries the required publisher CN. `osslsigncode
@@ -126,7 +126,7 @@ ${verify_output}"
     # definition Cisco-issued. The CN check here is defense-in-depth
     # against an accidental non-Cisco cert bundled into the PKCS#7
     # container; a full SignerInfo → certificate binding would be
-    # stronger and is tracked as a follow-up spec.
+    # stronger and is not implemented yet.
     local found=0
     local seen_cns=""
     local cert_pem

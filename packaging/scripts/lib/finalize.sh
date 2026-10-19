@@ -21,8 +21,7 @@
 # AVC may use this helper or fold the same three actions into their
 # own signtool wrapper — DefenseClaw's contract only cares that the
 # final artefact set contains a correct .sha256 sidecar and a
-# provenance.json whose setup_sha256 matches. See
-# docs/specs/002-windows-avc-packaging/design.md § Decisions.
+# provenance.json whose setup_sha256 matches.
 #
 # USAGE
 #   ./finalize.sh --setup-exe out/DefenseClawSetup-Enterprise-x64.exe \
@@ -106,7 +105,7 @@ then
     # JSON, write permission denied, missing file, etc.) to exit code
     # 6 per the header contract. Without this, `set -e` alone would
     # bubble python's exit code — usually 1 — masking the IO nature
-    # of the failure. See CR spec-002:PRRT_kwDORuAK-s6af8jz.
+    # of the failure.
     die 6 "provenance.json rewrite failed (see python traceback above)"
 fi
 

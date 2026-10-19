@@ -25,17 +25,16 @@ const KindUnixPeer = "UnixPeer"
 
 // KindUnixPeerUnauthenticated is the peerIdentity.Kind value the
 // Windows accept path unconditionally reports for the initial-cut
-// deferred-auth posture (spec 004, docs/specs/004-windows-ui-ipc/).
+// deferred-auth posture.
 // The socket-file DACL is the only access boundary in this posture;
 // full peer-auth (DACL pinning to a Cisco Secure Client GUI
-// principal, or PID + WinVerifyTrust) lands in a follow-up spec per
-// parity-plan §4.4. Kept in sync with the same constant in
+// principal, or PID + WinVerifyTrust) lands in a follow-up change.
+// Kept in sync with the same constant in
 // peerauth_unix.go (linux + darwin) so tests reading the value
 // don't need build-tag gymnastics.
 //
 // The GA release-gate at internal/ipc/authposture_gagate.go refuses
-// a release-candidate build in which this Kind is still reachable
-// (spec 004 REQ-18 + REQ-19).
+// a release-candidate build in which this Kind is still reachable.
 const KindUnixPeerUnauthenticated = "UnixPeerUnauthenticated"
 
 // peerIdentity mirrors the unix shape so cross-platform callers can
@@ -59,7 +58,7 @@ type peerIdentity struct {
 // socket-file DACL applied at bind time (four ACEs; see
 // internal/ipc/acl_windows.go), NOT by anything in this function.
 //
-// The full peer-auth follow-up (parity-plan §4.4) will replace this
+// The full peer-auth follow-up will replace this
 // stub with either a DACL-pinned Cisco Secure Client GUI principal
 // check or a PID-in-first-message + WinVerifyTrust flow, depending
 // on which mechanism the packaging team selects. Until that lands,

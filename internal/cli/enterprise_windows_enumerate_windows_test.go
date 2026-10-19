@@ -303,8 +303,7 @@ func TestEnterpriseWindowsEnumerateIntervalHonoursCtxCancel(t *testing.T) {
 		// they never actually fire because ctx is cancelled
 		// before the initial-delay timer, but the numeric shape
 		// documents intent (100ms, not 100ns) for a future maintainer
-		// who removes the pre-cancel. See CR
-		// spec-005:PRRT_kwDORuAK-s6atye4.
+		// who removes the pre-cancel.
 		interval:     100 * time.Millisecond,
 		initialDelay: 100 * time.Millisecond,
 	}, manifest)

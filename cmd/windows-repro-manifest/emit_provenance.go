@@ -20,17 +20,16 @@ import (
 //
 //	Default: hash the file at --setup-exe and write setup_sha256/
 //	setup_size to those values. Meant for callers who own the final
-//	artefact — e.g. spec 001's byte-identity CI gate, which emits
+//	artefact — e.g. the byte-identity CI gate, which emits
 //	provenance for an already-final EXE.
 //
 //	--setup-sha256-placeholder: skip hashing, emit setup_sha256 as ""
-//	and setup_size as 0. Used by spec 002's assemble.{sh,ps1} because
+//	and setup_size as 0. Used by the AVC kit's assemble.{sh,ps1} because
 //	the outer EXE has NOT been signed yet at emit-provenance time —
 //	the signed EXE hash can only be produced after AVC's step-3
 //	signtool sign. AVC (or the optional finalize.{sh,ps1} helper)
 //	populates the placeholder in place. --setup-exe is optional in
-//	placeholder mode. See
-//	docs/specs/002-windows-avc-packaging/design.md § Decisions.
+//	placeholder mode.
 func runEmitProvenance(args []string) error {
 	fs := flag.NewFlagSet("emit-provenance", flag.ContinueOnError)
 	version := fs.String("version", "", "release version, e.g. 0.9.0")

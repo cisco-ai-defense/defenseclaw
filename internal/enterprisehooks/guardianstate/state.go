@@ -3,8 +3,7 @@
 
 // Package guardianstate is the out-of-band state file the hook-guardian
 // service writes to signal its `waiting_for_targets` / `ready` state to
-// the gateway sidecar. See spec 003 (docs/specs/003-windows-deferred-config/)
-// § Data flow.
+// the gateway sidecar, whose health surface reports it.
 //
 // Contract:
 //

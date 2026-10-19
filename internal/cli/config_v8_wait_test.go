@@ -42,7 +42,7 @@ func TestIsMissingConfigErrClassifier(t *testing.T) {
 
 // TestEnterConfigWaitLoopIfManagedGatesOnDeployMode asserts the wait
 // loop does NOT engage for non-managed-enterprise deploy modes even
-// when the error is a missing-file case. Spec 003 REQ-13 + REQ-28.
+// when the error is a missing-file case.
 func TestEnterConfigWaitLoopIfManagedGatesOnDeployMode(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -71,7 +71,7 @@ func TestEnterConfigWaitLoopIfManagedGatesOnDeployMode(t *testing.T) {
 			// fails the test at 2s rather than at the `go test`
 			// binary's 10-minute wall-clock timeout — the failure
 			// diagnostic in the latter case points at an unrelated
-			// panic. CR spec-003:PRRT_kwDORuAK-s6alkrh.
+			// panic.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			retry, err := enterConfigWaitLoopIfManaged(
@@ -129,8 +129,7 @@ func TestWaitForConfigV8ManagedReturnsWhenFilePresentOnEntry(t *testing.T) {
 		t.Fatalf("stage cfg: %v", err)
 	}
 	// Bounded ctx so an entry-probe regression fails the test at 2s
-	// rather than at `go test`'s wall-clock timeout. CR
-	// spec-003:PRRT_kwDORuAK-s6alkrh.
+	// rather than at `go test`'s wall-clock timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var buf strings.Builder
@@ -162,7 +161,7 @@ func TestWaitForConfigV8ManagedTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected timeout error, got nil")
 	}
-	// Distinguishable substring — spec 003 AC-06.
+	// Distinguishable substring the operator can match on after the bound.
 	if !strings.Contains(err.Error(), "configuration wait timeout") {
 		t.Fatalf("expected 'configuration wait timeout' in error, got: %v", err)
 	}

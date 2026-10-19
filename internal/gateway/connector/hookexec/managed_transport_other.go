@@ -27,8 +27,8 @@ import (
 // /Library/LaunchDaemons/ which is root:wheel 0644 — a non-root
 // process cannot install a replacement service or rebind an
 // already-bound port. The gateway's own codesign identity is
-// verified separately by the macOS IPC accept path (spec 004
-// peerauth_darwin.go) at accept-time via LOCAL_PEERCRED + codesign
+// verified separately by the macOS IPC accept path
+// (peerauth_darwin.go) at accept-time via LOCAL_PEERCRED + codesign
 // on the peer. This client is the reverse leg (hook → gateway)
 // where the loopback-plus-admin-plist trust chain suffices.
 //
@@ -36,8 +36,7 @@ import (
 // unconditionally on non-Windows, which broke every Codex / Claude
 // hook call on macOS managed_enterprise (the caller's fail-closed
 // branch fires with reason enterprise_managed_gateway_peer_unverified
-// before any request bytes leave the process). See spec 006 code-
-// review Tier 1 finding T1.1 (Agent E "wrapper/proxy correctness").
+// before any request bytes leave the process).
 //
 // The standalone managed profile on Linux and macOS does not use this
 // client: hooks bound to the root-owned runtime descriptor select

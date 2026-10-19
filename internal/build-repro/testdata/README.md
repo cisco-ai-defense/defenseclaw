@@ -1,8 +1,8 @@
 # Reproducibility fixture
 
 This directory holds the fixed signed-payload fixture that the
-Workstream E reproducibility gate (`.github/workflows/windows-
-deterministic-build.yml`) drives through the assembly step. Two
+reproducibility gate (`.github/workflows/windows-deterministic-build.yml`)
+drives through the assembly step. Two
 independent runners must produce byte-identical outer
 `DefenseClawSetup-Enterprise-x64.exe` given this fixture as input.
 
@@ -29,8 +29,7 @@ Each file is a **short deterministic byte sequence**, not a real
 Authenticode-signed PE or PS1. The reproducibility gate exercises the
 JSON-emission and `go build` invariants — it does NOT exercise the
 signature-verification path (`Assert-CiscoSignature`). AVC-side end-
-to-end signing is exercised by Workstream A's downstream CI, not
-here.
+to-end signing is exercised in AVC's signing pipeline, not here.
 
 The fixture is deliberately dummy-unsigned. The Common Name embedded
 in any test cert MUST NOT be `Cisco Systems, Inc.` — a lint check
@@ -56,7 +55,7 @@ The regeneration script:
    `.github/workflows/windows-deterministic-build.yml`.
 
 If a future refresh legitimately changes the fixture (e.g., you add
-another expected filename to Workstream A), regenerate and update
+another expected payload filename), regenerate and update
 the CI expected-SHA in the same PR so the deterministic gate sees
 the new baseline.
 

@@ -15,9 +15,8 @@ whose `agent_version` is empty even though the native application is present.
 
 ## Requirements
 
-The overall delivery default is governed by
-[spec 007](../specs/007-hook-delivery-default/README.md), which applies to
-Secure Client only (owner decision on #1291): under Secure Client unset policy
+The overall delivery default applies to Secure Client only (owner decision
+on #1291): under Secure Client unset policy
 is open, explicit closed remains supported, and managed macOS and Windows hooks
 honor the installer-selected delivery mode. Everywhere else hooks fail closed
 by default: OSS and standalone installs resolve an unset policy to closed,

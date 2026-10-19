@@ -725,10 +725,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	if opts.AttestClaudeEffectivePolicy {
 		arguments = append(arguments, "--attest-claude-effective-policy")
 	}
-	// Spec 003 --deferred-config forwards only for the initial
-	// install action. Upgrade/repair use the config/manifest already
-	// on disk and cannot legitimately defer them. See CR
-	// spec-003:PRRT_kwDORuAK-s6alkr4.
+	// --deferred-config forwards only for the initial install
+	// action. Upgrade/repair use the config/manifest already on disk
+	// and cannot legitimately defer them.
 	if opts.DeferredConfig && opts.Action == "install" {
 		arguments = append(arguments, "--deferred-config")
 	}

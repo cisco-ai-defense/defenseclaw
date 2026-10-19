@@ -126,8 +126,7 @@ type psSignatureRecord struct {
 // verifyAuthenticode is the fingerprint-based verify entry point.
 // Invokes PowerShell to gather a signed record about the file, then
 // applies the trust matrix in classifyVerify to decide accept vs.
-// reject. See docs/specs/003-windows-avc-standalone-assembler/ for
-// the design contract (AVC handoff, revision 2026-09-03).
+// reject.
 //
 // Errors are classified by cause so main.go's exit-code map does the
 // right thing:

@@ -54,8 +54,8 @@ var enterpriseHookWatchSessionSettle = 5 * time.Second
 
 // enterpriseHookTargetsWaitTimeout is the bounded window the hook-guardian
 // will fsnotify-wait for a missing targets.yaml before returning a
-// distinguishable error. See spec 003 (docs/specs/003-windows-deferred-config/)
-// requirements.md REQ-14 + REQ-29. Kept as a package-level `var` (not a
+// distinguishable error, so the SCM restart cycle picks it back up. Kept
+// as a package-level `var` (not a
 // const) so the timeout-path CI test can shorten it via a build-tag override
 // file; there is no envvar-configurable path — an operator cannot silently
 // extend the cap to weeks and mask a broken UCB pipeline as still-installing.
@@ -2544,7 +2544,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return changed, nil
 	}
 
-	// Spec 003 B3: in managed_enterprise mode, tolerate a missing
+	// In managed_enterprise mode, tolerate a missing
 	// targets.yaml at startup by fsnotify-waiting for UCB to drop it.
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
@@ -2573,7 +2573,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
 	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
+	// can collapse to overall `ready`.
 	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
@@ -2806,7 +2806,7 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 	}
 }
 
-// waitForEnterpriseHookManifestManaged is the spec 003 B3 bounded wait
+// waitForEnterpriseHookManifestManaged is the guardian's bounded wait
 // loop. Called only from managed_enterprise + missing-manifest at
 // startup. Uses the caller's already-created fsnotify.Watcher so we
 // share the same file-descriptor budget the normal watch loop uses;
@@ -2818,8 +2818,7 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 // Behaviour:
 //
 //   - Writes guardianstate `.state=waiting_for_targets` so the sidecar
-//     collapsing rule reports overall `waiting_for_targets` (spec 003
-//     REQ-15).
+//     collapsing rule reports overall `waiting_for_targets`.
 //   - Adds an fsnotify watch on the manifest's parent directory.
 //   - Loop: wait for a WRITE/CREATE event on the manifest path OR the
 //     poll ticker fires; on either, re-attempt LoadManifest. Success
@@ -2827,8 +2826,8 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 //     waiting.
 //   - Hard cap at enterpriseHookTargetsWaitTimeout — return a
 //     distinguishable error so the SCM restart cycle picks the
-//     guardian back up cleanly (spec 003 AC-06 analogue on the
-//     guardian side, though the primary AC-06 is for the daemon).
+//     guardian back up cleanly (the gateway's config wait does the
+//     same).
 //
 // A non-missing error from a retried LoadManifest (parse failure,
 // symlink) is treated as fatal: we did our one bounded wait, an
@@ -2858,8 +2857,8 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 	defer poll.Stop()
 
 	// Hard cap so a broken UCB pipeline does not leave the guardian
-	// silently waiting forever. Distinguishable exit — see spec 003
-	// AC-06's daemon-side counterpart.
+	// silently waiting forever. Distinguishable exit, like the
+	// gateway's config wait.
 	deadline, cancel := context.WithTimeout(ctx, enterpriseHookTargetsWaitTimeout)
 	defer cancel()
 
@@ -2869,8 +2868,7 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 	// OTHER error (parse failure, trust-plumbing rejection, symlink
 	// refusal, oversized manifest) ⇒ return that error immediately;
 	// the wait loop's contract is "wait for a MISSING file", not
-	// "silently absorb 24 hours of broken UCB drops". See CR
-	// spec-003:PRRT_kwDORuAK-s6alkry.
+	// "silently absorb 24 hours of broken UCB drops".
 	probeShouldReturn := func(err error, reason string) (bool, error) {
 		if err == nil {
 			fmt.Fprintf(w, "[hook-guardian] targets.yaml %s; resuming\n", reason)

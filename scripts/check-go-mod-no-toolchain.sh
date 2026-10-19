@@ -2,9 +2,7 @@
 #
 # check-go-mod-no-toolchain.sh
 #
-# Refuses a `toolchain` directive in go.mod. See
-# docs/specs/001-windows-deterministic-build/design.md § Tradeoffs:
-# the Go toolchain pin for the AVC-managed-enterprise reproducibility
+# Refuses a `toolchain` directive in go.mod. The Go toolchain pin for the AVC-managed-enterprise reproducibility
 # contract lives out-of-band (GOTOOLCHAIN=go1.26.4 in
 # packaging/scripts/lib/repro-flags.{sh,ps1} and the reproducibility
 # CI workflow), NOT in go.mod. A `toolchain` directive in go.mod would
@@ -44,12 +42,11 @@ contract lives out-of-band in:
 
 Adding a `toolchain` directive to go.mod would force every OSS build and
 contributor tooling invocation to download that toolchain, without giving
-OSS anything in return. See:
-  docs/specs/001-windows-deterministic-build/design.md § Tradeoffs
+OSS anything in return. Remove the directive and change the pin in the
+three files above instead.
 
-If you have a genuine reason to pin the toolchain module-wide, open a
-follow-up spec that rescopes the reproducibility invariant and update
-this check.
+If you have a genuine reason to pin the toolchain module-wide, rescope
+the reproducibility invariant with the maintainers and update this check.
 EOF
   exit 1
 fi

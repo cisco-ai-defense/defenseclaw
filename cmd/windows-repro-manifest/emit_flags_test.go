@@ -10,14 +10,14 @@ import (
 	"testing"
 )
 
-// TestEmitManifestUnsignedFlag exercises the --unsigned flag added by
-// docs/specs/002-windows-avc-packaging. It asserts that:
+// TestEmitManifestUnsignedFlag exercises the --unsigned flag used by
+// the AVC kit's local unsigned build. It asserts that:
 //   - the emitted manifest.json carries `"unsigned": true`,
 //   - the default distribution_flavor is auto-suffixed with "-unsigned",
 //   - an explicit --distribution-flavor is NOT auto-suffixed (the
 //     caller is trusted to have shaped the string).
 //
-// The round-trip integration test in Stage 5's CI job drives assemble.sh
+// The deterministic-build workflow's round-trip job drives assemble.sh
 // end-to-end; this Go-level test locks the emitter-side flag behavior
 // so a regression there is caught without needing a live CI runner.
 func TestEmitManifestUnsignedFlag(t *testing.T) {
@@ -71,8 +71,7 @@ func TestEmitManifestUnsignedFlag(t *testing.T) {
 	// ("managed-enterprise") + --unsigned → NO auto-suffix. Guards
 	// against the regression a value-vs-default comparison would
 	// cause: the caller asked for `managed-enterprise` explicitly, so
-	// return `managed-enterprise` even under --unsigned. See CR
-	// spec-002:PRRT_kwDORuAK-s6ahAB9.
+	// return `managed-enterprise` even under --unsigned.
 	explicitDefault := filepath.Join(outDir, "explicit-default.json")
 	err = runEmitManifest([]string{
 		"--version", "0.9.0",
@@ -114,7 +113,7 @@ func TestEmitManifestUnsignedFlag(t *testing.T) {
 }
 
 // TestEmitProvenancePlaceholder locks in the --setup-sha256-placeholder
-// contract added by docs/specs/002-windows-avc-packaging. In placeholder
+// contract the AVC kit's assemblers rely on. In placeholder
 // mode:
 //   - setup_sha256 is the empty string,
 //   - setup_size is 0,
@@ -122,8 +121,8 @@ func TestEmitManifestUnsignedFlag(t *testing.T) {
 //   - --unsigned still stamps unsigned=true and auto-suffixes the flavor.
 //
 // The signed EXE hash is populated by AVC (or the optional
-// finalize.{sh,ps1}) after step-3 signtool sign — see
-// design.md § Decisions for the rationale.
+// finalize.{sh,ps1}) after step-3 signtool sign, because the signed
+// hash does not exist until then.
 func TestEmitProvenancePlaceholder(t *testing.T) {
 	outDir := t.TempDir()
 

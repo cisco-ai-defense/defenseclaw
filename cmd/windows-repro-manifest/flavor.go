@@ -8,14 +8,14 @@ package main
 // carries by default. Named as a package-level const so a change to
 // this string flows through every emitter in one edit — the previous
 // per-file literals let manifest.json and provenance.json drift out of
-// sync (spec 002 CR — "The unsigned flavor rule is duplicated in two
-// emitters").
+// sync.
 const defaultDistributionFlavor = "managed-enterprise"
 
 // unsignedDistributionFlavorSuffix is the string appended to the
 // default flavor when the caller passes --unsigned. This is the marker
 // the runtime + release-engineering pipeline greps for to refuse
-// non-disposable-scope installs; see spec 002 REQ-16.
+// non-disposable-scope installs. Only an explicit --unsigned build may
+// carry it; the signed path is always plain "managed-enterprise".
 const unsignedDistributionFlavorSuffix = "-unsigned"
 
 // resolveDistributionFlavor is the single source of truth for how
@@ -32,8 +32,7 @@ const unsignedDistributionFlavorSuffix = "-unsigned"
 //     this to shape flavor strings that already carry markers of
 //     their own; earlier revisions inferred "explicit" from
 //     "value != default" and mis-suffixed
-//     `--distribution-flavor managed-enterprise --unsigned` (CR
-//     spec-002:PRRT_kwDORuAK-s6ahAB9).
+//     `--distribution-flavor managed-enterprise --unsigned`.
 //
 // emit-manifest and emit-provenance both call this — same rule, same
 // bytes, no drift. Callers detect explicitFlavor via FlagSet.Visit

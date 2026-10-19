@@ -9,7 +9,7 @@
 #
 # Both files set the same six envs, ship the same required-env list,
 # and export the same preflight+build functions. If they drift, the
-# byte-identical outer Setup EXE contract Workstream A depends on
+# byte-identical outer Setup EXE contract the AVC handoff depends on
 # quietly breaks — one script host would produce a different binary
 # from the other. This lint runs from `make lint` so drift is caught
 # on every PR that touches either file.
@@ -19,8 +19,6 @@
 # would require running PowerShell in CI, which is not universally
 # available; the two files diverge in ways that syntactic checks miss
 # only if someone is trying to hide drift, which is out of scope.
-#
-# See docs/specs/001-windows-deterministic-build/design.md § Risks.
 
 set -euo pipefail
 
@@ -65,7 +63,7 @@ if [[ "${sh_envs}" != "${ps_envs}" ]]; then
     echo "pwsh exports:" >&2
     echo "${ps_envs}" | sed 's/^/  /' >&2
     echo "" >&2
-    echo "See docs/specs/001-windows-deterministic-build/design.md § Risks." >&2
+    echo "Make the same change in both repro-flags.sh and repro-flags.ps1." >&2
     exit 1
 fi
 

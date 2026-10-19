@@ -2982,7 +2982,7 @@ function Assert-DefenseClawServiceName {
 # ~230 GuardianServiceName call-sites so the enumerator's name is
 # always in lockstep with the guardian's. Every caller that today
 # passes `-GuardianServiceName` gets the enumerator name for free
-# via this helper — no threading required. See spec 005 D1.
+# via this helper — no threading required.
 function Get-DefenseClawEnumeratorServiceName {
     param([Parameter(Mandatory)][string]$GuardianServiceName)
     Assert-DefenseClawServiceName -Name $GuardianServiceName
@@ -7234,7 +7234,7 @@ function Set-DefenseClawManagedServices {
             -BrokerLogPath $BrokerLogPath
     }
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
-    # Spec 005 D1: third SCM service reuses the gateway binary, invoked
+    # The hook enumerator, a third SCM service, reuses the gateway binary, invoked
     # with the `enterprise windows enumerate` subcommand. Runs as
     # LocalSystem with the same privilege set as the guardian (needs
     # SeImpersonatePrivilege to walk per-user profile trees; SeBackupPrivilege
@@ -7420,7 +7420,7 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GuardianServiceName `
         -ExpectedImage $guardianImage
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfV): authenticate an
+    # Authenticate an
     # existing enumerator BEFORE reconfiguring it, mirroring the
     # ownership check the uninstall path already does. Without this,
     # a foreign process that pre-registered a service with the exact
@@ -7580,7 +7580,7 @@ function Set-DefenseClawManagedServices {
         -LogPath $GuardianLogPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
-    # Spec 005 D1: the enumerator shares the guardian's log directory
+    # The enumerator shares the guardian's log directory
     # via GuardianLogPath — one hook-guardian log surface holds every
     # guardian + enumerator line, matching macOS's shared
     # hook-enumerator.log convention. A follow-up may split the paths
@@ -7891,11 +7891,11 @@ function Get-DefenseClawTransactionServiceStates {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): derive the enumerator's
+    # Derive the enumerator's
     # service name from the guardian's — same shape as the
     # transaction-open snapshot builder above. Transaction snapshots
-    # written by pre-spec-005 psm1 versions have only 2 services;
-    # loading such a snapshot on a post-spec-005 host is expected
+    # written by psm1 versions without the enumerator have only 2 services;
+    # loading such a snapshot on a newer host is expected
     # during an upgrade window, so the "missing enumerator state"
     # check below is a WARN (rather than throw) that treats the
     # enumerator as absent. Post-upgrade transactions always carry
@@ -7944,10 +7944,10 @@ function Get-DefenseClawTransactionServiceStates {
             throw "transaction is missing service state for $name"
         }
     }
-    # Enumerator is spec-005-new. A pre-spec-005 transaction snapshot
+    # The enumerator is the newest service. An older transaction snapshot
     # will not carry it; synthesise an "absent" entry so callers
     # (Restore-DefenseClawTransactionServiceStartModes) can iterate
-    # all three service names uniformly. Post-spec-005 snapshots
+    # all three service names uniformly. Newer snapshots
     # always contain the entry, and Get-DefenseClawTransactionService-
     # StartMode's absence guard already rejects a running-but-absent
     # combination.
@@ -7992,7 +7992,7 @@ function Restore-DefenseClawTransactionServiceStartModes {
         -Services $Services `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): restore the enumerator's
+    # Restore the enumerator's
     # recorded start mode too, so a rollback returns all three
     # services to their pre-transaction posture. Order: guardian →
     # gateway (existing, preserves the boot-safety invariant that
@@ -8021,7 +8021,7 @@ function Initialize-DefenseClawManagedIPCDirectory {
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
     # Program Files, not ProgramData. Path parity with the Go resolver
-    # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
+    # in internal/ipc/paths_windows.go is mandatory.
     $expectedIPCDirectory = [string](Get-DefenseClawProfileRoots).ManagedIPCDirectory
     $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
         -Path ([IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')) `
@@ -8283,7 +8283,7 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
 
     # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
     # Program Files, not ProgramData. Path parity with the Go resolver
-    # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
+    # in internal/ipc/paths_windows.go is mandatory.
     $expectedIPCDirectory = [string](Get-DefenseClawProfileRoots).ManagedIPCDirectory
     $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
         -Path ([IO.Path]::GetFullPath(
@@ -9616,7 +9616,7 @@ function Get-DefenseClawLayout {
     # (not ProgramData) as of the AVC release-26.8.4 integration —
     # Cisco Secure Client's Windows GUI dials the socket under Program
     # Files so DefenseClaw follows. Path parity with
-    # internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02. The
+    # internal/ipc/paths_windows.go is mandatory. The
     # standalone profile keeps the same shape under its own root.
     $managedIPCDirectory = [string]$profileRoots.ManagedIPCDirectory
     $lifecycleLockDirectory = [string]$profileRoots.LifecycleDirectory
@@ -10819,11 +10819,10 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # intentionally runs as LocalSystem so it can hold the sensor plane's
         # narrowly scoped host privileges.
         [switch]$SensorHelper,
-        # Spec 005 D1: mirrors -Guardian for the third SCM service.
+        # Mirrors -Guardian for the third SCM service, the hook enumerator.
         # Its ImagePath is the gateway binary invoked with
         # `enterprise windows enumerate --manifest X --interval 5m`;
-        # its ObjectName is LocalSystem (same as guardian, matching
-        # the account-model choice recorded in the Stage 1 commit).
+        # its ObjectName is LocalSystem, the same account as the guardian.
         [switch]$Enumerator
     )
     if (($Guardian -and ($SensorHelper -or $Enumerator)) -or
@@ -11129,7 +11128,7 @@ function New-DefenseClawTransaction {
             [string]$Layout.StateRoot
         ).Identity
     )
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): transaction snapshots
+    # Transaction snapshots
     # must record all THREE managed services. The enumerator's
     # start-mode + running state travel with gateway + guardian so
     # rollback restores them together — otherwise a failed transaction
@@ -11229,7 +11228,7 @@ function New-DefenseClawTransaction {
         # Disabled start neutralizes boot activation and any failure restart
         # already queued by SCM. Gateway is disabled first so a crash cannot
         # leave it boot-active while guardian was demoted by this transaction.
-        # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): disable all THREE
+        # Disable all THREE
         # services during the quiesce phase. Enumerator disabled last
         # so its final cycle (already in flight) can complete and drop
         # a coherent targets.yaml before the transaction reads it as
@@ -14073,7 +14072,7 @@ function Start-DefenseClawTransactionServices {
             -StartMode 3
         Start-DefenseClawService -Name $GatewayServiceName
     }
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): restore only an Enumerator
+    # Restore only an Enumerator
     # explicitly present in the authenticated service preimage. A missing or
     # explicitly absent row was retired above and cannot be inferred to grant
     # fresh-install activation authority. Every recorded Enumerator that must
@@ -21308,7 +21307,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         ) `
         -ExpectedEnvironment $guardianEnvironment `
         -ExpectedStartMode $expectedStartMode
-    # Spec 005 D1: third service. Same account model + privilege set
+    # Enumerator: third service. Same account model + privilege set
     # as the guardian (needs SeImpersonate + SeBackup + SeRestore for
     # per-user profile walks). Shares the guardian's log path — the
     # enumerator records its read-only profile audit there rather than
@@ -22478,7 +22477,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         Get-DefenseClawSensorHelperEnvironmentValues `
             -GatewayServiceName $GatewayServiceName
     )
-    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
+    # The enumerator is a
     # third managed SCM service. Its expected env vars mirror the
     # guardian's (DEFENSECLAW_WINDOWS_SERVICE_NAME differs; everything
     # else including the shared GuardianLogPath is identical), and
@@ -22650,13 +22649,13 @@ function Assert-DefenseClawEnterpriseDeployment {
                 [string]$guardianReadiness.diagnostic
             )
         }
-        # Spec 005 D1: readiness check for the enumerator SCM
+        # Readiness check for the enumerator SCM
         # process. Uses the same lightweight "service is running"
         # probe as Test-DefenseClawGatewayReady rather than a
         # deeper liveness call — the enumerator has no readiness
         # RPC of its own; its per-cycle stderr goes to the
         # guardian's log surface and the sidecar's
-        # SidecarHealth.Enumerator field (spec 005 Stage 9)
+        # SidecarHealth.Enumerator field
         # carries the per-cycle state. A missing-or-stopped SCM
         # process here is caught; a hung enumerator loop is a
         # follow-up to add a health probe for.
@@ -23924,7 +23923,7 @@ function Remove-DefenseClawSecureClientSensorHelperSocket {
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
-    # per spec 004 REQ-02 (path parity with internal/ipc/paths_windows.go).
+    # (path parity with internal/ipc/paths_windows.go).
     # The gateway creates <InstallRoot>\ipc\ on service start and binds
     # the AF_UNIX socket <InstallRoot>\ipc\defenseclaw_ipc.sock inside it;
     # the graceful stop removes the socket file but not the directory, so
@@ -30071,7 +30070,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $GatewayServiceName `
                 -StartMode 3
             Start-DefenseClawService -Name $GatewayServiceName -FailureLogPath $Layout.GatewayLogPath
-            # Spec 005 D1 (CR PRRT_kwDORuAK-s6au6lZ): the enumerator
+            # The enumerator
             # must be demand-started + RUNNING before the pending-state
             # assertion below, which requires every managed service to
             # be StartMode 3 AND (via -RequireReadiness below) the
@@ -30117,7 +30116,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 2
-            # Spec 005 D1: promote the (already-running) enumerator
+            # Promote the (already-running) enumerator
             # from demand-start to auto-start now that readiness has
             # been proven. Without this, boot would leave the
             # enumerator disabled and new user profiles would never
@@ -31663,7 +31662,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -ServicingTransaction
-        # Spec 005 D1: teardown order enumerator → guardian → gateway.
+        # Teardown order: enumerator → guardian → gateway.
         # The running enumerator is read-only, but removing it first freezes
         # profile-audit activity while Guardian and its authenticated manifest
         # are retired. Guardian teardown after remains unchanged.

@@ -255,7 +255,7 @@ class TestEffectiveResolvers(unittest.TestCase):
                 return cfg.guardrail.effective_hook_fail_mode(connector)
 
     def test_secure_client_defaults_hook_fail_mode_open(self):
-        # Owner decision on #1291: spec 007's open default applies only under
+        # Owner decision on #1291: the open hook delivery default applies only under
         # Secure Client, independent of the guardrail mode; an explicit closed
         # is always kept.
         base = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\n"

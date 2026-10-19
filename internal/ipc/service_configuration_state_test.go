@@ -10,8 +10,7 @@ import (
 	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
 )
 
-// TestMapConfigurationState pins the four-case table from
-// docs/specs/004-windows-ui-ipc/requirements.md REQ-13:
+// TestMapConfigurationState pins the four-case table:
 //
 //	waiting_for_config  → CONFIGURATION_STATE_WAITING_FOR_CONFIG
 //	waiting_for_targets → CONFIGURATION_STATE_WAITING_FOR_TARGETS
@@ -20,8 +19,8 @@ import (
 //
 // The last row covers two things: a nil *ConfigurationHealth
 // pointer (non-managed deployments never allocate it), and a
-// state string that spec 003 introduces in a future extension
-// which this spec 004 build doesn't yet recognise. Both must
+// state string that a future extension introduces
+// which this build doesn't yet recognise. Both must
 // collapse to UNSPECIFIED so a stale build never surfaces a
 // false "ready" for a state it doesn't understand.
 func TestMapConfigurationState(t *testing.T) {
@@ -66,7 +65,7 @@ func TestMapConfigurationState(t *testing.T) {
 }
 
 // TestCurrentHealthPopulatesConfigurationState is the end-to-end
-// wiring check spec 004 CR PRRT_kwDORuAK-s6ankz4 requires: verifies
+// wiring check: verifies
 // that currentHealth() actually ASSIGNS the mapped value to
 // pb.HealthSnapshot.ConfigurationState, catching a regression that
 // removes the assignment at service.go's `return &pb.HealthSnapshot{...}`.
@@ -118,7 +117,7 @@ func TestCurrentHealthPopulatesConfigurationState(t *testing.T) {
 			if got.ConfigurationState != tc.want {
 				t.Fatalf("currentHealth().ConfigurationState = %v, want %v", got.ConfigurationState, tc.want)
 			}
-			// Sanity: the other new-in-spec-004 field on
+			// Sanity: the other UI IPC field on
 			// HealthSnapshot (DefenseClawVersion) is still wired.
 			if got.DefenseClawVersion != "test-1.2.3" {
 				t.Fatalf("currentHealth().DefenseClawVersion = %q, want %q", got.DefenseClawVersion, "test-1.2.3")
@@ -137,7 +136,7 @@ func TestCurrentHealthOmitsConfigurationStateForNonManaged(t *testing.T) {
 	h := gateway.NewSidecarHealth()
 	// Deliberately do NOT call SetDaemonConfigLoaded — this
 	// simulates an OSS / SaaS / DP / CP deployment that skipped
-	// the sidecar-bootstrap wiring that spec 003 added.
+	// the managed sidecar-bootstrap wiring.
 	svc := &service{health: h, version: "test-1.2.3"}
 	got := svc.currentHealth()
 	if got.ConfigurationState != pb.ConfigurationState_CONFIGURATION_STATE_UNSPECIFIED {
@@ -148,8 +147,8 @@ func TestCurrentHealthOmitsConfigurationStateForNonManaged(t *testing.T) {
 // TestCodesignStateLabel pins the four-row table in
 // codesignStateLabel: Windows always reports deferred_windows;
 // linux/darwin report "enabled" when ANY require flag or
-// allowlist is set, and "disabled" otherwise. See
-// docs/specs/004-windows-ui-ipc/requirements.md REQ-09.
+// allowlist is set, and "disabled" otherwise. These literals are
+// a stable log contract.
 func TestCodesignStateLabel(t *testing.T) {
 	tests := []struct {
 		name                   string

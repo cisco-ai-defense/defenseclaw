@@ -34,8 +34,6 @@ import (
 // so both peers dial the same known-root prefix. The virtual service
 // SID granted DACL rights on this directory during install can bind /
 // unlink the socket under Program Files just as under ProgramData.
-//
-// See spec 004 REQ-02 and parity plan §4.2 C1.
 // windowsManagedIPCRelativeDir is defined in internal/winpath so the
 // sensor helper resolves the identical directory without importing this
 // package, which would cycle through internal/gateway.
@@ -51,10 +49,8 @@ var windowsManagedIPCRelativeDir = winpath.ManagedIPCRelativeDir
 // (ResolveSocketPath in paths.go) turns that into a distinguishable
 // "ipc: resolve socket path: empty" server-start error rather than
 // falling back to a per-user path.
-//
-// Spec 004 REQ-02.
 func resolveManagedIPCSocketPath(cfg *config.Config) string {
-	_ = cfg // reserved: a future spec may consult cfg.Managed for override plumbing
+	_ = cfg // reserved: a future change may consult cfg.Managed for override plumbing
 	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil || programFiles == "" {
 		return ""

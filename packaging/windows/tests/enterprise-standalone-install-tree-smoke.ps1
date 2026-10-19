@@ -356,7 +356,7 @@ try {
             } '^uninstall_in_use: defenseclaw-acp\.exe \(pid 4242, account HOST\\dcw-w3a1, started by zed\) runs from .*nothing was changed'
 
             # Secure Client: the AVC IPC directory lives under InstallRoot
-            # (spec 004 REQ-02) and a graceful gateway stop leaves it empty,
+            # (path parity with the Go IPC resolver) and a graceful stop leaves it empty,
             # so the uninstall inventory accepts that exact directory (release
             # 26.8.4, #839) but nothing inside it beyond the layout's socket.
             # share is not accepted, and the standalone removal helpers are

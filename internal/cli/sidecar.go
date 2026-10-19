@@ -37,7 +37,7 @@ import (
 )
 
 // configurationPollInterval is how often the sidecar re-reads the
-// guardian's out-of-band state file. Spec 003 tolerates a lag up to
+// guardian's out-of-band state file. The health surface tolerates a lag up to
 // one interval between a guardian-side transition and the health
 // surface reflecting it; 5s is short enough for a Secure Client UI to
 // update in near-real-time without burning IO on non-managed
@@ -118,8 +118,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
 
-	// Spec 003 (docs/specs/003-windows-deferred-config/) health-surface
-	// wiring. Only under managed_enterprise: mark the daemon-side of
+	// Deferred-config health-surface wiring. Only under managed_enterprise: mark the daemon-side of
 	// the collapsing rule loaded (we reached this point AFTER
 	// loadGatewayConfigV8 succeeded — either directly or via the wait
 	// loop in rootPersistentPreRunE), wire the sidecar's guardian
@@ -217,7 +216,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	// Spec 003 periodic guardian-state poller. Only under
+	// Periodic guardian-state poller. Only under
 	// managed_enterprise (SetDaemonConfigLoaded was called only in
 	// that branch above; RefreshConfiguration is a cheap no-op when
 	// SidecarHealth's configuration pointer is still nil, so this

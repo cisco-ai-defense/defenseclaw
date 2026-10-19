@@ -81,13 +81,13 @@ type EnumerateOptions struct {
 	// without a discovered agent version does not auto-hook the
 	// user; the admin promotes it explicitly).
 	//
-	// Callers that want to force a from-scratch generation (e.g. F1
+	// Callers that want to force a from-scratch generation (e.g. a
 	// targeted-uninstall regeneration after the target user's rows
 	// have been removed) leave this empty.
 	ExistingManifestPath string
 
 	// ExcludeSIDs is a list of SID strings to drop from the output.
-	// Used by spec 005 F1 targeted-uninstall to regenerate the
+	// Used by the targeted uninstall to regenerate the
 	// manifest with a specific user excluded, without doing per-row
 	// surgery on the on-disk file.
 	ExcludeSIDs []string
@@ -148,8 +148,8 @@ type EnumerateOptions struct {
 	RunningAgents map[string]map[string]string
 }
 
-// EnumerateWindows walks the local user profile registry, filters per
-// spec 005 REQ-08 + REQ-11, and produces a Manifest matching the
+// EnumerateWindows walks the local user profile registry (ProfileList),
+// keeps only interactive-user profiles, and produces a Manifest matching the
 // shape the hook-guardian's LoadManifest already accepts.
 //
 // Filter chain (each step drops the profile with a logf line if opts.Logger is set):
@@ -160,8 +160,7 @@ type EnumerateOptions struct {
 //     Refuses well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7,
 //     SYSTEM S-1-5-18, Authenticated Users S-1-5-11, BUILTIN
 //     S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by construction.
-//     Belt-and-braces on top of the CLI-input filter at spec 005
-//     REQ-15.
+//     Belt-and-braces on top of the CLI's target-SID validation.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -169,9 +168,9 @@ type EnumerateOptions struct {
 //     checks from the volume root down and refuses an ancestor before
 //     reading anything below it).
 //  5. `opts.ExcludeSIDs`: any SID listed here is dropped. Used by
-//     spec 005 F1's targeted uninstall.
+//     the targeted uninstall.
 //
-// Deduplication (REQ-10): if two profiles have the same SID (e.g. a
+// Deduplication: if two profiles have the same SID (e.g. a
 // re-created account whose registry entry conflicts with a stale
 // row), the enumerator prefers the one whose `ProfileImagePath`
 // mtime is newer.
@@ -281,10 +280,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
-		// completion after ctx has been cancelled — spec 005
-		// REQ-19's 60 s cycle ceiling depends on this loop
-		// noticing the deadline. See CR
-		// spec-005:PRRT_kwDORuAK-s6atyfD.
+		// completion after ctx has been cancelled — the 60 s
+		// cycle ceiling depends on this loop noticing the
+		// deadline.
 		if err := ctx.Err(); err != nil {
 			return Manifest{}, err
 		}
@@ -493,7 +491,7 @@ func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, ju
 //
 // Returns `changed=false, err=nil` when the on-disk file is
 // byte-identical to the newly-serialised manifest. This is the
-// no-op-no-write invariant from spec 005 REQ-05: without it, every
+// no-op-no-write invariant: without it, every
 // 5-min interval tick on a stable box would fsnotify-wake the
 // guardian and force it to re-reconcile identical rows (288
 // wakes/day on a stable 50-user fleet).
@@ -1044,7 +1042,7 @@ func previousManifestKey(sid, connector string) string {
 type windowsUserProfile struct {
 	SID  string
 	Home string
-	// HomeMtime disambiguates duplicate-SID rows per REQ-10; the
+	// HomeMtime disambiguates duplicate-SID rows (newest wins); the
 	// registry doesn't have direct time-of-registration for a
 	// profile, but the ProfileImagePath directory's mtime is a
 	// reasonable proxy (it changes whenever the profile is
@@ -1121,11 +1119,11 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // missing/reparse-point home) are dropped with a WARN via logf.
 //
 // Duplicate SIDs are deduplicated in-place — the newest
-// ProfileImagePath mtime wins, per REQ-10.
+// ProfileImagePath mtime wins.
 //
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
-// cycle timeout (spec 005 REQ-19).
+// 60 s cycle timeout.
 func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
@@ -1317,11 +1315,11 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 // S-1-5-19, NetworkService S-1-5-20, IIS_IUSRS S-1-5-17, etc.) fails
 // both accepted authority-and-shape checks.
 //
-// Matches spec 005 REQ-11 and — together with the CLI-input
-// validator at spec 005 REQ-15 — provides belt-and-braces coverage.
-// Same discipline as spec 004's `sidIsNTService` (in
+// Together with the CLI's target-SID validator
+// (validateWindowsEnterpriseTargetSID) this provides belt-and-braces
+// coverage. Same discipline as `sidIsNTService` (in
 // internal/ipc/acl_windows.go), inverted: this filter admits ONLY
-// interactive users; spec 004's admitted ONLY NT SERVICE principals.
+// interactive users; that one admits ONLY NT SERVICE principals.
 func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false
@@ -1376,7 +1374,7 @@ func sidIsEntraIDUser(sid *windows.SID) bool {
 // `guardrail.connector: claudecode` together with
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
-// authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
+// authoritative.
 //
 // The per-user connectors count only in a standalone process (one that
 // carries the profile pin); use EffectiveWindowsStandaloneHookConnectors

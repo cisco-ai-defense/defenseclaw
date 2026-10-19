@@ -12,13 +12,11 @@ import (
 
 // TestSupplyChainStdlibOnly guards the reproducibility-critical
 // windows-repro-manifest binary against picking up a third-party
-// dependency. See docs/specs/001-windows-deterministic-build/plan.md
-// § Security Plan: "The Go helper has no third-party dependencies
-// beyond the stdlib."
+// dependency: the helper must depend only on the Go stdlib.
 //
 // A third-party dep would:
 //   - increase the vendored tree size (bumping against the 300 MB
-//     build-kit ceiling in Workstream E REQ-11), and
+//     uncompressed build-kit size ceiling), and
 //   - couple our JSON byte-stability contract to that dep's own
 //     versioning cadence, which is exactly the variance we removed
 //     by writing this binary in the first place.

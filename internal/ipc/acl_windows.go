@@ -26,7 +26,7 @@ import (
 // managed-enterprise gateway service registers under by convention
 // ("NT SERVICE\DefenseClawGateway"). Callers can override this at
 // runtime by setting managed.WindowsServiceAccountEnv, which the
-// installer already pins per spec 002's SCM env plumbing. This
+// installer already pins in the service's SCM environment. This
 // constant is only the fallback when the env is unset — a
 // certification-scoped install with a hashed service name (e.g.
 // DefenseClawCertGateway_<10-hex>) sets the env explicitly and
@@ -39,8 +39,7 @@ const defaultGatewayServiceAccount = `NT SERVICE\DefenseClawGateway`
 // GENERIC_READ|GENERIC_WRITE on a directory includes FILE_ADD_FILE
 // and FILE_ADD_SUBDIRECTORY, which would let Authenticated Users
 // pre-create files inside the IPC directory (including at the socket
-// path while the daemon is stopped). See CR
-// spec-004:PRRT_kwDORuAK-s6ankzk.
+// path while the daemon is stopped).
 type aclObjectClass int
 
 const (
@@ -48,10 +47,10 @@ const (
 	aclObjectSocketFile
 )
 
-// applyBaselineIPCACL applies the spec 004 baseline hygiene DACL to
+// applyBaselineIPCACL applies the baseline hygiene DACL to
 // the file at `path`. The DACL is protected — SE_DACL_PROTECTED
 // severs inheritance so ancestor ACL policy on ProgramData cannot
-// silently over-permit the IPC surface (spec 004 REQ-05).
+// silently over-permit the IPC surface.
 //
 // Four ACEs, no others:
 //
@@ -76,9 +75,9 @@ const (
 //     population cannot rewrite the socket's ACL.
 //
 // Access boundary rationale: the initial-cut deferred-auth posture
-// (spec 004 REQ-06 → REQ-08) does NO accept-time codesign or
+// on Windows does NO accept-time codesign or
 // signer-CN validation. The DACL is the only access control. Full
-// peer-auth lands in a follow-up spec per parity plan §4.4; until
+// peer-auth lands in a follow-up change; until
 // then the GA release-gate at authposture_gagate.go refuses a
 // release-candidate build in which this posture remains reachable.
 func applyBaselineIPCACL(path string, class aclObjectClass) error {
@@ -102,7 +101,7 @@ func applyBaselineIPCACLEntries(path string, entries []windows.EXPLICIT_ACCESS) 
 	}
 	// DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION:
 	// write the DACL AND set the protected flag so the object does not
-	// inherit any additional ACEs from its parent (spec 004 REQ-05).
+	// inherit any additional ACEs from its parent.
 	// Owner/group left alone — the file's original owner (usually the
 	// process account) retains WRITE_DAC via ownership, which is fine:
 	// only SYSTEM/admins can rewrite the process account's DACL from
@@ -229,8 +228,7 @@ func baselineIPCACEsForGatewaySID(
 	// a malicious auth-user must NOT be able to pre-create a decoy
 	// file at the socket path while the daemon is stopped. Windows'
 	// specific rights for a directory object; NOT the generic bits
-	// (which map to FILE_ADD_FILE etc.). See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzk.
+	// (which map to FILE_ADD_FILE etc.).
 	//
 	// Socket-file mask: GENERIC_READ | GENERIC_WRITE. Enough for the
 	// UDS `connect()` + gRPC handshake byte streams. WRITE_DAC is
@@ -289,8 +287,7 @@ func explicitAllow(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPLICIT_
 // is the ONLY access boundary, so an unvalidated principal in the
 // DACL would be the single point of failure. A spoofed
 // WindowsServiceAccountEnv that resolved to e.g. `Everyone` or an
-// unrelated user must NOT slip into the ACE list. See CR
-// spec-004:PRRT_kwDORuAK-s6ankzl.
+// unrelated user must NOT slip into the ACE list.
 //
 // `internal/managed/trust_windows.go` performs a similar check on a
 // different code path (trusted-path binding at daemon startup); this

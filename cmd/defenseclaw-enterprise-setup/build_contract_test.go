@@ -33,7 +33,7 @@ func readEnterpriseSetupContractFile(t *testing.T, relative string) string {
 }
 
 // TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap asserts
-// the AVC-facing assembler (docs/specs/002-windows-avc-packaging/)
+// the AVC-facing assembler
 // keys off the exact machine-wide bootstrap contract: same output
 // filename, same source package, same payload set, no relabeling of
 // the per-user Setup as managed-enterprise. Replaces the retired

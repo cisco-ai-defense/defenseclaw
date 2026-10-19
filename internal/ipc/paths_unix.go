@@ -25,8 +25,8 @@ import (
 // macOS install layout at
 // /opt/cisco/secureclient/defenseclaw/ipc/defenseclaw_ipc.sock.
 //
-// The Windows sibling in paths_windows.go returns the ProgramData
-// path required by spec 004; both paths share ResolveSocketPath's
+// The Windows sibling in paths_windows.go returns the trusted
+// Program Files path; both paths share ResolveSocketPath's
 // unwrapping logic in paths.go.
 func resolveManagedIPCSocketPath(cfg *config.Config) string {
 	return filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
