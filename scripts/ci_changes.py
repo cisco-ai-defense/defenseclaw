@@ -63,7 +63,8 @@ MANAGED_SECTIONS = ("managed", "managed_impacting", "excluded")
 # The inputs of the Windows deterministic-build gate
 # (windows-deterministic-build.yml): the AVC build kit, its fixture, the
 # reproducibility lints and the toolchain pin. The gate compares two builds of
-# the same tree on two hosts, so other source changes cannot break it.
+# the same tree on two hosts, so other source changes cannot break it. This
+# classifier selects the gate, so a change to it runs the gate too.
 REPRO_PATHS = (
     "cmd/windows-repro-manifest/",
     "cmd/defenseclaw-enterprise-setup/",
@@ -75,6 +76,7 @@ REPRO_PATHS = (
     "scripts/check-assemble-parity.sh",
     "scripts/generate-repro-fixture.sh",
     ".github/workflows/windows-deterministic-build.yml",
+    "scripts/ci_changes.py",
     "go.mod",
 )
 

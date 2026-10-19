@@ -41,6 +41,7 @@ on:
       - scripts/check-assemble-parity.sh
       - scripts/generate-repro-fixture.sh
       - .github/workflows/windows-deterministic-build.yml
+      - scripts/ci_changes.py
       - go.mod
 
 permissions:

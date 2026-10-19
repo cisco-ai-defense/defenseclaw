@@ -416,6 +416,8 @@ def test_the_deterministic_build_gate_runs_only_for_its_inputs() -> None:
         "internal/build-repro/testdata/signed-payload-fixture.tar.zst",
         "go.mod",
         ".github/workflows/windows-deterministic-build.yml",
+        # The classifier selects the gate, so a change to it runs the gate.
+        "scripts/ci_changes.py",
     ):
         assert classify(path)["repro"], path
     for path in ("internal/gateway/router.go", "packaging/windows/DefenseClawEnterprise.psm1"):

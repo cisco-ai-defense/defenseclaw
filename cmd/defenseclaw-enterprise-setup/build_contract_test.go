@@ -209,6 +209,8 @@ func TestEnterpriseWorkflowValidatesPublicContractsWithoutPrivateRepositoryAcces
 			"[Management.Automation.Language.Parser]::ParseFile",
 			"bash -n packaging/scripts/build-managed-windows-bundle.sh",
 			"go build -tags ga ./internal/ipc/...",
+			// The refusal must come from the gate, not an unrelated build error.
+			`authposture_gagate\.go:.*authpostureGAApproved`,
 		} {
 			if !strings.Contains(workflow, required) {
 				t.Errorf("%s is missing %q", name, required)

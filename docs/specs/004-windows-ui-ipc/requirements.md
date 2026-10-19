@@ -115,8 +115,9 @@
   - Only the follow-up peer-auth spec defines that symbol.
 - **REQ-19:** CI (the `enterprise-setup-contracts` job in `ci.yml` for pull
   requests to `main`, and `windows-enterprise-setup.yml`) runs
-  `GOOS=windows go build -tags ga` and fails if that build succeeds. The
-  missing symbol in stderr is only a diagnostic hint.
+  `GOOS=windows go build -tags ga` and fails if that build succeeds, or if
+  it fails for any reason other than the gate: the error must name
+  `authposture_gagate.go` and `authpostureGAApproved`.
 
 ## Lifecycle
 
