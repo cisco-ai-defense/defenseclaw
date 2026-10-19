@@ -37,7 +37,11 @@ REQUIRED_CHECKS = {
         "make test (unified)",
         "Go Test",
         "Rego Policy Tests",
+        # The managed-mode aggregates (spec 008).
+        "Enterprise Required",
     },
+    "windows-native.yml": {"Windows Native Required"},
+    "windows-deterministic-build.yml": {"Windows Deterministic Build Required"},
 }
 # connector-live-e2e.yml builds its matrix at run time; every matrix it can
 # choose must contain this cell (see the no-op test below).

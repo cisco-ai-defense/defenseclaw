@@ -1,6 +1,7 @@
 # Spec 008: Managed path manifest and managed-mode CI gating
 
-Status: Phases 1 to 3 implemented. Phase 0 (ruleset, reviewers team) is open.
+Status: Phases 1 to 3 implemented, and the three aggregates are required on
+`main` (D1). D2 and D3 are open.
 Investigated against `origin/main` at `314616938` (2026-10-19).
 
 ## Goal
@@ -15,7 +16,7 @@ Investigated against `origin/main` at `314616938` (2026-10-19).
 | Goal | Possible? | How |
 | --- | --- | --- |
 | Managed CI runs on every PR that touches managed code | **Yes** | `.github/managed-paths.txt` drives `scripts/ci_changes.py` |
-| A red managed lane blocks merge | **Yes**, but it needs a ruleset change by a repo admin (D1) | Require the three aggregate checks |
+| A red managed lane blocks merge | **Yes** | The `main` ruleset requires the three aggregate checks (D1) |
 
 ## Non-goal: moving managed code
 
@@ -59,7 +60,7 @@ secrets, so they are fork-safe. The gaps were in the wiring:
 
 | # | Gap | Status |
 | --- | --- | --- |
-| 1 | **No managed check is a required status check.** The live ruleset requires only the 11 `ci.yml` checks and `Contract codex / macos-latest`. The `ci.yml` comment claimed it required `Enterprise Required`. | Open: D1 |
+| 1 | **No managed check is a required status check.** The live ruleset requires only the 11 `ci.yml` checks and `Contract codex / macos-latest`. The `ci.yml` comment claimed it required `Enterprise Required`. | Fixed: D1 |
 | 2 | Python changes never set `enterprise`, including `uv.lock` and `pyproject.toml`, which the enterprise Setup embeds. | Fixed: manifest |
 | 3 | Go-only managed changes skipped the Windows enterprise PowerShell smokes (`windows_python` did not include `go`). | Fixed: manifest |
 | 4 | Workflow edits never ran the lanes they change. | Fixed: the managed workflows are in the manifest |
@@ -152,15 +153,14 @@ out; most of them run everything anyway):
 Go changes already ran the enterprise lanes, so the manifest adds little
 runner time. Most of it is the Windows Python shards on Go-only managed PRs.
 
-## Phase 0: open decisions (maintainers and a repo admin)
+## Phase 0: decisions (maintainers and a repo admin)
 
-- **D1.** Require `Enterprise Required`, `Windows Native Required` and
-  `Windows Deterministic Build Required` on `main`, and add them to
-  `REQUIRED_CHECKS` in `cli/tests/test_ci_changes.py` in the same change.
-  **Until then a red managed lane still does not block a merge.**
-  - Before turning `Enterprise Required` on, fix its current failure on
-    `main`: at `314616938`, `TestManagedHookFailModeIsTheRenderedValue` fails
-    in Unix Standalone Lifecycle on Ubuntu and macOS.
+- **D1. Done.** The `main protection` ruleset requires `Enterprise Required`,
+  `Windows Native Required` and `Windows Deterministic Build Required`.
+  `REQUIRED_CHECKS` in `cli/tests/test_ci_changes.py` lists them, so a test
+  fails if one of them stops reporting on every pull request. The earlier
+  `TestManagedHookFailModeIsTheRenderedValue` failure on `main` was fixed in
+  #1342.
 - **D2.** Create a managed reviewers team (or name an existing one). A
   CODEOWNERS block generated from the manifest then routes managed paths to
   it. Not built until the team exists.
