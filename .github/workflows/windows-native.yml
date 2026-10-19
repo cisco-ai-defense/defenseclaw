@@ -378,7 +378,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # Twelve shards balanced on Windows module times
+        # (scripts/test-timings/python-windows.json) finish in about the time
+        # of the packaged Setup lifecycle part.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -408,7 +411,7 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run Python test shard ${{ matrix.shard }} of 8
+      - name: Run Python test shard ${{ matrix.shard }} of 12
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
@@ -426,8 +429,8 @@ jobs:
             }
           }
           # Balance whole test files (the TUI suite included) across the
-          # eight shards by recorded time, as the Linux coverage shards do.
-          $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '8', '--shard-index', [string]$shardIndex, '--timings', 'scripts/test-timings/python-linux.json')
+          # shards by recorded Windows time, as the Linux coverage shards do.
+          $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '12', '--shard-index', [string]$shardIndex, '--timings', 'scripts/test-timings/python-windows.json')
           if (-not $fullTelemetryRegistry) {
             foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
               $shardSelectionArgs += @('--exclude', $telemetryFile)
@@ -465,13 +468,24 @@ jobs:
             $nativeTelemetryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $nativeTelemetryTargets + @('-vv', '--durations=25', '--color=no')
             Invoke-WindowsNativeProcess $uv $nativeTelemetryPytestArgs -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-native-telemetry.log' -f $env:PYTHON_SHARD)) | Out-Null
           }
-          $ordinaryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
+          # The JUnit report refreshes python-windows.json
+          # (scripts/update_test_timings.py python --out ...).
+          $junitPath = Join-Path $env:DC_STATE_ROOT ('junit-windows-py-shard-{0}.xml' -f $env:PYTHON_SHARD)
+          $ordinaryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q', "--junitxml=$junitPath")
           Invoke-WindowsNativeProcess $uv $ordinaryPytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-ordinary.log' -f $env:PYTHON_SHARD)) | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: |
           ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
           ./scripts/annotate-windows-native-test-failures.ps1 -StateRoot $env:DC_STATE_ROOT -Suite Python -Shard $env:PYTHON_SHARD
+      - name: Upload JUnit report for the test timings
+        if: ${{ success() || failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-python-junit-${{ matrix.shard }}
+          path: ${{ env.DC_STATE_ROOT }}\junit-windows-py-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Upload diagnostics on failure
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

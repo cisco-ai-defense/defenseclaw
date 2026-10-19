@@ -14,6 +14,8 @@ weighs an estimate. Refresh after a large test change:
            scripts/update_test_timings.py go go.json
   python pytest --junitxml reports of the Python suite -> python-linux.json
            pytest cli/tests --junitxml=py.xml ...; scripts/update_test_timings.py python py.xml
+         Windows Native CI uploads windows-python-junit-<n> reports:
+           scripts/update_test_timings.py python junit-windows-*.xml --out scripts/test-timings/python-windows.json
   go-ci-log  CI job logs of the Go race shards ("ok <package> <seconds>s"
          lines): replaces the package times in go-linux.json with what the
          hosted runners measured and keeps the per-test times

@@ -68,7 +68,7 @@ def test_windows_pr_keeps_native_telemetry_coverage_without_repeating_exhaustive
         assert isolated in workflow
     assert "if (-not $fullTelemetryRegistry) {" in workflow
     assert "$shardSelectionArgs += @('--exclude', $telemetryFile)" in workflow
-    assert "'scripts/python_test_shards.py', '--shard-count', '8'" in workflow
+    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in workflow
     for native_test in (
         "test_updater_help_imports_on_native_platform",
         "test_updater_mid_publish_failure_restores_prior_bytes_and_inodes",

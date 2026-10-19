@@ -2979,8 +2979,8 @@ threading.Event().wait()
         'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8\]' -and
-        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''8'', ''--shard-index'', \[string\]\$shardIndex' -and
+    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\]' -and
+        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''12'', ''--shard-index'', \[string\]\$shardIndex' -and
         $nativeWorkflowText -match '\$shardSelectionArgs \+= @\(''--exclude'', \$telemetryFile\)' -and
         $nativeWorkflowText -match 'pytest-shard-\{0\}-files\.log' -and
         $nativeWorkflowText -match 'selected no ordinary test files' -and
@@ -2988,7 +2988,7 @@ threading.Event().wait()
         $nativeWorkflowText -match 'pytest-shard-\{0\}-ordinary\.log' -and
         $nativeWorkflowText -notmatch 'WINDOWS_TUI_MODE' -and
         $nativeWorkflowText -notmatch 'test_app_shell') `
-        'Windows Python suite balances every test file, the TUI suite included, across eight size-weighted shards'
+        'Windows Python suite balances every test file, the TUI suite included, across twelve time-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
