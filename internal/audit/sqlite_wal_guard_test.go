@@ -55,12 +55,16 @@ func TestCheckpointWALSizeCheckDoesNotHoldAuditWriter(t *testing.T) {
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
+	// Only liveness is checked here: once the connection is released the
+	// size check must finish. A loaded Windows runner can take more than a
+	// second to schedule it, so the bound is generous; a check that never
+	// gets the connection still fails.
 	select {
 	case err := <-guardDone:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("WAL size check did not finish after checkpoint connection was released")
 	}
 }
