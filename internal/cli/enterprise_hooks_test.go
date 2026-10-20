@@ -1365,6 +1365,14 @@ func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
 	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
 		t.Fatalf("unchanged log = %q, want one summary line", got)
 	}
+	var hostile bytes.Buffer
+	writeEnterpriseHookReconcileLog(&hostile, "fsnotify", "attention", enterpriseHookReconcileRun{
+		Rows:     []enterpriseHookReconcileRow{{Connector: "codex", UserHome: "/Users/a\n[hook-guardian] reconcile status=ok\x1b[2J", Error: "bad\x00\x1b[31mred\rline"}},
+		Failures: 1,
+	}, 7, true, "")
+	if got := hostile.String(); strings.Count(got, "\n") != 2 || strings.ContainsAny(got, "\x00\x1b\r") {
+		t.Fatalf("control characters reached the log: %q", got)
+	}
 	if got := enterpriseHookReconcileRowLabel(enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"}); got != "codex@S-1-5-21-1-2-3-1001" {
 		t.Fatalf("SID-only row label = %q, want the SID", got)
 	}

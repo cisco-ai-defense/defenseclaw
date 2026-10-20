@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -2343,8 +2344,17 @@ func enterpriseHookReconcileRowLabel(row enterpriseHookReconcileRow) string {
 // log, so a long error cannot flood it.
 const enterpriseHookReconcileLogMaxDetail = 1024
 
-// enterpriseHookReconcileLogDetail keeps a failure reason on one bounded line.
+// enterpriseHookReconcileLogDetail keeps a log field (a target label or a
+// failure reason) on one bounded line. Control characters, which a user name,
+// profile path or error text could carry, become spaces first, so a field
+// cannot start a new log line or emit terminal escape sequences.
 func enterpriseHookReconcileLogDetail(detail string) string {
+	detail = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, detail)
 	detail = strings.Join(strings.Fields(detail), " ")
 	if detail == "" {
 		return "no reason recorded"
@@ -2392,7 +2402,8 @@ func writeEnterpriseHookReconcileLog(
 				continue
 			}
 			fmt.Fprintf(writer, "[hook-guardian] target %s failed: %s\n",
-				enterpriseHookReconcileRowLabel(row), enterpriseHookReconcileLogDetail(row.Error))
+				enterpriseHookReconcileLogDetail(enterpriseHookReconcileRowLabel(row)),
+				enterpriseHookReconcileLogDetail(row.Error))
 		}
 		return
 	}
