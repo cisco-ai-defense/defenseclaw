@@ -1801,7 +1801,11 @@ func validateWindowsUserPathProtectionACL(
 			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s has an unreadable ACE at index %d", path, index)
 		}
 		entry := managedDACLEntry{Type: ace.Header.AceType, Mask: uint32(ace.Mask), Flags: ace.Header.AceFlags}
-		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			// Both share the ACE_HEADER, Mask, SidStart layout, so a rejected
+			// deny entry is named like an allow entry. Extended (object,
+			// callback) types keep no SID here.
 			entry.SID = windowsSIDString((*windows.SID)(unsafe.Pointer(&ace.SidStart)))
 		}
 		actual = append(actual, entry)

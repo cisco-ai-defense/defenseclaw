@@ -76,7 +76,7 @@ func TestManagedDACLRejectsWriteCapableOrMissingEntries(t *testing.T) {
 		{"ALL APPLICATION PACKAGES read-only", withEntry(expected, managedDACLEntry{SID: "S-1-15-2-1", Mask: 0x001200a9}), "broad group ALL APPLICATION PACKAGES"},
 		{"Remote Desktop Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-32-555", Mask: 0x001200a9}), "broad group Remote Desktop Users"},
 		{"Domain Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-21-1004336348-1177238915-682003330-513", Mask: 0x001200a9, Flags: aceOI | aceCI}), "broad group Domain Users"},
-		{"deny entry", withEntry(expected, managedDACLEntry{SID: testTargetSID, Type: 1, Mask: 0x001200a9}), "non-canonical ACE type"},
+		{"deny entry", withEntry(expected, managedDACLEntry{SID: testTargetSID, Type: 1, Mask: 0x001200a9}), "non-canonical ACE type 1 at index 7 (principal " + testTargetSID + ")"},
 		{"missing canonical", expected[1:], "missing the canonical ACE for principal S-1-3-4"},
 		{"canonical replaced by read-only", append([]managedDACLEntry{{SID: "S-1-5-18", Mask: 0x001200a9}}, expected[:3]...), "missing the canonical ACE"},
 	} {
