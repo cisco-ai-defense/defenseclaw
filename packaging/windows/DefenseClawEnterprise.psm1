@@ -14473,14 +14473,17 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
             # Only a prepared receipt can belong to the teardown being rolled
             # back. Bind it to restored deployment metadata before retirement;
             # a finalized receipt is a predecessor preimage and must survive.
-            # A prepared receipt of another deployment generation is no
-            # teardown's: it is retired without binding (GAP-0029).
+            # On standalone a prepared receipt of another deployment
+            # generation is no teardown's: it is retired without binding
+            # (GAP-0029). Secure Client binds every prepared receipt, as
+            # before (Secure Client is out of scope for this fix).
             $restoredMetadata = Get-DefenseClawDeploymentMetadata `
                 -Layout $Layout `
                 -Required
-            if (-not (Test-DefenseClawContractCleanupReceiptOfRemovedDeployment `
-                    -Receipt $rollbackReceipt `
-                    -Metadata $restoredMetadata)) {
+            if (-not ((Test-DefenseClawStandaloneProfile) -and
+                    (Test-DefenseClawContractCleanupReceiptOfRemovedDeployment `
+                        -Receipt $rollbackReceipt `
+                        -Metadata $restoredMetadata))) {
                 [void](Get-DefenseClawManagedHookContractCleanupReceipt `
                     -Layout $Layout `
                     -GatewayServiceName ([string]$snapshot.gateway_service) `

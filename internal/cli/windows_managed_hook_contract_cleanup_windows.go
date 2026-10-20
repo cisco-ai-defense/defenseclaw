@@ -468,16 +468,20 @@ func completeWindowsManagedHookContractCleanupClaim(
 // then failed "does not match the authenticated retired scope", with the
 // rollback failing the same way (GAP-0029). It is replaced without applying
 // its claims, so no per-user file is touched on its authority. Its scope and
-// gateway service must still be this layout's.
+// gateway service must still be this layout's. Only a standalone process
+// replaces it; Secure Client keeps the binding check for every prepared
+// receipt (Secure Client is out of scope for this fix).
 func windowsManagedHookContractCleanupPrepareReuses(
 	existing windowsManagedHookContractCleanupReceipt,
 	identity windowsManagedHooksTeardownJournal,
 	scopeSHA256 string,
+	standalone bool,
 ) (bool, error) {
 	if existing.Phase != windowsManagedHookContractCleanupPrepared {
 		return false, nil
 	}
-	if existing.DeploymentGenerationID != identity.DeploymentGenerationID &&
+	if standalone &&
+		existing.DeploymentGenerationID != identity.DeploymentGenerationID &&
 		existing.ScopeSHA256 == strings.TrimSpace(scopeSHA256) &&
 		strings.EqualFold(existing.GatewayServiceName, identity.GatewayServiceName) {
 		return false, nil

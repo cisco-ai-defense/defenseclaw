@@ -126,7 +126,8 @@ func TestManagedHookContractCleanupCapturedEntryAlreadyAbsentRequiresBarrier(t *
 // A prepared receipt that an earlier, removed deployment left at the
 // scope-stable path is replaced, so it no longer fails every later uninstall.
 // A same-generation mismatch, or a receipt for another scope or gateway
-// service, still refuses.
+// service, still refuses. Secure Client keeps the binding check for every
+// prepared receipt.
 func TestManagedHookContractCleanupPrepareReusesOnlyThisDeploymentsReceipt(t *testing.T) {
 	const scope = "1111111111111111111111111111111111111111111111111111111111111111"
 	identity := windowsManagedHooksTeardownJournal{
@@ -172,10 +173,11 @@ func TestManagedHookContractCleanupPrepareReusesOnlyThisDeploymentsReceipt(t *te
 		r.ManifestSHA256 = "2026be56e484c4c8d82d601a3a804b414db7c34a2501e4d5e727145bbceeedfb"
 	}
 	for _, tc := range []struct {
-		name    string
-		receipt windowsManagedHookContractCleanupReceipt
-		reuse   bool
-		refuse  bool
+		name         string
+		receipt      windowsManagedHookContractCleanupReceipt
+		secureClient bool
+		reuse        bool
+		refuse       bool
 	}{
 		{name: "this deployment's prepared receipt is resumed", receipt: receipt(nil), reuse: true},
 		{name: "a finalized predecessor is replaced", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
@@ -183,6 +185,8 @@ func TestManagedHookContractCleanupPrepareReusesOnlyThisDeploymentsReceipt(t *te
 			r.Phase = windowsManagedHookContractCleanupFinalized
 		})},
 		{name: "a removed deployment's prepared receipt is replaced", receipt: receipt(otherGeneration)},
+		{name: "Secure Client still refuses a removed deployment's prepared receipt", receipt: receipt(otherGeneration), secureClient: true, refuse: true},
+		{name: "Secure Client resumes this deployment's prepared receipt", receipt: receipt(nil), secureClient: true, reuse: true},
 		{name: "same generation with other claims refuses", receipt: receipt(func(r *windowsManagedHookContractCleanupReceipt) {
 			r.Claims[0].SID = "S-1-5-21-1-2-3-1002"
 		}), refuse: true},
@@ -200,7 +204,7 @@ func TestManagedHookContractCleanupPrepareReusesOnlyThisDeploymentsReceipt(t *te
 		}), refuse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reuse, err := windowsManagedHookContractCleanupPrepareReuses(tc.receipt, identity, scope)
+			reuse, err := windowsManagedHookContractCleanupPrepareReuses(tc.receipt, identity, scope, !tc.secureClient)
 			if tc.refuse != (err != nil) || reuse != tc.reuse {
 				t.Fatalf("reuse=%v err=%v, want reuse=%v refuse=%v", reuse, err, tc.reuse, tc.refuse)
 			}

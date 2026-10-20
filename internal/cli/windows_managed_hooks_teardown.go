@@ -585,6 +585,7 @@ func runWindowsManagedHooksTeardown(
 						existing,
 						identity,
 						contractCleanupScope,
+						enterprisehooks.WindowsStandaloneProcess(),
 					)
 				}
 			} else if !errors.Is(statErr, os.ErrNotExist) {
