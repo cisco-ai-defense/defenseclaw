@@ -294,10 +294,10 @@ func TestMergeOwnedCodexHooksCollapsesAccumulatedTrustedMatrices(t *testing.T) {
 	for _, profile := range profiles {
 		if len(profile) == 11 {
 			switch profile[len(profile)-1].timeout {
-			case 3:
-				legacyElevenEvents = profile
-			case 60:
+			case codexSessionEndHookGroup.timeout:
 				currentElevenEvents = profile
+			case 60:
+				legacyElevenEvents = profile
 			}
 			continue
 		}

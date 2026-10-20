@@ -67,7 +67,13 @@ _CODEX_HOOK_SPECS = {
     "PostCompact": ("post_compact", None, 30),
     "Stop": ("stop", None, 90),
 }
-_CODEX_SESSION_END_SPEC = {"SessionEnd": ("session_end", None, 60)}
+# Codex caps the SessionEnd and Interrupt timeouts at three seconds (default
+# one) and records trust for the capped value, as codexSessionEndHookGroup and
+# codexCommandHookHashForPlatform do on the Go side.
+_CODEX_CAPPED_TIMEOUT_EVENTS = frozenset({"session_end", "interrupt"})
+_CODEX_CAPPED_TIMEOUT_MAX_SECONDS = 3
+_CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS = 1
+_CODEX_SESSION_END_SPEC = {"SessionEnd": ("session_end", None, _CODEX_CAPPED_TIMEOUT_MAX_SECONDS)}
 _CODEX_TRUSTED_CONTRACTS = frozenset({"codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"})
 _CODEX_POLICY_TIMEOUT_SECONDS = 20.0
 _CODEX_POLICY_MESSAGE_LIMIT = 2 * 1024 * 1024
@@ -1563,10 +1569,13 @@ def _codex_command_hook_hash(event_key: str, matcher: str | None, hook: dict[str
     if not isinstance(windows_command, str) or not windows_command.strip():
         raise _InspectionError("stale", "Codex command handler has an empty native command")
 
-    timeout = hook.get("timeout", 600)
+    capped = event_key in _CODEX_CAPPED_TIMEOUT_EVENTS
+    timeout = hook.get("timeout", _CODEX_CAPPED_TIMEOUT_DEFAULT_SECONDS if capped else 600)
     if type(timeout) is not int or timeout < 0:  # bool is intentionally not accepted as an integer.
         raise _InspectionError("stale", "Codex command handler has an invalid timeout")
     timeout = max(timeout, 1)
+    if capped:
+        timeout = min(timeout, _CODEX_CAPPED_TIMEOUT_MAX_SECONDS)
     async_value = hook.get("async", False)
     if type(async_value) is not bool:
         raise _InspectionError("stale", "Codex command handler has an invalid async value")

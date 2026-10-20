@@ -1339,6 +1339,37 @@ func TestEnterpriseHookReconcileLogReportsRepairAsChange(t *testing.T) {
 	}
 }
 
+// A changed reconcile names each failing target and its reason; an unchanged
+// one stays a single summary line.
+func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
+	run := enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{
+			{Connector: "cursor", User: "alice", OK: true},
+			{Connector: "codex", User: "alice", Error: "enterprise hooks: connector codex hook verification failed:\n  owned hook command not present: SessionEnd trust state is not trusted"},
+			{Connector: "claudecode", UserHome: "/Users/bob", Pending: true},
+		},
+		Failures: 1,
+		Pending:  1,
+	}
+	var changed bytes.Buffer
+	writeEnterpriseHookReconcileLog(&changed, "fsnotify", "attention", run, 7, true, "")
+	const want = "[hook-guardian] target codex@alice failed: enterprise hooks: connector codex hook verification failed: owned hook command not present: SessionEnd trust state is not trusted\n"
+	if got := changed.String(); !strings.Contains(got, want) {
+		t.Fatalf("changed log = %q, want %q", got, want)
+	}
+	if got := changed.String(); strings.Contains(got, "target cursor@alice") || strings.Contains(got, "target claudecode@") {
+		t.Fatalf("changed log names a healthy or pending target: %q", got)
+	}
+	var unchanged bytes.Buffer
+	writeEnterpriseHookReconcileLog(&unchanged, "interval", "attention", run, 7, false, "")
+	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
+		t.Fatalf("unchanged log = %q, want one summary line", got)
+	}
+	if got := enterpriseHookReconcileLogDetail(strings.Repeat("x", 3000)); len([]rune(got)) != enterpriseHookReconcileLogMaxDetail+1 {
+		t.Fatalf("detail not bounded: %d runes", len([]rune(got)))
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {

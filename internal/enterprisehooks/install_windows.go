@@ -430,7 +430,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", target.conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup)))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				target.setup,
@@ -890,7 +890,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err)
 	}
 	if !present {
-		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
+		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup))
 	}
 	if err := connector.ValidateManagedHookRuntimeState(target.dataDir, target.conn.Name(), target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s runtime sidecars are invalid: %w", target.conn.Name(), err)
@@ -1778,52 +1778,35 @@ func validateWindowsUserPathProtectionACL(
 	if control&windows.SE_DACL_PROTECTED == 0 {
 		return fmt.Errorf("enterprise hooks: managed Windows DACL is not protected on %s", path)
 	}
-	expected, err := windowsUserPathAppliedCanonicalACEs(target, directory)
+	canonical, err := windowsUserPathAppliedCanonicalACEs(target, directory)
 	if err != nil {
 		return err
 	}
-	if int(dacl.AceCount) != len(expected) {
-		return fmt.Errorf(
-			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
-			path,
-			dacl.AceCount,
-			len(expected),
-		)
+	expected := make([]managedDACLEntry, 0, len(canonical))
+	for _, want := range canonical {
+		expected = append(expected, managedDACLEntry{
+			SID:   windowsSIDString(want.sid),
+			Type:  managedDACLAccessAllowedType,
+			Mask:  uint32(want.mask),
+			Flags: want.flags,
+		})
 	}
-	seen := make([]bool, len(expected))
+	actual := make([]managedDACLEntry, 0, dacl.AceCount)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
 			return fmt.Errorf("enterprise hooks: inspect Windows ACE %d for %s: %w", index, path, err)
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, index)
+		if ace == nil {
+			return fmt.Errorf("enterprise hooks: managed Windows DACL on %s has an unreadable ACE at index %d", path, index)
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		match := -1
-		for candidate, want := range expected {
-			if seen[candidate] {
-				continue
-			}
-			if sid.Equals(want.sid) &&
-				ace.Mask == want.mask &&
-				ace.Header.AceFlags == want.flags {
-				match = candidate
-				break
-			}
+		entry := managedDACLEntry{Type: ace.Header.AceType, Mask: uint32(ace.Mask), Flags: ace.Header.AceFlags}
+		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+			entry.SID = windowsSIDString((*windows.SID)(unsafe.Pointer(&ace.SidStart)))
 		}
-		if match < 0 {
-			return fmt.Errorf(
-				"enterprise hooks: managed Windows DACL on %s contains unexpected or duplicate ACE for principal %s (mask 0x%x, inheritance 0x%x)",
-				path,
-				windowsSIDString(sid),
-				uint32(ace.Mask),
-				uint32(ace.Header.AceFlags),
-			)
-		}
-		seen[match] = true
+		actual = append(actual, entry)
 	}
-	return nil
+	return checkManagedDACLEntries(path, expected, actual)
 }
 
 func rejectWindowsUserRuntimeWriteACEs(path string, dacl *windows.ACL, target *windows.SID, wantDir, protectChildren bool) error {

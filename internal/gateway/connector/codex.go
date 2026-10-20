@@ -655,35 +655,38 @@ func codexHookConfigPath() string {
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	present, _, err := c.checkOwnedHookContract(opts)
+	return present, err
+}
+
+// ownedHookContractAbsentReason explains a (false, nil) result from
+// ownedHookContractPresent. The check stays (false, nil) for an absent or
+// rejected matrix so hook guards keep healing it by Setup; the reason is only
+// for the messages that report it.
+func (c *CodexConnector) ownedHookContractAbsentReason(opts SetupOpts) string {
+	_, reason, _ := c.checkOwnedHookContract(opts)
+	return reason
+}
+
+func (c *CodexConnector) checkOwnedHookContract(opts SetupOpts) (bool, string, error) {
 	resolution := resolveHookContractForOptions("codex", opts)
 	if resolution.Contract.ContractID == "" {
-		return false, nil
+		return false, "no Codex hook contract resolves: " + resolution.Reason, nil
 	}
 	expectedGroups := codexHookGroupsForContract(resolution.Contract.ContractID)
 	userConfigPath := codexConfigPath()
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return false, err
+			return false, "", err
 		}
 	} else {
 		cfg := map[string]interface{}{}
 		if err := toml.Unmarshal(data, &cfg); err != nil {
-			return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
+			return false, "", fmt.Errorf("parse Codex config for hook guardian: %w", err)
 		}
-		if rawFeatures, exists := cfg["features"]; exists {
-			features, ok := rawFeatures.(map[string]interface{})
-			if !ok {
-				return false, nil
-			}
-			for _, key := range []string{"hooks", "codex_hooks"} {
-				if rawEnabled, exists := features[key]; exists {
-					enabled, ok := rawEnabled.(bool)
-					if !ok || !enabled {
-						return false, nil
-					}
-				}
-			}
+		if reason := codexHooksFeatureDisabled(cfg, userConfigPath); reason != "" {
+			return false, reason, nil
 		}
 	}
 
@@ -691,31 +694,20 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	data, err = os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, "Codex hook config " + configPath + " does not exist", nil
 		}
-		return false, err
+		return false, "", err
 	}
 	cfg := map[string]interface{}{}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return false, fmt.Errorf("parse Codex hook config for guardian: %w", err)
+		return false, "", fmt.Errorf("parse Codex hook config for guardian: %w", err)
 	}
-	if rawFeatures, exists := cfg["features"]; exists {
-		features, ok := rawFeatures.(map[string]interface{})
-		if !ok {
-			return false, nil
-		}
-		for _, key := range []string{"hooks", "codex_hooks"} {
-			if rawEnabled, exists := features[key]; exists {
-				enabled, ok := rawEnabled.(bool)
-				if !ok || !enabled {
-					return false, nil
-				}
-			}
-		}
+	if reason := codexHooksFeatureDisabled(cfg, configPath); reason != "" {
+		return false, reason, nil
 	}
 	hooks, ok := cfg["hooks"].(map[string]interface{})
 	if !ok {
-		return false, nil
+		return false, "Codex hook config " + configPath + " has no [hooks] table", nil
 	}
 	var verifyErr error
 	if runtime.GOOS == "windows" {
@@ -728,9 +720,31 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		)
 	}
 	if verifyErr != nil {
-		return false, nil
+		return false, fmt.Sprintf("Codex hook matrix in %s (%s): %v", configPath, resolution.Contract.ContractID, verifyErr), nil
 	}
-	return true, nil
+	return true, "", nil
+}
+
+// codexHooksFeatureDisabled names the [features] flag that turns Codex hooks
+// off, "" when hooks are enabled or the table does not mention them.
+func codexHooksFeatureDisabled(cfg map[string]interface{}, path string) string {
+	rawFeatures, exists := cfg["features"]
+	if !exists {
+		return ""
+	}
+	features, ok := rawFeatures.(map[string]interface{})
+	if !ok {
+		return "[features] in " + path + " is not a table"
+	}
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if rawEnabled, exists := features[key]; exists {
+			enabled, ok := rawEnabled.(bool)
+			if !ok || !enabled {
+				return "[features]." + key + " in " + path + " is not true"
+			}
+		}
+	}
+	return ""
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -806,7 +820,18 @@ var codexHookGroups = []codexHookGroup{
 	{"Stop", "", 90},
 }
 
-var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 60}
+// codexSessionEndMaxTimeoutSeconds mirrors Codex's SESSION_END_MAX_TIMEOUT_SEC
+// (codex-rs/hooks/src/engine/discovery.rs, normalize_command_hook). Codex caps
+// the SessionEnd and Interrupt timeouts at three seconds and defaults them to
+// one, and it hashes the capped value when it records trust, so registering
+// more than three only draws a clamp warning and a trust hash no other value
+// reproduces.
+const (
+	codexSessionEndMaxTimeoutSeconds     = 3
+	codexSessionEndDefaultTimeoutSeconds = 1
+)
+
+var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", codexSessionEndMaxTimeoutSeconds}
 
 func codexHookGroupsForContract(contractID string) []codexHookGroup {
 	groups := append([]codexHookGroup(nil), codexHookGroups...)
@@ -1303,8 +1328,9 @@ func codexCommandHookHash(eventKey, matcher, command string, timeout int) string
 
 // codexCommandHookHashForPlatform mirrors openai/codex hook discovery. Codex
 // first selects commandWindows on Windows (falling back to command), clamps the
-// timeout to at least one second, and then hashes a normalized handler with no
-// commandWindows override. Codex converts the identity through toml::Value
+// timeout to at least one second (SessionEnd and Interrupt: default one, at
+// most three), and then hashes a normalized handler with no commandWindows
+// override. Codex converts the identity through toml::Value
 // before canonical JSON, so absent Option fields (matcher, commandWindows, and
 // statusMessage) are omitted rather than serialized as JSON null.
 func codexCommandHookHashForPlatform(
@@ -1332,7 +1358,11 @@ func codexCommandHookHashForPlatform(
 		return "", fmt.Errorf("selected command is empty")
 	}
 
+	cappedEvent := eventKey == "session_end" || eventKey == "interrupt"
 	timeout := 600
+	if cappedEvent {
+		timeout = codexSessionEndDefaultTimeoutSeconds
+	}
 	if rawTimeout, exists := handler["timeout"]; exists {
 		parsed, ok := codexInteger(rawTimeout)
 		if !ok {
@@ -1345,6 +1375,9 @@ func codexCommandHookHashForPlatform(
 	}
 	if timeout < 1 {
 		timeout = 1
+	}
+	if cappedEvent && timeout > codexSessionEndMaxTimeoutSeconds {
+		timeout = codexSessionEndMaxTimeoutSeconds
 	}
 
 	async := false
@@ -2237,8 +2270,11 @@ func inferTrustedCodexManagedHookCommands(
 // actually emitted. The five-event profile predates PermissionRequest; the
 // six-event profile added it; the eight-event profile added compact lifecycle
 // coverage; the ten-event profile added subagent lifecycle coverage. SessionEnd
-// is the sole extension to that current matrix; its first shipped timeout was
-// three seconds before the current sixty-second budget. Keeping these profiles
+// is the sole extension to that current matrix. Its timeout shipped first as
+// three seconds, then as sixty, and is three again: Codex caps SessionEnd at
+// three seconds and records trust for the capped value, so a sixty-second
+// registration was never trusted as written. Installs carrying the sixty-second
+// matrix are still recognised as product-owned and repaired. Keeping these profiles
 // explicit prevents a trusted-looking subset or edited superset from being
 // absorbed as product-owned state.
 func codexShippedManagedHookProfiles() [][]codexHookGroup {
@@ -2262,7 +2298,7 @@ func codexShippedManagedHookProfiles() [][]codexHookGroup {
 	elevenEvents := append([]codexHookGroup(nil), tenEvents...)
 	elevenEvents = append(elevenEvents, codexSessionEndHookGroup)
 	legacyElevenEvents := append([]codexHookGroup(nil), tenEvents...)
-	legacyElevenEvents = append(legacyElevenEvents, codexHookGroup{"SessionEnd", "", 3})
+	legacyElevenEvents = append(legacyElevenEvents, codexHookGroup{"SessionEnd", "", 60})
 	return [][]codexHookGroup{
 		elevenEvents,
 		legacyElevenEvents,

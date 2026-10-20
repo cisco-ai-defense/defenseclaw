@@ -559,12 +559,7 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	}
 
 	for _, row := range run.Rows {
-		label := row.Connector
-		if row.User != "" {
-			label += "@" + row.User
-		} else if row.UserHome != "" {
-			label += "@" + row.UserHome
-		}
+		label := enterpriseHookReconcileRowLabel(row)
 		if row.OK {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
 		} else if row.Pending {
@@ -2329,6 +2324,34 @@ func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// enterpriseHookReconcileRowLabel names a reconcile row as connector@user, or
+// connector@home when the row has no user name.
+func enterpriseHookReconcileRowLabel(row enterpriseHookReconcileRow) string {
+	label := row.Connector
+	if row.User != "" {
+		label += "@" + row.User
+	} else if row.UserHome != "" {
+		label += "@" + row.UserHome
+	}
+	return label
+}
+
+// enterpriseHookReconcileLogMaxDetail bounds one failure reason in the watch
+// log, so a long error cannot flood it.
+const enterpriseHookReconcileLogMaxDetail = 1024
+
+// enterpriseHookReconcileLogDetail keeps a failure reason on one bounded line.
+func enterpriseHookReconcileLogDetail(detail string) string {
+	detail = strings.Join(strings.Fields(detail), " ")
+	if detail == "" {
+		return "no reason recorded"
+	}
+	if runes := []rune(detail); len(runes) > enterpriseHookReconcileLogMaxDetail {
+		detail = string(runes[:enterpriseHookReconcileLogMaxDetail]) + "…"
+	}
+	return detail
+}
+
 // enterpriseHookReconcileChanged treats an authenticated successful repair as
 // a change even when the stable row outcome remains OK before and after it.
 // Otherwise a restored hook would be mislabeled no_change=true.
@@ -2358,6 +2381,16 @@ func writeEnterpriseHookReconcileLog(
 			watchDirs,
 			triggerTag,
 		)
+		// The counts alone do not say which target failed or why; a changed
+		// outcome names each failing target once. Unchanged reconciles stay a
+		// single line, and `enterprise hooks status` repeats the reasons.
+		for _, row := range run.Rows {
+			if row.OK || row.Pending {
+				continue
+			}
+			fmt.Fprintf(writer, "[hook-guardian] target %s failed: %s\n",
+				enterpriseHookReconcileRowLabel(row), enterpriseHookReconcileLogDetail(row.Error))
+		}
 		return
 	}
 	// Log at DEBUG-ish cadence: one line per no-change reconcile is useful
