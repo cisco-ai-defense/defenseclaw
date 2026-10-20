@@ -274,6 +274,8 @@ type windowsBundleRun struct {
 	anchorPath     string
 	anchorPrevious []byte
 	anchorExisted  bool
+	// previousGeneration is config.generation.json as the run found it.
+	previousGeneration configwrite.GenerationState
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
@@ -751,6 +753,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the enforced config: "+readConfigErr.Error())
 	}
 	run.previous = installed
+	run.previousGeneration, _ = configwrite.ReadGenerationState(layout.ConfigPath)
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	driver.DeliveryID = opts.bundleDeliveryID
@@ -765,7 +768,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if len(rollback) > 0 {
 		// The installed config is a bundle that was never confirmed, not a
 		// last good config: a rollback of this run must not report it as one.
-		run.previous = nil
+		run.previous, run.previousGeneration = nil, configwrite.GenerationState{}
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeNotConfirmed),
 			Message: "an earlier bundle was installed but never confirmed; this run installs the new bundle over it"})
 	}
@@ -1128,6 +1131,19 @@ func windowsBundleHasCode(messages []enterprisestatus.Message, code string) bool
 type windowsBundleRollbackTarget struct {
 	store *enterprisebundle.Store
 	ref   *enterprisebundle.Ref
+	// before is config.generation.json as the run found it, restored the
+	// hex SHA-256 of the config the rollback installs. A record that named
+	// the bundle for exactly these bytes names it again, also once the
+	// bundle's receipt was pruned (GAP-0011).
+	before   configwrite.GenerationState
+	restored string
+}
+
+// writeOptions records the rollback write as the confirmed bundle: its
+// principal and bundle fields, so the gateway digests the restored config in
+// the bundle's scope and status, verify and ensure find the bundle enforcing.
+func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) configwrite.Options {
+	return configwrite.RestoreOptions(t.before, t.restored, windowsBundleRestoreWriteOptions(t.store, t.ref, expectSHA))
 }
 
 // rollbackWindowsBundle installs the last good config again (the current
@@ -1154,7 +1170,8 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	rollback := *opts
 	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
 	if ref != nil {
-		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref}
+		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref,
+			before: run.previousGeneration, restored: configwrite.SHA256Hex(last)}
 	}
 	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
 	rollback.jsonOutput = true

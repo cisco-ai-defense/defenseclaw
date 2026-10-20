@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -381,5 +382,64 @@ func TestWindowsBundleRestoreWaitsForAPendingTransaction(t *testing.T) {
 	}
 	if restore := restoreWindowsBundleConfig(context.Background(), ""); restore.failed() || len(restore.changes) != 1 {
 		t.Fatalf("restore after the transaction settled: %+v", restore)
+	}
+}
+
+// GAP-0011: the rollback of a bundle the gateway adopted but the apply could
+// not confirm puts the last good bundle's config back recorded as that
+// bundle (principal, bundle id, version and signer), also once its receipt
+// was pruned. It used to be recorded as a plain lifecycle write, so the
+// gateway digested the restored config outside the bundle's scope and
+// status, verify and ensure failed with bundle_not_applied.
+func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
+	for _, pruned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "receipt kept", true: "receipt pruned"}[pruned], func(t *testing.T) {
+			host := newWindowsBundleRestoreHost(t)
+			ctx := context.Background()
+			host.tamper(t, false)
+			if restore := restoreWindowsBundleConfig(ctx, ""); restore.failed() {
+				t.Fatalf("record the confirmed bundle: %+v", restore)
+			}
+			before, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
+			if err != nil || before.BundleID != host.bundleID {
+				t.Fatalf("the confirmed bundle config is not recorded as the bundle: %+v (%v)", before, err)
+			}
+			// The next bundle's config, installed and adopted, then refused.
+			failed := append(append([]byte(nil), host.bundleConfig...), []byte("# next bundle\n")...)
+			if err := windowsEnterpriseHotConfigWrite(ctx, host.layout.ConfigPath, failed, configwrite.Options{Actor: configwrite.ActorLifecycle,
+				Reason: "next bundle", ExpectSHA256: configwrite.SHA256Hex(host.bundleConfig)}); err != nil {
+				t.Fatal(err)
+			}
+			if pruned {
+				receipts, _ := filepath.Glob(filepath.Join(host.layout.LifecycleDir, enterprisebundle.ReceiptsDirName, "*.json"))
+				for _, path := range receipts {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			host.installer(t, installedStatus("status"), installedStatus("Verify"))
+			source, validate := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate
+			t.Cleanup(func() { windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigValidate = source, validate })
+			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+			windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+			windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
+				return windowsServiceConfigValidation{}, nil
+			}
+			opts := windowsBundleRestoreOptions()
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+			opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
+			cmd, _ := windowsBundleCommand()
+			run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),
+				previous: host.bundleConfig, previousGeneration: before}
+			if _, ok := rollbackWindowsBundle(cmd, opts, run); !ok {
+				t.Fatal("the rollback did not put the last good bundle config back")
+			}
+			state, err := configwrite.ReadGenerationState(host.layout.ConfigPath)
+			if err != nil || state.ConfigSHA256 != configwrite.SHA256Hex(host.bundleConfig) || state.BundleID != host.bundleID ||
+				state.BundleVersion != 5 || state.SignerKeyID != "k1" || !configwrite.IsPrincipalActor(state.Actor) {
+				t.Fatalf("after the rollback config.generation.json is %+v (%v), want bundle %s version 5 signed by k1", state, err, host.bundleID)
+			}
+		})
 	}
 }
