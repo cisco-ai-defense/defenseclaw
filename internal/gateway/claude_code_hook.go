@@ -91,6 +91,9 @@ type claudeCodeHookRequest struct {
 	// guestCWD is a sandbox request's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); CWD is its host mount.
 	guestCWD string
+	// aidToolCallDeclared comes from the hook contract the dispatcher
+	// resolved for this request, never from the body.
+	aidToolCallDeclared bool
 }
 
 type claudeCodeHookResponse struct {
@@ -201,6 +204,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
 			callerCWD:     req.CWD,
+			toolUseID:     req.ToolUseID,
+
+			aidToolCallDeclared: req.aidToolCallDeclared,
+			hookEvent:           req.HookEventName,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
 		actionInput := actionfacts.Input{

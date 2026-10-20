@@ -112,6 +112,10 @@ type codexHookRequest struct {
 	// from the request context (never decoded from the body).
 	activeHome         string
 	activeHomeResolved bool
+
+	// aidToolCallDeclared comes from the hook contract the dispatcher
+	// resolved for this request, never from the body.
+	aidToolCallDeclared bool
 }
 
 // withTrustedActiveHome records the request's trusted home so helpers that
@@ -294,6 +298,10 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
 			callerCWD:     toolCWD,
+			toolUseID:     req.ToolUseID,
+
+			aidToolCallDeclared: req.aidToolCallDeclared,
+			hookEvent:           req.HookEventName,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {

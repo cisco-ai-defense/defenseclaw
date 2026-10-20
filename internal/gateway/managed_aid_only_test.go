@@ -347,7 +347,10 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 		if verdict == nil || verdict.Action != "block" {
 			t.Fatalf("verdict = %+v, want block", verdict)
 		}
-		wantMessages := append(before, ChatMessage{Role: "user", Content: "provider-native prompt"})
+		// The proxy lane keeps provider tool calls local (see inspectCisco).
+		wantHistory := append([]ChatMessage(nil), before...)
+		wantHistory[0].ToolCalls = nil
+		wantMessages := append(wantHistory, ChatMessage{Role: "user", Content: "provider-native prompt"})
 		if !reflect.DeepEqual(stub.messages, wantMessages) {
 			t.Fatalf("AID messages = %#v, want preserved history plus synthetic turn %#v", stub.messages, wantMessages)
 		}
@@ -355,6 +358,106 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 			t.Fatalf("caller messages mutated: got %#v, want %#v", original, before)
 		}
 	})
+}
+
+// The proxy lane sends AID a provider's history as role and content only, as
+// before tool calls were carried. A provider's tool fields are raw (here an
+// Ollama call: object arguments, no id), and one malformed entry fails the
+// whole request, so they stay local; only the hook lane sends tool calls.
+// Every strategy calls AID from its own site, so each is covered.
+func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Long enough for the injection judge to ask its provider.
+	const prompt = "thanks, now summarize that weather report"
+	history := []ChatMessage{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "list files", Name: "alice"},
+		{Role: "assistant", ToolCalls: json.RawMessage(
+			`[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]`)},
+		{Role: "tool", Content: "22C", ToolCallID: "call_1"},
+		{Role: "user", Content: prompt},
+	}
+	before := append([]ChatMessage(nil), history...)
+
+	apiKeyClient := newCiscoInspectTestClient(t, srv.URL, "TEST_PROXY_TOOL_CALLS_LOCAL")
+	apiKeyClient.client = srv.Client()
+	managedClient := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if managedClient == nil {
+		t.Fatal("expected managed client")
+	}
+	apiKey := func(strategy string, judge *LLMJudge) func() *GuardrailInspector {
+		return func() *GuardrailInspector {
+			g := NewGuardrailInspector("remote", apiKeyClient, judge)
+			g.SetDetectionStrategy(strategy, "", "", "", false)
+			return g
+		}
+	}
+	text := func(content string) interface{} { return content }
+	// A judge that answers, with every label false, so judge_first takes its
+	// judged path rather than the fallback.
+	judgeProvider := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{
+		Content: `{"Instruction Manipulation":{"label":false},"Context Manipulation":{"label":false},` +
+			`"Obfuscation":{"label":false},"Semantic Manipulation":{"label":false},"Token Exploitation":{"label":false}}`,
+	}}}}}
+	judge := &LLMJudge{
+		cfg:      &config.JudgeConfig{Enabled: true, Injection: true, Model: "test/m"},
+		provider: judgeProvider,
+		rp:       mustLoadRulePack(t, ""),
+	}
+	for _, lane := range []struct {
+		name      string
+		guardrail func() *GuardrailInspector
+		content   func(string) interface{}
+	}{
+		{name: "api-key/regex_only", guardrail: apiKey("regex_only", nil), content: text},
+		{name: "api-key/regex_judge", guardrail: apiKey("regex_judge", nil), content: text},
+		{name: "api-key/judge_first/fallback", guardrail: apiKey("judge_first", nil), content: text},
+		{name: "api-key/judge_first/judged", guardrail: apiKey("judge_first", judge), content: text},
+		{
+			name: "managed",
+			guardrail: func() *GuardrailInspector {
+				g := NewGuardrailInspector("both", nil, nil)
+				g.SetManagedMode(true)
+				g.SetCiscoInspector(managedClient)
+				return g
+			},
+			content: func(text string) interface{} { return map[string]interface{}{"text": text} },
+		},
+	} {
+		t.Run(lane.name, func(t *testing.T) {
+			gotBody = nil
+			lane.guardrail().Inspect(t.Context(), "prompt", prompt, history, "provider/model", "action")
+			var payload struct {
+				Messages []map[string]interface{} `json:"messages"`
+			}
+			if err := json.Unmarshal(gotBody, &payload); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+			}
+			want := make([]map[string]interface{}, len(history))
+			for i, message := range history {
+				want[i] = map[string]interface{}{"role": message.Role, "content": lane.content(message.Content)}
+			}
+			if !reflect.DeepEqual(payload.Messages, want) {
+				t.Fatalf("AID messages = %v, want role and content only %v", payload.Messages, want)
+			}
+			if !reflect.DeepEqual(history, before) {
+				t.Fatalf("caller messages mutated: got %#v, want %#v", history, before)
+			}
+		})
+	}
+	if len(judgeProvider.captured) == 0 {
+		t.Error("the judged path never asked the judge")
+	}
 }
 
 func TestProxyManagedAIDOnly_CompletionRemainsAssistantOnly(t *testing.T) {
@@ -470,6 +573,91 @@ func TestHookManagedAIDOnly_ToolPolicyBlock(t *testing.T) {
 	v := a.inspectToolPolicy(req)
 	if v == nil || v.Action != "block" {
 		t.Fatalf("managed tool policy with AID block: want block, got %+v", v)
+	}
+}
+
+// A managed PreToolUse goes out as the tool call followed by the text form the
+// managed lane sent before, byte for byte, so the text stays the last message
+// and AID keeps the request path.
+func TestHookManagedAIDOnly_ToolCallKeepsTextForm(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if client == nil {
+		t.Fatal("expected managed client")
+	}
+	a := managedHookServer(client)
+
+	const args = `{"command":"rm -rf /"}`
+	send := func(req *ToolInspectRequest) []json.RawMessage {
+		t.Helper()
+		gotBody = nil
+		if v := a.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+			t.Fatalf("verdict = %+v, want AID's allow", v)
+		}
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+		}
+		return payload.Messages
+	}
+	textOnly := send(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(args)})
+	withCall := send(&ToolInspectRequest{
+		Tool:      "Bash",
+		Args:      json.RawMessage(args),
+		Direction: "tool_call",
+		toolUseID: "toolu_01U3wpX",
+
+		aidToolCallDeclared: true,
+	})
+
+	const text = `{"content":{"text":"Tool call: Bash\n{\"command\":\"rm -rf /\"}"},"role":"user"}`
+	if len(textOnly) != 1 || string(textOnly[0]) != text {
+		t.Fatalf("text form = %s, want %s", textOnly, text)
+	}
+	if len(withCall) != 2 || string(withCall[1]) != text {
+		t.Fatalf("messages = %s, want the tool call, then %s", withCall, text)
+	}
+	const toolCall = `{"content":{"text":""},"role":"assistant","tool_calls":[{"function":` +
+		`{"arguments":"{\"command\":\"rm -rf /\"}","name":"Bash"},"id":"toolu_01U3wpX","type":"function"}]}`
+	if string(withCall[0]) != toolCall {
+		t.Errorf("tool call message = %s, want %s", withCall[0], toolCall)
+	}
+}
+
+// The managed lane makes its own carryable check, so arguments that cannot
+// stand as tool-call fields go out as the text form alone there too.
+func TestHookManagedAIDOnly_UncarryableArgsStayText(t *testing.T) {
+	stub := &stubAIDInspector{verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}}
+	a := managedHookServer(stub)
+	for _, req := range []*ToolInspectRequest{
+		{Tool: "shell", Args: json.RawMessage(`null`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(` null `), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`"rm -rf /"`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`["rm -rf /"]`), Direction: "tool_call"},
+		{
+			Tool:                    "shell",
+			Args:                    json.RawMessage(`{"hook_event_name":"PreToolUse","command":"rm -rf /"}`),
+			Direction:               "tool_call",
+			toolArgsAreHookEnvelope: true,
+		},
+	} {
+		stub.messages = nil
+		a.inspectToolPolicy(req)
+		want := []ChatMessage{{Role: "user", Content: "Tool call: shell\n" + string(req.Args)}}
+		if !reflect.DeepEqual(stub.messages, want) {
+			t.Errorf("args %s: AID messages = %#v, want the text form alone", req.Args, stub.messages)
+		}
 	}
 }
 
@@ -2322,3 +2510,315 @@ func TestManagedAIDOnly_ServesNoIdentityRoutes(t *testing.T) {
 		t.Fatalf("PATCH /v1/guardrail/config = %d, want the managed 403", resp.StatusCode)
 	}
 }
+
+// The Secure Client connectors' PreToolUse, through their own hook routes in
+// managed_enterprise, as the defense_claw endpoint receives it: the tool call
+// first, then the text message the managed lane has always sent, byte for byte
+// and last.
+func TestHookManagedAIDOnly_SecureClientPreToolUseWire(t *testing.T) {
+	for _, test := range []struct {
+		connector string
+		tool      string
+		headers   map[string]string
+		extra     map[string]interface{}
+		wantID    string
+	}{
+		{
+			connector: "claudecode",
+			tool:      "Bash",
+			extra:     map[string]interface{}{"tool_use_id": "toolu_01U3wpX"},
+			wantID:    "toolu_01U3wpX",
+		},
+		{
+			connector: "codex",
+			tool:      "shell",
+			headers: map[string]string{
+				"X-DefenseClaw-Hook-Event":    "PreToolUse",
+				"X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract,
+			},
+			extra:  map[string]interface{}{"tool_use_id": "call_codex_42"},
+			wantID: "call_codex_42",
+		},
+		{
+			connector: "cursor",
+			tool:      "run_terminal_cmd",
+		},
+	} {
+		t.Run(test.connector, func(t *testing.T) {
+			installCorrelationHMACForTest()
+			var gotBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+			}))
+			t.Cleanup(srv.Close)
+			client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+				Endpoint:  srv.URL,
+				TimeoutMs: 3000,
+			}, newFakeCloudProvider("cmid-token-1"))
+			if client == nil {
+				t.Fatal("expected managed client")
+			}
+			a := managedHookServer(client)
+			a.scannerCfg.Guardrail.Connector = test.connector
+			a.scannerCfg.Guardrail.Mode = "action"
+
+			payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+			for key, value := range test.extra {
+				payload[key] = value
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/"+test.connector+"/hook", bytes.NewReader(raw))
+			for key, value := range test.headers {
+				request.Header.Set(key, value)
+			}
+			response := httptest.NewRecorder()
+			a.handleAgentHook(test.connector).ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("hook status=%d body=%s", response.Code, response.Body.String())
+			}
+
+			var wire struct {
+				Messages []json.RawMessage `json:"messages"`
+			}
+			if err := json.Unmarshal(gotBody, &wire); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+			}
+			if len(wire.Messages) != 2 {
+				t.Fatalf("messages = %d, want the tool call and the text form (body=%s)", len(wire.Messages), gotBody)
+			}
+			var structured struct {
+				Role      string `json:"role"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			}
+			if err := json.Unmarshal(wire.Messages[0], &structured); err != nil {
+				t.Fatal(err)
+			}
+			if structured.Role != "assistant" || len(structured.ToolCalls) != 1 {
+				t.Fatalf("first message = %s, want one assistant tool call", wire.Messages[0])
+			}
+			call := structured.ToolCalls[0]
+			if call.Type != "function" || call.Function.Name != test.tool {
+				t.Errorf("tool call = %+v, want function %q", call, test.tool)
+			}
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+				t.Fatalf("arguments is not a JSON object string: %v (%q)", err, call.Function.Arguments)
+			}
+			switch {
+			case test.wantID != "" && call.ID != test.wantID:
+				t.Errorf("id = %q, want the agent's id %q", call.ID, test.wantID)
+			case test.wantID == "" && !strings.HasPrefix(call.ID, "dc-"):
+				t.Errorf("id = %q, want a \"dc-\" id when the agent reported none", call.ID)
+			}
+
+			// The managed lane's text message, built as before this change.
+			want, err := json.Marshal(map[string]interface{}{
+				"role":    "user",
+				"content": map[string]interface{}{"text": "Tool call: " + test.tool + "\n" + call.Function.Arguments},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(wire.Messages[1], want) {
+				t.Errorf("text message = %s, want %s", wire.Messages[1], want)
+			}
+		})
+	}
+}
+
+// The tool-call form follows the hook contract the dispatcher resolved, not the
+// payload: the same golden PreToolUse goes out as the tool call and the text
+// form under a contract that declares it, and as the text form alone under a
+// profile with no declaration, as when no contract resolves.
+func TestHookManagedAIDOnly_ToolCallFollowsResolvedContract(t *testing.T) {
+	for _, test := range []struct {
+		connector string
+		headers   map[string]string
+	}{
+		{connector: "claudecode"},
+		{connector: "codex", headers: map[string]string{
+			"X-DefenseClaw-Hook-Event":    "PreToolUse",
+			"X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract,
+		}},
+	} {
+		for _, declared := range []bool{true, false} {
+			name := test.connector + "/undeclared"
+			if declared {
+				name = test.connector + "/declared"
+			}
+			t.Run(name, func(t *testing.T) {
+				installCorrelationHMACForTest()
+				var gotBody []byte
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotBody, _ = io.ReadAll(r.Body)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+				}))
+				t.Cleanup(srv.Close)
+				client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+					Endpoint:  srv.URL,
+					TimeoutMs: 3000,
+				}, newFakeCloudProvider("cmid-token-1"))
+				a := managedHookServer(client)
+				a.scannerCfg.Guardrail.Connector = test.connector
+				a.scannerCfg.Guardrail.Mode = "action"
+
+				payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				profile := a.hookProfileForConnector(test.connector)
+				if !connector.HookProfileCarriesAIDToolCall(profile) {
+					t.Fatalf("%s resolved contract %q does not declare the tool call", test.connector, profile.ContractID)
+				}
+				if !declared {
+					profile = connector.HookProfile{Name: test.connector}
+				}
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/"+test.connector+"/hook", bytes.NewReader(raw))
+				for key, value := range test.headers {
+					request.Header.Set(key, value)
+				}
+				req := normalizeAgentHookRequestWithProfile(test.connector, payload, profile)
+				_ = hookRuntimeForProfile(profile).Evaluate(a, request.Context(), req, raw, payload)
+
+				var wire struct {
+					Messages []json.RawMessage `json:"messages"`
+				}
+				if err := json.Unmarshal(gotBody, &wire); err != nil {
+					t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+				}
+				want := 1
+				if declared {
+					want = 2
+				}
+				if len(wire.Messages) != want {
+					t.Fatalf("messages = %d, want %d (body=%s)", len(wire.Messages), want, gotBody)
+				}
+				if !declared && bytes.Contains(gotBody, []byte(`"tool_calls"`)) {
+					t.Fatalf("undeclared contract sent a tool call: %s", gotBody)
+				}
+			})
+		}
+	}
+}
+
+// Each reason a tool invocation goes to AID as text alone has its own name, in
+// the order the carry check applies them.
+func TestToolCallNotCarriedReason(t *testing.T) {
+	declared := func(req ToolInspectRequest) *ToolInspectRequest {
+		req.aidToolCallDeclared = true
+		return &req
+	}
+	for _, test := range []struct {
+		name string
+		req  *ToolInspectRequest
+		want string
+	}{
+		{"nil", nil, "not_a_tool_call"},
+		{"prompt", declared(ToolInspectRequest{Tool: "message", Direction: "prompt"}), "not_a_tool_call"},
+		{"undeclared", &ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`), Direction: "tool_call"}, "contract_undeclared"},
+		{"envelope", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{}`), Direction: "tool_call", toolArgsAreHookEnvelope: true}), "hook_envelope_args"},
+		{"placeholder", declared(ToolInspectRequest{Tool: "tool", Args: json.RawMessage(`{}`), Direction: "tool_call", toolNameIsLabel: true}), "placeholder_tool_name"},
+		{"blank", declared(ToolInspectRequest{Tool: " ", Args: json.RawMessage(`{}`), Direction: "tool_call"}), "blank_tool_name"},
+		{"null args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`null`), Direction: "tool_call"}), "args_not_object"},
+		{"string args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`"ls"`), Direction: "tool_call"}), "args_not_object"},
+		{"carried", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`), Direction: "tool_call"}), ""},
+	} {
+		if got := toolCallNotCarriedReason(test.req); got != test.want {
+			t.Errorf("%s: reason=%q want %q", test.name, got, test.want)
+		}
+		if got, want := toolCallArgsCarryable(test.req), test.want == ""; got != want {
+			t.Errorf("%s: carryable=%v want %v", test.name, got, want)
+		}
+	}
+}
+
+// The gateway log says how each PreToolUse went to AID: as a tool call with its
+// name, id, argument keys and message order, or as text alone with the reason.
+// It never carries argument values, which hold the agent's commands.
+func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	a := managedHookServer(client)
+	const secret = "s3cr3t-arg-value"
+	args := json.RawMessage(`{"command":"echo ` + secret + `","cwd":"/tmp"}`)
+
+	carried := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+			toolUseID: "toolu_01U3wpX", aidToolCallDeclared: true, hookEvent: "PreToolUse",
+		})
+	})
+	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode event=PreToolUse tool="Bash" id=toolu_01U3wpX (agent) arg_keys=[command cwd] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
+	if !strings.Contains(carried, wantCarried) {
+		t.Errorf("log = %q, want %q", carried, wantCarried)
+	}
+	derived := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "run_terminal_cmd", Args: args, Direction: "tool_call", Connector: "cursor",
+			aidToolCallDeclared: true,
+		})
+	})
+	if !strings.Contains(derived, `connector=cursor event=<unknown> tool="run_terminal_cmd" id=dc-`) || !strings.Contains(derived, "(derived)") {
+		t.Errorf("log = %q, want a dc- id marked derived", derived)
+	}
+	textOnly := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+		})
+	})
+	const wantText = `[aid] PreToolUse sent as text only: connector=claudecode event=<unknown> tool="Bash" reason=contract_undeclared`
+	if !strings.Contains(textOnly, wantText) {
+		t.Errorf("log = %q, want %q", textOnly, wantText)
+	}
+	// A label the normalizer filled in is not a tool name.
+	label := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "tool", Args: args, Direction: "tool_call", Connector: "cursor",
+			aidToolCallDeclared: true, toolArgsAreHookEnvelope: true, toolNameIsLabel: true,
+			hookEvent: "beforeShellExecution",
+		})
+	})
+	const wantLabel = `[aid] PreToolUse sent as text only: connector=cursor event=beforeShellExecution tool=<none> reason=hook_envelope_args`
+	if !strings.Contains(label, wantLabel) {
+		t.Errorf("log = %q, want %q", label, wantLabel)
+	}
+	for _, log := range []string{carried, derived, textOnly, label} {
+		if strings.Contains(log, secret) {
+			t.Fatalf("log carries an argument value: %q", log)
+		}
+	}
+
+	// No AID lane, no wire line.
+	a.scannerCfg.CiscoAIDefense.ScanHookSurface = boolPtrForAIDLogTest(false)
+	off := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
+		})
+	})
+	if strings.Contains(off, "[aid] PreToolUse") {
+		t.Errorf("hook surface off still logged: %q", off)
+	}
+}
+
+func boolPtrForAIDLogTest(v bool) *bool { return &v }

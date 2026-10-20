@@ -71,6 +71,13 @@ func kiroWindowsManagedHookContracts() []HookContract {
 			},
 			Events:      append([]string(nil), kiroWindowsManagedHookEvents...),
 			AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+			// Built per call, so the registry's init never fills these in.
+			AIDSurfaceEvents: map[string][]string{
+				AIDSurfacePrompt:     {"UserPromptSubmit"},
+				AIDSurfaceToolCall:   {"PreToolUse", "preToolUse"},
+				AIDSurfaceToolResult: {"PostToolUse", "postToolUse"},
+			},
+			AIDWireVersion: AIDWireVersionChatToolCalls,
 			Capabilities: HookCapability{
 				CanBlock:           true,
 				SupportsFailClosed: true,
