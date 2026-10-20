@@ -378,9 +378,16 @@ Exit 0.
 - argv: `enterprise bundle verify --bundle <file.dcbundle> --json`. Do not
   pass `--anchors` on a device: the default is the installed anchor file,
   checked for root-only trust. `--platform` defaults to this OS.
-- Privilege: any account can run it. Run it as root or SYSTEM so the floor
-  includes the confirmed bundle and the credential check can read the store
-  (otherwise it warns `floor_unchecked` and `secret_presence_unchecked`).
+- Privilege: run it as root or SYSTEM so the floor includes the confirmed
+  bundle and the credential check can read the store (otherwise it warns
+  `floor_unchecked` and `secret_presence_unchecked`). Any account can run it
+  on Linux and macOS, where the installed anchor file is world-readable. On
+  Windows the installed anchors are readable only by administrators and
+  SYSTEM, so a standard account is refused `not_admin`. A standard account can
+  pass `--anchors` with a copy of the anchor file it can read; it cannot read
+  the deployment record either, so verify then skips the device checks and
+  warns `anchor_trust_unchecked` (the ownership and permissions of the copy
+  were not checked). The agent always runs verify as root or SYSTEM.
 - Preconditions: none; it is the dry run of apply.
 - Lock: none. Changes nothing (it stages into a private temporary folder
   and reads the credential store listing and the installed config.yaml).

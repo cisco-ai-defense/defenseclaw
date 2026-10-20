@@ -100,6 +100,15 @@ func init() {
 	// bundle status and verify ask whether this is a standalone managed
 	// device; on Windows the deployment record answers.
 	bundleManagedDevice = windowsEnterpriseStandaloneInstalled
+	// A standard user cannot read deployment.json, so bundle verify cannot
+	// tell a managed device from an unmanaged one (GAP-0009).
+	bundleDeviceRecordUnreadable = func() bool {
+		if windowsEnterpriseIsElevated() {
+			return false
+		}
+		deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+		return err == nil && deployment.State == winpath.EnterpriseDeploymentUnknown
+	}
 	bundlePrivilege = func() error {
 		if !windowsEnterpriseIsElevated() {
 			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin,

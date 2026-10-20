@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -342,5 +343,40 @@ func TestEnterpriseBundleAbsentOnSecureClient(t *testing.T) {
 	keepCommandTreeOfMainOnSecureClient(root)
 	if len(enterprise.Commands()) != 0 {
 		t.Fatalf("enterprise bundle is in the Secure Client tree")
+	}
+}
+
+// GAP-0009: an account that cannot read the installed anchor file (a
+// standard user on Windows) is told to run verify elevated or to pass
+// --anchors, not that the anchor file is insecure; with --anchors, an
+// account that cannot read the deployment record is not told that the
+// device is unmanaged.
+func TestEnterpriseBundleVerifyUnreadableAnchorsAndRecord(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d:\n%s", code, out)
+	}
+	savedAnchors, savedLstat, savedUnreadable := bundleDefaultAnchors, bundleAnchorsLstat, bundleDeviceRecordUnreadable
+	t.Cleanup(func() {
+		bundleDefaultAnchors, bundleAnchorsLstat, bundleDeviceRecordUnreadable = savedAnchors, savedLstat, savedUnreadable
+	})
+	bundleDefaultAnchors = func() (string, error) { return e.anchors, nil }
+	bundleAnchorsLstat = func(path string) (fs.FileInfo, error) {
+		return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
+	}
+	out, code := runBundle(t, "verify", "--bundle", signed, "--platform", "linux", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_admin"`) ||
+		!strings.Contains(out, "--anchors") || strings.Contains(out, "anchor_insecure") {
+		t.Fatalf("default anchors unreadable (exit %d):\n%s", code, out)
+	}
+
+	bundleAnchorsLstat = os.Lstat
+	bundleDeviceRecordUnreadable = func() bool { return true }
+	out, code = runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors, "--platform", "linux", "--json")
+	if code != 0 || !strings.Contains(out, `"anchor_trust_unchecked"`) ||
+		strings.Contains(out, "not a managed device") || !strings.Contains(out, "deployment record") {
+		t.Fatalf("--anchors with an unreadable deployment record (exit %d):\n%s", code, out)
 	}
 }

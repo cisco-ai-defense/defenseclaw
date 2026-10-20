@@ -56,6 +56,13 @@ var (
 	bundleDefaultAnchors = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
 	// bundleAnchorTrust is the anchor file trust check on a device.
 	bundleAnchorTrust = enterprisebundle.TrustCheck(enterprisebundle.TrustAnchorFile)
+	// bundleAnchorsLstat inspects the installed anchor file before verify
+	// reads it.
+	bundleAnchorsLstat = os.Lstat
+	// bundleDeviceRecordUnreadable reports a deployment record this account
+	// cannot read (a standard user on Windows), so verify cannot tell
+	// whether this is a managed device.
+	bundleDeviceRecordUnreadable = func() bool { return false }
 )
 
 const enterpriseBundleLong = `Sign, verify and report signed policy bundles for the standalone
@@ -513,12 +520,23 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		if path, err = bundleDefaultAnchors(); err != nil {
 			return err
 		}
+		// On Windows the installed anchors are readable only by
+		// administrators and SYSTEM (GAP-0009): say how to verify instead
+		// of calling the anchor file insecure.
+		if _, err := bundleAnchorsLstat(path); errors.Is(err, fs.ErrPermission) {
+			res.Anchors = path
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Path: enterprisebundle.AnchorsName,
+				Detail: "this account cannot read the installed trust anchors; run verify as root or as an elevated administrator or SYSTEM, or pass --anchors with a copy of the anchor file that this account can read"}
+		}
 	} else if !device {
 		// An administrator checking a bundle on a workstation names an
 		// anchor file of their own; only a device needs it root-owned.
 		trust, res.AnchorTrust = nil, "unchecked"
-		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_trust_unchecked",
-			Message: "not a managed device: the anchor file ownership and permissions were not checked"})
+		message := "not a managed device: the anchor file ownership and permissions were not checked"
+		if bundleDeviceRecordUnreadable() {
+			message = "this account cannot read the deployment record, so the device checks were skipped and the anchor file ownership and permissions were not checked; run verify elevated for them"
+		}
+		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_trust_unchecked", Message: message})
 	}
 	res.Anchors = path
 	b, err := readBundleInput(opts.bundle)
