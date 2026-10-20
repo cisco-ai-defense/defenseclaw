@@ -73,6 +73,9 @@ func TestManagedDACLRejectsWriteCapableOrMissingEntries(t *testing.T) {
 		{"duplicate canonical", withEntry(expected, expected[0]), "repeats the canonical ACE for principal S-1-3-4"},
 		{"Everyone read-only", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x001200a9, Flags: aceOI | aceCI}), "broad group Everyone"},
 		{"Authenticated Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-11", Mask: 0x001200a9}), "broad group Authenticated Users"},
+		{"ALL APPLICATION PACKAGES read-only", withEntry(expected, managedDACLEntry{SID: "S-1-15-2-1", Mask: 0x001200a9}), "broad group ALL APPLICATION PACKAGES"},
+		{"Remote Desktop Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-32-555", Mask: 0x001200a9}), "broad group Remote Desktop Users"},
+		{"Domain Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-21-1004336348-1177238915-682003330-513", Mask: 0x001200a9, Flags: aceOI | aceCI}), "broad group Domain Users"},
 		{"deny entry", withEntry(expected, managedDACLEntry{SID: testTargetSID, Type: 1, Mask: 0x001200a9}), "non-canonical ACE type"},
 		{"missing canonical", expected[1:], "missing the canonical ACE for principal S-1-3-4"},
 		{"canonical replaced by read-only", append([]managedDACLEntry{{SID: "S-1-5-18", Mask: 0x001200a9}}, expected[:3]...), "missing the canonical ACE"},
@@ -101,5 +104,23 @@ func TestManagedDACLFilesAcceptNoExtraEntry(t *testing.T) {
 	err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw\hooks\.hook-codex.token`, false, file, withEntry(file, codex))
 	if err == nil || !strings.Contains(err.Error(), "files accept only the canonical entries") {
 		t.Fatalf("read-only extra on a file: err=%v, want rejection", err)
+	}
+}
+
+// A machine-local group whose RID only looks like a domain group's is matched
+// on the full SID shape, so the Codex sandbox group (RID 1000) and a local
+// group with RID 513 under a longer SID are not mistaken for Domain Users.
+func TestManagedDACLBroadPrincipalName(t *testing.T) {
+	for sid, want := range map[string]string{
+		"S-1-1-0": "Everyone",
+		"s-1-5-21-1004336348-1177238915-682003330-513": "Domain Users",
+		"S-1-5-21-1004336348-1177238915-682003330-514": "Domain Guests",
+		testCodexSandboxSID:                            "",
+		"S-1-5-21-1-2-3-4-513":                         "",
+		"S-1-5-32-544":                                 "",
+	} {
+		if got := managedDACLBroadPrincipalName(sid); got != want {
+			t.Errorf("managedDACLBroadPrincipalName(%s)=%q want %q", sid, got, want)
+		}
 	}
 }
