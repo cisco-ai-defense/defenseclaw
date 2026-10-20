@@ -2324,14 +2324,17 @@ func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// enterpriseHookReconcileRowLabel names a reconcile row as connector@user, or
-// connector@home when the row has no user name.
+// enterpriseHookReconcileRowLabel names a reconcile row as connector@user,
+// connector@home when the row has no user name, or connector@SID when it has
+// neither (a Windows target that failed before its profile path resolved).
 func enterpriseHookReconcileRowLabel(row enterpriseHookReconcileRow) string {
 	label := row.Connector
 	if row.User != "" {
 		label += "@" + row.User
 	} else if row.UserHome != "" {
 		label += "@" + row.UserHome
+	} else if row.SID != "" {
+		label += "@" + row.SID
 	}
 	return label
 }

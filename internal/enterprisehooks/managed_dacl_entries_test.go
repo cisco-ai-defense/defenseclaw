@@ -43,14 +43,14 @@ func withEntry(entries []managedDACLEntry, extra managedDACLEntry) []managedDACL
 func TestManagedDACLAcceptsReadOnlySandboxGrant(t *testing.T) {
 	expected := canonicalTestDirectoryEntries()
 	codex := managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x001200a9, Flags: aceOI | aceCI}
-	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, expected, withEntry(expected, codex)); err != nil {
+	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, true, expected, withEntry(expected, codex)); err != nil {
 		t.Fatalf("canonical DACL plus the Codex sandbox read grant rejected: %v", err)
 	}
-	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, expected, expected); err != nil {
+	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, true, expected, expected); err != nil {
 		t.Fatalf("canonical DACL rejected: %v", err)
 	}
 	generic := managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x80000000 | 0x20000000, Flags: aceOI | aceCI | aceIO}
-	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, expected, withEntry(expected, generic)); err != nil {
+	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, true, expected, withEntry(expected, generic)); err != nil {
 		t.Fatalf("generic read/execute grant rejected: %v", err)
 	}
 }
@@ -66,17 +66,40 @@ func TestManagedDACLRejectsWriteCapableOrMissingEntries(t *testing.T) {
 	}{
 		{"write data", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x001200a9 | 0x2}), "beyond read and execute"},
 		{"delete", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x001200a9 | 0x00010000}), "beyond read and execute"},
-		{"write DAC", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x00040000}), "beyond read and execute"},
-		{"write owner", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x00080000}), "beyond read and execute"},
-		{"generic write", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x40000000, Flags: aceOI | aceCI | aceIO}), "beyond read and execute"},
-		{"generic all", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x10000000}), "beyond read and execute"},
+		{"write DAC", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x00040000}), "beyond read and execute"},
+		{"write owner", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x00080000}), "beyond read and execute"},
+		{"generic write", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x40000000, Flags: aceOI | aceCI | aceIO}), "beyond read and execute"},
+		{"generic all", withEntry(expected, managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x10000000}), "beyond read and execute"},
+		{"duplicate canonical", withEntry(expected, expected[0]), "repeats the canonical ACE for principal S-1-3-4"},
+		{"Everyone read-only", withEntry(expected, managedDACLEntry{SID: "S-1-1-0", Mask: 0x001200a9, Flags: aceOI | aceCI}), "broad group Everyone"},
+		{"Authenticated Users read-only", withEntry(expected, managedDACLEntry{SID: "S-1-5-11", Mask: 0x001200a9}), "broad group Authenticated Users"},
 		{"deny entry", withEntry(expected, managedDACLEntry{SID: testTargetSID, Type: 1, Mask: 0x001200a9}), "non-canonical ACE type"},
 		{"missing canonical", expected[1:], "missing the canonical ACE for principal S-1-3-4"},
 		{"canonical replaced by read-only", append([]managedDACLEntry{{SID: "S-1-5-18", Mask: 0x001200a9}}, expected[:3]...), "missing the canonical ACE"},
 	} {
-		err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, expected, test.actual)
+		err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw`, true, expected, test.actual)
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: err=%v, want %q", test.name, err, test.want)
 		}
+	}
+}
+
+// Files, which include the connector token files, accept only their canonical
+// entries: a read-only grant that is fine on the hook folder would expose a
+// credential on a file.
+func TestManagedDACLFilesAcceptNoExtraEntry(t *testing.T) {
+	file := []managedDACLEntry{
+		{SID: "S-1-3-4", Mask: 0x00020000},
+		{SID: testTargetSID, Mask: 0x001301bf},
+		{SID: "S-1-5-18", Mask: 0x001f01ff},
+		{SID: "S-1-5-32-544", Mask: 0x001f01ff},
+	}
+	if err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw\hooks\.hook-codex.token`, false, file, file); err != nil {
+		t.Fatalf("canonical file DACL rejected: %v", err)
+	}
+	codex := managedDACLEntry{SID: testCodexSandboxSID, Mask: 0x001200a9}
+	err := checkManagedDACLEntries(`C:\Users\u\.defenseclaw\hooks\.hook-codex.token`, false, file, withEntry(file, codex))
+	if err == nil || !strings.Contains(err.Error(), "files accept only the canonical entries") {
+		t.Fatalf("read-only extra on a file: err=%v, want rejection", err)
 	}
 }

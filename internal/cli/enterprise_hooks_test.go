@@ -1365,6 +1365,9 @@ func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
 	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
 		t.Fatalf("unchanged log = %q, want one summary line", got)
 	}
+	if got := enterpriseHookReconcileRowLabel(enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"}); got != "codex@S-1-5-21-1-2-3-1001" {
+		t.Fatalf("SID-only row label = %q, want the SID", got)
+	}
 	if got := enterpriseHookReconcileLogDetail(strings.Repeat("x", 3000)); len([]rune(got)) != enterpriseHookReconcileLogMaxDetail+1 {
 		t.Fatalf("detail not bounded: %d runes", len([]rune(got)))
 	}

@@ -30,15 +30,30 @@ const (
 	managedDACLReadOnlyMask uint32 = 0x001200a9 | 0x80000000 | 0x20000000
 )
 
+// managedDACLBroadPrincipals are well-known groups that cover every user or
+// every caller. An extra read grant to one of them is rejected even on a
+// directory: an agent sandbox grants its own group, never these.
+var managedDACLBroadPrincipals = map[string]string{
+	"S-1-1-0":      "Everyone",
+	"S-1-5-11":     "Authenticated Users",
+	"S-1-5-32-545": "Users",
+	"S-1-5-4":      "Interactive",
+	"S-1-5-2":      "Network",
+	"S-1-5-7":      "Anonymous Logon",
+	"S-1-5-32-546": "Guests",
+}
+
 // checkManagedDACLEntries holds a managed path's DACL to its canonical
-// entries. Every canonical entry must be present exactly once. An extra entry
-// is accepted only when it is an allow entry granting read and execute rights
-// alone: agent sandboxes grant their own group read access to the folders their
-// sandboxed processes run hooks from (Codex adds CodexSandboxUsers with
-// (OI)(CI)(RX) to the hook runtime folder), and nothing such an entry allows
-// can change the managed runtime. Any other extra entry (a write-capable grant,
-// a deny, an audit or object ACE) is rejected and named.
-func checkManagedDACLEntries(path string, expected, actual []managedDACLEntry) error {
+// entries. Every canonical entry must be present exactly once. On a directory,
+// an extra entry is accepted only when it is an allow entry granting read and
+// execute rights alone to a principal other than a broad built-in group: agent
+// sandboxes grant their own group read access to the folders their sandboxed
+// processes run hooks from (Codex adds CodexSandboxUsers with (OI)(CI)(RX) to
+// the hook runtime folder), and nothing such an entry allows can change the
+// managed runtime. Files, which include the connector tokens, accept no extra
+// entry at all. Any other extra entry (a write-capable grant, a deny, an audit
+// or object ACE, a duplicate canonical entry) is rejected and named.
+func checkManagedDACLEntries(path string, directory bool, expected, actual []managedDACLEntry) error {
 	seen := make([]bool, len(expected))
 	for index, entry := range actual {
 		if entry.Type != managedDACLAccessAllowedType {
@@ -47,17 +62,39 @@ func checkManagedDACLEntries(path string, expected, actual []managedDACLEntry) e
 				path, entry.Type, index, entry.SID,
 			)
 		}
-		match := -1
+		match, duplicate := -1, false
 		for candidate, want := range expected {
-			if !seen[candidate] && strings.EqualFold(entry.SID, want.SID) &&
-				entry.Mask == want.Mask && entry.Flags == want.Flags {
-				match = candidate
-				break
+			if !strings.EqualFold(entry.SID, want.SID) || entry.Mask != want.Mask || entry.Flags != want.Flags {
+				continue
 			}
+			if seen[candidate] {
+				duplicate = true
+				continue
+			}
+			match = candidate
+			break
 		}
 		if match >= 0 {
 			seen[match] = true
 			continue
+		}
+		if duplicate {
+			return fmt.Errorf(
+				"enterprise hooks: managed Windows DACL on %s repeats the canonical ACE for principal %s (mask 0x%x, inheritance 0x%x)",
+				path, entry.SID, entry.Mask, entry.Flags,
+			)
+		}
+		if !directory {
+			return fmt.Errorf(
+				"enterprise hooks: managed Windows DACL on file %s has an extra ACE for principal %s (mask 0x%x, inheritance 0x%x); files accept only the canonical entries",
+				path, entry.SID, entry.Mask, entry.Flags,
+			)
+		}
+		if name, broad := managedDACLBroadPrincipals[strings.ToUpper(entry.SID)]; broad {
+			return fmt.Errorf(
+				"enterprise hooks: managed Windows DACL on %s grants the broad group %s (%s) access (mask 0x%x, inheritance 0x%x)",
+				path, name, entry.SID, entry.Mask, entry.Flags,
+			)
 		}
 		if entry.Mask&^managedDACLReadOnlyMask != 0 {
 			return fmt.Errorf(

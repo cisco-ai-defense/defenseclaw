@@ -1806,7 +1806,7 @@ func validateWindowsUserPathProtectionACL(
 		}
 		actual = append(actual, entry)
 	}
-	return checkManagedDACLEntries(path, expected, actual)
+	return checkManagedDACLEntries(path, directory, expected, actual)
 }
 
 func rejectWindowsUserRuntimeWriteACEs(path string, dacl *windows.ACL, target *windows.SID, wantDir, protectChildren bool) error {
