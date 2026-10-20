@@ -448,10 +448,13 @@ type HookProfile struct {
 	ResponseFieldName       string
 	SupportedEvents         []string
 	AIDSurfaces             []string
-	AgentVersion            string
-	NormalizedAgentVersion  string
-	CompatibilityStatus     string
-	CompatibilityReason     string
+	// AIDWireVersion is the resolved contract's AID encoding; empty when no
+	// contract resolved or the contract sends nothing to AID.
+	AIDWireVersion         string
+	AgentVersion           string
+	NormalizedAgentVersion string
+	CompatibilityStatus    string
+	CompatibilityReason    string
 	// ToolCallLifecycle is the resolved, versioned routing and trust contract
 	// for structured tool proposals, result content, and lifecycle audit
 	// events. A zero value means the experimental stateful path is disabled.
@@ -544,10 +547,13 @@ type HookProfileRequest struct {
 	SuppressCorrelationEmit   bool
 	CWD                       string
 	ToolName                  string
-	Content                   string
-	Direction                 string
-	Model                     string
-	Payload                   map[string]interface{}
+	// ToolNameIsLabel marks ToolName as a placeholder the decoder filled in
+	// for logs and spans because the payload named no tool.
+	ToolNameIsLabel bool
+	Content         string
+	Direction       string
+	Model           string
+	Payload         map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's

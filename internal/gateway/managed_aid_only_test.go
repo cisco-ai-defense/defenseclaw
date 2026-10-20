@@ -602,6 +602,8 @@ func TestHookManagedAIDOnly_ToolCallKeepsTextForm(t *testing.T) {
 		Args:      json.RawMessage(args),
 		Direction: "tool_call",
 		toolUseID: "toolu_01U3wpX",
+
+		aidToolCallDeclared: true,
 	})
 
 	const text = `{"content":{"text":"Tool call: Bash\n{\"command\":\"rm -rf /\"}"},"role":"user"}`
@@ -2618,5 +2620,82 @@ func TestHookManagedAIDOnly_SecureClientPreToolUseWire(t *testing.T) {
 				t.Errorf("text message = %s, want %s", wire.Messages[1], want)
 			}
 		})
+	}
+}
+
+// The tool-call form follows the hook contract the dispatcher resolved, not the
+// payload: the same golden PreToolUse goes out as the tool call and the text
+// form under a contract that declares it, and as the text form alone under a
+// profile with no declaration, as when no contract resolves.
+func TestHookManagedAIDOnly_ToolCallFollowsResolvedContract(t *testing.T) {
+	for _, test := range []struct {
+		connector string
+		headers   map[string]string
+	}{
+		{connector: "claudecode"},
+		{connector: "codex", headers: map[string]string{
+			"X-DefenseClaw-Hook-Event":    "PreToolUse",
+			"X-DefenseClaw-Hook-Contract": "codex-hooks-v4",
+		}},
+	} {
+		for _, declared := range []bool{true, false} {
+			name := test.connector + "/undeclared"
+			if declared {
+				name = test.connector + "/declared"
+			}
+			t.Run(name, func(t *testing.T) {
+				installCorrelationHMACForTest()
+				var gotBody []byte
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotBody, _ = io.ReadAll(r.Body)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+				}))
+				t.Cleanup(srv.Close)
+				client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+					Endpoint:  srv.URL,
+					TimeoutMs: 3000,
+				}, newFakeCloudProvider("cmid-token-1"))
+				a := managedHookServer(client)
+				a.scannerCfg.Guardrail.Connector = test.connector
+				a.scannerCfg.Guardrail.Mode = "action"
+
+				payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				profile := a.hookProfileForConnector(test.connector)
+				if !connector.HookProfileCarriesAIDToolCall(profile) {
+					t.Fatalf("%s resolved contract %q does not declare the tool call", test.connector, profile.ContractID)
+				}
+				if !declared {
+					profile = connector.HookProfile{Name: test.connector}
+				}
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/"+test.connector+"/hook", bytes.NewReader(raw))
+				for key, value := range test.headers {
+					request.Header.Set(key, value)
+				}
+				req := normalizeAgentHookRequestWithProfile(test.connector, payload, profile)
+				_ = hookRuntimeForProfile(profile).Evaluate(a, request.Context(), req, raw, payload)
+
+				var wire struct {
+					Messages []json.RawMessage `json:"messages"`
+				}
+				if err := json.Unmarshal(gotBody, &wire); err != nil {
+					t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+				}
+				want := 1
+				if declared {
+					want = 2
+				}
+				if len(wire.Messages) != want {
+					t.Fatalf("messages = %d, want %d (body=%s)", len(wire.Messages), want, gotBody)
+				}
+				if !declared && bytes.Contains(gotBody, []byte(`"tool_calls"`)) {
+					t.Fatalf("undeclared contract sent a tool call: %s", gotBody)
+				}
+			})
+		}
 	}
 }

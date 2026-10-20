@@ -95,6 +95,9 @@ type codexHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+	// aidToolCallDeclared comes from the hook contract the dispatcher
+	// resolved for this request, never from the body.
+	aidToolCallDeclared bool
 }
 
 type codexHookResponse struct {
@@ -221,6 +224,8 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Connector:     "codex",
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 			toolUseID:     req.ToolUseID,
+
+			aidToolCallDeclared: req.aidToolCallDeclared,
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{

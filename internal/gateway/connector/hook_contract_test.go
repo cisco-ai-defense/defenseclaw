@@ -332,6 +332,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		ResponseField           string                    `json:"response_field"`
 		Events                  []string                  `json:"events"`
 		AIDSurfaces             []string                  `json:"aid_surfaces"`
+		AIDSurfaceEvents        map[string][]string       `json:"aid_surface_events"`
+		AIDWireVersion          string                    `json:"aid_wire_version"`
+		AIDToolCallShapes       []AIDToolCallShape        `json:"aid_tool_call_shapes"`
 		SupportsTraceparent     bool                      `json:"supports_traceparent"`
 		NativeOTLP              bool                      `json:"native_otlp"`
 		ContentEnvelopeKey      string                    `json:"content_envelope_key"`
@@ -351,7 +354,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		Contracts         []manifestContract `json:"contracts"`
 	}
 	type manifest struct {
-		Connectors map[string]manifestConnector `json:"connectors"`
+		SchemaVersion int                          `json:"schema_version"`
+		Connectors    map[string]manifestConnector `json:"connectors"`
 	}
 
 	path := filepath.Join("..", "..", "..", "cli", "defenseclaw", "inventory", "hook_contracts.json")
@@ -362,6 +366,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	var gotManifest manifest
 	if err := json.Unmarshal(payload, &gotManifest); err != nil {
 		t.Fatalf("unmarshal hook contract manifest: %v", err)
+	}
+	if gotManifest.SchemaVersion != 2 {
+		t.Fatalf("hook contract manifest schema_version=%d want 2", gotManifest.SchemaVersion)
 	}
 
 	for _, proxy := range []string{"openclaw", "zeptoclaw"} {
@@ -427,6 +434,15 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if !sameStrings(manifestContract.AIDSurfaces, runtime.AIDSurfaces) {
 				t.Fatalf("%s aid_surfaces=%v want %v", runtime.ContractID, manifestContract.AIDSurfaces, runtime.AIDSurfaces)
+			}
+			if !reflect.DeepEqual(manifestContract.AIDSurfaceEvents, runtime.AIDSurfaceEvents) {
+				t.Fatalf("%s aid_surface_events=%v want %v", runtime.ContractID, manifestContract.AIDSurfaceEvents, runtime.AIDSurfaceEvents)
+			}
+			if manifestContract.AIDWireVersion != runtime.AIDWireVersion {
+				t.Fatalf("%s aid_wire_version=%q want %q", runtime.ContractID, manifestContract.AIDWireVersion, runtime.AIDWireVersion)
+			}
+			if !reflect.DeepEqual(manifestContract.AIDToolCallShapes, runtime.AIDToolCallShapes) {
+				t.Fatalf("%s aid_tool_call_shapes=%+v want %+v", runtime.ContractID, manifestContract.AIDToolCallShapes, runtime.AIDToolCallShapes)
 			}
 			if manifestContract.SupportsTraceparent != runtime.SupportsTraceparent {
 				t.Fatalf("%s traceparent=%v want %v", runtime.ContractID, manifestContract.SupportsTraceparent, runtime.SupportsTraceparent)

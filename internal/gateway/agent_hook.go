@@ -109,7 +109,11 @@ type agentHookRequest struct {
 	CorrelationReceipt        *audit.CorrelationReceiptLocator
 	CWD                       string
 	ToolName                  string
-	ToolArgs                  json.RawMessage
+	// ToolNameIsLabel marks ToolName as a placeholder ("tool", "session",
+	// "message", "subagent") filled in for logs and spans because the payload
+	// named no tool. It is never sent to AID as a tool call's name.
+	ToolNameIsLabel bool
+	ToolArgs        json.RawMessage
 	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
 	// the payload carries no tool-argument object.
 	ToolArgsAreHookEnvelope bool
@@ -1506,6 +1510,7 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 			}
 		}
 	}
+	toolNameIsLabel := toolName == ""
 	if toolName == "" {
 		// Label-only mapping for lifecycle events that carry no tool:
 		// session start/end → "session", subagent stop → "subagent",
@@ -1597,7 +1602,7 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 		CorrelationProfileVersion: spec.ProfileVersion, CorrelationCompleteness: spec.Completeness,
 		CorrelationSurface: connector.CorrelationSurfaceHook, CorrelationOrigins: origins,
 		CorrelationValues: values, CorrelationIdentifiers: identifiers,
-		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
+		CWD: cwd, ToolName: toolName, ToolNameIsLabel: toolNameIsLabel, ToolArgs: json.RawMessage(argBytes),
 		ToolArgsAreHookEnvelope: argsAreEnvelope,
 		Content:                 content, Direction: direction, Payload: payload,
 	}
@@ -1627,6 +1632,7 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	}
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
+		req.ToolNameIsLabel = decoded.ToolNameIsLabel
 	}
 	if decoded.Content != "" {
 		req.Content = decoded.Content
@@ -1781,6 +1787,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
 			toolUseID:               reportedToolInvocationID(req),
 			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
+			aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
+			toolNameIsLabel:         req.ToolNameIsLabel,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)

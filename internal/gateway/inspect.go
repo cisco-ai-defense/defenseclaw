@@ -86,6 +86,14 @@ type ToolInspectRequest struct {
 	// toolArgsAreHookEnvelope marks args the connector did not project from a
 	// tool payload: the whole hook envelope, session and event keys included.
 	toolArgsAreHookEnvelope bool
+	// aidToolCallDeclared is set by a connector adapter, never from the wire,
+	// when the resolved hook contract declares the tool_call surface in the
+	// encoding hookAIDInspectToolCall implements. Without it the invocation is
+	// sent to AID as text alone, so an undeclared contract never changes shape.
+	aidToolCallDeclared bool
+	// toolNameIsLabel marks Tool as a placeholder the adapter filled in because
+	// the payload named no tool; it is not sent as a tool call's name.
+	toolNameIsLabel bool
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -417,12 +425,15 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	})
 }
 
-// toolCallArgsCarryable reports whether the arguments can stand as tool-call
-// fields: a JSON object the connector projected from its own tool payload.
-// JSON null decodes into a map without error, but it is not an object, and
-// AID's rule engine fails the tool-call rules on it.
+// toolCallArgsCarryable reports whether the invocation can stand as tool-call
+// fields: the connector's contract declares the encoding, the connector named
+// the tool, and the arguments are a JSON object it projected from its own tool
+// payload. A blank or placeholder name would put a made-up name in
+// function.name. JSON null decodes into a map without error, but it is not an
+// object, and AID's rule engine fails the tool-call rules on it.
 func toolCallArgsCarryable(req *ToolInspectRequest) bool {
-	if req == nil || req.Direction != "tool_call" || req.toolArgsAreHookEnvelope {
+	if req == nil || !req.aidToolCallDeclared || req.Direction != "tool_call" || req.toolArgsAreHookEnvelope ||
+		req.toolNameIsLabel || strings.TrimSpace(req.Tool) == "" {
 		return false
 	}
 	var object map[string]json.RawMessage
@@ -482,15 +493,14 @@ func (a *APIServer) hookAIDInspectToolCall(
 	if len(call.Args) == 0 {
 		return nil
 	}
-	name := call.Name
-	if strings.TrimSpace(name) == "" {
-		name = "tool"
+	if strings.TrimSpace(call.Name) == "" {
+		return a.hookAIDInspect(ctx, call.Name, content)
 	}
 	toolCalls, err := json.Marshal([]map[string]interface{}{{
 		"id":   toolCallWireID(call),
 		"type": "function",
 		"function": map[string]interface{}{
-			"name":      name,
+			"name":      call.Name,
 			"arguments": string(call.Args),
 		},
 	}})

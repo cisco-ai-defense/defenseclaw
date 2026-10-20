@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const goldenHookPayloadDir = "../../scripts/live-connector-e2e/golden"
@@ -108,74 +109,76 @@ func decodeAIDWire(t *testing.T, body []byte) aidWire {
 	return got
 }
 
+// connectorToolCallGoldens lists the connectors whose committed golden PreToolUse
+// reaches AID as a tool call, with the contract its hook route resolves.
+var connectorToolCallGoldens = []struct {
+	connector string
+	contract  string
+	headers   map[string]string
+	// extra is merged into the golden payload.
+	extra map[string]interface{}
+	// wantID is the id the agent reported. Empty means the payload carries
+	// none, so the id is DefenseClaw's "dc-" one: the chat schema rejects a
+	// tool call without an id, and a minted correlation id is not the agent's.
+	wantID string
+}{
+	{
+		connector: "claudecode",
+		contract:  "claudecode-hooks-v1",
+		extra:     map[string]interface{}{"tool_use_id": "toolu_01U3wpX"},
+		wantID:    "toolu_01U3wpX",
+	},
+	{
+		connector: "codex",
+		contract:  "codex-hooks-v4",
+		headers: map[string]string{
+			"X-DefenseClaw-Hook-Event":    "PreToolUse",
+			"X-DefenseClaw-Hook-Contract": "codex-hooks-v4",
+		},
+		extra:  map[string]interface{}{"tool_use_id": "call_codex_42"},
+		wantID: "call_codex_42",
+	},
+	{connector: "cursor", contract: "cursor-hooks-v1"},
+	{connector: "amp", contract: "amp-plugin-v1", wantID: "dc-e2e-amp-tool-block"},
+	{connector: "hermes", contract: "hermes-hooks-v1"},
+	{connector: "openhands", contract: "openhands-hooks-v1"},
+	{
+		connector: "copilot",
+		contract:  "copilot-hooks-v1",
+		headers:   map[string]string{"X-DefenseClaw-Copilot-Event": "preToolUse"},
+	},
+	{connector: "geminicli", contract: "geminicli-hooks-v1"},
+	{connector: "windsurf", contract: "windsurf-hooks-v1"},
+}
+
+// connectorTextOnlyGoldens lists the connectors whose golden PreToolUse reaches
+// AID as the text form alone, and why.
+var connectorTextOnlyGoldens = map[string]string{
+	// The golden's tool name does not survive antigravity's decoder on this
+	// branch, and a call without a name is not carried as a tool call.
+	"antigravity": "tool name not decoded",
+}
+
 // Each connector's committed golden hook payload, through its own hook route,
-// as AID receives it. The wanted values are the vendor's own: tool names and
-// argument keys differ between connectors and a cloud rule has to match what is
-// listed here.
+// as AID receives it. The tool name and the command key are not written here:
+// they come from the registry's AIDToolCallShapes for the resolved contract, so
+// the registry, the goldens and the wire have to agree, and a vendor renaming a
+// tool or its command argument fails here.
 func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 	// The release branch's goldens predate main's "rm -rf /" refresh.
 	const command = "cat /etc/shadow"
 
-	for _, test := range []struct {
-		connector string
-		tool      string
-		args      map[string]interface{}
-		headers   map[string]string
-		// extra is merged into the golden payload.
-		extra map[string]interface{}
-		// wantID is the id the agent reported. Empty means the payload carries
-		// none, so the id is DefenseClaw's "dc-" one: the chat schema rejects a
-		// tool call without an id, and a minted correlation id is not the
-		// agent's.
-		wantID string
-	}{
-		{
-			connector: "claudecode",
-			tool:      "Bash",
-			args:      map[string]interface{}{"command": command},
-			extra:     map[string]interface{}{"tool_use_id": "toolu_01U3wpX"},
-			wantID:    "toolu_01U3wpX",
-		},
-		{
-			connector: "codex",
-			tool:      "shell",
-			args:      map[string]interface{}{"command": command},
-			headers: map[string]string{
-				"X-DefenseClaw-Hook-Event":    "PreToolUse",
-				"X-DefenseClaw-Hook-Contract": "codex-hooks-v4",
-			},
-			extra:  map[string]interface{}{"tool_use_id": "call_codex_42"},
-			wantID: "call_codex_42",
-		},
-		{
-			connector: "cursor",
-			tool:      "run_terminal_cmd",
-			args:      map[string]interface{}{"command": command},
-		},
-		{
-			connector: "amp",
-			tool:      "shell",
-			args:      map[string]interface{}{"command": command},
-			wantID:    "dc-e2e-amp-tool-block",
-		},
-		{
-			connector: "hermes",
-			tool:      "execute_command",
-			args:      map[string]interface{}{"command": command},
-		},
-		{
-			connector: "openhands",
-			tool:      "terminal",
-			args:      map[string]interface{}{"command": command},
-		},
-		{
-			connector: "copilot",
-			tool:      "shell",
-			args:      map[string]interface{}{"command": command},
-			headers:   map[string]string{"X-DefenseClaw-Copilot-Event": "preToolUse"},
-		},
-	} {
+	for _, test := range connectorToolCallGoldens {
 		t.Run(test.connector, func(t *testing.T) {
+			contract, ok := knownHookContractByID(test.connector, test.contract)
+			if !ok {
+				t.Fatalf("no contract %s for %s", test.contract, test.connector)
+			}
+			if len(contract.AIDToolCallShapes) != 1 {
+				t.Fatalf("%s declares %d tool-call shapes, want the golden's one", test.contract, len(contract.AIDToolCallShapes))
+			}
+			shape := contract.AIDToolCallShapes[0]
+
 			payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
 			for key, value := range test.extra {
 				payload[key] = value
@@ -190,10 +193,6 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if text.Role != "user" {
 				t.Errorf("text role = %q, want user", text.Role)
 			}
-			if !strings.HasPrefix(text.Content, "Tool call: "+test.tool+"\n") ||
-				!strings.Contains(text.Content, command) {
-				t.Errorf("text content = %q", text.Content)
-			}
 			if structured.Role != "assistant" {
 				t.Errorf("tool-call role = %q, want assistant", structured.Role)
 			}
@@ -204,17 +203,20 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if call.Type != "function" {
 				t.Errorf("type = %q, want function", call.Type)
 			}
-			if call.Function.Name != test.tool {
-				t.Errorf("name = %q, want the vendor name %q", call.Function.Name, test.tool)
+			if call.Function.Name != shape.Tool {
+				t.Errorf("name = %q, want the registry's %q for %s", call.Function.Name, shape.Tool, test.contract)
+			}
+			if golden, _ := payload["tool_name"].(string); golden != call.Function.Name {
+				t.Errorf("name = %q, want the golden's tool_name %q", call.Function.Name, golden)
 			}
 			var args map[string]interface{}
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 				t.Fatalf("arguments is not a JSON object: %v (%q)", err, call.Function.Arguments)
 			}
-			if !reflect.DeepEqual(args, test.args) {
-				t.Errorf("arguments = %v, want %v", args, test.args)
+			if want := map[string]interface{}{shape.CommandArg: command}; !reflect.DeepEqual(args, want) {
+				t.Errorf("arguments = %v, want %v (command_arg %q from the registry)", args, want, shape.CommandArg)
 			}
-			if want := "Tool call: " + test.tool + "\n" + call.Function.Arguments; text.Content != want {
+			if want := "Tool call: " + shape.Tool + "\n" + call.Function.Arguments; text.Content != want {
 				t.Errorf("text content = %q, want the same invocation as text %q", text.Content, want)
 			}
 			switch {
@@ -227,6 +229,58 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			}
 		})
 	}
+	for connectorName, reason := range connectorTextOnlyGoldens {
+		t.Run(connectorName+"/text-only", func(t *testing.T) {
+			payload := loadGoldenHookPayload(t, connectorName, "pre_tool_block")
+			got := decodeAIDWire(t, captureAIDPayloadForConnector(t, connectorName, payload, nil))
+			if len(got.Messages) != 1 || len(got.Messages[0].ToolCalls) != 0 {
+				t.Fatalf("messages = %+v, want the text form alone (%s)", got.Messages, reason)
+			}
+			if !strings.Contains(got.Messages[0].Content, command) {
+				t.Errorf("text content = %q, want the command", got.Messages[0].Content)
+			}
+		})
+	}
+}
+
+// Every committed PreToolUse golden is accounted for: carried as a tool call
+// with a registry shape, or listed as text only with a reason. A new golden
+// cannot be left out of the wire test unnoticed.
+func TestCiscoInspectClient_EveryToolGoldenIsChecked(t *testing.T) {
+	covered := map[string]bool{}
+	for _, test := range connectorToolCallGoldens {
+		covered[test.connector] = true
+	}
+	for connectorName := range connectorTextOnlyGoldens {
+		if covered[connectorName] {
+			t.Errorf("%s is listed both as a tool call and as text only", connectorName)
+		}
+		covered[connectorName] = true
+	}
+	entries, err := os.ReadDir(goldenHookPayloadDir)
+	if err != nil {
+		t.Fatalf("read goldens: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(goldenHookPayloadDir, entry.Name(), "pre_tool_block.json")); err != nil {
+			continue
+		}
+		if !covered[entry.Name()] {
+			t.Errorf("golden %s/pre_tool_block.json is not in the AID wire test", entry.Name())
+		}
+	}
+}
+
+func knownHookContractByID(connectorName, contractID string) (connector.HookContract, bool) {
+	for _, contract := range connector.KnownHookContracts(connectorName) {
+		if contract.ContractID == contractID {
+			return contract, true
+		}
+	}
+	return connector.HookContract{}, false
 }
 
 // A payload with no tool-argument object leaves args as the whole hook envelope,

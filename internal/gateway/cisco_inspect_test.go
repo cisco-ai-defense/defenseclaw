@@ -571,11 +571,15 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 	client.client = srv.Client()
 	api.SetCiscoInspector(client)
 
-	body := `{"tool":"Bash","args":{"command":"rm -rf / --no-preserve-root"},` +
-		`"direction":"tool_call","connector":"claudecode"}`
-	if rec, _ := postInspectForConnector(t, api, "claudecode", body); rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	// As a connector adapter builds it after resolving a contract that declares
+	// the tool_call surface.
+	_ = api.inspectToolPolicy(&ToolInspectRequest{
+		Tool:                "Bash",
+		Args:                json.RawMessage(`{"command":"rm -rf / --no-preserve-root"}`),
+		Direction:           "tool_call",
+		Connector:           "claudecode",
+		aidToolCallDeclared: true,
+	})
 	if len(gotBody) == 0 {
 		t.Fatal("AID was not called")
 	}
@@ -618,6 +622,40 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 	}
 }
 
+// The public inspect route resolves no hook contract, so a caller cannot opt
+// into the tool-call form by sending direction=tool_call: AID gets the text
+// form alone, byte for byte what it got before tool calls were carried.
+func TestCiscoInspectClient_PublicInspectRouteSendsTextOnly(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	api := testAPIServerWithConfig(t, "action")
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_PUBLIC_ROUTE_TEXT")
+	client.client = srv.Client()
+	api.SetCiscoInspector(client)
+
+	body := `{"tool":"Bash","args":{"command":"rm -rf / --no-preserve-root"},` +
+		`"direction":"tool_call","connector":"claudecode"}`
+	if rec, _ := postInspectForConnector(t, api, "claudecode", body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var payload struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+	}
+	const want = `{"content":"Tool call: Bash\n{\"command\":\"rm -rf / --no-preserve-root\"}","role":"user"}`
+	if len(payload.Messages) != 1 || string(payload.Messages[0]) != want {
+		t.Fatalf("messages = %s, want the text form alone %s", payload.Messages, want)
+	}
+}
+
 // The agent's own tool id reaches the wire. Each hook sets toolUseID on the
 // request: claudecode and codex from tool_use_id, every other connector from the
 // reported ToolInvocationID on the shared agent hook. This pins the request to
@@ -641,6 +679,8 @@ func TestCiscoInspectClient_ToolUseIDReachesWire(t *testing.T) {
 		Args:      json.RawMessage(`{"command":"rm -rf /"}`),
 		Direction: "tool_call",
 		toolUseID: "call_from_connector_42",
+
+		aidToolCallDeclared: true,
 	}
 	if v := api.hookAIDInspectTool(t.Context(), req, req.Tool, string(req.Args)); v == nil {
 		t.Fatal("expected a verdict")
@@ -732,8 +772,8 @@ func TestHookAIDToolCall_TextFormUnchangedAndLast(t *testing.T) {
 			emptyContent: map[string]interface{}{"text": ""},
 		},
 	} {
-		// A blank tool name keeps main's text form; only function.name falls
-		// back to "tool".
+		// A blank tool name sends the text form alone: there is no name to put
+		// in function.name, and a placeholder would read as the agent's.
 		for _, tool := range []string{"Bash", "", " "} {
 			t.Run(lane.name+"/"+strconv.Quote(tool), func(t *testing.T) {
 				messages := func(send func()) []json.RawMessage {
@@ -756,6 +796,12 @@ func TestHookAIDToolCall_TextFormUnchangedAndLast(t *testing.T) {
 						Args: json.RawMessage(args),
 					}, args)
 				})
+				if strings.TrimSpace(tool) == "" {
+					if len(withCall) != 1 || !bytes.Equal(withCall[0], textOnly[0]) {
+						t.Fatalf("blank name sent %s, want the text form alone %s", withCall, textOnly)
+					}
+					return
+				}
 				if len(textOnly) != 1 || len(withCall) != 2 {
 					t.Fatalf("messages = %d and %d, want 1 and 2", len(textOnly), len(withCall))
 				}
@@ -785,9 +831,6 @@ func TestHookAIDToolCall_TextFormUnchangedAndLast(t *testing.T) {
 					t.Errorf("tool call message = %s, want assistant with empty content", withCall[0])
 				}
 				wantName := tool
-				if strings.TrimSpace(tool) == "" {
-					wantName = "tool"
-				}
 				if len(structured.ToolCalls) != 1 {
 					t.Fatalf("tool_calls = %d, want 1 (%s)", len(structured.ToolCalls), withCall[0])
 				}

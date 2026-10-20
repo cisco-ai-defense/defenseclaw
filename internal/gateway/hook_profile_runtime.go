@@ -71,7 +71,8 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	}
 }
 
-func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
+	aidToolCallDeclared := connector.HookProfileCarriesAIDToolCall(profile)
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
 			return a.rememberCodexRawHookEvents(decodeCodexRequestFromBytes(rawBody, payload), req.SemanticEventID)
@@ -81,13 +82,15 @@ func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
 			cxReq := decodeCodexRequestFromBytes(rawBody, payload)
+			cxReq.aidToolCallDeclared = aidToolCallDeclared
 			enrichCodexHookSpan(ctx, cxReq)
 			return codexResponseToAgentHookResponse(a.evaluateCodexHook(ctx, cxReq))
 		},
 	}
 }
 
-func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func claudeCodeHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
+	aidToolCallDeclared := connector.HookProfileCarriesAIDToolCall(profile)
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
 			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestFromBytes(rawBody, payload), req.SemanticEventID)
@@ -96,7 +99,9 @@ func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 			a.emitClaudeCodeHookLLMEvent(ctx, decodeClaudeCodeRequestFromBytes(rawBody, payload), rawEventIDs, rawBody)
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
-			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, decodeClaudeCodeRequestFromBytes(rawBody, payload)))
+			ccReq := decodeClaudeCodeRequestFromBytes(rawBody, payload)
+			ccReq.aidToolCallDeclared = aidToolCallDeclared
+			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, ccReq))
 		},
 	}
 }
