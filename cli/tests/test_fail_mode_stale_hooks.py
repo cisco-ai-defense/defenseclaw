@@ -59,6 +59,25 @@ def test_fail_mode_change_with_gateway_stopped_re_renders_hooks(tmp_path: Path, 
     assert "re-rendered the hooks now (codex fail-closed)" in result.output
 
 
+def test_upstream_fail_open_connectors_are_not_re_rendered(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0027: their hooks fail open upstream whatever the config says.
+    reconcile = MagicMock()
+    config = _CONFIG + "".join(f"    {name}: {{mode: action}}\n" for name in ("antigravity", "copilot", "hermes"))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(config)
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire()),
+        patch("defenseclaw.process_liveness.pid_file_alive", return_value=False),
+        patch("defenseclaw.fail_mode.reconcile_connector_registration", reconcile),
+    ):
+        result = CliRunner().invoke(cmd_config.config_cmd, ["unset", "guardrail.hook_fail_mode"])
+    assert result.exit_code == 0, result.output
+    assert [call.args[1] for call in reconcile.call_args_list] == ["codex"]
+    assert "could not be re-rendered" not in result.output
+    assert "keep their previous fail mode" not in result.output
+
+
 def test_running_gateway_and_unrelated_keys_leave_hooks_to_the_gateway(tmp_path: Path, monkeypatch) -> None:
     reconcile = MagicMock()
     running = _run(

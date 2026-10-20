@@ -51,6 +51,13 @@ _EXPECTED_CONTRACTS = {
     "devin": frozenset({"devin-hooks-v1"}),
 }
 _UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
+# The hook script each Unix shell registration must name (the connectors in
+# _EXPECTED_CONTRACTS that _unix_registration_freshness checks).
+_UNIX_REGISTRATION_HOOK_SCRIPTS = {
+    "claudecode": "claude-code-hook.sh",
+    "codex": "codex-hook.sh",
+    "devin": "devin-hook.sh",
+}
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
 _WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(
@@ -640,15 +647,12 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     """Verify the live Unix agent registration points at this data dir's hook."""
 
     paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
-    if not paths:
+    script_name = _UNIX_REGISTRATION_HOOK_SCRIPTS.get(connector)
+    if not paths or script_name is None:
         return "registration-missing"
-    if connector == "claudecode":
-        registration_path = Path(paths[0])
-        script_name = "claude-code-hook.sh"
-    else:
-        registration_path = Path(paths[0])
-        script_name = "codex-hook.sh"
-    registration = _read_small_file(registration_path)
+    # Devin's registration names devin-hook.sh; checking it for codex-hook.sh
+    # reported every current Devin registration as stale (GAP-0027).
+    registration = _read_small_file(Path(paths[0]))
     if registration is None:
         return "registration-missing"
     expected = str((Path(cfg.data_dir) / "hooks" / script_name).resolve())

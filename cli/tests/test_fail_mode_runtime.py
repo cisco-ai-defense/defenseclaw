@@ -888,6 +888,28 @@ def test_unix_registration_freshness_requires_current_script_path(
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.parametrize(
+    ("connector", "script"),
+    [("claudecode", "claude-code-hook.sh"), ("codex", "codex-hook.sh"), ("devin", "devin-hook.sh")],
+)
+def test_unix_registration_freshness_checks_each_connectors_own_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, script: str
+) -> None:
+    # GAP-0027: a current Devin registration was reported stale because the
+    # check looked for codex-hook.sh in it.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home), patch(
+        "defenseclaw.connector_paths.Path.home", return_value=home
+    ):
+        registration = Path(fail_mode_runtime.connector_config_files(connector, workspace_dir="")[0])
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        registration.write_text(json.dumps({"command": "/stale/" + script}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, connector) == "registration-command-stale"
+        current = str((Path(cfg.data_dir) / "hooks" / script).resolve())
+        registration.write_text(json.dumps({"command": current}), encoding="utf-8")
+        assert fail_mode_runtime._unix_registration_freshness(cfg, connector) is None
+
+
 def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -768,8 +768,15 @@ def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, s
         return []
     if before is None:
         return []
+    from defenseclaw.fail_mode import _UPSTREAM_FAIL_OPEN_CONNECTORS
+
     changed = []
     for name in names:
+        # Antigravity, Copilot and Hermes hooks fail open upstream whatever the
+        # config says, so a fail-mode write changes nothing there; reconciling
+        # them only produced false "could not be re-rendered" warnings (GAP-0027).
+        if str(name).strip().lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+            continue
         try:
             if hasattr(guardrail, "effective_enabled") and not guardrail.effective_enabled(name):
                 continue
