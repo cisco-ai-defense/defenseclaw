@@ -39,6 +39,20 @@ import (
 // settings) or a vendor bug can hide the hooks. Live verification runs the
 // real client as the target user.
 
+// liveProofNote is the static verify advice on how to prove what the client
+// really loads (what: "policy", "hooks"). Linux and macOS have `enterprise
+// policy verify --live`. A managed Windows host refuses it (Windows cannot
+// start the client as another account, and a standard account cannot read
+// the managed configuration), so there the note names the proof that works:
+// a tool call in the user's own session, then its record read from an
+// elevated prompt (GAP-0010).
+func liveProofNote(opts Options, connectorName, client, what string) string {
+	if opts.goos() == "windows" {
+		return fmt.Sprintf("on Windows `enterprise policy verify --live` is not available: to prove the effective %s, make a tool call in %s from the user's own session, then read its record from an elevated Administrator prompt with `defenseclaw audit export --connector %s -o <file>`", what, client, connectorName)
+	}
+	return fmt.Sprintf("`enterprise policy verify --live --connector %s --user <user>` proves the effective %s", connectorName, what)
+}
+
 // LiveOptions selects the client and user for a live check.
 type LiveOptions struct {
 	Connector   string

@@ -466,7 +466,7 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 		state.conflict("hooks.%s does not name DefenseClaw's hook directory %q", codexManagedDirKey(opts), hookBinaryDir(opts))
 	}
 	inspectCodexHigherSources(opts, policy, state)
-	state.detail("cloud-managed Codex requirements (ChatGPT Business/Enterprise) are not visible locally; `enterprise policy verify --live --connector codex --user <user>` proves the effective policy")
+	state.detail("cloud-managed Codex requirements (ChatGPT Business/Enterprise) are not visible locally; %s", liveProofNote(opts, codexConnector, "Codex", "policy"))
 	return nil
 }
 
