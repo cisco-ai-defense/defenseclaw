@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -96,6 +97,9 @@ type ToolInspectRequest struct {
 	// toolNameIsLabel marks Tool as a placeholder the adapter filled in because
 	// the payload named no tool; it is not sent as a tool call's name.
 	toolNameIsLabel bool
+	// hookEvent is the agent hook event that produced the request, set by a
+	// connector adapter for the AID wire log only.
+	hookEvent string
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -237,6 +241,7 @@ func (a *APIServer) managedAIDOnly() bool {
 // aidToolCall is a tool invocation sent to AID as a structured tool call.
 type aidToolCall struct {
 	Connector string
+	Event     string
 	Name      string
 	ID        string
 	Args      json.RawMessage
@@ -468,13 +473,25 @@ func (a *APIServer) aidHookSurfaceWired() bool {
 }
 
 // logAIDToolCallTextOnly records that a tool invocation went to AID as the
-// text form alone, and why. Names only, never argument values.
-func (a *APIServer) logAIDToolCallTextOnly(connectorName, toolName, reason string) {
+// text form alone, and why. Names only, never argument values. A tool name the
+// adapter filled in as a label, or a blank one, is shown as <none>.
+func (a *APIServer) logAIDToolCallTextOnly(connectorName, event, toolName string, nameIsLabel bool, reason string) {
 	if reason == "" || reason == "not_a_tool_call" || !a.aidHookSurfaceWired() {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as text only: connector=%s tool=%q reason=%s\n",
-		connectorName, toolName, reason)
+	tool := strconv.Quote(toolName)
+	if nameIsLabel || strings.TrimSpace(toolName) == "" {
+		tool = "<none>"
+	}
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as text only: connector=%s event=%s tool=%s reason=%s\n",
+		connectorName, aidLogEvent(event), tool, reason)
+}
+
+func aidLogEvent(event string) string {
+	if strings.TrimSpace(event) == "" {
+		return "<unknown>"
+	}
+	return event
 }
 
 // logAIDToolCallCarried records the shape of a tool call sent to AID: the
@@ -492,8 +509,8 @@ func logAIDToolCallCarried(call aidToolCall, wireID string) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s tool=%q id=%s (%s) arg_keys=%v wire=%s messages=[assistant:tool_calls, user:text]\n",
-		call.Connector, call.Name, wireID, idSource, keys, connector.AIDWireVersionChatToolCalls)
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%s (%s) arg_keys=%v wire=%s messages=[assistant:tool_calls, user:text]\n",
+		call.Connector, aidLogEvent(call.Event), call.Name, wireID, idSource, keys, connector.AIDWireVersionChatToolCalls)
 }
 
 // hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
@@ -504,11 +521,12 @@ func (a *APIServer) hookAIDInspectTool(
 	toolName, argsStr string,
 ) *ScanVerdict {
 	if reason := toolCallNotCarriedReason(req); reason != "" {
-		a.logAIDToolCallTextOnly(req.Connector, toolName, reason)
+		a.logAIDToolCallTextOnly(req.Connector, req.hookEvent, toolName, req.toolNameIsLabel, reason)
 		return a.hookAIDInspect(ctx, toolName, argsStr)
 	}
 	return a.hookAIDInspectToolCall(ctx, aidToolCall{
 		Connector: req.Connector,
+		Event:     req.hookEvent,
 		Name:      toolName,
 		ID:        req.toolUseID,
 		Args:      req.Args,
@@ -552,7 +570,7 @@ func (a *APIServer) hookAIDInspectToolCall(
 		return nil
 	}
 	if strings.TrimSpace(call.Name) == "" {
-		a.logAIDToolCallTextOnly(call.Connector, call.Name, "blank_tool_name")
+		a.logAIDToolCallTextOnly(call.Connector, call.Event, call.Name, false, "blank_tool_name")
 		return a.hookAIDInspect(ctx, call.Name, content)
 	}
 	wireID := toolCallWireID(call)
@@ -568,7 +586,7 @@ func (a *APIServer) hookAIDInspectToolCall(
 		return nil
 	}
 	if len(toolCalls) > aidToolCallMaxBytes {
-		a.logAIDToolCallTextOnly(call.Connector, call.Name, "oversized")
+		a.logAIDToolCallTextOnly(call.Connector, call.Event, call.Name, false, "oversized")
 		return a.hookAIDInspect(ctx, call.Name, content)
 	}
 	logAIDToolCallCarried(call, wireID)
@@ -801,11 +819,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
 		if reason := toolCallNotCarriedReason(req); reason != "" {
-			a.logAIDToolCallTextOnly(req.Connector, req.Tool, reason)
+			a.logAIDToolCallTextOnly(req.Connector, req.hookEvent, req.Tool, req.toolNameIsLabel, reason)
 			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
 		}
 		return a.inspectManagedAIDOnlyCall(ctx, req.Tool, string(req.Args), &aidToolCall{
 			Connector: req.Connector,
+			Event:     req.hookEvent,
 			Name:      req.Tool,
 			ID:        req.toolUseID,
 			Args:      req.Args,

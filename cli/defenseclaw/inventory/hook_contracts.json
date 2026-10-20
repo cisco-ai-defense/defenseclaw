@@ -552,6 +552,11 @@
               "tool": "shell",
               "surface": "shell",
               "command_arg": "command"
+            },
+            {
+              "tool": "Bash",
+              "surface": "shell",
+              "command_arg": "command"
             }
           ],
           "supports_traceparent": true,
@@ -1030,6 +1035,19 @@
               "tool": "run_terminal_cmd",
               "surface": "shell",
               "command_arg": "command"
+            },
+            {
+              "tool": "Shell",
+              "surface": "shell",
+              "command_arg": "command"
+            },
+            {
+              "tool": "Grep",
+              "surface": "file-read"
+            },
+            {
+              "tool": "Read",
+              "surface": "file-read"
             }
           ],
           "supports_traceparent": true,

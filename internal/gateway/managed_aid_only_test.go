@@ -2751,10 +2751,10 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 	carried := captureStderr(t, func() {
 		_ = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
-			toolUseID: "toolu_01U3wpX", aidToolCallDeclared: true,
+			toolUseID: "toolu_01U3wpX", aidToolCallDeclared: true, hookEvent: "PreToolUse",
 		})
 	})
-	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode tool="Bash" id=toolu_01U3wpX (agent) arg_keys=[command cwd] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
+	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode event=PreToolUse tool="Bash" id=toolu_01U3wpX (agent) arg_keys=[command cwd] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
 	if !strings.Contains(carried, wantCarried) {
 		t.Errorf("log = %q, want %q", carried, wantCarried)
 	}
@@ -2764,7 +2764,7 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 			aidToolCallDeclared: true,
 		})
 	})
-	if !strings.Contains(derived, `connector=cursor tool="run_terminal_cmd" id=dc-`) || !strings.Contains(derived, "(derived)") {
+	if !strings.Contains(derived, `connector=cursor event=<unknown> tool="run_terminal_cmd" id=dc-`) || !strings.Contains(derived, "(derived)") {
 		t.Errorf("log = %q, want a dc- id marked derived", derived)
 	}
 	textOnly := captureStderr(t, func() {
@@ -2772,11 +2772,23 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 			Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode",
 		})
 	})
-	const wantText = `[aid] PreToolUse sent as text only: connector=claudecode tool="Bash" reason=contract_undeclared`
+	const wantText = `[aid] PreToolUse sent as text only: connector=claudecode event=<unknown> tool="Bash" reason=contract_undeclared`
 	if !strings.Contains(textOnly, wantText) {
 		t.Errorf("log = %q, want %q", textOnly, wantText)
 	}
-	for _, log := range []string{carried, derived, textOnly} {
+	// A label the normalizer filled in is not a tool name.
+	label := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: "tool", Args: args, Direction: "tool_call", Connector: "cursor",
+			aidToolCallDeclared: true, toolArgsAreHookEnvelope: true, toolNameIsLabel: true,
+			hookEvent: "beforeShellExecution",
+		})
+	})
+	const wantLabel = `[aid] PreToolUse sent as text only: connector=cursor event=beforeShellExecution tool=<none> reason=hook_envelope_args`
+	if !strings.Contains(label, wantLabel) {
+		t.Errorf("log = %q, want %q", label, wantLabel)
+	}
+	for _, log := range []string{carried, derived, textOnly, label} {
 		if strings.Contains(log, secret) {
 			t.Fatalf("log carries an argument value: %q", log)
 		}

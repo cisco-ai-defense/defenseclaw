@@ -174,12 +174,15 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if !ok {
 				t.Fatalf("no contract %s for %s", test.contract, test.connector)
 			}
-			if len(contract.AIDToolCallShapes) != 1 {
-				t.Fatalf("%s declares %d tool-call shapes, want the golden's one", test.contract, len(contract.AIDToolCallShapes))
-			}
-			shape := contract.AIDToolCallShapes[0]
-
 			payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+			goldenTool, _ := payload["tool_name"].(string)
+			shape, ok := contract.AIDToolCallShapeFor(goldenTool)
+			if !ok {
+				t.Fatalf("%s declares no tool-call shape for the golden's tool %q", test.contract, goldenTool)
+			}
+			if shape.Surface == connector.ToolSurfaceShell && shape.CommandArg == "" {
+				t.Fatalf("%s shape %q is a shell tool with no command key", test.contract, goldenTool)
+			}
 			for key, value := range test.extra {
 				payload[key] = value
 			}
@@ -206,8 +209,8 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if call.Function.Name != shape.Tool {
 				t.Errorf("name = %q, want the registry's %q for %s", call.Function.Name, shape.Tool, test.contract)
 			}
-			if golden, _ := payload["tool_name"].(string); golden != call.Function.Name {
-				t.Errorf("name = %q, want the golden's tool_name %q", call.Function.Name, golden)
+			if goldenTool != call.Function.Name {
+				t.Errorf("name = %q, want the golden's tool_name %q", call.Function.Name, goldenTool)
 			}
 			var args map[string]interface{}
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {

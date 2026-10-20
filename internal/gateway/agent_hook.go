@@ -1789,6 +1789,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
 			aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
 			toolNameIsLabel:         req.ToolNameIsLabel,
+			hookEvent:               req.HookEventName,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)

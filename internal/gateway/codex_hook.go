@@ -226,6 +226,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			toolUseID:     req.ToolUseID,
 
 			aidToolCallDeclared: req.aidToolCallDeclared,
+			hookEvent:           req.HookEventName,
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{

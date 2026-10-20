@@ -153,21 +153,32 @@ type AIDToolCallShape struct {
 	CommandArg string      `json:"command_arg,omitempty"`
 }
 
-// aidToolCallShapesByContract lists, per contract, the tools the committed
-// golden payloads (scripts/live-connector-e2e/golden) show reaching AID as a
-// tool call. Every shell tool sends its command as "command" after decoding.
-// antigravity-hooks-v2 has none: its golden's tool name does not survive the
-// decoder, and a call without a name goes to AID as text alone.
+// aidToolCallShapesByContract lists, per contract, the tools seen reaching AID
+// as a tool call: the committed golden payloads (scripts/live-connector-e2e/
+// golden), plus the names live agents report where they differ from the
+// goldens (Codex 0.163 reports its shell tool as "Bash", and Cursor reports
+// "Shell", "Grep" and "Read"; captured from the gateway's [aid] log lines on
+// macOS and Windows). Every shell tool sends its command as "command" after
+// decoding. antigravity-hooks-v2 has none: its golden's tool name does not
+// survive the decoder, and a call without a name goes to AID as text alone.
 var aidToolCallShapesByContract = map[string][]AIDToolCallShape{
 	"claudecode-hooks-v1": {{Tool: "Bash", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"codex-hooks-v4":      {{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"cursor-hooks-v1":     {{Tool: "run_terminal_cmd", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"amp-plugin-v1":       {{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"hermes-hooks-v1":     {{Tool: "execute_command", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"openhands-hooks-v1":  {{Tool: "terminal", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"copilot-hooks-v1":    {{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"geminicli-hooks-v1":  {{Tool: "RunShellCommand", Surface: ToolSurfaceShell, CommandArg: "command"}},
-	"windsurf-hooks-v1":   {{Tool: "run_command", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"codex-hooks-v4": {
+		{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"},
+		{Tool: "Bash", Surface: ToolSurfaceShell, CommandArg: "command"},
+	},
+	"cursor-hooks-v1": {
+		{Tool: "run_terminal_cmd", Surface: ToolSurfaceShell, CommandArg: "command"},
+		{Tool: "Shell", Surface: ToolSurfaceShell, CommandArg: "command"},
+		{Tool: "Grep", Surface: ToolSurfaceFileRead},
+		{Tool: "Read", Surface: ToolSurfaceFileRead},
+	},
+	"amp-plugin-v1":      {{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"hermes-hooks-v1":    {{Tool: "execute_command", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"openhands-hooks-v1": {{Tool: "terminal", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"copilot-hooks-v1":   {{Tool: "shell", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"geminicli-hooks-v1": {{Tool: "RunShellCommand", Surface: ToolSurfaceShell, CommandArg: "command"}},
+	"windsurf-hooks-v1":  {{Tool: "run_command", Surface: ToolSurfaceShell, CommandArg: "command"}},
 }
 
 // AIDToolCallShapeFor returns the declared shape of one of the contract's

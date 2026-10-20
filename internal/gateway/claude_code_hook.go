@@ -157,6 +157,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			toolUseID:     req.ToolUseID,
 
 			aidToolCallDeclared: req.aidToolCallDeclared,
+			hookEvent:           req.HookEventName,
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
